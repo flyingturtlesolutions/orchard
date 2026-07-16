@@ -382,10 +382,29 @@ export function validateBindings(bindings, candidate, knownLabels = []) {
     const v = supplied[p.name];
     if (v == null || v === '') continue;   // unbound → demonstrated default
     if (p.kind === 'option' && Array.isArray(p.vocabulary) && p.vocabulary.length) {
-      const hit = p.vocabulary.find((o) => normalizeAliasPhrase(o) === normalizeAliasPhrase(v));
+      const nv = normalizeAliasPhrase(v);
+      const hit = p.vocabulary.find((o) => normalizeAliasPhrase(o) === nv);
       if (hit) out.bound[p.name] = hit;
-      else if (known.has(normalizeAliasPhrase(v))) out.bound[p.name] = known.get(normalizeAliasPhrase(v));   // ORCH-A — the page confirms it
-      else out.gaps.push({ name: p.name, requested: String(v), reason: 'not-in-vocabulary' });
+      else if (known.has(nv)) out.bound[p.name] = known.get(nv);   // ORCH-A — the page confirms it
+      else {
+        // v2.74.1538 — UNIQUE-substring snap: an ask names the option the human way ("Greensboro"), the captured
+        // vocabulary the page way ("Greensboro - 118"). When exactly ONE entry contains the value, snap to it.
+        // v2.74.1539 — VARIANT collapse: the menu may list one option in VARIANTS ("Greensboro - 118" + "Greensboro
+        // - 118 All" — VendorSuite lists EVERY division twice), so a bare name matches several entries and the
+        // unique-gate wrongly gapped ALL of them. When the SHORTEST match is a PREFIX of every other match, they
+        // are variants of ONE option — snap to the shortest (the same tie-break CLICK_BY_LABEL applies on the live
+        // menu at replay). Genuinely different options ("Atlanta" → West / East City) share no such prefix → still
+        // a GAP — ambiguity between real alternatives is never guessed.
+        const subs = nv.length >= 3 ? p.vocabulary.filter((o) => normalizeAliasPhrase(o).includes(nv)) : [];
+        if (subs.length === 1) out.bound[p.name] = subs[0];
+        else if (subs.length > 1) {
+          const sorted = [...subs].sort((a, b) => normalizeAliasPhrase(a).length - normalizeAliasPhrase(b).length);
+          const base = normalizeAliasPhrase(sorted[0]);
+          if (sorted.every((o) => normalizeAliasPhrase(o).startsWith(base))) out.bound[p.name] = sorted[0];
+          else out.gaps.push({ name: p.name, requested: String(v), reason: 'ambiguous-in-vocabulary' });
+        }
+        else out.gaps.push({ name: p.name, requested: String(v), reason: 'not-in-vocabulary' });
+      }
     } else {
       out.bound[p.name] = String(v);
     }

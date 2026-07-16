@@ -1703,6 +1703,7 @@ function _findLandmarkCandidatesByDescription({ role, accessibleName, hierarchic
   let matchMethod = 'role-only';
   let nameSimilarity = 0;
   let matchedName = null;
+  let nameFailed = false;   // v2.74.1532 — name-recovery exhausted; a structural recovery may still re-identify it
   if (accessibleName) {
     const authoredLc = String(accessibleName).toLowerCase();
     // Compute current names once; reuse across tiers.
@@ -1754,11 +1755,15 @@ function _findLandmarkCandidatesByDescription({ role, accessibleName, hierarchic
           nameSimilarity = top.score;
           matchedName = top.name;
         } else {
-          // All tiers failed — return empty so caller emits 'fail'.
-          return {
-            candidates: [], matchMethod: null, nameSimilarity: 0,
-            authoredName: accessibleName,
-          };
+          // v2.74.1532 — all NAME tiers failed. Don't hard-fail yet: a CURRENT-VALUE-LABELED element (a division
+          // selector, a status pill — a disclosure trigger whose visible text IS the value it displays) keeps its
+          // ROLE + structural POSITION when its label drifts. Defer to the hierarchical-context recovery below;
+          // recover ONLY when that uniquely re-identifies it (no ambiguity → no wrong click). Fixes the live
+          // "Atlanta West" division-trigger unresolvable (SCROLL_TO found the h5 — it's right there — but its
+          // heading now shows the CURRENT division, so name recovery rejected the correct element).
+          nameFailed = true;
+          candidates = roleCandidates;
+          matchMethod = 'role-only';
         }
       }
     }
@@ -1766,6 +1771,7 @@ function _findLandmarkCandidatesByDescription({ role, accessibleName, hierarchic
   // (3) Hierarchical context. Same logic as before: match ancestor
   // role + name when both present; partial match acceptable; fall
   // back to pre-context list if context filtering empties.
+  let contextNarrowed = false;   // v2.74.1532 — did the structural context actually FILTER the candidate set?
   if (hierarchicalContext && hierarchicalContext.ancestorRole) {
     const wantRole = hierarchicalContext.ancestorRole;
     const wantName = hierarchicalContext.ancestorName;
@@ -1775,7 +1781,14 @@ function _findLandmarkCandidatesByDescription({ role, accessibleName, hierarchic
       if (wantName && ctx.ancestorName && ctx.ancestorName !== wantName) return false;
       return true;
     });
-    if (matching.length > 0) candidates = matching;
+    if (matching.length > 0) { contextNarrowed = matching.length < candidates.length; candidates = matching; }
+  }
+  // v2.74.1532 — STRUCTURAL recovery (the "same element, drifted label" case): a name-FAILED landmark is trusted
+  // ONLY when the hierarchical context NARROWED the role candidates to exactly ONE (a unique structural match → no
+  // wrong click). Otherwise fail as before — a name miss with no unique structure must NOT guess by role alone.
+  if (nameFailed) {
+    if (contextNarrowed && candidates.length === 1) { matchMethod = 'structural'; nameSimilarity = 0; }
+    else return { candidates: [], matchMethod: null, nameSimilarity: 0, authoredName: accessibleName ?? null };
   }
   return {
     candidates, matchMethod, nameSimilarity,
@@ -2341,8 +2354,18 @@ function handleSetFile(selector, value) {
  * @param {string} value    - Option label or "__VERIFY_FIRST__" sentinel.
  * @returns {{ success: boolean, error?: string, clicked?: object, info?: string }}
  */
-function handleClickByLabel(selector, value) {
-  const container = resolveElement(selector);
+async function handleClickByLabel(selector, value) {
+  // v2.74.1535 — POLL for the container. A menu opened by the PRECEDING click (e.g. the division dropdown
+  // #divisionMenu, opened by the trigger click) renders ASYNC — it's usually not in the DOM the instant this step
+  // runs, because the demo had human delay between opening the menu and picking an option and the replay has none
+  // (live: the re-taught "Search ticket by division" walk clicked the division trigger, then CLICK_BY_LABEL
+  // #divisionMenu hard-failed "no container matched" on that race). Wait up to ~2.5s (mirrors WAIT_FOR) before
+  // giving up, instead of failing on the first tick.
+  let container = resolveElement(selector);
+  for (let i = 0; i < 10 && !container; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    container = resolveElement(selector);
+  }
   if (!container) {
     return {
       success: false,
@@ -2488,8 +2511,16 @@ function _findLabelMatches(container, normalizedTarget) {
       const g = tryGroup(sel, mode);
       if (g.length > 0) return g;
     }
-    const direct = matchIn(container.children, mode);
-    if (direct.length > 0) return direct;
+    // v2.74.1537 — direct-children are a valid match ONLY in EXACT mode (a wrapper whose OWN text IS the label).
+    // In CONTAINS mode a direct child can be a big CONTAINER that merely CONTAINS the label — the <ul> inside
+    // #divisionMenu holds EVERY division, so it "contains Raleigh" and was clicked instead of the Raleigh row
+    // (live 201523: CLICK_BY_LABEL "Raleigh" landed on <ul>, the division never switched). Skip straight to the
+    // all-descendants scan, which returns the SHORTEST containing element (the division-name span); the click
+    // bubbles up to its clickable row.
+    if (mode === 'exact') {
+      const direct = matchIn(container.children, mode);
+      if (direct.length > 0) return direct;
+    }
     const any = tryGroup('*', mode);
     if (any.length > 0) return any;
   }
@@ -5846,6 +5877,31 @@ function _obsResultListContainer(el) {
   } catch { /* */ }
   return null;
 }
+// v2.74.1534 — a VendorSuite DIVISION-menu selection. The demo click lands on whatever span the user happens to hit
+// inside the row — usually the VENDOR span "DEAKO INC (ALL DIVISIONS)", the SAME text in every row — at a fragile
+// position (li:nth-of-type(72) > span:nth-of-type(2)), so the taught walk only ever re-selected the demonstrated
+// division. Instead capture the DIVISION NAME (the row's `span.medium`, e.g. "Raleigh - 495") + the menu container,
+// so the OBS param path lifts it into a CLICK_BY_LABEL {division} scoped to #divisionMenu — parameterized by the
+// case/ask division at replay, not the demonstrated row. `#divisionMenu` is a stable id; the names are the vocabulary
+// (needed only to trip the ≥3-option generalization — replay matches the LIVE menu, so a 60-cap can't break it).
+function _obsDivisionSelect(el) {
+  try {
+    const menu = el.closest && el.closest('#divisionMenu');
+    if (!menu) return null;
+    const row = (el.closest && (el.closest('li[data-value]') || el.closest('li'))) || null;
+    if (!row) return null;
+    const nameEl = row.querySelector('span.medium') || row.querySelector('span');
+    const name = ((nameEl && nameEl.textContent) || '').replace(/\s+/g, ' ').trim();
+    if (!name) return null;
+    const container = menu.id ? `#${menu.id}` : '#divisionMenu';
+    const vocab = Array.from(new Set(
+      Array.from(menu.querySelectorAll('li span.medium'))
+        .map((s) => (s.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean),
+    )).slice(0, 200);
+    return { container, name, vocab: vocab.length >= 3 ? vocab : [name, name, name] };
+  } catch { return null; }
+}
 function _obsSend(domKind, el, rawValue) {
   if (!_obsRec.active || !el) return;
   const target = _obsExtract(el);
@@ -5855,7 +5911,11 @@ function _obsSend(domKind, el, rawValue) {
   if (domKind === 'input' || domKind === 'change') value = sensitive ? null : (rawValue != null ? String(rawValue).slice(0, 300) : null);
   else if (domKind === 'click') value = sensitive ? null : (target.accessibleName || null);   // used only if it classifies as a select
   else if (domKind === 'keypress') value = rawValue || 'Enter';                                 // the key (Enter)
-  if (!sensitive) { const vocab = _obsOptionVocabulary(domKind, el, target); if (vocab && vocab.length > 1) target.options = vocab; }   // ORCH-V — dropdown vocabulary (+B nav container)
+  // v2.74.1534 — DIVISION-menu select wins over the generic option/result capture: override the value with the row's
+  // division NAME and mark the menu container, so it generalizes to CLICK_BY_LABEL {division} (not a positional click).
+  const _divSel = (!sensitive && domKind === 'click') ? _obsDivisionSelect(el) : null;
+  if (_divSel) { value = _divSel.name; target.optionContainer = _divSel.container; target.options = _divSel.vocab; }
+  else if (!sensitive) { const vocab = _obsOptionVocabulary(domKind, el, target); if (vocab && vocab.length > 1) target.options = vocab; }   // ORCH-V — dropdown vocabulary (+B nav container)
   // v2.74.1528 — a search-RESULT row click (a row in a repeating list, NOT a 3–18 option group) → capture the LIST
   // container + ROW text so the OBS param path content-addresses the row instead of its position (li:nth-of-type(72)).
   if (!sensitive && domKind === 'click' && !(target.options && target.options.length > 1)) {
@@ -6348,10 +6408,17 @@ const MESSAGE_HANDLERS = {
           .catch(err => sendResponse({ success: false, error: `TYPE: ${err.message}` }));
         return true;   // keep channel open for async response
       }
+      // v2.74.1535 — CLICK_BY_LABEL is now async: it POLLS for its container, which a preceding click may open
+      // async (the division dropdown). Same channel-keep pattern as TYPE.
+      if (action === 'CLICK_BY_LABEL') {
+        handleClickByLabel(selector, value)
+          .then(result => sendResponse(result))
+          .catch(err => sendResponse({ success: false, error: `CLICK_BY_LABEL: ${err.message}` }));
+        return true;   // keep channel open for async response
+      }
       let result;
       switch (action) {
         case 'CLICK':     result = handleClick(selector, value);              break;
-        case 'CLICK_BY_LABEL':  result = handleClickByLabel(selector, value); break;
         case 'SELECT':    result = handleSelect(selector, value);             break;
         case 'SET_FILE':  result = handleSetFile(selector, value);            break;
         case 'EXTRACT':   result = handleExtract(selector, payload?.fromIndex ?? 0, payload?.positional === true); break;

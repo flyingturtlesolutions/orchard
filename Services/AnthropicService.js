@@ -2655,17 +2655,29 @@ Rules:
     if (!(await AnthropicService.hasLlm())) return null;
     const conf = (examples && examples.confirmed) || {};
     const rej = (examples && examples.rejected) || {};
+    // v2.74.1538 — ASK-AWARE vocabulary preview. The old blind head-slice (first 12 of N) hid the ask's own value
+    // and read as the COMPLETE option set — live: "in Greensboro" over a 61-division vocabulary → the model saw 12
+    // non-Greensboro entries, concluded "none of the candidates list Greensboro", and REFUSED (top=null,
+    // bindings={}). Now: entries matching an ask token surface FIRST, the head fills the rest, and a truncated
+    // list carries moreOptions so the model knows the set is larger than shown.
+    const _askLc = String(ask).toLowerCase();
+    const _vocabPreview = (vocab) => {
+      const all = vocab.filter(Boolean).map(String);
+      const hits = all.filter((v) => v.toLowerCase().split(/[^a-z0-9]+/).some((w) => w.length >= 3 && _askLc.includes(w)));
+      const options = Array.from(new Set([...hits, ...all])).slice(0, 12);
+      return { options, ...(all.length > options.length ? { moreOptions: all.length - options.length } : {}) };
+    };
     const lean = list.map((c) => ({
       id: c.id, intent: c.intent || '', aliases: (c.aliases || []).slice(0, 8),
       params: (Array.isArray(c.params) ? c.params : []).filter((p) => p && p.used).map((p) => ({
-        name: p.name, kind: p.kind, ...(Array.isArray(p.vocabulary) ? { options: p.vocabulary.slice(0, 12) } : {}),
+        name: p.name, kind: p.kind, ...(Array.isArray(p.vocabulary) ? _vocabPreview(p.vocabulary) : {}),
       })),
       // ORCH-FB-2 (option 1) — past corrections for THIS capability, so the model generalizes from them.
       ...(Array.isArray(conf[c.id]) && conf[c.id].length ? { confirmedAsks: conf[c.id].slice(0, 5) } : {}),
       ...(Array.isArray(rej[c.id]) && rej[c.id].length ? { rejectedAsks: rej[c.id].slice(0, 5) } : {}),
     }));
     const aff = (Array.isArray(affordances) ? affordances : []).slice(0, 60);
-    const systemPrompt = `You match a user's ASK to grounded capabilities on the current page. Each CANDIDATE is already runnable here. For EACH candidate, judge whether its effect plausibly ACHIEVES the ask (effectEligible) and its relevance (0..1). Then for your single best candidate, BIND the ask's values to its params. For an "option" param, the value SHOULD be one of that param's given options — but if the ask names a DIFFERENT option that appears in PAGE_AFFORDANCES (the controls the page actually has), you MAY bind that instead (the page confirms it exists). e.g. a "search by category" capability demonstrated for "Vectors" can be re-bound to "Illustrations" when Illustrations is in PAGE_AFFORDANCES. Other params take a value extracted from the ask. A candidate may carry confirmedAsks (asks the USER previously CONFIRMED this capability handles — strong evidence it fits SIMILAR asks) and rejectedAsks (asks the user previously said this capability is WRONG for — strong evidence to rate it LOW for similar asks). Weight these corrections heavily. Be CONSERVATIVE — rate relevance high only when the capability clearly does what's asked; never invent an option the page doesn't have. A bare, gibberish, or single meaningless token that merely COULD be typed into a field (e.g. dropped into a search box) is NOT a request to run a capability — rate it LOW (<=0.2); do not treat junk as a search query just because it is fillable. Return ONLY JSON:
+    const systemPrompt = `You match a user's ASK to grounded capabilities on the current page. Each CANDIDATE is already runnable here. For EACH candidate, judge whether its effect plausibly ACHIEVES the ask (effectEligible) and its relevance (0..1). Then for your single best candidate, BIND the ask's values to its params. For an "option" param, the value SHOULD be one of that param's given options — but if the ask names a DIFFERENT option that appears in PAGE_AFFORDANCES (the controls the page actually has), you MAY bind that instead (the page confirms it exists). e.g. a "search by category" capability demonstrated for "Vectors" can be re-bound to "Illustrations" when Illustrations is in PAGE_AFFORDANCES. Other params take a value extracted from the ask. A candidate may carry confirmedAsks (asks the USER previously CONFIRMED this capability handles — strong evidence it fits SIMILAR asks) and rejectedAsks (asks the user previously said this capability is WRONG for — strong evidence to rate it LOW for similar asks). Weight these corrections heavily. An "options" list may be TRUNCATED — moreOptions says how many more exist beyond those shown. When the ask names a value that plausibly belongs to a truncated option set but isn't shown, DO NOT refuse or mark the candidate ineligible for that reason — bind the ask's value verbatim (the executor validates it against the live page). Be CONSERVATIVE — rate relevance high only when the capability clearly does what's asked; never invent an option the page doesn't have. A bare, gibberish, or single meaningless token that merely COULD be typed into a field (e.g. dropped into a search box) is NOT a request to run a capability — rate it LOW (<=0.2); do not treat junk as a search query just because it is fillable. Return ONLY JSON:
 {"scores":[{"id":"<id>","relevance":<0..1>,"effectEligible":<true|false>}],"topId":"<best id or null>","bindings":{"<PARAM>":"<value>"},"rationale":"<one short sentence>"}`;
     const user = `ASK: ${ask}\n${context ? `CONTEXT: ${String(context).slice(0, 400)}\n` : ''}${aff.length ? `PAGE_AFFORDANCES: ${JSON.stringify(aff)}\n` : ''}CANDIDATES:\n${JSON.stringify(lean)}`;
     try {

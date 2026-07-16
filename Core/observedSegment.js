@@ -208,8 +208,12 @@ export function deriveObservedParams(op) {
       // re-bindable OPTION, not a fixed click. The demonstrated label ("Music") is the default; the group is the
       // vocabulary. This collapses N per-category capabilities ("Search for music/vectors/gifs") into ONE with a
       // CATEGORY param. The clicked item is included in `vocab` so the default replay validates.
-      else if (s.kind === 'click' && Array.isArray(vocab) && vocab.length >= 3 && s.value != null && s.value !== '')
-        add('category', 'Category', 'option', s.value, sel, vocab.includes(s.value) ? vocab : [s.value, ...vocab], s.target && s.target.optionContainer);
+      else if (s.kind === 'click' && Array.isArray(vocab) && vocab.length >= 3 && s.value != null && s.value !== '') {
+        // v2.74.1534 — a click in the VendorSuite division menu (#divisionMenu) lifts to a {division} param, not a
+        // generic {category}: the name lets the on-site intercept fill {{DIVISION}} from the case/ask division.
+        const isDiv = /divisionmenu/i.test(String((s.target && s.target.optionContainer) || ''));
+        add(isDiv ? 'division' : 'category', isDiv ? 'Division' : 'Category', 'option', s.value, sel, vocab.includes(s.value) ? vocab : [s.value, ...vocab], s.target && s.target.optionContainer);
+      }
       // v2.74.1528 — a result-row click after a search → reuse the search param as a by-label click in the list
       else if (s.kind === 'click' && sel && lastText && lastText.value && _rowContainsValue(s, lastText.value)) {
         lastText.clickReuse = { selector: sel, container: (s.target && s.target.resultContainer) || (s.target && s.target.optionContainer) || optionContainerSelector(sel) || sel };

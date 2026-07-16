@@ -212,6 +212,26 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.equal(Object.keys(empty.bound).length, 0, 'an empty value is left to its default');
   });
 
+  it('v1538/1539 — validateBindings: substring snap + VARIANT collapse (the "<Name> - <NNN>" / "… All" pair); real ambiguity stays a gap', () => {
+    // The ask names the option the HUMAN way; the captured vocabulary the PAGE way — and VendorSuite lists EVERY
+    // division TWICE ("Greensboro - 118" + "Greensboro - 118 All"), so a bare name matches BOTH variants. The
+    // shortest-is-a-prefix-of-the-rest rule collapses variants of ONE option (snap to the shortest — the same
+    // tie-break CLICK_BY_LABEL applies live); different options sharing a word ("Atlanta") stay a gap.
+    const cand = { id: 'c', params: [
+      { name: 'DIVISION', kind: 'option', used: true, vocabulary: ['Raleigh - 495', 'Greensboro - 118', 'Greensboro - 118 All', 'Atlanta West - 210', 'Atlanta West - 210 All', 'Atlanta East City - 214', 'Mobile - 223'] },
+    ] };
+    const snap = validateBindings({ DIVISION: 'greensboro' }, cand);
+    assert.equal(snap.bound.DIVISION, 'Greensboro - 118', 'both variants of ONE division collapse to the shortest');
+    assert.equal(snap.gaps.length, 0);
+    const full = validateBindings({ DIVISION: 'atlanta west' }, cand);
+    assert.equal(full.bound.DIVISION, 'Atlanta West - 210', 'a fuller name collapses its own variant pair the same way');
+    const ambi = validateBindings({ DIVISION: 'Atlanta' }, cand);
+    assert.ok(!('DIVISION' in ambi.bound), 'a value matching DIFFERENT options (West vs East City) is never guessed');
+    assert.deepEqual(ambi.gaps, [{ name: 'DIVISION', requested: 'Atlanta', reason: 'ambiguous-in-vocabulary' }]);
+    const short = validateBindings({ DIVISION: 'Ra' }, cand);
+    assert.ok(!('DIVISION' in short.bound), 'a <3-char value never substring-snaps (spurious-match guard)');
+  });
+
   it('promotionBonus + tallyCapabilityConfirmations: confirmations accrue, decay, cap (ORCH-G)', () => {
     assert.equal(promotionBonus({ successes: 0 }), 0);
     assert.ok(Math.abs(promotionBonus({ successes: 1 }) - 0.06) < 1e-9);

@@ -3543,6 +3543,7 @@ let _sweepBatchIndex = [];   // render-order number → proposalId (what `approv
 // my_open_tickets). "Show me" resolves HERE first when the read is more recent than the last proposal batch —
 // a claim's ground truth is the read that produced it, never a random item.
 let _lastGroundedRead = null;   // { leg, params, at }
+let _lastReteach = null;   // v2.74.1533 — { groundId, tabId, ask } of the last on-site record run, so `re-teach` can re-record it even when it WORKED
 let _rideEachCursor = null;     // DK-7b/c — a PAUSED each fan-out's resume point: { at, leg, ask, tabId, groundId, params, each:{name,values,total}, offset }; bare "continue" resumes it
 let _rideEachRunning = false;   // DK-7c (v2.74.1490) — a fan-out is mid-run (typed "stop" aborts it instead of the engine-run stop)
 let _rideEachAbort = false;     // DK-7c — the abort latch the running loop checks between items
@@ -4777,12 +4778,12 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
 // A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
 // `onAuthored` (optional) fires with the derived capability after a successful demo — the chain runner uses it to
 // RESUME a cold compound from the next clause instead of dead-ending at the gap.
-function _orchOfferRecord(msg, { groundId, tabId, ask, label = '● Show me', onAuthored = null }) {
+function _orchOfferRecord(msg, { groundId, tabId, ask, label = '● Show me', onAuthored = null, replaceCapabilityId = null }) {
   if (!groundId) return;
   const bar = _orchActionBar(msg);
   const rec = document.createElement('button'); rec.className = 'btn-secondary tiny'; rec.type = 'button'; rec.textContent = label;
   bar.appendChild(rec);
-  rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored }); });
+  rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored, replaceCapabilityId }); });
 }
 
 // ORCH-X T2 — after a compound ask runs successfully, offer to PROMOTE it into a durable composite (a T2
@@ -5937,7 +5938,7 @@ async function _tryGroundedTurn(text) {
 
 // ORCH-C — record a demonstration from chat (MISS → "show me"), reusing the OBS recorder handlers, then derive
 // a durable capability. On success, seeds the original ask as an alias so the next ask HITS. NO LLM grounding.
-async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null }) {
+async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null, replaceCapabilityId = null }) {
   const start = await _orchReq('RECORD_START_SESSION', { tabId });
   if (!start || start.success === false) { _setMessageBody(msg, 'Couldn’t start recording on this page.'); return; }
   _setMessageBody(msg, 'Recording — do the task on the page, then click Stop & save.');
@@ -5987,6 +5988,13 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null })
         const mid = _memoryId();
         if (mid) retireActFail(mid, ask).then((n) => { if (n) _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${String(ask).slice(0, 40)}" after re-teach`); }).catch(() => { /* */ });
       } catch { /* best-effort — never block the teach reply */ }
+      // v2.74.1540 — RETIRE-ON-REPLACE: the offer said "show me the right way and I'll REPLACE it" — honor the
+      // replace half. The re-teach knows exactly which capability it supersedes (threaded from the offer, no
+      // signature guessing); soft-retract it (restorable in Studio) so re-teach duplicates stop accumulating
+      // (live: THREE identical "Search ticket by division" walks collapsed the match margin to 0.01).
+      if (replaceCapabilityId && replaceCapabilityId !== res.capability.id) {
+        try { _orchReq('RETIRE_CAPABILITY', { groundId, capabilityId: replaceCapabilityId, reason: 'superseded-by-re-teach' }); } catch { /* best-effort */ }
+      }
       // When a caller wants to CONTINUE after the demo (the chain runner resuming a cold compound), hand back the
       // derived capability instead of the dead-end "ask me again" copy — the chain picks up from the next clause.
       if (typeof onAuthored === 'function') {
@@ -6534,8 +6542,29 @@ async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, w
 // drill-bearing ride ground exists) picks the leg; the list read + drill join do the rest — including the v1522
 // status walk and the on-site open (the ask carries the on-site phrase _rideDrillJoin keys on). Trusted-data rule
 // holds: curated leg + origin; the only ask-derived value is the drill filter. Returns false → interpret, unchanged.
+// v2.74.1531 — the DIVISION ALREADY IN HAND from the workflow context. In the real flow ("open all new warranty
+// tasks [in a division]" → cases → "show this ticket"), the record was READ under a specific divisionId, so the
+// division needn't be re-discovered by an expensive cross-division sweep — it rides on the last grounded read.
+// Returns the resolved divisionId (a string id like "32"), or null: no fresh read, an each-mode sweep (no single
+// division), or a stale read (past the follow-up window — a stale division must not leak into a fresh ask). PURE-ish.
+function _contextDivision() {
+  const g = _lastGroundedRead;
+  if (!g || !g.params || (Date.now() - (g.at || 0)) > _FOLLOWUP_TTL) return null;
+  const id = g.params.divisionId;
+  if (id == null || id === '' || String(id).toLowerCase() === 'each') return null;
+  // v2.74.1534 — prefer the human LABEL ("Raleigh") over the internal id ("32"). The on-page division menu shows the
+  // NAME, so a walk's CLICK_BY_LABEL {division} contains-matches "Raleigh" against "Raleigh - 495"; a bare id can't.
+  // The drill path is unaffected — its param resolve maps a name OR an id to the internal id either way.
+  const label = g.labels && g.labels.divisionId;
+  return String((label != null && label !== '') ? label : id);
+}
 async function _openRecordOnSite(ask, recordValue, siteWord) {
   const generic = ['site', 'page', 'tab', 'browser', 'web'].includes(siteWord);
+  // v2.74.1533 — an EXPLICIT division in the ask ("show ticket X IN Raleigh on vendorsuite") WINS over the context
+  // division. Live bug: "in Raleigh" searched "Mobile" — a stale last-read division leaked via _contextDivision and
+  // the ask's own "Raleigh" was ignored. Parse "…in|for <division> on|in|at <site>" (the trailing site-phrase pins it).
+  let explicitDiv = null;
+  try { const md = String(ask || '').match(/\b(?:in|for)\s+([a-z][\w .\-]*?)\s+(?:on|in|at)\s+(?:the\s+)?[a-z][\w.-]{2,}\s*$/i); if (md && md[1]) explicitDiv = md[1].trim(); } catch { /* */ }
   let tabId = null;
   try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); tabId = (tabs && tabs[0] && tabs[0].id) ?? null; } catch { /* */ }
   // The deterministic DRILL candidate (API read → navigate → text-click the row's address) is landmark-free — the
@@ -6556,13 +6585,16 @@ async function _openRecordOnSite(ask, recordValue, siteWord) {
     if (!seenLeg.has(key)) { seenLeg.add(key); cands.push({ leg, gid: g.gid }); }
   }
   const drill = cands.length === 1 ? cands[0] : null;   // 0 = nothing drillable; >1 on a generic tail = ambiguous
+  if (drill) _lastReteach = { groundId: drill.gid, tabId, ask };   // v1533 — `re-teach` re-records this even when the walk WORKS (a success shows no failure-only offer)
   const runDrill = async (msg) => {
     const { leg, gid } = drill;
     const statusSlot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
     const statuses = (statusSlot && Array.isArray(statusSlot.enum)) ? statusSlot.enum.map(String) : [];
     const params = { [leg.tool.drill.matchOn]: String(recordValue) };
+    const _div = explicitDiv || _contextDivision();   // v1533 — EXPLICIT "in <division>" wins; else the case/last-read division (context) beats the arbitrary default
+    if (_div) params.divisionId = _div;
     if (statuses.length) params.status = statuses.includes('open') ? 'open' : statuses[0];   // most-likely bucket first; the drill walk covers the rest
-    try { _orchLog(`RIDE_DRILL ▸ on-site intercept → ${leg.tool.recipeId || leg.key} (${leg.tool.drill.matchOn}="${String(recordValue).slice(0, 40)}")`); } catch { /* */ }
+    try { _orchLog(`RIDE_DRILL ▸ on-site intercept → ${leg.tool.recipeId || leg.key} (${leg.tool.drill.matchOn}="${String(recordValue).slice(0, 40)}"${_div ? `, division=${_div} [${explicitDiv ? 'explicit' : 'context'}]` : ''})`); } catch { /* */ }
     await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: gid, params });
   };
   // TEACH-ONCE WINS — a saved capability whose EXACT alias is this ask replays first (it rides the site's own
@@ -6572,14 +6604,51 @@ async function _openRecordOnSite(ask, recordValue, siteWord) {
   // also prefers the drill when one exists — deferring to interpret handed the phrase to the model, which reliably
   // mis-picks a broken drive artifact. Only a hit with NO drill defers to interpret (unchanged).
   let m = null;
-  try { m = await _orchReq('ORCH_MATCH', { tabId, ask }); } catch { m = null; }
+  // v2.74.1536 — includeActions: this intercept only fires for an on-site OPEN ("show <record> on <site>"), a
+  // READ-phrased ask whose mechanism is the taught ACTION walk. Without this the walk is scoped out of a READ
+  // match for any non-exact-alias phrasing (a different ticket number, or "in <division>"), so it could NEVER
+  // reach the binds-ticket replay — 0 candidates → miss → drill (live 200236). The binds-ticket gate below still
+  // guards which capability actually replays.
+  try { m = await _orchReq('ORCH_MATCH', { tabId, ask, includeActions: true }); } catch { m = null; }
   const hit = m && m.success !== false && m.capabilityId && m.decision !== 'miss';
   const turn = hit ? planAssistantTurn(m) : null;
-  if (turn && turn.action === 'run' && turn.reason === 'alias-exact') {
+  // v2.74.1531 — replay the taught WALK for a NON-exact hit too, WHEN the match binds THIS ticket number: the
+  // walk's {ticketId} param generalizes across numbers — its whole point — so "show ticket <any number> on
+  // vendorsuite" should replay the walk with the number filled in, not fall to the drill (whose on-page open
+  // misses). v1527 wrongly routed every number but the exact taught one to the drill; the binds-ticket gate
+  // keeps it to the ticket-opening capability, and the drill stays the fallback on a replay failure.
+  const bindsTicket = !!(m && m.bindings && typeof m.bindings === 'object' && Object.values(m.bindings).some((v) => v != null && String(v) === String(recordValue)));
+  // v2.74.1538 — the intercept KNOWS the record id: when the matcher returned a candidate but EMPTY bindings
+  // (live "in Greensboro": the truncated vocab preview made the LLM refuse top/bindings, and three re-teach
+  // duplicates collapsed the margin to propose/ambiguous → bindsTicket=false → the walk never replayed), fill
+  // the ticket param OURSELVES and replay anyway. The candidate qualifies when it carries a used TEXT param
+  // with a ticket-ish name; a wrong pick just fails → drill fallback (the unchanged v1526 contract) — trying
+  // the walk is strictly better than never reaching it.
+  const _ticketParamName = (() => {
+    try {
+      const ps = (m && m.candidate && Array.isArray(m.candidate.params)) ? m.candidate.params : [];
+      const p = ps.find((q) => q && q.used && String(q.kind || '') === 'text' && /ticket|task|search|find|number|(^|_)id($|_)/i.test(String(q.name || '')));
+      return (p && p.name) ? String(p.name) : null;
+    } catch { return null; }
+  })();
+  if (turn && ((turn.action === 'run' && turn.reason === 'alias-exact') || bindsTicket || _ticketParamName)) {
     appendMessage({ role: 'user', body: ask });
-    const rmsg = appendMessage({ role: 'assistant', body: turn.say || `Opening ${recordValue}…` });
+    // v2.74.1540 — a `re-teach` after THIS run replaces THIS capability (works after success AND failure): stamp
+    // it so the record flow retires the superseded walk on accept ("…and I'll replace it" — the replace half).
+    _lastReteach = { groundId: m.groundId, tabId, ask, replaceCapabilityId: m.capabilityId };
+    const rmsg = appendMessage({ role: 'assistant', body: ((turn.action === 'run' && turn.say) ? turn.say : null) || `Opening ${recordValue}…` });
+    // v2.74.1534 — thread the DIVISION into the walk so its parameterized {{DIVISION}} step (CLICK_BY_LABEL in
+    // #divisionMenu, from the re-teach) selects the TICKET's division on the page — the whole point of "the walk
+    // selects the division". Precedence: an explicit "in <division>" in the ask wins; else the case/last-read context
+    // division (a NAME, so CLICK_BY_LABEL contains-matches the on-page "Raleigh - 495"); a bare id is skipped (it
+    // can't match the visible label — the drill, which resolves either, remains the fallback). Harmless on a walk
+    // with no {{DIVISION}} step (an unused paramValue is ignored) — no regression to a division-less walk.
+    const _ctxDiv = _contextDivision();
+    const _pv = { ...((_ctxDiv && !/^\d+$/.test(String(_ctxDiv))) ? { DIVISION: String(_ctxDiv) } : {}), ...((m.bindings && typeof m.bindings === 'object') ? m.bindings : {}) };
+    if (explicitDiv) _pv.DIVISION = explicitDiv;
+    if (_ticketParamName && (_pv[_ticketParamName] == null || _pv[_ticketParamName] === '')) _pv[_ticketParamName] = String(recordValue);   // v1538 — the ask's record id fills the walk's search param when the matcher didn't
     let rep = null;
-    try { rep = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId: m.groundId, capabilityId: m.capabilityId, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} }); } catch { rep = null; }
+    try { rep = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId: m.groundId, capabilityId: m.capabilityId, paramValues: _pv }); } catch { rep = null; }
     if (rep && rep.success !== false && rep.ran !== false && rep.ok) {
       _setMessageBody(rmsg, `Done — opened ${recordValue} on the site.`);
       _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: ask });
@@ -6597,12 +6666,12 @@ async function _openRecordOnSite(ask, recordValue, siteWord) {
       // OFFER to re-teach it here — otherwise the intercept always resolves via the drill and the user can NEVER
       // reach the record offer (the v1527 drill fallback silently suppressed re-teach, the live block: "not yet").
       const t = appendMessage({ role: 'assistant', body: 'That shortcut’s saved steps are stale — show me the right way and I’ll replace it.' });
-      _orchOfferRecord(t, { groundId: m.groundId, tabId, ask, label: '● Show me the right way' });
+      _orchOfferRecord(t, { groundId: m.groundId, tabId, ask, label: '● Show me the right way', replaceCapabilityId: m.capabilityId });   // v1540 — "replace" retires the superseded walk on accept
       _orchFinalize(t);
       return true;
     }
     _setMessageBody(rmsg, `“${(m.candidate && m.candidate.intent) || 'That shortcut'}” didn’t work here — its saved steps don’t match the current page (re-teach it and I’ll replace it).`);
-    _orchOfferRecord(rmsg, { groundId: m.groundId, tabId, ask, label: '● Show me the right way' });
+    _orchOfferRecord(rmsg, { groundId: m.groundId, tabId, ask, label: '● Show me the right way', replaceCapabilityId: m.capabilityId });   // v1540 — same replace contract
     _orchFinalize(rmsg);
     return true;
   }
@@ -6743,7 +6812,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: rr.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled });
       if (dj !== null) return dj;
     }
-    _lastGroundedRead = { leg, params, at: Date.now(), value: rr.value };   // FL-1d — this read grounds the coming answer; CX-9j — the VALUE stays (panel memory) so a follow-up ("what are the instructions?") answers from THIS record
+    _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), value: rr.value };   // FL-1d — this read grounds the coming answer; CX-9j — the VALUE stays (panel memory) so a follow-up ("what are the instructions?") answers from THIS record; v1534 — labels carry the human division NAME for a follow-up on-site open
     const facts = readShapeFacts(rr.value);
     // CX-9j (v2.74.1445) — an explicit DETAILS-intent in the ask ("… and show details", "warranty details for …") on a
     // SINGLE record → the FULL FORMATTED RECORD, deterministically (live: the clause rode along as words and the shaper
@@ -6836,7 +6905,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // showList / a miss / no-LLM → the deterministic CX-4c render below (grounded #ids, never LLM-re-emitted).
     // FL-1d — this read grounds the coming answer. CX-7e — also remember the RETURNED record's id + the read's
     // tab-derived urlArgs (handle), so "show profile" can open that record's admin page even for a by-email lookup.
-    _lastGroundedRead = { leg, params, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null, value: res.value };   // CX-9j — the value stays for field follow-ups
+    _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null, value: res.value };   // CX-9j — the value stays for field follow-ups; v1534 — labels carry the division NAME
     const facts = readShapeFacts(res.value);
     // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
@@ -7905,6 +7974,28 @@ async function sendChatMessage() {
   {
     const mSectionShow = text.match(/^(?:show|view|go\s+to)\s+(?:the\s+)?([a-z][\w ]*?)\s*$/i);
     if (mSectionShow && await _showSection(mSectionShow[1].trim())) { input.value = ''; _autosizeInput(); return; }
+  }
+  // v2.74.1533 — `re-teach` (also `reteach` / `show me again`): re-record the last on-site capability EVEN WHEN IT
+  // WORKS. A successful walk shows no failure-only "● Show me" offer, so there was no way to improve it (e.g. add
+  // the division step). This is the explicit door. `re-teach: <ask>` overrides the ask (reusing the same ground).
+  {
+    const mRe = text.match(/^(?:re-?teach|show\s+me\s+again)\s*:?\s*([\s\S]*)$/i);
+    if (mRe) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      const arg = (mRe[1] || '').trim();
+      const rt = arg && _lastReteach ? { ..._lastReteach, ask: arg } : _lastReteach;
+      const m2 = appendMessage({ role: 'assistant', body: '' });
+      if (!rt || !rt.groundId || !rt.ask) {
+        _setMessageBody(m2, 'Nothing to re-teach yet — run it once (e.g. “show ticket 4867009 on vendorsuite”), then type `re-teach`.');
+        _orchFinalize(m2); return;
+      }
+      let tId = rt.tabId;
+      try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); tId = (tabs && tabs[0] && tabs[0].id) ?? rt.tabId; } catch { /* */ }
+      _setMessageBody(m2, `Re-teaching **${rt.ask}** — click below, then show me the steps (include the division this time).`, { markdown: true });
+      _orchOfferRecord(m2, { groundId: rt.groundId, tabId: tId, ask: rt.ask, label: '● Show me the right way', replaceCapabilityId: rt.replaceCapabilityId || null });   // v1540 — an explicit re-teach retires what it replaces
+      _orchFinalize(m2); return;
+    }
   }
   // v2.74.1522 — the ON-SITE RECORD ask ("show ticket 4867009 on vendorsuite"): verb + digit-run + trailing
   // "on/in <site>" runs the drill-bearing list leg DETERMINISTICALLY (the named site scopes it; the drill join

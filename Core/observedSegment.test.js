@@ -389,6 +389,36 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.ok(!lone.some((p) => p.kind === 'option'), 'a 2-item nav is below the category floor');
   });
 
+  it('v1534 — a #divisionMenu CLICK → a re-bindable {division} option scoped to the menu (the walk selects the ticket division)', () => {
+    // The demo click lands on whatever span the user hits inside the row — usually the VENDOR span "DEAKO INC (ALL
+    // DIVISIONS)", the same text in every row — at a fragile position (span:nth-of-type(2)). The recorder overrides
+    // the value with the row's DIVISION NAME (span.medium) and marks the #divisionMenu container, so deriveObserved
+    // lifts it to a {division} param (named 'division', NOT the generic 'category', so the on-site intercept can fill
+    // {{DIVISION}}) and parameterizeObserved lowers it to CLICK_BY_LABEL in #divisionMenu — replay then selects the
+    // case/ask division by name (CLICK_BY_LABEL contains-matches "Raleigh" against "Raleigh - 495").
+    const divs = ['Atlanta West - 210 All', 'Raleigh - 495', 'Mobile - 223', 'Greensboro - 118'];
+    const click = buildRawAction({
+      domKind: 'click', value: 'Raleigh - 495', url: 'https://vendorsuite.example.com',
+      target: { role: null, accessibleName: 'DEAKO INC (ALL DIVISIONS)', selector: '#divisionMenu li:nth-of-type(72) > div > span:nth-of-type(2)', options: divs, optionContainer: '#divisionMenu' },
+    });
+    assert.equal(click.value, 'Raleigh - 495', 'the division click keeps the row NAME as its value (not the vendor span)');
+    const nav = buildRawAction({ domKind: 'navigate', url: 'https://vendorsuite.example.com/warranty', from: 'https://vendorsuite.example.com' });
+    const op = segmentTrace(coalesce([click, nav]));
+    const params = deriveObservedParams(op);
+    const div = params.find((p) => p.kind === 'option');
+    assert.ok(div, 'the division click became an OPTION param');
+    assert.equal(div.key, 'division', 'named division (not the generic category) so the intercept fills {{DIVISION}}');
+    assert.equal(div.value, 'Raleigh - 495', 'demonstrated division is the default');
+    assert.ok(div.vocabulary.includes('Mobile - 223'), 'the division set is the vocabulary');
+    const { phases, params: named } = parameterizeObserved(opToPhases(op), params);
+    const np = named.find((p) => p.kind === 'option');
+    assert.equal(np.name, 'DIVISION', 'placeholder is {{DIVISION}} — what the on-site walk-replay fills from the case/ask');
+    const byLabel = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'CLICK_BY_LABEL');
+    assert.ok(byLabel, 'division click lowered to CLICK_BY_LABEL');
+    assert.equal(byLabel.selector, '#divisionMenu', 'CLICK_BY_LABEL targets the division menu, so any division resolves');
+    assert.equal(byLabel.value, '{{DIVISION}}', 'division is the placeholder the intercept fills');
+  });
+
   it('describeTraceInput: structure-derived summary (phases as step kinds + params as example inputs) (ORCH-D)', () => {
     const op = segmentTrace(coalesce(raw));
     const { phases, params } = parameterizeObserved(opToPhases(op), deriveObservedParams(op));

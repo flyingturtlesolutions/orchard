@@ -2420,6 +2420,9 @@ export function createSgMessageHandlers(ctx) {
         // v2.74.1530 — diagnostic: did a result-row click content-address (reuse the search value as CLICK_BY_LABEL)?
         // Surfaces in gl so the OBS-4b content-addressing (v1528/1530) is verifiable from a re-teach trace.
         try { const _ca = params.filter((p) => p && p.clickReuse).length; if (_ca) Logger.info('background', `OBS_PARAM ▸ content-addressed ${_ca} result-row click(s) → CLICK_BY_LABEL by search value`); } catch { /* */ }
+        // v2.74.1534 — diagnostic: did a #divisionMenu click generalize to a {division} param? Surfaces in gl so the
+        // "the walk selects the division" generalization is verifiable from a re-teach trace (else it's invisible).
+        try { const _dv = params.find((p) => p && p.kind === 'option' && /divisionmenu/i.test(String(p.containerHint || ''))); if (_dv) Logger.info('background', `OBS_PARAM ▸ division select generalized → {${_dv.key}} CLICK_BY_LABEL in ${_dv.containerHint} (default "${String(_dv.value || '').slice(0, 40)}", vocab ${(_dv.vocabulary || []).length})`); } catch { /* */ }
         // OBS-3b — DERIVE DURABLE LANDMARKS from the demonstrated elements (your step 3): each step carries an
         // inline landmark (role + accessibleName + hierarchicalContext + selector); mint a per-Ground Landmark
         // record per unique identity and convert every step to a `landmarkRef` so the capability is
@@ -3060,7 +3063,7 @@ export function createSgMessageHandlers(ctx) {
     // here the Locale scope is the executability proxy. See specs/DESIGN_intent_orchestration.md §4.
     ORCH_MATCH: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId = null, ask = '' } = payload ?? {};
+        const { tabId, groundId = null, ask = '', includeActions = false } = payload ?? {};
         if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
         let url = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; } catch { /* */ } }
@@ -3113,10 +3116,18 @@ export function createSgMessageHandlers(ctx) {
         // BEFORE the alias was ever consulted, so the taught capability could never fire on the ask that taught it.
         const _nAsk = normalizeAliasPhrase(ask);
         const _aliasHit = (c) => !!c && Array.isArray(c.aliases) && c.aliases.some((al) => normalizeAliasPhrase(al) === _nAsk);
+        // v2.74.1536 — the on-site OPEN intercept (chat `_openRecordOnSite`) sets includeActions: "show ticket X in
+        // Raleigh on vendorsuite" is READ-phrased but its MECHANISM is an ACTION walk (navigate + select division +
+        // search + click the row to display it ON the page). The READ scope hid that walk whenever the phrasing
+        // wasn't the exact demonstrated alias — a DIFFERENT ticket number, or an added "in <division>" — so the
+        // whole {division}/{ticketId} generalization was structurally unreachable (live: 0/7 candidates → miss →
+        // drill, and the drill's address-click also missed). With includeActions a READ ask keeps the action pool;
+        // the intercept still gates replay on binds-ticket, so a mis-pick falls through to the drill as before.
         let pool;
-        if (_askIsRead) pool = projected.filter((c) => _isReadCand(c) || _aliasHit(c));
+        if (_askIsRead && !includeActions) pool = projected.filter((c) => _isReadCand(c) || _aliasHit(c));
+        else if (_askIsRead) pool = projected;   // read-phrased action (on-site open) — don't scope the walk out
         else { const _acts = projected.filter((c) => !_isReadCand(c) || _aliasHit(c)); pool = _acts.length ? _acts : projected; }
-        Logger.info('background', `ORCH_MATCH scope ▸ ask=${_askIsRead ? 'READ' : 'ACTION'} → ${pool.length}/${projected.length} candidate(s) (effect-scoped${_askIsRead ? ', observations only' : ', actions only'})`);
+        Logger.info('background', `ORCH_MATCH scope ▸ ask=${_askIsRead ? (includeActions ? 'READ+actions' : 'READ') : 'ACTION'} → ${pool.length}/${projected.length} candidate(s) (effect-scoped${_askIsRead ? (includeActions ? ', actions kept for on-site open' : ', observations only') : ', actions only'})`);
         const parts = scopeAndPartition(pool, { currentGroundId: gid, currentLocaleUrl: localeUrl, sameLocale });
         // ORCH — rank over ALL same-Ground capabilities (here + reachable). The exact-locale "here vs reachable"
         // split produced "go to another page" dead-ends for site-wide affordances (search, login, join) and
@@ -4867,6 +4878,29 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, groups, duplicateCount: dupes });
       } catch (err) {
         Logger.error('background', `DETECT_DUPLICATE_CAPABILITIES failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // v2.74.1540 — RETIRE the capability a re-teach REPLACED ("show me the right way and I'll replace it" — this is
+    // the replace half, previously unhonored). Soft-retract via applyRetraction (restorable in Studio;
+    // isActiveCapability hides it from every matcher) — NEVER a hard delete. The caller (chat record flow) knows
+    // exactly WHICH capability the fresh demonstration supersedes, so there is no signature guessing — this is what
+    // stops re-teach duplicates accumulating (live: three identical "Search ticket by division" walks on one Ground
+    // collapsed the match margin to 0.01 → propose/ambiguous on every non-alias phrasing).
+    RETIRE_CAPABILITY: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null, capabilityId = null, reason = '' } = payload ?? {};
+        if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
+        const caps = (await ctx.readSgCapabilities(groundId)) || [];
+        const cap = caps.find((c) => c && c.id === capabilityId);
+        if (!cap) { sendResponse({ success: true, retired: false, reason: 'not-found' }); return; }
+        if (cap.retracted === true) { sendResponse({ success: true, retired: false, reason: 'already-retracted' }); return; }
+        await ctx.writeSgCapability(groundId, applyRetraction(cap, { now: Date.now() }));
+        Logger.info('background', `LEARNED ▸ retired superseded capability ${String(capabilityId).slice(0, 8)} ("${String(cap.intent || cap.name || '').slice(0, 60)}")${reason ? ` [${reason}]` : ''} — restorable in Studio`);
+        sendResponse({ success: true, retired: true });
+      } catch (err) {
+        Logger.error('background', `RETIRE_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
