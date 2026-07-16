@@ -3296,7 +3296,7 @@ export function createSgMessageHandlers(ctx) {
     // The resolver NAMES the target; run authority stays with ORCH-G. Never LLM, never a minted origin.
     TARGET_RESOLVE: async (payload, _sender, sendResponse) => {
       try {
-        const { ask = '', tabId = null, deskOrigins = [] } = payload ?? {};
+        const { ask = '', tabId = null, deskOrigins = [], focus = [] } = payload ?? {};   // FC-4 (v2.74.1552) — the conversation's focus provenance (TR-2 evidence)
         if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
         const all = (await StorageManager.getAllGrounds()) || [];
         const grounds = all.map((g) => ({ groundId: g.id || g.groundId, host: primaryHost(g) || '', name: _groundLabel(g) || '' })).filter((g) => g.groundId);
@@ -3330,7 +3330,7 @@ export function createSgMessageHandlers(ctx) {
         let liveOrigins = [];
         try { const reg = (await readConnRegistry()) || {}; const bad = new Set(attentionOrigins(reg, Object.keys(reg)).map((a) => a.origin)); liveOrigins = Object.keys(reg).filter((o) => !bad.has(o)); } catch { /* */ }
         try { const tabs = await chrome.tabs.query({}); for (const t of tabs) { try { const h = new URL(t.url || '').host; if (h && /^https?:/.test(t.url || '') && !liveOrigins.includes(h)) liveOrigins.push(h); } catch { /* */ } } } catch { /* */ }
-        const decision = resolveTarget(ask, { grounds, fingerprints, aliasIndex: _targetCtxCache.aliasIndex, normalizePhrase: normalizeAliasPhrase, deskOrigins, tabGroundId, liveOrigins });
+        const decision = resolveTarget(ask, { grounds, fingerprints, aliasIndex: _targetCtxCache.aliasIndex, normalizePhrase: normalizeAliasPhrase, deskOrigins, tabGroundId, liveOrigins, focus });
         Logger.info('background', renderTargetDecision(decision));
         sendResponse({ success: true, decision, tabGroundId });
       } catch (err) {

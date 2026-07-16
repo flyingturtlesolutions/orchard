@@ -39,7 +39,12 @@ function _groundForToken(tok, grounds) {
   return null;
 }
 
-const _hostIn = (host, origins) => !!host && (origins || []).some((o) => String(o || '').toLowerCase() === String(host).toLowerCase());
+// v2.74.1547 — origins arrive in MIXED formats (a desk connection may store "https://vendorsuite.drhorton.com/",
+// the ground's primaryHost is bare "vendorsuite.drhorton.com") — exact equality read the desk's OWN site as a
+// VISITOR and silently skipped TR-2 (live 121110: `tier=TR-4/tab … visitor` on the desk's bound ground).
+// Normalize both sides: strip scheme, leading www., and any path.
+const _normHost = (s) => String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/[/?#].*$/, '').trim();
+const _hostIn = (host, origins) => { const h = _normHost(host); return !!h && (origins || []).some((o) => _normHost(o) === h); };
 
 /**
  * Resolve an ask's TARGET over injected library data. Ladder: TR-1 explicit → TR-2 conversation (desk; an
@@ -52,6 +57,7 @@ const _hostIn = (host, origins) => !!host && (origins || []).some((o) => String(
  *   aliasIndex?: Array<{phrase:string, groundId:string, capabilityId:string}>,  // phrases PRE-normalized
  *   normalizePhrase?: (s:string)=>string,                        // the SAME normalizer that built aliasIndex
  *   deskOrigins?: string[],                                      // the conversation's bound connections (TR-2)
+ *   focus?: Array<{groundId?:string, host?:string, nouns?:string[]}>,  // FC-4 — the conversation's focus provenance (TR-2 evidence)
  *   tabGroundId?: (string|null),                                 // TR-4
  *   liveOrigins?: string[],                                      // fresh-session / open-tab origins (TR-5)
  * }} ctx
@@ -80,8 +86,13 @@ export function resolveTarget(ask, ctx = {}) {
     aliasHit = ctx.aliasIndex.find((a) => a && a.phrase === n && byId.has(a.groundId)) || null;
   }
 
-  // ── TR-2 CONVERSATION — the desk's bound connections outrank the tab. ──
-  if (deskOrigins.length) {
+  // ── TR-2 CONVERSATION — the desk's bound connections outrank the tab. FC-4 (v2.74.1552,
+  // DESIGN_conversation_focus.md §6): the conversation's FOCUS provenance is the SECOND evidence class in this
+  // tier — the grounds its working set points at join the candidate pool, and ask-tokens matching a focus
+  // entry's nouns count into the score (referential asks themselves never reach here — the referent stage
+  // upstream dereferences them; this covers content asks spoken in the held entity's vocabulary). ──
+  const focusRefs = (Array.isArray(ctx.focus) ? ctx.focus : []).filter((f) => f && (f.groundId || f.host));
+  if (deskOrigins.length || focusRefs.length) {
     const deskGrounds = grounds.filter((g) => _hostIn(g.host, deskOrigins));
     // TR-2a — an exact alias WITHIN the desk keeps its full (auto) authority: the taught phrase is prior consent,
     // and the desk already scopes it. (Ordering note in the spec: alias sits below conversation, but an alias
@@ -90,13 +101,27 @@ export function resolveTarget(ask, ctx = {}) {
       const ag = byId.get(aliasHit.groundId);
       if (ag && _hostIn(ag.host, deskOrigins)) return _pick('alias', 3, ag, { capabilityId: aliasHit.capabilityId, auto: true, why: 'alias-in-desk' });
     }
-    if (deskGrounds.length) {
-      const ranked = scoreAskAffinity(tokens, fps.filter((f) => deskGrounds.some((g) => g.groundId === f.groundId)));
+    const focusGrounds = grounds.filter((g) => focusRefs.some((f) => (f.groundId && f.groundId === g.groundId) || (f.host && _normHost(f.host) === _normHost(g.host))));
+    const pool = [...new Map([...deskGrounds, ...focusGrounds].map((g) => [g.groundId, g])).values()];
+    if (pool.length) {
+      const ranked = scoreAskAffinity(tokens, fps.filter((f) => pool.some((g) => g.groundId === f.groundId)));
+      // Focus-noun bonus: the held entity's vocabulary counts for its ground (even when fingerprints are thin).
+      for (const f of focusRefs) {
+        const g = focusGrounds.find((x) => (f.groundId && f.groundId === x.groundId) || (f.host && _normHost(f.host) === _normHost(x.host)));
+        if (!g) continue;
+        const extra = tokens.filter((t) => (Array.isArray(f.nouns) ? f.nouns : []).includes(t));
+        if (!extra.length) continue;
+        const mine = ranked.find((r) => r.groundId === g.groundId);
+        if (mine) { mine.score += extra.length; mine.matchedTerms = [...new Set([...mine.matchedTerms, ...extra])]; }
+        else ranked.push({ groundId: g.groundId, score: extra.length, matchedTerms: extra });
+      }
+      ranked.sort((a, b) => b.score - a.score);
       if (ranked.length) {
         const top = ranked[0];
-        return _pick('conversation', 2, byId.get(top.groundId), { why: `desk affinity (${top.matchedTerms.join(', ')})`, matchedTerms: top.matchedTerms });
+        const viaFocus = focusGrounds.some((g) => g.groundId === top.groundId) && !deskGrounds.some((g) => g.groundId === top.groundId);
+        return _pick('conversation', 2, byId.get(top.groundId), { why: `${viaFocus ? 'focus' : 'desk'} affinity (${top.matchedTerms.join(', ')})`, matchedTerms: top.matchedTerms });
       }
-      // Desk grounds exist but none speak the ask's vocabulary → fall through (the §5.4 inverse case).
+      // Conversation-tier grounds exist but none speak the ask's vocabulary → fall through (the §5.4 inverse case).
     }
   }
 

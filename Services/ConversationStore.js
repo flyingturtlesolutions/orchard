@@ -214,7 +214,7 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ id: explicitId = null, title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null, appId = null, appVersion = null, parentId = null, icon = null, config = null, presetId = null, instanceId = null, pinned = false } = {}) {
+  async create({ id: explicitId = null, title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null, appId = null, appVersion = null, parentId = null, icon = null, config = null, presetId = null, instanceId = null, pinned = false, focus = null } = {}) {
     // v2.74.1234 — an explicit id mints a RESERVED conversation (the persistent Overview owns OVERVIEW_ID). The caller
     // is responsible for get-or-create (don't create over an existing id); a random uuid is the default.
     const id = (typeof explicitId === 'string' && explicitId) ? explicitId : crypto.randomUUID();
@@ -249,6 +249,7 @@ export const ConversationStore = {
       if (presetId) conv.presetId = presetId;                          // AP-0 (v2.74.1211) — the generic TEMPLATE this app instance came from (object-model / canvas resolve through it)
       if (appId) conv.instanceId = instanceId || crypto.randomUUID();  // AP-0 — per-INSTANCE identity; goal memory keys by THIS, not the shared appId/type (re-create passes the saved id so memory persists)
       if (pinned) conv.pinned = true;                                  // AP-1 — pinned apps sort to the top of the drawer
+      if (Array.isArray(focus) && focus.length) conv.focus = focus;    // FC-0 (v2.74.1552) — the conversation's FOCUS working set (a case is born holding its record as structure); body-only, no index mirror
     }
     await chrome.storage.local.set({ [convKey(id)]: conv });
     const entry = { id, title, kind: k, updatedAt: now };
@@ -275,7 +276,7 @@ export const ConversationStore = {
     if (!conv) return null;
     // v2.74.1045 (DBR-P2-2) — `syncedMain`: the `main` commit this branch last synced onto (feeds the P2-5 merge freshness check).
     // v2.74.1053 (DBR-P3-1) — `seed`: the split-seed prompt; cleared (→ null) by chat.js once pre-filled into the input.
-    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm', 'surface', 'appId', 'appVersion', 'parentId', 'icon', 'config', 'pinned', 'instanceId', 'presetId']) {   // .1102 — titledByLlm; .1147 — surface (the dev altitude; WITHOUT this, `surface high` silently dropped the field and never activated the high surface); .1168 (CV-3c) — app identity (appId/appVersion/parentId/icon) + tighten-only config; .1211 (AP-0/1) — pinned + per-instance identity (instanceId/presetId)
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm', 'surface', 'appId', 'appVersion', 'parentId', 'icon', 'config', 'pinned', 'instanceId', 'presetId', 'focus']) {   // .1102 — titledByLlm; .1147 — surface (the dev altitude; WITHOUT this, `surface high` silently dropped the field and never activated the high surface); .1168 (CV-3c) — app identity (appId/appVersion/parentId/icon) + tighten-only config; .1211 (AP-0/1) — pinned + per-instance identity (instanceId/presetId); .1552 (FC-0) — focus (the conversation's working set; accretion/refresh patch it)
       if (k in fields) conv[k] = fields[k];
     }
     conv.updatedAt = Date.now();

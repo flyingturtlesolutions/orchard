@@ -67,6 +67,29 @@ describe('targetResolve — the TR ladder (TRT-2)', () => {
     const d = resolveTarget('fold the laundry', CTX);
     assert.equal(d.tier, 'teach'); assert.equal(d.tr, 7);
   });
+  it('v2.74.1547 — origin formats normalize: a desk connection stored with scheme/www/path still matches its ground', () => {
+    // Live 121110: `tier=TR-4/tab … visitor` on the desk's OWN bound ground — exact string equality read
+    // "https://vendorsuite.drhorton.com/" ≠ "vendorsuite.drhorton.com", so TR-2 skipped and visitor mis-flagged.
+    const d = resolveTarget('foreach division, open new warranty tasks in a new case',
+      { ...CTX, deskOrigins: ['https://vendorsuite.drhorton.com/', 'www.deako.zendesk.com'], tabGroundId: 'px' });
+    assert.equal(d.tier, 'conversation'); assert.equal(d.groundId, 'vs');
+    assert.equal(d.visitor, undefined, 'the desk\'s own ground is never a visitor');
+  });
+  it('FC-4 (v2.74.1552) — focus provenance is TR-2 evidence: a held entity pulls its ground into the conversation tier', () => {
+    // No desk connections at all — the case's focus alone claims the conversation tier for content asks
+    // spoken in the entity's vocabulary. (Referential asks never reach the ladder — the referent stage owns them.)
+    const d = resolveTarget('anything else open for this warranty?', { ...CTX, focus: [{ groundId: 'vs', host: 'vendorsuite.drhorton.com', nouns: ['warranty', 'task'] }] });
+    assert.equal(d.tier, 'conversation'); assert.equal(d.groundId, 'vs');
+    assert.ok(d.why.startsWith('focus affinity'), `why names the evidence class: ${d.why}`);
+    // Focus ∪ desk pool: the focus ground competes INSIDE the tier, and the desk pick stays a desk pick.
+    const d2 = resolveTarget('foreach division, open new warranty tasks in a new case',
+      { ...CTX, deskOrigins: ['vendorsuite.drhorton.com'], focus: [{ groundId: 'px', host: 'pixabay.com', nouns: ['image'] }] });
+    assert.equal(d2.groundId, 'vs'); assert.ok(d2.why.startsWith('desk affinity'));
+    // The focus-noun bonus reaches grounds whose fingerprints are thin: nouns alone score the focus ground.
+    const d3 = resolveTarget('the warranty again please', { ...CTX, fingerprints: [], focus: [{ groundId: 'vs', nouns: ['warranty', 'task'] }] });
+    assert.equal(d3.tier, 'conversation'); assert.equal(d3.groundId, 'vs');
+    assert.ok(d3.matchedTerms.includes('warranty'));
+  });
   it('renderTargetDecision: one explainable line, shadow-taggable', () => {
     const d = resolveTarget('foreach division, open new warranty tasks in a new case', { ...CTX, deskOrigins: ['vendorsuite.drhorton.com'] });
     const line = renderTargetDecision(d, { shadow: true });

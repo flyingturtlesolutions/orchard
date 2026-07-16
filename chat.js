@@ -24,7 +24,7 @@ import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.7
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
@@ -36,6 +36,7 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { canBulkApprove, getPath, pendingSummary, targetUrls, renderProposalCards } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links; FL-10f (v1385) — the grouped review render
+import { focusRecordEntry, focusListEntry, focusFromSeedRecord, pushFocus, bindReferent, recordFind, recordDivision, nounFromLeg } from './Core/conversationFocus.js';   // FC (v2.74.1552, DESIGN_conversation_focus.md) — the conversation's working set of grounded entity handles + the pure referent binder
 import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
 import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown, queueStateLines } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown; v1375 — the queue-state breakdown
 import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half); FL-1e (v1352) — the "show work" run trace
@@ -141,6 +142,7 @@ function _clearCurrentConversation() {
   _currentConversationId = null;
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
+  _currentConversationFocus = [];       // FC (v2.74.1552) — focus is per-conversation working state
   _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
   _setupState = null; _setupPick = null; _setupCatalog = null; _setupCatalogMsg = null;   // AS-2/AS-5 (v2.74.1188/.1406) — drop any in-progress setup flow + its multi-select picks when the surface changes
   _rideEachCursor = null;   // DK-7b — a fan-out continuation never crosses conversations
@@ -1555,6 +1557,7 @@ async function _createAppConversation(def, { setup = false } = {}) {
   _currentConversationId = conv.id;
   _currentConversationKind = 'agent';            // an app routes through the IL (the seed shapes it), not the dev bridge
   _currentConversationSeed = def.seed || '';
+  _currentConversationFocus = Array.isArray(conv.focus) ? conv.focus : [];   // FC — a def-created desk starts with an empty working set
   _currentConversationAppId = typeId || null;            // the TYPE — object-model / canvas resolution + the gallery
   _currentConversationInstanceId = conv.instanceId || null;   // AP-0 — the per-instance goal-memory key
   _currentConversationPresetId = conv.presetId || null;       // §10.2 — the app's preset type (distill-up target)
@@ -1665,7 +1668,7 @@ async function _createSubTasks(app, items) {
   for (const spec of specs) {
     if (existing.has(String(spec.title || '').trim().toLowerCase())) { skipped++; continue; }
     try {
-      const conv = await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
+      const conv = await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null, focus: (Array.isArray(spec.focus) && spec.focus.length) ? spec.focus : null });   // FC-0 — the case's pinned record entry rides the create
       // DK-8e (v2.74.1496) — the case opens WITH its record on screen (the dossier's first page): the same quiet
       // upsert the seed-directive note uses, so it's there before the case is ever opened. Plain text (escape-first).
       if (spec.detail) {
@@ -1747,7 +1750,10 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
         if (dr.ok) {
           const detailObj = primaryObject(dr.value) || dr.value;
           const lines = dossierLines(detailObj, { max: 24 });   // the full record earns a bigger budget than a row
-          if (lines.length) foItems[k] = { ...foItems[k], detail: lines.join('\n') };
+          // FC-0 (v2.74.1552) — keep the STRUCTURE too: the drilled object merged over the row (the row carries
+          // the each-tag division + join ids the detail may lack). This was where the code plane died — the
+          // object flattened to prose one line down and every reference-ask consumer had to re-parse text.
+          if (lines.length) foItems[k] = { ...foItems[k], detail: lines.join('\n'), fields: { ...(row || {}), ...((detailObj && typeof detailObj === 'object' && !Array.isArray(detailObj)) ? detailObj : {}) } };
         }
       }
       try { _orchLog(`RIDE_DRILL ▸ dossier ${leg.tool.recipeId || leg.key} → ${dj.via} × ${foItems.length} (fan-out spawn)`); } catch { /* */ }
@@ -1768,6 +1774,16 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
         if (spec.persona) childApp = { ...app, seed: composeSeed(app.seed, spec.persona) };
       }
     } catch { /* extraction is best-effort; keep innerDirective + the app's own seed */ }
+  }
+  // FC-0 (v2.74.1552, DESIGN_conversation_focus.md) — each case is BORN WITH FOCUS: its record as a PINNED
+  // structured entry (fields + leg provenance), the code-plane twin of the seed's prose CASE_RECORD. "show this
+  // ticket" then dereferences structure instead of re-parsing prose (the 133636/144407 mis-route class).
+  if (leg) {
+    const _noun = nounFromLeg(leg);
+    for (const it of foItems) {
+      const entry = focusRecordEntry({ label: it.label, noun: _noun, fields: it.fields || it.row || null, leg, pinned: true, at: Date.now() });
+      if (entry) it.focus = [entry];
+    }
   }
   const { created, skipped } = await _createSubTasks(childApp, foItems);   // DK-8k — already-open cases skip (dedup by title under this desk)
   // EPHEMERAL (v2.74.1262) — a REDUCE over the set: the workers run → the parent SYNTHESIZES their findings → the
@@ -3516,7 +3532,11 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
         if (r.ok) items.push({ label: all[i].label, rows: _rideEachRows(r.value) });
         else failed++;
       }
-      try { _orchLog(`RIDE_EACH ▸ ${leg.tool.recipeId || leg.key} × ${all.length} ${noun}(s) (chain) → ${items.length} ok, ${failed} failed, ${items.reduce((n, it) => n + it.rows.length, 0)} row(s)`); } catch { /* */ }
+      // v2.74.1548 — print the NON-each bound params (e.g. status=new): a clean 121-ok/0-row sweep is only
+      // diagnosable when the line shows WHICH bucket it swept (live 122747: 0 rows — genuinely-empty vs
+      // wrong-status was undecidable from the trace).
+      const _fixed = Object.entries(params || {}).filter(([k, v]) => k !== rp.each.name && v != null && v !== '').map(([k, v]) => `${k}=${String(v).slice(0, 20)}`).join(', ');
+      try { _orchLog(`RIDE_EACH ▸ ${leg.tool.recipeId || leg.key} × ${all.length} ${noun}(s) (chain${_fixed ? `, ${_fixed}` : ''}) → ${items.length} ok, ${failed} failed, ${items.reduce((n, it) => n + it.rows.length, 0)} row(s)`); } catch { /* */ }
       if (!items.length) return { ok: false, error: `couldn’t read any ${noun} (${failed} tried)`, hint: 'the session may have expired — click into the site’s tab and retry' };
       const tagged = [];
       for (const it of items) for (const row of it.rows) { if (tagged.length >= 200) break; tagged.push({ [noun]: it.label, ...row }); }
@@ -3543,6 +3563,98 @@ let _sweepBatchIndex = [];   // render-order number → proposalId (what `approv
 // my_open_tickets). "Show me" resolves HERE first when the read is more recent than the last proposal batch —
 // a claim's ground truth is the read that produced it, never a random item.
 let _lastGroundedRead = null;   // { leg, params, at }
+// FC (v2.74.1552, DESIGN_conversation_focus.md) — the CONVERSATION's durable working set. `_lastGroundedRead`
+// above is the fast in-panel cache of the last read; focus is its per-conversation, persisted generalization —
+// a case is BORN with its record pinned here; grounded reads accrete entries (FC-3). Working state, not memory:
+// never promoted, dies with the conversation.
+let _currentConversationFocus = [];
+let _lastSendStamp = { key: '', at: 0 };   // v2.74.1553 — the duplicate-send belt's memory (identical text <3s apart = a double-fire, dropped)
+function _persistFocus() {
+  if (!_currentConversationId || _currentConversationKind !== 'agent') return;
+  try { ConversationStore.patchMeta(_currentConversationId, { focus: _currentConversationFocus }).catch(() => { /* best-effort */ }); } catch { /* */ }
+}
+function _pushFocusEntry(entry) {
+  if (!entry) return;
+  _currentConversationFocus = pushFocus(_currentConversationFocus, entry);
+  _persistFocus();
+}
+// FC-3 — a grounded read accretes a focus entry: a single record (primaryObject) or a list (its first rows).
+function _accreteFocusFromRead({ leg, params = null, labels = null, value, label = '' } = {}) {
+  try {
+    if (!leg || value === undefined) return;
+    const obj = primaryObject(value);
+    const rows = primaryList(value);
+    const lbl = String(label || (labels && Object.values(labels)[0]) || (leg && leg.name) || '').trim();
+    const entry = obj
+      ? focusRecordEntry({ label: lbl, noun: nounFromLeg(leg), fields: obj, leg, params, labels, at: Date.now() })
+      : (Array.isArray(rows) && rows.length ? focusListEntry({ label: lbl, noun: nounFromLeg(leg), rows, leg, params, labels, at: Date.now() }) : null);
+    if (entry) _pushFocusEntry(entry);
+  } catch { /* accretion is best-effort — the read itself already succeeded */ }
+}
+// FC-2 — dereference a bound RECORD entry to its on-site page. The find value + division come from the entry's
+// FIELDS/labels (structure, not re-parsed prose); the venue is the entry's provenance host; the run is the
+// PROVEN _openRecordOnSite arc (walk replay with the division filled, drill fallback). The SYNTHESIZED canonical
+// phrase is what runs and what alias-records — a demonstrative can never key an alias. Last resort: a banked
+// itemUrl template filled entirely from the record's own ids (curated template + banked ids — never a minted URL).
+async function _openFocusEntry(entry, originalText, opts = {}) {
+  const find = recordFind(entry);
+  if (!find) return false;
+  const div = recordDivision(entry);
+  const host = (entry.provenance && entry.provenance.host) || '';
+  const siteWord = host ? String(host).toLowerCase().replace(/^www\./, '').split('.')[0] : 'site';
+  const synth = `show ticket ${find}${div ? ` in ${div}` : ''} on ${host ? siteWord : 'the site'}`;
+  try { _orchLog(`FOCUS ▸ "${String(originalText).slice(0, 40)}" → ${String(entry.label || 'record').slice(0, 40)} (${find}${div ? `, ${div}` : ''}) on ${host || 'site'}`); } catch { /* */ }
+  try { _orchLog(`TARGET ▸ tier=TR-2/focus target=${host || '(drill-scoped)'} why=focus(${entry.noun || 'record'}) auto`); } catch { /* */ }
+  if (await _openRecordOnSite(synth, find, siteWord, opts)) return true;
+  const prov = entry.provenance || {};
+  if (host && prov.itemUrl) {
+    try {
+      const path = fillEndpoint(String(prov.itemUrl), entry.fields || {});
+      if (path && !path.includes('{')) {
+        const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}${path.startsWith('/') ? path : '/' + path}`] });
+        if (r && r.success !== false) {
+          const m = appendMessage({ role: 'assistant', body: `${r.reused ? 'Focused' : 'Opened'} ${entry.label || 'the record'} on ${host}.` });
+          _orchFinalize(m);
+          return true;
+        }
+      }
+    } catch { /* the walk/drill path already reported */ }
+  }
+  return false;
+}
+// FC-5 — re-pull the focus head's record via its DRILL provenance: same leg family, same join id, fresh fields.
+// Updates the entry + the case_record card; any failure reports honestly and leaves the snapshot standing.
+async function _refreshFocusHead(head) {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  try {
+    const prov = head.provenance;
+    let recs = [];
+    try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: prov.groundId, origin: prov.host || undefined }); recs = (rr && rr.recipes) || []; } catch { recs = []; }
+    const legs = harvestedRecipeLegs(recs, { host: prov.host || '', mode: 'ask', groundId: prov.groundId });
+    const parentLeg = legs.find((l) => l && l.tool && prov.recipeId && l.tool.recipeId === prov.recipeId)
+      || legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === prov.drill.via);
+    const joinVal = head.fields ? head.fields[prov.drill.from] : null;
+    if (!parentLeg || joinVal == null || joinVal === '') { _setMessageBody(m, 'Can’t re-pull this record — its source leg or join id is gone.'); _orchFinalize(m); return; }
+    const viaLeg = await _rideDrillLeg(parentLeg, prov.drill.via, prov.groundId);
+    if (!viaLeg) { _setMessageBody(m, `Can’t re-pull — the “${prov.drill.via}” detail leg isn’t available.`); _orchFinalize(m); return; }
+    const dr = await _rideExecOnce(viaLeg, { [prov.drill.param || 'id']: joinVal }, { groundId: prov.groundId });
+    if (!dr.ok) { _setMessageBody(m, `Re-pull failed — ${dr.error || 'the read errored'}. The record on file is unchanged.`); _orchFinalize(m); return; }
+    const detailObj = primaryObject(dr.value) || dr.value;
+    const fresh = focusRecordEntry({ label: head.label, noun: head.noun, fields: { ...(head.fields || {}), ...((detailObj && typeof detailObj === 'object' && !Array.isArray(detailObj)) ? detailObj : {}) }, pinned: !!head.pinned, at: Date.now() });
+    if (!fresh) { _setMessageBody(m, 'Re-pull returned nothing readable — the record on file is unchanged.'); _orchFinalize(m); return; }
+    fresh.provenance = prov;   // the rebuilt entry keeps its ORIGINAL provenance (focusRecordEntry had no leg here)
+    _pushFocusEntry(fresh);
+    const lines = dossierLines(detailObj, { max: 24 });
+    if (lines.length && _currentConversationId) {
+      try { await ConversationStore.updateMessage(_currentConversationId, 'case_record', { role: 'assistant', body: `${head.label}\n\n${lines.join('\n')}\n\n— Refreshed just now — ask for any field.` }, { upsert: true }); } catch { /* card is best-effort */ }
+    }
+    _setMessageBody(m, `Refreshed **${head.label}** — ${Object.keys(fresh.fields).length} fields on file.`, { markdown: true });
+    try { _orchLog(`FOCUS ▸ refresh → ${String(head.label).slice(0, 40)} (${Object.keys(fresh.fields).length} fields)`); } catch { /* */ }
+  } catch (e) {
+    _setMessageBody(m, `Re-pull failed — ${e?.message || 'error'}. The record on file is unchanged.`);
+  }
+  _orchFinalize(m);
+}
 let _lastReteach = null;   // v2.74.1533 — { groundId, tabId, ask } of the last on-site record run, so `re-teach` can re-record it even when it WORKED
 // ── TRT-2..5 (v2.74.1546, DESIGN_target_routing.md) — the chat side of the TARGET resolver ─────────────────────
 let _turnVisitor = null;          // TRT-5 §5.2 — {origin, convId} when THIS turn targets off-desk: fences the desk-instance memory write
@@ -3556,7 +3668,14 @@ async function _resolveTarget(ask) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = (tabs && tabs[0] && tabs[0].id) ?? null;
     const deskOrigins = _boundConnections().map((c) => c.origin);
-    const r = await _orchReq('TARGET_RESOLVE', { ask: a, tabId, deskOrigins });
+    // FC-4 (v2.74.1552) — the conversation's FOCUS provenance rides as TR-2 evidence: the grounds the working
+    // set points at (+ their nouns) join the conversation-tier candidate pool. Hints only — ids and hosts from
+    // the trusted catalog at read time, never from record content.
+    const focus = (_currentConversationFocus || []).slice(0, 3)
+      .map((e) => (e && e.provenance && (e.provenance.groundId || e.provenance.host))
+        ? { groundId: e.provenance.groundId || null, host: e.provenance.host || null, nouns: Array.isArray(e.nounTokens) ? e.nounTokens.slice(0, 8) : [] } : null)
+      .filter(Boolean);
+    const r = await _orchReq('TARGET_RESOLVE', { ask: a, tabId, deskOrigins, focus });
     decision = (r && r.success && r.decision) ? { ...r.decision, tabGroundId: r.tabGroundId ?? null } : null;
   } catch { decision = null; }
   _lastTargetResolve = { ask: a, at: Date.now(), decision };
@@ -4449,6 +4568,11 @@ async function _goToOrigin() {
 async function _showSection(word) {
   let w = String(word || '').trim().toLowerCase();
   if (!w) return false;
+  // v2.74.1551 — a DEMONSTRATIVE noun ("this ticket", "that task") is a REFERENCE to something at hand, never a
+  // section name: the token fallback would match "ticket" against a FOREIGN site's recipe meta and navigate the
+  // wrong site with the literal phrase (live 144407: "show this ticket" in a case → zendesk's "its this ticket
+  // page"). Fall through — the case bridge or interpret owns references.
+  if (/^(?:this|that|these|those)\b/.test(w)) return false;
   // v2.74.1521 — a digit-run means a RECORD ask ("show ticket 4867009 on vendorsuite"), never a section name.
   // Fall through to interpret, where the ride drill owns it (v1520 on-site open). Live miss: the token fallback
   // matched "ticket" against a Zendesk leg's does-line and navigated the WRONG SITE with the ask's value ignored.
@@ -4517,8 +4641,20 @@ async function _showSection(word) {
 // "everything" dumps the full record render. Local display of the user's own data; nothing leaves the panel.
 const _FOLLOWUP_TTL = 600000;   // 10 min — the conversational window a follow-up plausibly refers to
 async function _fieldFollowup(text) {
-  const g = _lastGroundedRead;
-  if (!g || g.value === undefined || (Date.now() - g.at) > _FOLLOWUP_TTL) return false;
+  let g = _lastGroundedRead;
+  let _focusStale = '';
+  if (!g || g.value === undefined || (Date.now() - g.at) > _FOLLOWUP_TTL) {
+    // FC-2 (v2.74.1552) — the conversation's FOCUS is durable context: a REOPENED case answers field asks from
+    // its record (the module-var read memory dies with the panel; the focus head doesn't). Pre-FC cases parse
+    // the seed's fenced CASE_RECORD once. Records only; no head → fall through exactly as before.
+    const head = (_currentConversationFocus || []).find((e) => e && e.kind === 'record' && e.fields)
+      || focusFromSeedRecord(_currentConversationSeed, 'this case’s record');
+    if (!head) return false;
+    g = { value: { results: [head.fields] }, at: head.at || 0, leg: { name: head.noun || 'record' } };
+    if (head.provenance && head.provenance.drill && (Date.now() - (head.at || 0)) > 1800000) {
+      _focusStale = '\n\n_(from the record on file — say `refresh` to re-pull it)_';   // FC-5 — snapshots age; routing ids don’t
+    }
+  }
   const t = String(text).trim();
   // verbed form ("what are the instructions?") OR a BARE short ask ("details", "instructions", "vendor explanation") —
   // the live miss: bare `details` had no verb, missed this regex, fell to the ROUTER, which invoked the detail READ
@@ -4589,7 +4725,7 @@ async function _fieldFollowup(text) {
     }
     return `**${nice(k)}:** ${String(v)}`;      // FULL scalar value — never truncated (this is the "exact instructions" ask)
   });
-  msgFor(parts.join('\n\n'));
+  msgFor(parts.join('\n\n') + _focusStale);
   try { _orchLog(`FIELD_FOLLOWUP ▸ "${q}" → ${hits.map(([k]) => k).join(',')}`); } catch { /* */ }
   return true;
 }
@@ -4753,7 +4889,13 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       // full sweep, merged group-tagged rows as ONE value) — then fan out over what it returned. A fan-out that
       // FOLLOWS a read keeps consuming st.lastValue unchanged.
       if (st.lastValue == null && _boundConnections().length) {
-        const cr = await _chainConnectorRun(clause.text, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        // v2.74.1547 — enumerate with the READ-shaped ask, not the raw spawn phrase: the leg-picker's interpret
+        // read "open new warranty tasks in a new case" as REVIEW_QUEUE with an `every` schedule param (live
+        // 121110 — the schedule misread, one layer deeper). fanoutReadAsk strips the spawn grammar
+        // ("foreach division, open new warranty tasks in a new case" → "foreach division, list new warranty
+        // tasks") so the picker sees collection + quantifier + filters only.
+        const _readAsk = fanoutReadAsk(clause.text) || clause.text;
+        const cr = await _chainConnectorRun(_readAsk, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
         if (cr && cr.ok) { st.lastValue = cr.value; st.lastLeg = cr.leg; }
         else if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${(cr.leg && (cr.leg.does || cr.leg.name)) || 'read the list to fan out over'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
       }
@@ -6465,6 +6607,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
       const dj2 = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: one.rows, where: ` in ${one.label}` });
       if (dj2 === true) {
         _lastGroundedRead = { leg, params, at: Date.now(), value: { results: one.rows.map((r) => ({ [noun]: one.label, ...r })) } };
+        _accreteFocusFromRead({ leg, params, value: _lastGroundedRead.value, label: one.label });   // FC-3
         return true;
       }
     }
@@ -6505,6 +6648,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   const tagged = [];
   for (const it of view) for (const row of it.rows) { if (tagged.length >= 200) break; tagged.push({ [noun]: it.label, ...row }); }
   _lastGroundedRead = { leg, params, at: Date.now(), value: { results: tagged } };
+  _accreteFocusFromRead({ leg, params, value: _lastGroundedRead.value });   // FC-3 — the each-mode sweep holds as ONE list entry
   return true;
 }
 
@@ -6639,7 +6783,7 @@ function _contextDivision() {
   const label = g.labels && g.labels.divisionId;
   return String((label != null && label !== '') ? label : id);
 }
-async function _openRecordOnSite(ask, recordValue, siteWord) {
+async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v2.74.1553 — opts.echoAsk:false when the caller already echoed the user's ORIGINAL words (the focus referent stage)
   const generic = ['site', 'page', 'tab', 'browser', 'web'].includes(siteWord);
   // v2.74.1533 — an EXPLICIT division in the ask ("show ticket X IN Raleigh on vendorsuite") WINS over the context
   // division. Live bug: "in Raleigh" searched "Mobile" — a stale last-read division leaked via _contextDivision and
@@ -6713,7 +6857,7 @@ async function _openRecordOnSite(ask, recordValue, siteWord) {
     } catch { return null; }
   })();
   if (turn && ((turn.action === 'run' && turn.reason === 'alias-exact') || bindsTicket || _ticketParamName)) {
-    appendMessage({ role: 'user', body: ask });
+    if (opts.echoAsk !== false) appendMessage({ role: 'user', body: ask });
     // v2.74.1540 — a `re-teach` after THIS run replaces THIS capability (works after success AND failure): stamp
     // it so the record flow retires the superseded walk on accept ("…and I'll replace it" — the replace half).
     _lastReteach = { groundId: m.groundId, tabId, ask, replaceCapabilityId: m.capabilityId };
@@ -6758,7 +6902,7 @@ async function _openRecordOnSite(ask, recordValue, siteWord) {
   }
   if (hit && !drill) return false;   // a non-exact hit with no reliable drill → let interpret arbitrate (unchanged)
   if (!drill) return false;
-  appendMessage({ role: 'user', body: ask });
+  if (opts.echoAsk !== false) appendMessage({ role: 'user', body: ask });
   await runDrill(appendMessage({ role: 'assistant', body: `Looking up ${recordValue}…` }));
   return true;
 }
@@ -6894,6 +7038,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       if (dj !== null) return dj;
     }
     _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), value: rr.value };   // FL-1d — this read grounds the coming answer; CX-9j — the VALUE stays (panel memory) so a follow-up ("what are the instructions?") answers from THIS record; v1534 — labels carry the human division NAME for a follow-up on-site open
+    _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: rr.value });   // FC-3
     const facts = readShapeFacts(rr.value);
     // CX-9j (v2.74.1445) — an explicit DETAILS-intent in the ask ("… and show details", "warranty details for …") on a
     // SINGLE record → the FULL FORMATTED RECORD, deterministically (live: the clause rode along as words and the shaper
@@ -6987,6 +7132,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // FL-1d — this read grounds the coming answer. CX-7e — also remember the RETURNED record's id + the read's
     // tab-derived urlArgs (handle), so "show profile" can open that record's admin page even for a by-email lookup.
     _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null, value: res.value };   // CX-9j — the value stays for field follow-ups; v1534 — labels carry the division NAME
+    _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: res.value });   // FC-3
     const facts = readShapeFacts(res.value);
     // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
@@ -7631,6 +7777,19 @@ async function sendChatMessage() {
   const input    = $('chat-input');
   let text       = input.value.trim();   // v2.74.1166 — `let` so the routing inversion can strip a `tool:` prefix
   if (!text) return;
+  // v2.74.1553 — DUPLICATE-SEND BELT: the IDENTICAL text within 3s is a double-fire (Enter+Enter / Enter+click),
+  // not a new ask — live 165125: "show this ticket" arrived twice 1.5s apart and ran TWO full drill pipelines
+  // whose interleaved navigations broke each other's row-click. A deliberate retry always comes later than 3s.
+  {
+    const k = text.toLowerCase();
+    const now = Date.now();
+    if (_lastSendStamp.key === k && (now - _lastSendStamp.at) < 3000) {
+      try { _orchLog(`ROUTE ▸ duplicate send dropped ("${text.slice(0, 30)}" again ${now - _lastSendStamp.at}ms later)`); } catch { /* */ }
+      input.value = ''; _autosizeInput();
+      return;
+    }
+    _lastSendStamp = { key: k, at: now };
+  }
 
   // v2.74.1029 — DEV CONVERSATION: every typed message routes straight to the Claude Code bridge (no `dev:`
   // prefix), and NOTHING else runs — not template-detection, not STOP, not the capability matcher. This is
@@ -8023,6 +8182,54 @@ async function sendChatMessage() {
       if (!p) { const m4 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m4, 'No such proposal number — run `pending` to renumber.', { markdown: true }); _orchFinalize(m4); return; }
       await _showProposalSources(p);
       return;
+    }
+    // FC-2 (v2.74.1552, DESIGN_conversation_focus.md) — the REFERENT STAGE: a referential ask ("show this
+    // ticket", "open the task", "view it") binds against the conversation's FOCUS — the working set of grounded
+    // entity handles (a case is born with its record PINNED here) — and dereferences to the entity's provenance
+    // ground via the PROVEN on-site open. Structure, not phrase patterns: this replaces the v1550/51 bridge
+    // (regexes over seed prose) and must sit ABOVE the bare-show/section intercepts that stole the turn in
+    // traces 133636/144407. Pre-FC cases (no conv.focus) fall back to parsing the seed's fenced CASE_RECORD
+    // once. Non-referential asks bind nothing and fall through UNCHANGED; ambiguity asks, never guesses.
+    {
+      const _fx = (_currentConversationFocus && _currentConversationFocus.length)
+        ? _currentConversationFocus
+        : [focusFromSeedRecord(_currentConversationSeed, 'this case’s record')].filter(Boolean);
+      if (_fx.length) {
+        const bound = bindReferent(text, _fx);
+        if (bound && bound.ambiguous) {
+          input.value = ''; _autosizeInput();
+          appendMessage({ role: 'user', body: text });
+          const mA = appendMessage({ role: 'assistant', body: '' });
+          _setMessageBody(mA, `Which one — ${bound.ambiguous.map((e) => `**${e.label}**`).join(' or ')}? Say it with the name.`, { markdown: true });
+          _orchFinalize(mA);
+          return;
+        }
+        if (bound && bound.entry && bound.entry.kind === 'record') {
+          // v2.74.1553 — CLAIM INSTANTLY: clear the composer + echo the user's words BEFORE the ~20s open.
+          // Live 165125: the stage awaited the whole open with the text still sitting in the box and nothing
+          // on the thread — the user (reasonably) pressed Enter again → two interleaved drill runs broke each
+          // other's row-click. A record-bind now always claims the turn; an unopenable record says so honestly.
+          input.value = ''; _autosizeInput();
+          appendMessage({ role: 'user', body: text });
+          if (await _openFocusEntry(bound.entry, text, { echoAsk: false })) return;
+          const mF = appendMessage({ role: 'assistant', body: '' });
+          _setMessageBody(mF, `Couldn’t open **${bound.entry.label}** on its site — no findable record number, or no site path is armed. Ask for a field instead, or say \`refresh\`.`, { markdown: true });
+          _orchFinalize(mF);
+          return;
+        }
+      }
+    }
+    // FC-5 (v2.74.1552) — `refresh` / `re-pull`: the focus head's record snapshot ages (a $0 budget gets
+    // approved); re-run its DRILL via provenance and update fields + the case_record card. Claims the word only
+    // when a drill-bearing record head exists — otherwise falls through to normal routing unchanged.
+    if (/^(?:refresh|re-?pull)(?:\s+(?:the\s+)?(?:record|case|task|ticket|details?))?\s*$/i.test(text)) {
+      const head = (_currentConversationFocus || []).find((e) => e && e.kind === 'record' && e.provenance && e.provenance.groundId && e.provenance.drill);
+      if (head) {
+        input.value = ''; _autosizeInput();
+        appendMessage({ role: 'user', body: text });
+        await _refreshFocusHead(head);
+        return;
+      }
     }
     // v1378 (live miss: "show ticket" with ONE pending → interpret asked "Which ticket?") — the bare console
     // phrasings are DETERMINISTIC: the FL-1d cascade already resolves the referent (last answer's read → the
@@ -9725,6 +9932,7 @@ async function _rehydrateConversation(conv) {
   _currentConversationId = conv.id;
   _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
   _currentConversationSeed = (conv.kind !== 'dev' && conv.seed) ? String(conv.seed).trim() : '';   // v2.74.1163 (CV-2b) — restore the IL seed (agent convs only; dev `seed` is a one-shot prefill)
+  _currentConversationFocus = (conv.kind !== 'dev' && Array.isArray(conv.focus)) ? conv.focus : [];   // FC (v2.74.1552) — restore the working set: a REOPENED case still holds its record
   _currentConversationConfig = (conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — restore the track's enforced write policy (a sub-task carries its app's tightened copy)
   _currentConversationAppId = (conv.kind !== 'dev' && conv.appId) ? String(conv.appId) : null;   // AL-3b — restore the app type
   _currentConversationInstanceId = (conv.kind !== 'dev' && conv.instanceId) ? String(conv.instanceId) : null;   // AP-0 — restore the per-instance memory key

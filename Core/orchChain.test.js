@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, fanoutLimit, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
@@ -46,6 +46,23 @@ describe('orchChain — isFanoutAsk (CV-4-full: foreach over a read → conversa
     // a REAL compound with a verb in the first clause still splits (no regression)
     const seq = decomposeAsk('search remote jobs, then sort by date');
     assert.equal(seq.length, 2, 'a verb-led first clause is a real step — still splits');
+  });
+  it('v2.74.1547 — fanoutReadAsk strips the spawn grammar → the READ the enumeration runs with', () => {
+    // Live 121110: the implicit read handed the WHOLE spawn phrase to the connector leg-picker, whose interpret
+    // read "open new … in a new case" as REVIEW_QUEUE {every} (the schedule misread, one layer deeper).
+    assert.equal(fanoutReadAsk('foreach division, open new warranty tasks in a new case'), 'foreach division, list new warranty tasks');
+    assert.equal(fanoutReadAsk('for each division, open new warranty tasks in a case'), 'for each division, list new warranty tasks');
+    assert.equal(fanoutReadAsk('open every alert into a separate case'), 'list every alert');
+    assert.equal(fanoutReadAsk('summarize each order'), null, 'nothing to strip → null (caller keeps the original)');
+  });
+  it('v2.74.1549 — innerDirective strips the FUSED foreach wrapper (the runaway-sweep fix)', () => {
+    // Live 123810: "foreach division," survived into every case's directive (the strip patterns required
+    // `for\s+each`) → each worker re-quantified → three full 121-division sweeps + a cross-site "get 1677" hop.
+    assert.equal(innerDirective('foreach division, open any open warranty tasks in a new case'), '',
+      'a spawn-verb husk is NO directive — the case holds its item, no auto-run (DK-8d semantics)');
+    assert.equal(innerDirective('foreach ticket, research the customer history in its own case'), 'research the customer history',
+      'an analysis directive survives, wrapper-free');
+    assert.equal(innerDirective('for-each division, review the totals in a new case'), 'review the totals', 'hyphenated form too');
   });
   it('v2.74.1262 — ALSO fires on an analysis-verb foreach (no conversation noun) + a QUALIFIED "sub thread"', () => {
     assert.equal(isFanoutAsk('research each ticket'), true, 'analysis per item → worker fan-out, no conv noun needed');

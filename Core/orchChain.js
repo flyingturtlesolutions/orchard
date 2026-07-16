@@ -328,6 +328,24 @@ export function fanoutLifecycle(ask) {
 export function isEphemeralFanout(ask) { return fanoutLifecycle(ask) === 'ephemeral'; }
 
 /**
+ * v2.74.1547 — the READ-shaped ask a SELF-CONTAINED fan-out enumerates with. The clause carries BOTH the
+ * collection and the spawn ("foreach division, open new warranty tasks in a new case"); handing the WHOLE
+ * phrase to the connector leg-picker mis-picks (live: the interpret read "open new … in a new case" as
+ * REVIEW_QUEUE with an `every` schedule param — the §1 misread class, one layer deeper). Strip the SPAWN
+ * grammar: remove the conversation/case TARGET phrase, swap the leading spawn verb for "list" — leaving the
+ * collection + quantifier + filters the leg-picker actually needs ("foreach division, list new warranty
+ * tasks"). Returns null when nothing changed (caller keeps the original). PURE.
+ */
+export function fanoutReadAsk(ask) {
+  const s = String(ask || '');
+  if (!s.trim()) return null;
+  let out = s.replace(new RegExp(_CONV_TARGET.source, 'gi'), ' ');           // drop the spawn target phrase(s)
+  out = out.replace(/\b(open|create|spawn|start)\b/i, 'list');               // the spawn verb → the read verb
+  out = out.replace(/\s{2,}/g, ' ').replace(/\s+([,.;])/g, '$1').replace(/[,;\s]+$/, '').trim();
+  return (out && out.toLowerCase() !== s.trim().toLowerCase()) ? out : null;
+}
+
+/**
  * DK-8g (v2.74.1498) — an explicit COUNT in a fan-out ask caps the spawn ("open the first as a case" → 1,
  * "open 3 cases" → 3) — the single-case testing/iteration primitive. PURE. null = no stated limit (the default cap).
  */
@@ -363,8 +381,12 @@ export function innerDirective(ask) {
   // per task"): the old pipeline dropped from the first "each", annihilating the verb phrase and returning the
   // husk "for" — a truthy garbage directive that auto-ran in every spawned case (live: every case rendered the
   // full 13-row list). Comma-bounded form, else strip up to a known verb.
-  s = s.replace(/^\s*for\s+(?:each|every)\b[^,]*,\s*/i, '');
-  s = s.replace(/^\s*for\s+(?:each|every)\b[\s\S]*?(?=\b(?:open|create|start|spawn|make|research|investigate|analy[sz]e|review|assess|evaluate|study|triage|draft|respond|repl(?:y|ies)|summari[sz]e|read|list|check|write|send|look)\b)/i, '');
+  // v2.74.1549 — `for[-\s]*` covers the FUSED `foreach` (and `for-each`): the space-mandatory patterns let
+  // "foreach division," survive into EVERY spawned case's directive — each worker re-quantified and re-ran the
+  // FULL 121-division sweep inside its own case (live 123810: 3 sweeps before the user pulled logs), and one
+  // husk abbreviated into a cross-site "get 1677" Zendesk read. The v1543 lexicon lesson, third boundary.
+  s = s.replace(/^\s*for[-\s]*(?:each|every)\b[^,]*,\s*/i, '');
+  s = s.replace(/^\s*for[-\s]*(?:each|every)\b[\s\S]*?(?=\b(?:open|create|start|spawn|make|research|investigate|analy[sz]e|review|assess|evaluate|study|triage|draft|respond|repl(?:y|ies)|summari[sz]e|read|list|check|write|send|look)\b)/i, '');
   s = s.replace(/\b(in|into)\b[\s\S]*$/i, '');     // drop the "in a new conversation …" tail
   s = s.replace(/\beach\b[\s\S]*$/i, '');          // drop "each [noun] …" onward
   s = s.replace(/[\s,]*\b(and|then)\b[\s,]*$/i, '').replace(/[\s,]+$/,'').trim();

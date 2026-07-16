@@ -234,9 +234,12 @@ export function planSubTasks(app, items) {
   if (!isApp(app)) return [];
   // DK-8e (v2.74.1496) — items may be plain STRINGS (the `subtasks:` typed list) or STRUCTURED {label, detail}
   // (the enumerate-from-read fan-out): a case born from a read carries its RECORD, not just a display label.
+  // FC-0 (v2.74.1552, DESIGN_conversation_focus.md) — `focus` rides too: the record as STRUCTURE (a focus entry
+  // with fields + provenance), the code-plane twin of the seed's prose CASE_RECORD. This projection was exactly
+  // where the structure died (three traces of "show this ticket" mis-routes) — don't re-flatten it here.
   const list = (Array.isArray(items) ? items : [])
-    .map((it) => (typeof it === 'string' ? { label: _str(it), detail: '' }
-      : (it && typeof it === 'object') ? { label: _str(it.label), detail: _str(it.detail) } : null))
+    .map((it) => (typeof it === 'string' ? { label: _str(it), detail: '', focus: null }
+      : (it && typeof it === 'object') ? { label: _str(it.label), detail: _str(it.detail), focus: (Array.isArray(it.focus) ? it.focus : null) } : null))
     .filter((it) => it && it.label);
   const seen = new Set();
   const specs = [];
@@ -252,7 +255,7 @@ export function planSubTasks(app, items) {
     // requestor's framing), quoting any of its fields on demand — never re-dump it as key:value lines.
     const voice = item.detail ? ' Present and discuss it conversationally, as the requestor would — the fenced record below is this case’s file; quote any of its fields on demand rather than dumping them.' : '';
     const spec = subTaskFromApp(app, `This case handles: ${item.label}. Apply the desk's instructions to this specific item.${voice}${rec}`);   // Case rename (v1492) — the child's persona speaks the taxonomy (Desk → Case)
-    if (spec) specs.push({ ...spec, title: item.label.slice(0, 60), detail: item.detail });
+    if (spec) specs.push({ ...spec, title: item.label.slice(0, 60), detail: item.detail, focus: item.focus || null });   // FC-0 — the structured record follows the spec to ConversationStore.create
   }
   return specs;
 }
