@@ -7,7 +7,7 @@
 // deterministic render (showList → the CALLER renders, never the LLM re-emitting #ids it could mangle).
 // PURE: no chrome / DOM / LLM / clock.
 
-import { primaryList, primaryObject, summarizeItem, recordDetails, itemFields } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, recordDetails, itemFields, roleFlags } from './connectorRender.js';
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : '');
 
@@ -31,6 +31,22 @@ export function readShapeFacts(value, { sampleN = 12 } = {}) {
     const s = summarizeItem(o);
     const out = { id: s.id ?? null, title: s.title || '', status: s.status ?? null };
     if (!out.title && out.status == null) { const f = itemFields(o, { max: 5 }); if (f.length) out.fields = Object.fromEntries(f); }
+    // v2.74.1561 — CONTACT-CLASS scalars survive the lean sample: a CONTACTS read's whole point is phone/email,
+    // but the {id,title,status} projection dropped them — the shaper honestly answered "contact details are not
+    // included" over data it was never shown (live 202331: 3 contacts with Email + Cell phone on file). Still
+    // minimized: short scalars from an explicit key CLASS — never bodies, notes, or free text.
+    const _CONTACT_KEY = /phone|cell|email|contact\s*method/i;
+    const extra = {};
+    for (const [k, v] of Object.entries(o || {})) {
+      if (!_CONTACT_KEY.test(k) || v == null || v === '' || typeof v === 'object') continue;
+      extra[k] = String(v).slice(0, 60);
+      if (Object.keys(extra).length >= 4) break;
+    }
+    if (Object.keys(extra).length) out.contact = extra;
+    // v2.74.1562 — the contact TYPE rides too: truthy Is* flags fold into role words ("Primary, Buyer" vs
+    // "Dr Horton" — who's the homeowner vs the CS rep). Status-class info, same tier as `status`.
+    const roles = roleFlags(o);
+    if (roles.length) out.roles = roles.join(', ');
     return out;
   };
   const detailed = (o) => { const b = lean(o); const d = recordDetails(o); return Object.keys(d).length ? { ...b, details: d } : b; };

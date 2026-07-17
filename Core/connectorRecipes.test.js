@@ -370,17 +370,43 @@ describe('CX-7 — Shopify recipes project with the transport markers', () => {
     assert.equal(cust.tool.gql, true);
     assert.equal(cust.tool.csrf, 'sniff');
     assert.deepEqual(cust.tool.urlParam, { name: 'handle', pattern: '\\/store\\/([^\\/]+)' });
-    assert.equal(cust.tool.endpoint, '/api/shopify/{handle}');
+    // RH-0a (v2.74.1564) — the HAR-verified contract: the BFF routes on ?operation&type + body operationName
+    // (anonymous docs → the live http-404-empty), and two static headers ride every call. Asserted on the
+    // LEG-PROJECTION path (the seeded-Ground seam, invariant #3).
+    assert.equal(cust.tool.endpoint, '/api/shopify/{handle}?operation=Customers&type=query');
+    assert.equal(cust.tool.body.operationName, 'Customers');
+    assert.ok(/^query Customers\(/.test(cust.tool.body.query), 'the document is NAMED to match ?operation=');
+    assert.deepEqual(cust.tool.requestHeaders, { 'apollographql-client-name': 'core', 'shopify-proxy-api-enable': 'true' });
     assert.ok(cust.tool.body && typeof cust.tool.body.query === 'string'); // gql READ body threads (write-only gating lifted)
     assert.equal(isReadOnlyGql(cust.tool.body.query), true);               // every curated READ document passes the belt
-    for (const l of legs) assert.equal(isReadOnlyGql(l.tool.body.query), true);
+    for (const l of legs) {
+      assert.equal(isReadOnlyGql(l.tool.body.query), true);
+      // every free-form read carries the full contract; the ?operation= name matches its body operationName
+      const m = String(l.tool.endpoint).match(/\?operation=(\w+)&type=query$/);
+      assert.ok(m, `${l.tool.recipeId} endpoint carries ?operation&type`);
+      assert.equal(l.tool.body.operationName, m[1], `${l.tool.recipeId} operationName matches the route param`);
+    }
+  });
+  it('SH-Q1 (v2.74.1558) — the orders QUEUE leg is list-shaped with the full fan-out contract (listUrl + drill join), on the LEG-projection path', () => {
+    // The invariant-#3 seam: a marker that only the catalog-direct path carries is invisible to a seeded Ground —
+    // assert on recipeLegs() (entry → leg), not on the raw entry.
+    const q = shopReads().find((l) => l.tool.recipeId === 'shopify_orders_queue');
+    assert.ok(q, 'the queue leg projects');
+    assert.equal(q.tool.listUrl, '/store/{handle}/orders');
+    assert.deepEqual(q.tool.drill, { via: 'shopify_order', param: 'order', from: 'name', matchOn: 'order', label: ['name', 'id', 'displayFulfillmentStatus', 'displayFinancialStatus'] });
+    assert.ok(/status:open fulfillment_status:unfulfilled/.test(JSON.stringify(q.tool.body)), 'the queue query is FIXED — the backlog, not a param switch');
+    assert.equal(isReadOnlyGql(q.tool.body.query), true);
+    const via = shopReads().find((l) => l.tool.recipeId === 'shopify_order');
+    assert.ok(via && via.tool.itemUrl, 'the drill target carries the record itemUrl (the case/show venue)');
+    assert.ok((via.tool.params || via.params || []).length, 'the drill via-param exists on the detail leg');
   });
   it('fillBody fills {param}s inside GraphQL variables, leaves the query document untouched', () => {
     const cust = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_customer_by_email');
     const b = fillBody(cust.body, { email: 'jane.doe@example.com' });
     assert.equal(b.variables.q, 'email:"jane.doe@example.com"');
     assert.equal(b.variables.n, 5);
-    assert.match(b.query, /^query\(/);
+    assert.match(b.query, /^query Customers\(/);   // RH-0a — named document (the route param's twin)
+    assert.equal(b.operationName, 'Customers', 'operationName survives the fill untouched');
   });
   it('recipeForOrigin + connections matching reach admin.shopify.com', () => {
     assert.ok(recipeForOrigin('admin.shopify.com'));
@@ -618,5 +644,16 @@ describe('DK-7 (v2.74.1488) — the each-mode marker rides the resolve spec thro
     assert.ok(leg, 'vs_warranty_tasks projects a leg');
     assert.equal(leg.tool.resolve.divisionId.each, true);
     assert.ok(/"each"/.test(leg.does), 'the does-text teaches the model the sentinel');
+  });
+  it('v2.74.1559 — drill.also (dossier sidecar reads) survives the LEG-projection path; the contacts leg projects with the id discipline', () => {
+    const legs = recipeLegs({ account: 'me', trusted: true });
+    const q = legs.find((l) => l && l.tool && l.tool.recipeId === 'vs_warranty_tasks');
+    assert.deepEqual(q.tool.drill.also, ['vs_task_contacts'], 'hop 3 rebuilds drill field-by-field — a dropped `also` would be invisible on the seeded path (invariant #3)');
+    const c = legs.find((l) => l && l.tool && l.tool.recipeId === 'vs_task_contacts');
+    assert.ok(c, 'vs_task_contacts projects a leg');
+    assert.equal(c.tool.endpoint, '/api/Vendor/Warranty/TaskContacts/{taskId}');
+    const entry = CONNECTOR_RECIPES.find((r) => r.id === 'vs_task_contacts');
+    const p = (entry.params || []).find((x) => x && x.name === 'taskId');
+    assert.ok(p && p.required && /INTERNAL/i.test(p.hint || ''), 'the hint carries the internal-id discipline (live 195557: a ticket NUMBER fed as the id → http-500)');
   });
 });

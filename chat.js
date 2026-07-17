@@ -51,7 +51,7 @@ import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 �
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList } from './Core/connectorRender.js';   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags } from './Core/connectorRender.js';   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
@@ -1740,6 +1740,12 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
   if (leg && leg.tool && leg.tool.drill && leg.tool.drill.via && leg.tool.drill.from) {
     const dj = leg.tool.drill;
     const viaLeg = await _rideDrillLeg(leg, dj.via, leg.tool.groundId || null);
+    // v2.74.1559 — SIDECAR reads (drill.also, catalog-owned): pulled per case with the SAME join id and merged
+    // into the dossier — a case is born knowing its homeowner CONTACTS, not just the address. Read-only belt.
+    const alsoLegs = [];
+    for (const aid of (Array.isArray(dj.also) ? dj.also : [])) {
+      try { const al = await _rideDrillLeg(leg, aid, leg.tool.groundId || null); if (al && !(al.tool && al.tool.write)) alsoLegs.push(al); } catch { /* sidecars are best-effort */ }
+    }
     if (viaLeg) {
       for (let k = 0; k < foItems.length; k++) {
         const row = foItems[k].row || {};
@@ -1748,15 +1754,23 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
         _setMessageBody(msg, `Step ${i + 1} of ${total}: pulling the full record ${k + 1}/${foItems.length} (${foItems[k].label})…`);
         const dr = await _rideExecOnce(viaLeg, { [dj.param || 'id']: joinId }, { groundId: leg.tool.groundId || null });
         if (dr.ok) {
-          const detailObj = primaryObject(dr.value) || dr.value;
-          const lines = dossierLines(detailObj, { max: 24 });   // the full record earns a bigger budget than a row
+          const detailObj0 = primaryObject(dr.value) || dr.value;
+          const mergedObj = (detailObj0 && typeof detailObj0 === 'object' && !Array.isArray(detailObj0)) ? { ...detailObj0 } : {};
+          for (const al of alsoLegs) {
+            try {
+              const pn = (((al.params || (al.tool && al.tool.params)) || []).find((p) => p && p.required) || {}).name || dj.param || 'id';
+              const adr = await _rideExecOnce(al, { [pn]: joinId }, { groundId: leg.tool.groundId || null });
+              if (adr.ok) Object.assign(mergedObj, _sidecarFields(adr.value, al));
+            } catch { /* a failed sidecar keeps the dossier */ }
+          }
+          const lines = dossierLines(mergedObj, { max: 24 });   // the full record earns a bigger budget than a row
           // FC-0 (v2.74.1552) — keep the STRUCTURE too: the drilled object merged over the row (the row carries
           // the each-tag division + join ids the detail may lack). This was where the code plane died — the
           // object flattened to prose one line down and every reference-ask consumer had to re-parse text.
-          if (lines.length) foItems[k] = { ...foItems[k], detail: lines.join('\n'), fields: { ...(row || {}), ...((detailObj && typeof detailObj === 'object' && !Array.isArray(detailObj)) ? detailObj : {}) } };
+          if (lines.length) foItems[k] = { ...foItems[k], detail: lines.join('\n'), fields: { ...(row || {}), ...mergedObj } };
         }
       }
-      try { _orchLog(`RIDE_DRILL ▸ dossier ${leg.tool.recipeId || leg.key} → ${dj.via} × ${foItems.length} (fan-out spawn)`); } catch { /* */ }
+      try { _orchLog(`RIDE_DRILL ▸ dossier ${leg.tool.recipeId || leg.key} → ${dj.via}${alsoLegs.length ? ` +${alsoLegs.map((a) => a.tool.recipeId || a.key).join('+')}` : ''} × ${foItems.length} (fan-out spawn)`); } catch { /* */ }
     }
   }
   // Q2 (v2.74.1263) — a PERSONA-bearing fan-out ("… and respond in the customer's voice") needs the {task, persona}
@@ -1868,7 +1882,7 @@ async function _runChildTask(child, task) {
     // a session-ride READ — safe to run unattended.
     const run = await _runConnectorLeg(cleg, coerceParams(d.params || {}, cleg.paramSchema), { tabId });
     if (run.ok) { const lines = renderConnectorLines(run.value, { name: cleg.name || 'Results' }); body = lines ? lines.join('\n') : 'Done.'; status = 'done'; }
-    else { body = `Needs you — couldn’t ${cleg.does || cleg.name || 'run that'}${run.error ? ` — ${run.error}` : ''}.${run.hint ? `  ${run.hint}.` : ''}`; }
+    else { body = `Needs you — couldn’t ${_legFailName(cleg, 'run that')}${run.error ? ` — ${run.error}` : ''}.${run.hint ? `  ${run.hint}.` : ''}`; }
   } else if (d && d.intent === 'act' && d.capabilityId) {
     // a page action / write capability — NOT run unattended (the safety pause).
     body = `Needs you — “${task}” needs a page action or a write I won’t run unattended. Open this conversation to continue.`;
@@ -3591,6 +3605,46 @@ function _accreteFocusFromRead({ leg, params = null, labels = null, value, label
     if (entry) _pushFocusEntry(entry);
   } catch { /* accretion is best-effort — the read itself already succeeded */ }
 }
+// v2.74.1559 — flatten a SIDECAR read (drill.also: contacts…) into dossier fields: the first entry's scalars,
+// keys prefixed by the leg's noun ("Contact" + FirstName…), + a compact roll-up of additional entries. Defensive
+// (the response shape is only known live); collisions lose to the prefix, never overwrite the task's own fields.
+function _sidecarFields(value, alsoLeg) {
+  const out = {};
+  try {
+    const tail = String((alsoLeg.tool && alsoLeg.tool.recipeId) || alsoLeg.key || 'extra').split('_').pop().replace(/s$/i, '');
+    const prefix = tail.charAt(0).toUpperCase() + tail.slice(1);
+    const list = primaryList(value);
+    const one = primaryObject(value) || (Array.isArray(list) && list[0]) || null;
+    if (one && typeof one === 'object') {
+      let n = 0;
+      for (const [k, v] of Object.entries(one)) {
+        if (v == null || v === '' || typeof v === 'object') continue;
+        out[`${prefix}${k}`] = v; if (++n >= 10) break;
+      }
+      const r0 = roleFlags(one);
+      if (r0.length) out[`${prefix}Roles`] = r0.join(', ');   // v2.74.1562 — the contact TYPE ("Primary, Buyer" vs "Dr Horton")
+    }
+    if (Array.isArray(list) && list.length > 1) {
+      // v2.74.1562 — the roll-up carries WHO each contact IS: "Jane Smith (Primary, Buyer) 5551234567; John CS
+      // (Dr Horton) …" — name-ish + roles + short contact strings per entry (was a role-blind string join).
+      const roll = list.slice(0, 3).map((r) => {
+        if (!r || typeof r !== 'object') return '';
+        const name = ['FullName', 'Name', 'fullName', 'name'].map((k) => r[k]).find((v) => typeof v === 'string' && v.trim()) || '';
+        const roles = roleFlags(r);
+        const rest = Object.entries(r).filter(([k, v]) => typeof v === 'string' && v && !/^https?:/.test(v) && v !== name && /phone|cell|email|method/i.test(k)).map(([, v]) => v).slice(0, 2).join(' ');
+        return [name, roles.length ? `(${roles.join(', ')})` : '', rest].filter(Boolean).join(' ');
+      }).filter(Boolean).join('; ');
+      if (roll) out[`${prefix}sAll`] = roll.slice(0, 300);
+    }
+  } catch { /* an unreadable sidecar adds nothing */ }
+  return out;
+}
+// v2.74.1559 — failure lines lead with the leg NAME (short), never `does` first (harvested does are full
+// sentences — live 195557: "Couldn't Returns the warranty task contacts associated with a specific…").
+function _legFailName(leg, fallback = 'do that') {
+  const n = String((leg && (leg.name || leg.does)) || '').trim();
+  return n ? n.charAt(0).toLowerCase() + n.slice(1) : fallback;
+}
 // FC-2 — dereference a bound RECORD entry to its on-site page. The find value + division come from the entry's
 // FIELDS/labels (structure, not re-parsed prose); the venue is the entry's provenance host; the run is the
 // PROVEN _openRecordOnSite arc (walk replay with the division filled, drill fallback). The SYNTHESIZED canonical
@@ -4674,6 +4728,7 @@ async function _showSection(word) {
 // record literally has a matching field — anything else falls through to normal routing untouched. "details" /
 // "everything" dumps the full record render. Local display of the user's own data; nothing leaves the panel.
 const _FOLLOWUP_TTL = 600000;   // 10 min — the conversational window a follow-up plausibly refers to
+let _lastFieldSuggestion = null;   // v2.74.1561 — {field, at}: the absent-branch's "Did you mean **X**?" — a bare yes consumes it
 async function _fieldFollowup(text) {
   let g = _lastGroundedRead;
   let _focusStale = '';
@@ -4690,11 +4745,19 @@ async function _fieldFollowup(text) {
     }
   }
   const t = String(text).trim();
+  // v2.74.1561 — "Did you mean **X**?" is a QUESTION: a bare yes within a minute answers X (live 202331: the
+  // user said "yes" to the Cell-phone suggestion and got "There's no yes field").
+  if (_lastFieldSuggestion && (Date.now() - _lastFieldSuggestion.at) < 60000 && /^(?:yes|yeah|yep|y|correct|that one|please)\.?\s*$/i.test(t)) {
+    const fq = _lastFieldSuggestion.field; _lastFieldSuggestion = null;
+    return _fieldFollowup(fq);
+  }
   // verbed form ("what are the instructions?") OR a BARE short ask ("details", "instructions", "vendor explanation") —
   // the live miss: bare `details` had no verb, missed this regex, fell to the ROUTER, which invoked the detail READ
   // with a junk taskId → http-500. A bare ask ≤4 words is safe here: it acts only on a literal field/details match.
-  const mv = t.match(/^(?:what(?:'s|\s+is|\s+are)?|show\s+me|give\s+me|read)\s+(?:the\s+|its\s+)?([\w][\w\s\/-]{1,40}?)\s*\??$/i);
-  const bare = !mv && /^[\w][\w\s\/-]{0,40}\??$/.test(t) && t.replace(/\?+$/, '').trim().split(/\s+/).length <= 4
+  // v2.74.1561 — apostrophes allowed ("the homeowner's phone" previously failed the class and fell to the router);
+  // `list <field>` joins the verb set (live: the user reached fields only via the bare form).
+  const mv = t.match(/^(?:what(?:'s|\s+is|\s+are)?|show\s+me|give\s+me|read|list)\s+(?:the\s+|its\s+)?([\w][\w\s\/'’-]{1,40}?)\s*\??$/i);
+  const bare = !mv && /^[\w][\w\s\/'’-]{0,40}\??$/.test(t) && t.replace(/\?+$/, '').trim().split(/\s+/).length <= 4
     ? t.replace(/\?+$/, '').trim() : null;
   // v2.74.1526 — an EXPLICIT field reference ("what does the field, X say?", "the X field") names X regardless of
   // the verb frame, so it's caught even when mv/bare miss (live: that phrasing reached the LLM answer path, which
@@ -4707,7 +4770,10 @@ async function _fieldFollowup(text) {
   if (!mv && !bare && !fieldRefOk) return false;
   const obj = primaryObject(g.value) || (primaryList(g.value) || [])[0] || null;
   if (!obj || typeof obj !== 'object') return false;
-  const q = (fieldRefOk ? fieldRef[1] : (mv ? mv[1] : bare)).trim().toLowerCase().replace(/\s+/g, ' ');
+  const q0 = (fieldRefOk ? fieldRef[1] : (mv ? mv[1] : bare)).trim().toLowerCase().replace(/\s+/g, ' ');
+  // v2.74.1561 — PERSON-WORDS + possessives strip for MATCHING ("the homeowner's phone" → "phone" hits "Cell
+  // phone"; live 202331: every natural phrasing missed and only the literal field name landed).
+  const q = q0.replace(/['’]s?\b/g, '').replace(/\b(?:homeowners?|customers?|owners?|buyers?|contacts?|their|his|her|my)\b/g, ' ').replace(/\s+/g, ' ').trim() || q0;
   const norm = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase().trim();
   const nice = (k) => { const s = norm(k); return s.charAt(0).toUpperCase() + s.slice(1); };
   const msgFor = (body) => { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };   // v2.74.1554 — the user echo happens at sendChatMessage ENTRY (invariant #4)
@@ -4749,6 +4815,7 @@ async function _fieldFollowup(text) {
       if (ov > bestOv) { bestOv = ov; closest = nice(k); }
     }
     const recordNoun = (g.leg && g.leg.name) ? String(g.leg.name).replace(/\s+details?$/i, '').toLowerCase() : 'record';
+    _lastFieldSuggestion = closest ? { field: closest, at: Date.now() } : null;   // v2.74.1561 — a bare "yes" answers the suggestion
     msgFor(`There’s no **${named}** field on this ${recordNoun}.${closest ? ` Did you mean **${closest}**?` : ''}\n\nFields on file: ${labels.join(' · ')}.`);
     try { _orchLog(`FIELD_FOLLOWUP ▸ "${q}" → absent (${labels.length} field(s)${closest ? `, nearest=${closest}` : ''})`); } catch { /* */ }
     return true;
@@ -4931,7 +4998,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         const _readAsk = fanoutReadAsk(clause.text) || clause.text;
         const cr = await _chainConnectorRun(_readAsk, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
         if (cr && cr.ok) { st.lastValue = cr.value; st.lastLeg = cr.leg; }
-        else if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${(cr.leg && (cr.leg.does || cr.leg.name)) || 'read the list to fan out over'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
+        else if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg ? _legFailName(cr.leg) : 'read the list to fan out over'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
       }
       const _foCap = fanoutLimit(clause.text);   // DK-8g — "open the first as a case" / "open 3 cases" caps the spawn (the single-case test primitive)
       const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
@@ -4976,7 +5043,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
             _connSignInBar(msg, [_authOrigin], { retryAsk: ask });
             return;
           }
-          _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg.does || cr.leg.name || 'run that'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
+          _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${_legFailName(cr.leg, 'run that')}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
         }
       }
       const gid = (m && m.groundId) || st.chainGroundId;
@@ -6453,7 +6520,7 @@ async function _ilRunPanelAction(msg, { leg, panel, ask, params = {} }) {
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → self:${leg.key}`); } catch { /* */ }
   let r = null;
   try { r = await panel.run(msg, { ask, params }); }   // FL v1348 — interpret-bound params reach the panel leg (extra args are ignored by the param-free legs)
-  catch (e) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${e && e.message ? ` — ${e.message}` : ''}.`); return; }
+  catch (e) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${e && e.message ? ` — ${e.message}` : ''}.`); return; }
   if (r && r.rendered) return;                       // the action drew its own UI / reset the chat → no default line
   _setMessageBody(msg, panel.done || `${leg.name || 'Done'}.`);
 }
@@ -6977,6 +7044,37 @@ function _shapeScope(params, labels) {
 // Dispatch a builtin leg JUDGE picked. A PANEL (ACT×Self) leg runs locally (above); a Browser/Self READ leg goes
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
 async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false }) {
+  // FC (v2.74.1559) — REQUIRED ride params fill from the conversation's FOCUS head: in a case, "homeowner's
+  // phone?" / "get contacts" needs no id — the case record already carries TaskId (live 195557: the binder fed
+  // the human TICKET number as the internal id → the known junk-id http-500). Deterministic: exact-normalized
+  // name equality only (taskId ← TaskId; never TicketId), required-only, missing-only, scalars only.
+  try {
+    if (leg && leg.domain === 'connector' && (_currentConversationFocus || []).length) {
+      const _pnorm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      // Candidate field-sets, newest-first: a record entry's fields, or a list entry's FIRST row (the contacts
+      // read accretes as a LIST — its rows hold the join keys).
+      const _sets = (_currentConversationFocus || [])
+        .map((e) => (e && e.fields) || (e && Array.isArray(e.rows) && e.rows[0]) || null)
+        .filter((f) => f && typeof f === 'object');
+      for (const p of ((leg.params || (leg.tool && leg.tool.params)) || [])) {
+        if (!p || !p.required || !p.name) continue;
+        if (params[p.name] != null && params[p.name] !== '') continue;
+        const np = _pnorm(p.name);
+        // v2.74.1563 — JOIN-KEY params (email/phone/cell — the DK-4 cross-system identity keys) also fill by
+        // SUFFIX ("email" ← ContactEmail; "phone" ← ContactCellPhone): "does <name> have a shopify profile?"
+        // in a case means "search shopify by THIS contact's email" — the ask names a person, the leg wants the
+        // join key, and the conversation is already holding it. Exact-name match stays for everything else
+        // (an "id" param must never suffix-grab TicketId).
+        const _joinKey = /email|phone|cell/i.test(p.name);
+        let hit = null;
+        for (const f of _sets) {
+          hit = Object.entries(f).find(([k, v]) => v != null && v !== '' && typeof v !== 'object' && (_pnorm(k) === np || (_joinKey && _pnorm(k).endsWith(np))));
+          if (hit) break;
+        }
+        if (hit) { params[p.name] = String(hit[1]); try { _orchLog(`FOCUS ▸ param fill ${p.name} ← ${hit[0]} (case record)`); } catch { /* */ } }
+      }
+    }
+  } catch { /* the focus fill is additive — binding proceeds as before */ }
   // CX-9b (v2.74.1434) — the ID layer: resolve marked params (divisionId et al.) BEFORE any branch, so every
   // transport (replay read/write, cookie-ride write, the planExec tail) dispatches canonical ids — and a write's
   // HITL preview shows the real request. On ambiguity/unknown the honest ask-back is already rendered.
@@ -7074,7 +7172,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
       let wr = null;
       try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, bodyTemplate: leg.tool.body || null, contentType: contentType || 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, identityGql: leg.tool.identityGql || null }); } catch { /* */ }   // v1479 — identityGql rides so the EXECUTOR fills {me} from the AGENT read   // v1340 arm-guard pair · v1464 routing headers · v1471 — TEMPLATE + probe ride so the EXECUTOR fills {me} (chat-side fill silently DROPPED ID:'{me}')
-      if (!wr || wr.success === false || (typeof wr.status === 'number' && wr.status >= 400)) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'send that'}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
+      if (!wr || wr.success === false || (typeof wr.status === 'number' && wr.status >= 400)) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg, 'send that')}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
       _setMessageBody(msg, `Sent — ${_method} ${leg.tool.endpoint} → ${wr.status || 'ok'}.`);
       return true;
     }
@@ -7085,7 +7183,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) }); } catch { /* */ }   // v1340 (review A/§18) — the arm-guard pair rides the read too; v1464 — routing headers; v1471 — probe + template so the EXECUTOR fills {me}
     if (!rr || rr.success === false) {
       const hint = (rr && rr.hint) ? `  ${rr.hint}.` : '';
-      _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${rr && rr.error ? ` — ${rr.error}` : ''}${rr && rr.detail ? ` (${rr.detail})` : ''}.${hint}`);
+      _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${rr && rr.error ? ` — ${rr.error}` : ''}${rr && rr.detail ? ` (${rr.detail})` : ''}.${hint}`);
       return false;
     }
     // CX-9b — the drill join (shared helper; also hooked in the planExec tail below — both transports, v1435).
@@ -7125,7 +7223,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     if (!okd) { _setMessageBody(msg, 'Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C)
     let br = null;
     try { br = await _orchReq('INVOKE_CONNECTOR', { ...plan0.payload, confirmed: true }); } catch { /* */ }
-    if (!br || br.success === false) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${br && br.error ? ` — ${br.error}` : ''}${br && br.detail ? ` (${br.detail})` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
+    if (!br || br.success === false) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${br && br.error ? ` — ${br.error}` : ''}${br && br.detail ? ` (${br.detail})` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
     _setMessageBody(msg, `Done — ${plan0.payload.tool} sent.`);
     return true;
   }
@@ -7144,7 +7242,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
     let sw = null;
     try { sw = await _orchReq(planW.channel, { ...planW.payload, body: bodyW, contentType: ctW, confirmed: true }); } catch { /* */ }
-    if (!sw || sw.success === false) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'send that'}${sw && sw.error ? ` — ${sw.error}` : ''}${sw && sw.detail ? ` (${sw.detail})` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }   // CX-7 — surface the GraphQL `detail` (the real userErrors/errors message names the wrong field)
+    if (!sw || sw.success === false) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg, 'send that')}${sw && sw.error ? ` — ${sw.error}` : ''}${sw && sw.detail ? ` (${sw.detail})` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }   // CX-7 — surface the GraphQL `detail` (the real userErrors/errors message names the wrong field)
     // CX-7f (v2.74.1404) — a WRITE that created a record leaves a navigable "last read" so "show it" opens the new
     // record (the write leg carries an itemUrl; createdRecordId digs the new id out of the mutation reply's
     // data.<op>.<entity>). Only when we actually have an id + itemUrl — else a plain "Done." (nothing to open).
@@ -7171,7 +7269,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
   if (!res || res.success === false) {
     const hint = (res && res.hint) ? `  ${res.hint}.` : '';   // CX-4a.1 — surface "open <app> and sign in" on a connector auth miss
-    _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${res && res.error ? ` — ${res.error}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);
+    _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${res && res.error ? ` — ${res.error}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);
     return false;
   }
   if (leg.domain === 'connector') {

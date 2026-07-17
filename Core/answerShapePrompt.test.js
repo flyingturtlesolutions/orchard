@@ -21,6 +21,22 @@ describe('answerShapePrompt — readShapeFacts (deterministic count + MINIMIZED 
     assert.deepEqual(Object.keys(f.sample[0]).sort(), ['id', 'status', 'title']);   // NO description/body/url leaves
     assert.ok(!('description' in f.sample[0]) && !('body' in f.sample[0]));
   });
+  it('v2.74.1561 — CONTACT-CLASS scalars survive the lean sample (a contacts read\'s whole point); bodies still never leave', () => {
+    // Live 202331: 3 contacts with Email + Cell phone on file → the {id,title,status} projection dropped them →
+    // the shaper honestly answered "contact details are not included" over data it was never shown.
+    const CONTACTS = { results: [
+      { Id: 5455066, FullName: 'A Person', Email: 'a@example.com', CellPhone: '5551234567', ContactMethod: 'Cell', IsPrimary: true, Notes: 'long free text that must not leave' },
+      { Id: 5456787, FullName: 'B Person', Email: 'b@example.com', CellPhone: '5559876543', ContactMethod: 'Email', IsPrimary: false },
+    ] };
+    const f = readShapeFacts(CONTACTS);
+    assert.equal(f.kind, 'list');
+    assert.ok(f.sample[0].contact, 'contact-class scalars ride the sample');
+    assert.equal(f.sample[0].contact.CellPhone, '5551234567');
+    assert.equal(f.sample[0].contact.Email, 'a@example.com');
+    assert.equal(f.sample[0].roles, 'Primary', 'v1562 — the contact TYPE (truthy Is* flags → role words) rides too');
+    assert.ok(!('roles' in f.sample[1]), 'no truthy flags → no roles key');
+    assert.ok(!JSON.stringify(f.sample).includes('long free text'), 'free-text bodies still never leave (the privacy lever holds)');
+  });
   it('count is the FULL length even when the sample is capped', () => {
     const big = { results: Array.from({ length: 25 }, (_, i) => ({ id: i, subject: `t${i}`, status: 'open' })) };
     const f = readShapeFacts(big, { sampleN: 5 });

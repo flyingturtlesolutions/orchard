@@ -285,6 +285,12 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType, extraHeade
           if (Array.isArray(body.errors) && body.errors.length) { var e0 = body.errors[0] || {}; srvMsg = e0.message || e0.code || e0.reason || (e0.extensions && e0.extensions.code) || 'error'; }
           else srvMsg = body.error || body.message || body.troubleshoot || body.error_description || body.detail || null;
           if (srvMsg && typeof srvMsg === 'object') srvMsg = (srvMsg.message || srvMsg.code || JSON.stringify(srvMsg));
+          // v2.74.1559 — a CONTENTLESS extraction is a blind diagnostic (live 195557: the panel said only
+          // `the server said: result` for a vs http-500 — the v1402 lesson: detail must reach the eyeball).
+          // A short spaceless token (or nothing) falls back to a slice of the error body itself. Error bodies
+          // are structural (.NET/GraphQL error JSON), and 180 chars bounds any payload echo.
+          var _thin = !srvMsg || (typeof srvMsg === 'string' && srvMsg.length <= 8 && srvMsg.indexOf(' ') < 0);
+          if (_thin) { try { var _bs = JSON.stringify(body); if (_bs && _bs.length > 2) srvMsg = (srvMsg ? srvMsg + ' · ' : '') + _bs.slice(0, 180); } catch { /* keep what we have */ } }
         } else if (typeof body === 'string' && body) { srvMsg = body.slice(0, 160); }
         if (srvMsg != null) srvMsg = String(srvMsg).replace(/\s+/g, ' ').trim().slice(0, 160);
       } catch (e) {}
@@ -627,7 +633,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             try {
               const _recs = await readRideRecipes(payload.groundId);
               const _rec = Array.isArray(_recs) ? _recs.find((r) => r && r.id === payload.recipeId) : null;
-              if (_rec && !armable(_rec)) { sendResponse({ success: false, error: 'recipe-not-armable', hint: _rec.reviewState === 'pending' ? 'accept this recipe in Studio first' : 'this recipe is disabled in Studio' }); return; }
+              if (_rec && !armable(_rec)) { try { Logger.info('ride', `INVOKE ▸ blocked recipe-not-armable [${payload.recipeId}] (${_rec.reviewState})`); } catch { /* */ } sendResponse({ success: false, error: 'recipe-not-armable', hint: _rec.reviewState === 'pending' ? 'accept this recipe in Studio first' : 'this recipe is disabled in Studio' }); return; }
             } catch { /* never block on the guard's own failure */ }
           }
           const args = (payload && typeof payload.args === 'object' && payload.args) || {};
@@ -778,7 +784,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
 
           // 4) Build + run the call (write body filled from args incl. {me}; SESSION_FETCH JSON-encodes + adds CSRF).
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
-          if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
+          if (!path) { try { Logger.info('ride', `INVOKE ▸ blocked session-no-recipe [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           // v2.74.1433 — a `{param}` STILL in the path after fill = a missing REQUIRED param (the interpret binder left it
           // unbound). NEVER send it: `{taskId}` URL-encodes to %7BtaskId%7D and the app returns http-500. Refuse honestly,
           // naming the param — the same discipline the SESSION_REPLAY twin now enforces (keep both in lockstep).
@@ -830,6 +836,17 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // "show profile" (the itemUrl needs {handle}, which lives on the ride tab, not on the record). TRUSTED.
           const _urlArgs = (payload && payload.urlParam && payload.urlParam.name && args[payload.urlParam.name] != null)
             ? { [payload.urlParam.name]: args[payload.urlParam.name] } : undefined;
+          // v2.74.1560 — the INVOKE twin of the SESSION_REPLAY verdict line (live 201357: "what's the homeowner's
+          // phone?" ran the curated contacts leg and shaped "not found" — true or not, the trace couldn't say:
+          // this channel logged NOTHING between dispatch and shape). Body-blind: status + the value's SHAPE only
+          // (array length / object key NAMES — the same discipline as SESSION_REPLAY's `keys:[…]`).
+          try {
+            const _v = reply && reply.value;
+            const _shape = Array.isArray(_v) ? `array[${_v.length}]`
+              : (_v && typeof _v === 'object') ? (() => { const l = Object.values(_v).find((x) => Array.isArray(x)); return l ? `list[${l.length}]` : `object{${Object.keys(_v).length}} keys:[${Object.keys(_v).slice(0, 12).join(',')}]`; })()
+              : (_v == null ? 'empty' : typeof _v);
+            Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${reply && reply.success ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}`);
+          } catch { /* observability must never break the call */ }
           sendResponse(reply && reply.success ? { ...reply, origin, urlArgs: _urlArgs } : (reply || { success: false, error: 'no-reply' }));
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });

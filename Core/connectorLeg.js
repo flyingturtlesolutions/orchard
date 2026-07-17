@@ -122,6 +122,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
         ...(_str(r.drill.from) ? { from: _str(r.drill.from) } : {}),
         ...(_str(r.drill.matchOn) ? { matchOn: _str(r.drill.matchOn) } : {}),
         ...(Array.isArray(r.drill.label) ? { label: r.drill.label.filter((x) => _str(x)).slice(0, 10) } : {}),
+        ...(Array.isArray(r.drill.also) ? { also: r.drill.also.filter((x) => _str(x)).slice(0, 4) } : {}),   // v2.74.1559 — sidecar reads the dossier pulls with the same join id (invariant #3: hop 3 rebuilds drill field-by-field)
       } : null,
       // CX-9b (v2.74.1434) — per-param `resolve` specs (human value → canonical id via one of the app's own reads;
       // Core/rideParamResolve.js). The panel dispatch resolves BEFORE the executor, so both transports benefit.

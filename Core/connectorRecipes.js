@@ -113,16 +113,22 @@ export function isReadOnlyGql(query) {
 // hashes that rotate on admin deploys (HASH_STALE), unportable as curated data; refunds/returns are navigate-only.
 // Spec traps honored elsewhere: a 200-with-HTML login page = auth failure (SESSION_FETCH 'non-json'), and email/phone
 // search returns NEAR-MATCHES — exact-match before binding a customer to anything (recipe `does` says so).
-const _GQL_CUSTOMERS = 'query($q: String!, $n: Int!) { customers(first: $n, query: $q) { edges { node { id firstName lastName email phone numberOfOrders tags defaultAddress { city province country } } } } }';
+const _GQL_CUSTOMERS = 'query Customers($q: String!, $n: Int!) { customers(first: $n, query: $q) { edges { node { id firstName lastName email phone numberOfOrders tags defaultAddress { city province country } } } } }';
 // CX-7c (v2.74.1388) — order read now carries RETURNS (return/exchange status + reverse tracking — the "where's my
 // exchange?" question) and the refund AMOUNT (totalRefundedSet), plus the fulfillment event timeline. Spec §3.
-const _GQL_ORDERS = 'query($q: String!, $n: Int!) { orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true) { edges { node { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } customer { email } lineItems(first: 10) { edges { node { title quantity } } } fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } events(first: 10) { edges { node { status happenedAt } } } } returns(first: 10) { edges { node { id status returnLineItems(first: 10) { edges { node { quantity } } } reverseFulfillmentOrders(first: 5) { edges { node { reverseDeliveries(first: 5) { edges { node { deliverable { ... on ReverseDeliveryShippingDeliverable { tracking { carrierName number url } } } } } } } } } } } } refunds { createdAt note totalRefundedSet { shopMoney { amount currencyCode } } } tags note } } } }';
-const _GQL_PRODUCTS = 'query($q: String!, $n: Int!) { products(first: $n, query: $q) { edges { node { id title status totalInventory variants(first: 10) { edges { node { id title sku price inventoryQuantity } } } } } } }';
+const _GQL_ORDERS = 'query Orders($q: String!, $n: Int!) { orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true) { edges { node { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } customer { email } lineItems(first: 10) { edges { node { title quantity } } } fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } events(first: 10) { edges { node { status happenedAt } } } } returns(first: 10) { edges { node { id status returnLineItems(first: 10) { edges { node { quantity } } } reverseFulfillmentOrders(first: 5) { edges { node { reverseDeliveries(first: 5) { edges { node { deliverable { ... on ReverseDeliveryShippingDeliverable { tracking { carrierName number url } } } } } } } } } } } } refunds { createdAt note totalRefundedSet { shopMoney { amount currencyCode } } } tags note } } } }';
+const _GQL_PRODUCTS = 'query Products($q: String!, $n: Int!) { products(first: $n, query: $q) { edges { node { id title status totalInventory variants(first: 10) { edges { node { id title sku price inventoryQuantity } } } } } } }';
 // CX-7c — the LIVENESS probe document: `{ shop { name } }` (spec §2 probeShopify). `shopProbe:true` makes
 // INVOKE_SESSION run it once (cached) before the call — a clean signed-out verdict instead of a mid-call surprise.
 const SH = Object.freeze({
   app: 'shopify', appHost: 'admin.shopify.com', method: 'POST', gql: true, csrf: 'sniff', contentType: 'application/json',
   endpoint: '/api/shopify/{handle}', urlParam: { name: 'handle', pattern: '\\/store\\/([^\\/]+)' }, shopProbe: true,
+  // RH-0a (v2.74.1564, DESIGN_route_heal.md §2) — the HAR-verified request contract (2026-07-17, 43/43 working
+  // calls): the BFF now ROUTES on `?operation=<name>&type=query` + body `operationName` (anonymous docs → the
+  // live http-404-empty), and the admin sends these two static headers on every call. The Userdigest lesson
+  // made curated: headers are part of the route — keep what the capture shows, credential class excluded
+  // (cookies/CSRF stay runtime-acquired by the sniffer).
+  requestHeaders: { 'apollographql-client-name': 'core', 'shopify-proxy-api-enable': 'true' },
 });
 
 // ── VendorSuite (D.R. Horton vendor portal, vendorsuite.drhorton.com) — CX-9 (v2.74.1431), authored from HAR captures.
@@ -357,24 +363,52 @@ export const CONNECTOR_RECIPES = [
   // {id} is the RESULT's record id (a customer lookup by email → the customer gid, tail-stripped to numeric).
   { ...SH, id: 'shopify_customer_by_email', name: 'Find a Shopify customer by email', itemUrl: '/store/{handle}/customers/{id}',
     does: 'look up Shopify customer(s) by EMAIL, riding your admin login — search returns near-matches: confirm the exact email before trusting a hit',
-    body: { query: _GQL_CUSTOMERS, variables: { q: 'email:"{email}"', n: 5 } },
+    endpoint: '/api/shopify/{handle}?operation=Customers&type=query',
+    body: { operationName: 'Customers', query: _GQL_CUSTOMERS, variables: { q: 'email:"{email}"', n: 5 } },
     params: [{ name: 'email', type: 'string', required: true }] },
   { ...SH, id: 'shopify_customer_by_phone', name: 'Find a Shopify customer by phone', itemUrl: '/store/{handle}/customers/{id}',
     does: 'look up Shopify customer(s) by PHONE number, riding your admin login — search returns near-matches: confirm the digits match exactly before trusting a hit',
-    body: { query: _GQL_CUSTOMERS, variables: { q: 'phone:"{phone}"', n: 5 } },
+    endpoint: '/api/shopify/{handle}?operation=Customers&type=query',
+    body: { operationName: 'Customers', query: _GQL_CUSTOMERS, variables: { q: 'phone:"{phone}"', n: 5 } },
     params: [{ name: 'phone', type: 'string', required: true }] },
+  // v2.74.1563 — the NAME lookup (live: "does Mousab have a shopify profile?" — the most natural CS ask had no
+  // leg; only email/phone existed, so interpret force-fit the email leg). Shopify search matches bare words
+  // against names; the near-match warning applies doubly (same/similar names are common).
+  { ...SH, id: 'shopify_customer_search', name: 'Search Shopify customers by name', itemUrl: '/store/{handle}/customers/{id}',
+    does: 'search Shopify customers by NAME (or any free search words), riding your admin login — returns near-matches: same or similar names are common, confirm the email before trusting a hit',
+    endpoint: '/api/shopify/{handle}?operation=Customers&type=query',
+    body: { operationName: 'Customers', query: _GQL_CUSTOMERS, variables: { q: '{query}', n: 5 } },
+    params: [{ name: 'query', type: 'string', required: true, hint: 'the customer\'s name or free search words — for an exact email use the by-email lookup' }] },
   { ...SH, id: 'shopify_orders_for_customer', name: 'Shopify orders for a customer',
     does: 'list a customer’s recent Shopify orders by their EMAIL (status, totals, line items, fulfillment/tracking, refunds), riding your admin login',
-    body: { query: _GQL_ORDERS, variables: { q: 'email:"{email}"', n: 5 } },
+    endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
+    body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'email:"{email}"', n: 5 } },
     params: [{ name: 'email', type: 'string', required: true }] },
   { ...SH, id: 'shopify_order', name: 'Look up a Shopify order', itemUrl: '/store/{handle}/orders/{id}',
     does: 'fetch one Shopify order by its ORDER NUMBER (digits, e.g. 69872 — not the DEAKO# prefix): status, totals, line items, fulfillment/tracking, refunds — riding your admin login',
-    body: { query: _GQL_ORDERS, variables: { q: 'name:{order}', n: 3 } },
+    endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
+    body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'name:{order}', n: 3 } },
     params: [{ name: 'order', type: 'string', required: true }] },
   { ...SH, id: 'shopify_search_products', name: 'Search Shopify products',
     does: 'search Shopify products by title / sku / tag query (with variants, price, inventory), riding your admin login',
-    body: { query: _GQL_PRODUCTS, variables: { q: '{query}', n: 5 } },
+    endpoint: '/api/shopify/{handle}?operation=Products&type=query',
+    body: { operationName: 'Products', query: _GQL_PRODUCTS, variables: { q: '{query}', n: 5 } },
     params: [{ name: 'query', type: 'string', required: true }] },
+  // SH-Q1 (v2.74.1558) — the QUEUE leg: the first LIST-shaped Shopify read, the entry point the desk/case
+  // machinery fans out over (sweep → per-order cases → "show this order"), mirroring vs_warranty_tasks' shape:
+  // listUrl = the section-open + on-site-open eligibility; drill = dossier depth at case spawn + the cold
+  // on-site open's row join. drill.from feeds the row's OWN `name` back into the by-number lookup — a prefixed
+  // name ("DEAKO#69872") matches itself in Shopify search syntax, so the join is self-consistent by construction.
+  // Query FIXED (status:open + not fully fulfilled): the queue IS the fulfillment backlog — separate simple legs
+  // over one param-switched one, the by_email/by_phone house pattern. No each-mode (one store per handle).
+  { ...SH, id: 'shopify_orders_queue', name: 'Open unfulfilled Shopify orders', listUrl: '/store/{handle}/orders',
+    drill: { via: 'shopify_order', param: 'order', from: 'name', matchOn: 'order', label: ['name', 'id', 'displayFulfillmentStatus', 'displayFinancialStatus'] },
+    does: 'THE fulfillment queue: open orders not yet (fully) fulfilled, newest first — number, date, payment/fulfillment status, total, customer email, line items, tracking. Give an order number to drill straight into that one; say "on the site" to open it on the admin orders page. Fans out: "open each in a case"',
+    endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
+    body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'status:open fulfillment_status:unfulfilled', n: 10 } },
+    params: [
+      { name: 'order', type: 'string', hint: 'an ORDER NUMBER — set ONLY when the user names one specific order to drill into' },   // NOT in the body — the drill join's filter, like vs_warranty_tasks' `address`
+    ] },
 
   // ── Shopify write (CX-7b, v2.74.1387) — the spec's ALLOWED mutation class (customer create is NOT money; the
   // banned classes stay banned: refunds/returns/inventory never ship as recipes). Shopify admin mutations are
@@ -465,7 +499,10 @@ export const CONNECTOR_RECIPES = [
     resolve: { divisionId: VS_DIVISION },
     // v2.74.1519 — TicketId/TaskId join the drill match (the live miss: "ticket 4867009" bound cleanly but the
     // match fields were address-shaped only, so a warranty-ticket ask could never find its row).
-    drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName', 'TicketId', 'TaskId'] },
+    // v2.74.1559 — `also`: catalog-owned SIDECAR reads the case dossier pulls alongside the drill (same join id) —
+    // a case is born knowing its homeowner CONTACTS, not just the address (the task page's contact dropdown fires
+    // this lazy endpoint; the harvested capture proved it, this curates it).
+    drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName', 'TicketId', 'TaskId'], also: ['vs_task_contacts'] },
     does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount. The division can be a name ("Atlanta West"), a market number ("210"), blank for your current division, or "each" to list EVERY division you can access ("for each division…" / "across all divisions"); give a street address or a warranty ticket / task number to drill straight into that one task\'s details — or say "on the site" / "on vendorsuite" to open that record on the warranty page itself instead',
     endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
     params: [
@@ -477,6 +514,14 @@ export const CONNECTOR_RECIPES = [
     does: 'read a warranty task\'s full details by its INTERNAL task id (from a task list row — for a human task number or an address, use the task LIST with that as the address filter)',
     endpoint: '/api/Vendor/Warranty/Task/{taskId}',
     params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id from a list row — for a human task number or address, use the task LIST' }] },
+  // v2.74.1559 — CURATED from the user's harvest (harvest_get_api_vendor_warranty_taskcontacts_id — the task
+  // page's contact-dropdown lazy read; live 195557: the harvested {id} carried no semantics, so the binder fed a
+  // human TICKET number → the known junk-taskId http-500). Same id discipline as vs_warranty_task; in a CASE the
+  // focus param-fill supplies TaskId automatically, and the dossier `also`-pull bakes contacts in at spawn.
+  { ...VS, id: 'vs_task_contacts', name: 'Warranty task contacts', itemUrl: '/#warranty',
+    does: 'the homeowner CONTACTS for a warranty task (names, phone, email — the task page\'s contact dropdown) by its INTERNAL task id; in a case just ask ("homeowner\'s phone?") — the case record carries the id',
+    endpoint: '/api/Vendor/Warranty/TaskContacts/{taskId}',
+    params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id (TaskId from a list row / the case record) — never a ticket or task NUMBER' }] },
   { ...VS, id: 'vs_warranty_stats', name: 'Warranty task counts', listUrl: '/#dashboard',
     resolve: { divisionId: VS_DIVISION },
     does: 'warranty task counts (new / open / fixed) for a division — the dashboard statistic; division by name, market number, or blank for your current one',

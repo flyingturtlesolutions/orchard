@@ -421,6 +421,23 @@ export function dossierLines(o, { max = 16 } = {}) {
   return lines.slice(0, max);
 }
 
+/**
+ * v2.74.1562 — fold a record's TRUTHY boolean role flags into role WORDS ("IsPrimary,IsBuyer,IsDrHorton" →
+ * ["Primary", "Buyer", "Dr Horton"]). The contact TYPE lives in these flags on apps that model roles as Is*
+ * booleans (VendorSuite contacts: primary homeowner vs the DR Horton CS rep) — deriving the words is pure
+ * mechanics, no site knowledge. Status-class info (same privacy tier as `status`). PURE.
+ */
+export function roleFlags(o, { max = 4 } = {}) {
+  const out = [];
+  for (const [k, v] of Object.entries((o && typeof o === 'object') ? o : {})) {
+    if (v !== true || !/^[Ii]s(?=[_A-Z])/.test(k)) continue;   // IsPrimary / isBuyer / is_primary — never "island" (the flag body must start upper/underscore)
+    const w = k.replace(/^is[_-]?/i, '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
+    if (w) out.push(w.charAt(0).toUpperCase() + w.slice(1));
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 export function fanoutItems(value, cap = 20) {
   const list = primaryList(value) || [];
   const items = list.slice(0, cap).map((o) => {
