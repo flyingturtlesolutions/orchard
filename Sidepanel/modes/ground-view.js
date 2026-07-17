@@ -50,20 +50,32 @@ function _renderRideEntry(r, groundId) {
   const off = (r.enabled === false) ? ' gv-ride-off' : '';
   const pend = (r.reviewState === 'pending') ? '<span class="gv-ride-pending">pending</span>' : '';
   const prov = (r.provenance && r.provenance !== 'curated') ? `<span class="gv-ride-prov">${escHtml(r.provenance)}</span>` : '';
+  // RH-1a/1c (v2.74.1568) — drift lifecycle on the panel card too: the `drift?` badge + the staged fix's diff with
+  // 🩹 apply / ✕ dismiss (EDIT_RIDE_RECIPE op:heal/healDismiss — the wiring reads the op off the button).
+  const drift = (r.driftSuspect === true) ? '<span class="gv-ride-pending" title="route drift suspected — consecutive route-miss failures on a previously-working recipe">drift?</span>' : '';
+  const heal = (r.healProposal && Array.isArray(r.healProposal.diff) && r.healProposal.diff.length)
+    ? `<div class="fragment-desc" style="white-space:pre-line">🩹 proposed fix:\n${escHtml(r.healProposal.diff.join('\n'))}</div>`
+    : '';
+  const healBtns = heal
+    ? `<button class="btn-secondary gv-ride-act" data-gv-ride-op="heal" data-gv-ride-id="${escAttr(r.id || '')}" data-gv-ride-gid="${escAttr(groundId || '')}" type="button" title="Apply the proposed fix — the next run verifies it">🩹</button>`
+      + `<button class="btn-secondary gv-ride-act" data-gv-ride-op="healDismiss" data-gv-ride-id="${escAttr(r.id || '')}" data-gv-ride-gid="${escAttr(groundId || '')}" type="button" title="Dismiss the proposed fix">✕🩹</button>`
+    : '';
   const review = (r.reviewState === 'pending')
     ? `<button class="btn-secondary gv-ride-act" data-gv-ride-op="review" data-gv-ride-val="accept" data-gv-ride-id="${escAttr(r.id || '')}" data-gv-ride-gid="${escAttr(groundId || '')}" type="button" title="Accept — make this recipe armable">✓</button>`
       + `<button class="btn-secondary gv-ride-act" data-gv-ride-op="review" data-gv-ride-val="reject" data-gv-ride-id="${escAttr(r.id || '')}" data-gv-ride-gid="${escAttr(groundId || '')}" type="button" title="Reject">✕</button>`
     : '';
+  const acts = `${healBtns}${review}`;
   return `
     <div class="fragment-row gv-entry gv-ride-entry${off}">
       <div class="fragment-row-main">
         <span class="gv-ride-badge" title="${escAttr(r.safetyClass || 'auto')}">${badge}</span>
         <span class="fragment-name">${escHtml(r.name || r.id || '')}</span>
         <span class="gv-ride-method">${escHtml(String(r.method || 'GET'))}</span>
-        ${prov}${pend}
-        ${review ? `<span class="gv-ride-actions">${review}</span>` : ''}
+        ${prov}${pend}${drift}
+        ${acts ? `<span class="gv-ride-actions">${acts}</span>` : ''}
       </div>
       ${r.does ? `<div class="fragment-desc" style="white-space:pre-line">${escHtml(r.does)}</div>` : ''}
+      ${heal}
     </div>`;
 }
 
@@ -1177,9 +1189,10 @@ function _wireHandlers(grounds) {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       btn.disabled = true;
+      const op = btn.dataset.gvRideOp || 'review';   // RH-1c (v2.74.1568) — heal / healDismiss ride the same door as review
       const value = btn.dataset.gvRideVal;
-      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'EDIT_RIDE_RECIPE', payload: { groundId: btn.dataset.gvRideGid, id: btn.dataset.gvRideId, op: 'review', value } }, r));
-      if (res?.success) { toast(`Recipe ${value === 'accept' ? 'accepted' : 'rejected'}`); await _renderList(); }
+      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'EDIT_RIDE_RECIPE', payload: { groundId: btn.dataset.gvRideGid, id: btn.dataset.gvRideId, op, value } }, r));
+      if (res?.success) { toast(op === 'heal' ? 'Fix applied — the next run verifies it' : op === 'healDismiss' ? 'Fix dismissed' : `Recipe ${value === 'accept' ? 'accepted' : 'rejected'}`); await _renderList(); }
       else { toast(`Failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
     });
   });

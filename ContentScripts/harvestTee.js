@@ -89,19 +89,49 @@
       if (window.__ahub_write_buf.length > BMAX) window.__ahub_write_buf.splice(0, window.__ahub_write_buf.length - BMAX);
     } catch (e) { /* never throw into the page */ }
   };
-  var ctOf = function (input, init) {
+  var mergedH = function (input, init) {
+    var h = {};
     try {
-      var h = {};
       if (input && typeof input === 'object' && input.headers) { var ih = toPlainHeaders(input.headers); for (var a in ih) h[a] = ih[a]; }
       if (init && init.headers) { var jh = toPlainHeaders(init.headers); for (var b in jh) h[b] = jh[b]; }
-      return h['content-type'] || '';
-    } catch (e) { return ''; }
+    } catch (e) {}
+    return h;
   };
-  var push = function (method, url, status) {
+  var ctOf = function (input, init) {
+    try { return mergedH(input, init)['content-type'] || ''; } catch (e) { return ''; }
+  };
+  // ── RH-0b (v2.74.1565, DESIGN_route_heal.md §2) — retain the APP-SET request-header SHAPE on captures. Only
+  // headers the page itself set (fetch init / XHR setRequestHeader) are visible here — the browser's own
+  // (user-agent/sec-*/origin) never appear — so what survives is exactly the app's distinctive routing shape
+  // (the Userdigest lesson: headers are part of the route; dropping them is how the Shopify 404 happened).
+  // The CREDENTIAL CLASS IS STRIPPED AT CAPTURE (spec §4 hard line) — cookie/authorization/csrf/token/session/
+  // key/secret never enter any sink (the auth layer acquires those live per-origin; §20 handles Bearer replay
+  // separately, page-local only). Mechanical framing (content-length/host/content-type) is owned elsewhere.
+  // Bounded: 12 names, 160-char values. recipeFromHarvest diffs same-endpoint captures and banks only the
+  // headers that stay CONSTANT (a varying value is a nonce, not a route marker).
+  var CRED_HDR = /^(cookie|set-cookie|authorization|proxy-authorization)$|csrf|xsrf|token|secret|session|api[-_]?key|password|bearer|(^|[-_])auth([-_]|$)/;
+  var MECH_HDR = { 'content-length': 1, host: 1, 'content-type': 1 };
+  var safeHdrs = function (m) {
+    try {
+      if (!m) return null;
+      var out = null, n = 0;
+      for (var k in m) {
+        if (!Object.prototype.hasOwnProperty.call(m, k)) continue;
+        var lk = String(k).toLowerCase();
+        if (CRED_HDR.test(lk) || MECH_HDR[lk]) continue;
+        if (!out) out = {};
+        out[lk] = String(m[k]).slice(0, 160);
+        if (++n >= 12) break;
+      }
+      return out;
+    } catch (e) { return null; }
+  };
+  var push = function (method, url, status, h) {
     try {
       if (!url || !keep(url)) return;   // capture the app's reads (same-site + cross-origin API); drop analytics/telemetry only
       var abs = ''; try { abs = new URL(url, location.href).href; } catch (e) { abs = String(url); }
       var rec = { method: String(method || 'GET').toUpperCase(), url: abs, status: Number(status) || 0, at: (window.performance && performance.now) ? performance.now() : 0 };
+      if (h && typeof h === 'object') { for (var hk in h) { rec.h = h; break; } }   // RH-0b — attach only when non-empty (records without app-set headers stay byte-identical)
       var buf = window.__ahub_harvest_buf; buf.push(rec); if (buf.length > MAX) buf.splice(0, buf.length - MAX);
       try {   // SESSION accumulator (survives same-origin navigations); superset of buf for this origin
         var acc = []; var s = sessionStorage.getItem(SKEY); if (s) acc = JSON.parse(s) || [];
@@ -122,10 +152,11 @@
         } catch (e) { /* */ }
         try { stashFetchAuth(url, input, init); } catch (e) { /* */ }   // §20 — page-local auth capture (opt-in); never the harvest buffer
         try { if (capBody()) stashBody(method, url, init && init.body, ctOf(input, init)); } catch (e) { /* CX-8b — demo-scoped write-body capture (opt-in; page-local) */ }
+        var ch = null; try { ch = safeHdrs(mergedH(input, init)); } catch (e) {}   // RH-0b — the app-set header shape (credential class already stripped)
         var p = of.apply(this, arguments);
         // PASSIVE observer: a separate .then that reads only res.status/res.url — the page still gets `p` untouched and is
         // the one that consumes the body. We never read it.
-        try { p.then(function (res) { try { push(method, (res && res.url) || url, res && res.status); } catch (e) {} }, function () {}); } catch (e) {}
+        try { p.then(function (res) { try { push(method, (res && res.url) || url, res && res.status, ch); } catch (e) {} }, function () {}); } catch (e) {}
         return p;
       };
     }
@@ -140,7 +171,7 @@
     };
     var os = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function () {
-      try { var self = this; this.addEventListener('loadend', function () { try { push(self.__ahub_m, self.__ahub_u, self.status); } catch (e) {} }); } catch (e) {}
+      try { var self = this; this.addEventListener('loadend', function () { try { push(self.__ahub_m, self.__ahub_u, self.status, safeHdrs(self.__ahub_h)); } catch (e) {} }); } catch (e) {}   // RH-0b — the setRequestHeader-collected shape rides the capture (credential class stripped)
       try { if (capAuth() && this.__ahub_h) stashAuth(this.__ahub_u, this.__ahub_h); } catch (e) { /* §20 — page-local auth capture (opt-in) */ }
       try { if (capBody()) stashBody(this.__ahub_m, this.__ahub_u, arguments[0], this.__ahub_h && this.__ahub_h['content-type']); } catch (e) { /* CX-8b — demo-scoped write-body capture */ }
       return os.apply(this, arguments);

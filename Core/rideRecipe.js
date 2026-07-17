@@ -120,13 +120,24 @@ export function mergeRideCatalogForAnswer(curated, stored) {
 }
 
 // User-owned fields are PRESERVED across a re-seed / re-harvest; mechanical fields come from the incoming record.
-const _USER_FIELDS = ['name', 'does', 'enabled', 'reviewState', 'safetyClass', 'trust'];
+// RH-1a (v2.74.1566, DESIGN_route_heal.md §3.1) — the route-heal runtime state (lastOkAt/missStreak/driftSuspect/
+// driftAt, stamped by INVOKE_SESSION + SESSION_REPLAY via Core/routeHeal.js) is user-state-class: a curated
+// catalog refresh must never erase the proof-of-life stamp or the drift evidence.
+// RH-1c (v2.74.1567) — the heal lifecycle rides too: `healProposal` (the pending HITL diff), `healOverride` (an
+// APPLIED heal's shadow — see mergeRecipes), `healedAt`.
+const _USER_FIELDS = ['name', 'does', 'enabled', 'reviewState', 'safetyClass', 'trust', 'lastOkAt', 'missStreak', 'driftSuspect', 'driftAt', 'healProposal', 'healOverride', 'healedAt'];
 
 /**
  * Merge `incoming` into `existing` BY id, PRESERVING user state. PURE. Mechanical fields (method/endpoint/params/body/
  * provenance) come from `incoming` (a curated re-seed or fresh harvest may refresh them); the user fields above are kept
  * from `existing`. Existing records absent from `incoming` (e.g. harvested ones during a curated re-seed) are kept. So
  * the one function serves BOTH "re-seed the catalog" and "add a harvested recipe".
+ *
+ * RH-1c (v2.74.1567, DESIGN_route_heal.md §3.5 durability) — an APPLIED heal on a CURATED record must survive this
+ * merge's mechanical refresh (which would silently restore the catalog's still-broken shape on every read).
+ * `healOverride` re-asserts the healed endpoint/requestHeaders/params over the incoming record — until the CATALOG
+ * ITSELF catches up (incoming endpoint + requestHeaders equal the override's), at which point the override drops
+ * and the shipped fix, with its richer curated param specs, takes over.
  */
 export function mergeRecipes(existing, incoming) {
   const ex = Array.isArray(existing) ? existing : [];
@@ -135,7 +146,16 @@ export function mergeRecipes(existing, incoming) {
   const out = []; const seen = new Set();
   for (const r of inc) {
     const prior = byId.get(r.id);
-    if (prior) { const keep = {}; for (const k of _USER_FIELDS) if (prior[k] !== undefined) keep[k] = prior[k]; out.push({ ...r, ...keep }); }
+    if (prior) {
+      const keep = {}; for (const k of _USER_FIELDS) if (prior[k] !== undefined) keep[k] = prior[k];
+      const ov = keep.healOverride;
+      if (ov && typeof ov === 'object') {
+        const kk = ['endpoint', 'requestHeaders'].filter((k) => ov[k] !== undefined);
+        const caughtUp = kk.length > 0 && kk.every((k) => JSON.stringify(r[k]) === JSON.stringify(ov[k]));
+        if (caughtUp) { delete keep.healOverride; delete keep.healedAt; out.push({ ...r, ...keep }); }
+        else out.push({ ...r, ...keep, ...ov });
+      } else out.push({ ...r, ...keep });
+    }
     else out.push(r);
     seen.add(r.id);
   }

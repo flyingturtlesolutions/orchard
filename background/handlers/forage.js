@@ -103,16 +103,17 @@ export async function runForage({ groundId = '', sessionTabId = null, readRideRe
     Logger.error('background', `FORAGE failed: ${err.message}`);
   } finally {
     _forageAbort.delete(groundId);
+    let _healed = 0;
     if (harvestStarted) {
       try {
         const sr = await stopHarvestSession({ groundId, tabId, readRideRecipes, writeRideRecipes });
-        banked = sr.banked || 0;
+        banked = sr.banked || 0; _healed = sr.healed || 0;
         Logger.info('ride', `FORAGE harvest: ${(sr.captures || []).length} capture(s) → banked ${banked} recipe(s) (ground ${groundId})`);
       } catch (e) { Logger.warn('background', `FORAGE bank failed: ${e.message}`); }
     }
     // Tell the Ground panel the crawl finished so it can re-render the Ride card with the newly-banked recipes (mirrors
     // DISCOVERY_COMPLETE). Best-effort; the manual trigger toasts on it, the Discovery auto-chain just silently refreshes.
-    try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, visits, banked } }).catch(() => { /* no listener */ }); } catch { /* */ }
+    try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, visits, banked, healed: _healed } }).catch(() => { /* no listener */ }); } catch { /* */ }
   }
   return { ok: true, visits, banked };
 }
@@ -161,14 +162,14 @@ export async function bankForage({ groundId = '', readRideRecipes, writeRideReci
   groundId = String(groundId || '').trim();
   const armed = _forageArmed.get(groundId); _forageArmed.delete(groundId);
   if (!armed) return { ok: false, error: 'not armed', banked: 0 };
-  let banked = 0, captures = 0;
+  let banked = 0, captures = 0, healed = 0;
   try {
     const sr = await stopHarvestSession({ groundId, tabId: armed.tabId, readRideRecipes, writeRideRecipes });
-    banked = sr.banked || 0; captures = (sr.captures || []).length;
+    banked = sr.banked || 0; captures = (sr.captures || []).length; healed = sr.healed || 0;   // RH-1c — heal proposals staged by the bank's match pass
     Logger.info('ride', `FORAGE harvest (passive): ${captures} capture(s) → banked ${banked} recipe(s) (ground ${groundId})`);
   } catch (e) { Logger.warn('background', `FORAGE bank failed: ${e.message}`); }
-  try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, banked, captures, passive: true } }).catch(() => { /* */ }); } catch { /* */ }
-  return { ok: true, banked, captures };
+  try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, banked, captures, healed, passive: true } }).catch(() => { /* */ }); } catch { /* */ }
+  return { ok: true, banked, captures, healed };
 }
 
 /**

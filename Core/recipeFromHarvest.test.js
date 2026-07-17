@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseUrl, pathKey, templatePath, templateQuery, isIdentityCall, recipesFromHarvest, isNoiseCapture } from './recipeFromHarvest.js';
+import { parseUrl, pathKey, templatePath, templateQuery, isIdentityCall, recipesFromHarvest, isNoiseCapture, sanitizeCaptureHeaders, templateHeaders, pathAligns, scoreCandidateShape, matchCaptureToRecipe, healedShapeFor, recipeHealDiff, healProposalsFromCaptures } from './recipeFromHarvest.js';
 
 describe('recipeFromHarvest — isNoiseCapture (v2.74.1300 recipe-worthiness)', () => {
   it('drops static asset GETs (JS bundles, fonts, images) + their cache-bust dups', () => {
@@ -139,5 +139,116 @@ describe('recipeFromHarvest — recipesFromHarvest (end to end)', () => {
     const b = recipesFromHarvest(captures).recipes.map((r) => r.id).sort();
     assert.deepEqual(a, b);
     assert.ok(a.every((id) => id.startsWith('harvest_')));
+  });
+});
+
+describe('RH-0b (v2.74.1565) — captured header shape banks onto the recipe (capture fidelity, DESIGN_route_heal.md §2)', () => {
+  it('sanitizeCaptureHeaders: the CREDENTIAL class + mechanical framing never bank (defense in depth — the tee already stripped)', () => {
+    const s = sanitizeCaptureHeaders({
+      Cookie: 'sid=1', Authorization: 'Bearer x', 'X-CSRF-Token': 'z', 'x-session-id': 's', 'x-api-key': 'k', 'X-Auth': 'q',
+      'Content-Length': '12', Host: 'x.test', 'Content-Type': 'application/json',
+      'Apollographql-Client-Name': 'core', 'x-requested-with': 'XMLHttpRequest', Accept: 'application/vnd.api+json',
+    });
+    assert.deepEqual(s, { 'apollographql-client-name': 'core', 'x-requested-with': 'XMLHttpRequest', accept: 'application/vnd.api+json' });
+    assert.equal(sanitizeCaptureHeaders(null), null);
+  });
+  it('templateHeaders: only a header CONSTANT across every capture banks; varying values + dynamic-name ids drop', () => {
+    assert.deepEqual(templateHeaders([
+      { 'x-app': 'core', 'x-request-id': 'aaa', 'x-nonce-thing': '1', 'x-flavor': 'blue' },
+      { 'x-app': 'core', 'x-request-id': 'bbb', 'x-nonce-thing': '1', 'x-flavor': 'red' },
+    ]), { 'x-app': 'core' });   // request-id varies AND is dyn-class; nonce is dyn-class even though static; flavor varies
+    assert.deepEqual(templateHeaders([{ 'x-trace-id': 'same' }, { 'x-trace-id': 'same' }]), {}, 'a dynamic-NAME header never banks even when it looks static');
+  });
+  it('templateHeaders: a capture with NO app-set headers vetoes the group (sometimes-sent ≠ part of the route)', () => {
+    assert.deepEqual(templateHeaders([{ 'x-app': 'core' }, undefined]), {});
+    assert.deepEqual(templateHeaders([]), {});
+  });
+  it('recipesFromHarvest: the static shape rides the banked recipe as requestHeaders; header-free groups stay byte-identical (no empty key)', () => {
+    const { recipes } = recipesFromHarvest([
+      { method: 'GET', url: 'https://api.x.test/v1/things/11', h: { 'x-app-platform': 'web', authorization: 'Bearer leak?' } },
+      { method: 'GET', url: 'https://api.x.test/v1/things/22', h: { 'x-app-platform': 'web', authorization: 'Bearer other' } },
+      { method: 'GET', url: 'https://api.x.test/v1/plain.json' },
+    ], { appHost: 'x.test' });
+    const withH = recipes.find((r) => r.endpoint.includes('/things/'));
+    assert.deepEqual(withH.requestHeaders, { 'x-app-platform': 'web' }, 'the static app header banks; the credential strips');
+    assert.ok(!JSON.stringify(recipes).includes('Bearer'), 'a credential value never reaches a banked record');
+    const plain = recipes.find((r) => r.endpoint.includes('plain'));
+    assert.ok(!('requestHeaders' in plain), 'no app-set headers → no requestHeaders key');
+  });
+});
+
+describe('RH-1c (v2.74.1567) — match captures to drift-suspect recipes, propose the five-second heal (DESIGN_route_heal.md §3.4-5)', () => {
+  // The MOTIVATING live class (the Shopify 404): path held, the BFF grew ?operation&type routing + two headers.
+  // {handle} is a store SLUG — no digit run, so a capture never templates it: recipe-as-pattern alignment covers it.
+  const SH = {
+    id: 'shopify_customer_by_email', method: 'POST', gql: true, provenance: 'curated', driftSuspect: true,
+    endpoint: '/api/shopify/{handle}',
+    body: { operationName: 'Customers', query: 'query Customers($q: String!, $n: Int!) { customers(first: $n, query: $q) { edges { node { id } } } }' },
+    params: [{ name: 'email', type: 'string', required: true }],
+  };
+  const SH_CAPS = [
+    { method: 'POST', url: 'https://admin.shopify.com/api/shopify/store-a?operation=Customers&type=query', h: { 'apollographql-client-name': 'core', 'shopify-proxy-api-enable': 'true' } },
+    { method: 'POST', url: 'https://admin.shopify.com/api/shopify/store-a?operation=Customers&type=query', h: { 'apollographql-client-name': 'core', 'shopify-proxy-api-enable': 'true' } },
+  ];
+  it('pathAligns: the recipe template is the PATTERN — a param slot matches a literal store slug; length/static mismatches do not align', () => {
+    assert.equal(pathAligns('/api/shopify/{handle}', '/api/shopify/store-a'), true);
+    assert.equal(pathAligns('/api/Vendor/Warranty/Tasks/{divisionId}/{status}', '/api/Vendor/Warranty/Tasks/8123/open'), true);
+    assert.equal(pathAligns('/api/shopify/{handle}', '/api/shopify/store-a/extra'), false);
+    assert.equal(pathAligns('/api/a/{x}', '/api/b/{x}'), false);
+  });
+  it('the live Shopify class end-to-end: proposal keeps OUR path template, gains the query routing + both headers; diff is readable; the gql read heals despite POST', () => {
+    const props = healProposalsFromCaptures(SH_CAPS, [SH], { now: 7 });
+    assert.equal(props.length, 1);
+    assert.equal(props[0].recipeId, 'shopify_customer_by_email');
+    const p = props[0].proposal;
+    assert.equal(p.endpoint, '/api/shopify/{handle}?operation=Customers&type=query', 'OUR {handle} survives — the recipe knew its own shape');
+    assert.deepEqual(p.requestHeaders, { 'apollographql-client-name': 'core', 'shopify-proxy-api-enable': 'true' });
+    assert.ok(!p.addParams, 'no phantom handle param — pre-existing placeholders keep their existing fill (urlParam)');
+    assert.ok(p.diff.some((l) => l.startsWith('path: ')) && p.diff.some((l) => l.startsWith('+ header apollographql-client-name')), `diff readable: ${p.diff.join(' | ')}`);
+    assert.equal(p.at, 7);
+    assert.equal(p.samples, 2);
+  });
+  it('header-only drift: same endpoint, a new required header → header-only proposal (no endpoint key)', () => {
+    const r = { id: 'ac_calls', method: 'GET', provenance: 'curated', driftSuspect: true, endpoint: '/v3/calls?per_page=25', params: [] };
+    const caps = [
+      { method: 'GET', url: 'https://api.ac.test/v3/calls?per_page=25', h: { 'aircall-platform': 'web' } },
+      { method: 'GET', url: 'https://api.ac.test/v3/calls?per_page=25', h: { 'aircall-platform': 'web' } },
+    ];
+    const props = healProposalsFromCaptures(caps, [r], { now: 1 });
+    assert.equal(props.length, 1);
+    assert.ok(!props[0].proposal.endpoint, 'endpoint unchanged → not in the proposal');
+    assert.deepEqual(props[0].proposal.requestHeaders, { 'aircall-platform': 'web' });
+  });
+  it('the /v2-prefix class: param counts match → rebase onto the drifted skeleton with OUR param name', () => {
+    const r = { id: 'z_ticket', method: 'GET', provenance: 'curated', driftSuspect: true, endpoint: '/api/tickets/{ticketId}.json', params: [{ name: 'ticketId', type: 'integer', required: true, hint: 'curated hint survives' }] };
+    const caps = [
+      { method: 'GET', url: 'https://z.test/api/v2/tickets/64863.json' },
+      { method: 'GET', url: 'https://z.test/api/v2/tickets/64659.json' },
+    ];
+    const props = healProposalsFromCaptures(caps, [r], { now: 1 });
+    assert.equal(props.length, 1);
+    assert.equal(props[0].proposal.endpoint, '/api/v2/tickets/{ticketId}.json', 'the drifted skeleton, OUR param name');
+    assert.ok(!props[0].proposal.addParams, 'ticketId already spec’d — curated specs never replaced');
+  });
+  it('hard lines: a WRITE recipe never gets a proposal; a non-suspect recipe never gets one; an unmatched action proposes nothing', () => {
+    const w = { id: 'w', method: 'POST', write: true, provenance: 'curated', driftSuspect: true, endpoint: '/api/things', params: [] };
+    assert.deepEqual(healProposalsFromCaptures([{ method: 'POST', url: 'https://x.test/api/things' }], [w]), [], 'writes go through full re-review, never a one-click heal');
+    const fresh = { ...SH, driftSuspect: false };
+    assert.deepEqual(healProposalsFromCaptures(SH_CAPS, [fresh]), [], 'no suspicion → no proposal');
+    const far = { id: 'far', method: 'GET', provenance: 'curated', driftSuspect: true, endpoint: '/totally/other/Resource/{id}', params: [] };
+    assert.deepEqual(healProposalsFromCaptures([{ method: 'GET', url: 'https://x.test/api/unrelated.json' }], [far]), [], 'a weak match never proposes');
+  });
+  it('matchCaptureToRecipe (single-capture face) + scoreCandidateShape agree with the batch verdicts', () => {
+    assert.ok(matchCaptureToRecipe(SH_CAPS[0], SH) >= 5, 'the live class scores past the floor');
+    assert.equal(matchCaptureToRecipe({ method: 'GET', url: 'https://x.test/api/unrelated.json' }, SH), 0, 'method mismatch → 0');
+    assert.ok(scoreCandidateShape({ method: 'POST', endpoint: '/api/shopify/{handle}?operation=Customers&type=query' }, SH)
+      > scoreCandidateShape({ method: 'POST', endpoint: '/api/other/{x}?operation=Orders&type=query' }, SH), 'the right shape outscores a wrong one');
+  });
+  it('recipeHealDiff renders template-level lines only', () => {
+    const d = recipeHealDiff({ endpoint: '/a/{id}', requestHeaders: { 'x-old': '1' } }, { endpoint: '/b/{id}', requestHeaders: { 'x-new': '2' }, addParams: [{ name: 'q' }] });
+    assert.deepEqual(d, ['path: /a/{id} → /b/{id}', '+ header x-new: 2', '− header x-old', '+ param q']);
+  });
+  it('healedShapeFor: identical shape (nothing drifted) → null (no busywork proposal)', () => {
+    assert.equal(healedShapeFor({ method: 'GET', endpoint: '/v3/calls' }, { method: 'GET', endpoint: '/v3/calls', params: [] }), null);
   });
 });

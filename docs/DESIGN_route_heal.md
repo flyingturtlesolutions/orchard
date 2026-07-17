@@ -1,6 +1,10 @@
 # DESIGN — Route-Heal (RH-0 / RH-1): the ride layer's self-heal
 
-**Status: spec v1 (2026-07-17) — not built.** Companion to `DESIGN_connectors.md` (§17 harvest / §18 observability
+**Status: spec v1 (2026-07-17); FULL LADDER BUILT same day — RH-0a live-verified (v2.74.1564), RH-0b/1a
+(v2.74.1565/1566 — tee header capture, `templateHeaders` bank, `Core/routeHeal.js` detect + `HEAL ▸`),
+RH-1b/1c/1d (v2.74.1567/1568 — the chat relearn bar, `healProposalsFromCaptures` match + diff + apply-with-shadow,
+the verify-ratchet). Loop-level live verification owed (see §5 notes).** Companion
+to `DESIGN_connectors.md` (§17 harvest / §18 observability
 / §19 Forage — the machinery this composes), `DESIGN_target_routing.md` (unrelated "route"; this doc's route =
 the REQUEST SHAPE). Live evidence: the Shopify 404 arc (traces 084032 + the v1560 `INVOKE ▸ … → FAIL http-404
 empty` line) and the user's oracle: their Userdigest implementation — full session REPLAY of captured requests —
@@ -79,20 +83,53 @@ RH-0 removes most "relearning" before it happens. RH-1 handles the rarer true dr
 
 ## 5. Build ladder
 
-- **RH-0a** — the SH `requestHeaders` fix from the oracle diff (unblocks Shopify; no new machinery).
-- **RH-0b** — §17 tee retains headers (credential class stripped) + `recipeFromHarvest` banks them.
-- **RH-1a** — `lastOkAt` stamping + the detect predicate + `driftSuspect` + `HEAL ▸` (+ decision regexes).
-- **RH-1b** — suspect → consent-shaped arm proposal (reuse the passive-forage arm).
-- **RH-1c** — `matchCaptureToRecipe` (pure + tested) + the diff card + EDIT_RIDE_RECIPE apply.
-- **RH-1d** — verify-ratchet wiring.
+- **RH-0a** ✓ (v2.74.1564, live-verified) — the SH `requestHeaders` fix from the oracle diff (unblocks Shopify; no new machinery).
+- **RH-0b** ✓ (v2.74.1565) — §17 tee retains headers (credential class stripped AT CAPTURE, `safeHdrs`) +
+  `recipeFromHarvest` banks the STATIC shape (`templateHeaders`: constant-across-group only; dynamic-name class
+  — request ids / traces / nonces — never banks even when a single capture makes it look static).
+- **RH-1a** ✓ (v2.74.1566) — `lastOkAt` stamping (6h-throttled) + the detect predicate (`Core/routeHeal.js`
+  isRouteMiss: 404/405/410 + non-JSON body; the persisted-op 404 stays on its own op-heal, never double-counted) +
+  `missStreak`/`driftSuspect`/`driftAt` (all in `_USER_FIELDS`) + `HEAL ▸ suspect/cleared` (both decision REs).
+  Ticks fire from INVOKE_SESSION + SESSION_REPLAY; PROVEN records only; non-miss failures are no evidence.
+- **RH-1b** ✓ (v2.74.1568) — suspect → consent-shaped arm proposal. The EXECUTOR's failure response carries
+  `driftSuspect` (+ ground/recipe ids) when the tick flips; chat renders the relearn bar under the failure
+  (`_healRelearnBar`): arm = the passive-forage FORAGE toggle on the app's live tab (consent-gated inside
+  startHarvestSession; the tab reloads for document_start capture — the bar says so), the user does ONE action
+  by hand, Done = FORAGE bank. Auto-arm-without-prompt was NOT built — the proposal-only flow IS the default-off.
+- **RH-1c** ✓ (v2.74.1567/1568) — `healProposalsFromCaptures` / `matchCaptureToRecipe` / `scoreCandidateShape` /
+  `healedShapeFor` / `recipeHealDiff` (Core/recipeFromHarvest, pure + tested). Matching is RECIPE-AS-PATTERN:
+  `pathAligns` lets a `{param}` slot match a literal that never templates (the Shopify `{handle}` store slug —
+  the motivating case would otherwise be unmatchable); op identity reads the RECIPE's own `body.operationName`
+  against the capture URL's `?operation=` (the tee is body-blind — §3.4's "response-key shape" is NOT available
+  from a body-blind capture and was dropped from the design). Ambiguity (tie) → no proposal. The proposal is
+  STAGED ON THE RECORD (`healProposal`, user-state-class) by the bank's match pass — every bank funnel gets
+  healing for free — and applied via the existing EDIT_RIDE_RECIPE door (op:heal / op:healDismiss; reads only,
+  gql documents re-validated server-side at apply). Durability: apply stamps `healOverride`, the SHADOW the
+  v1435 merge re-asserts over a stale catalog refresh until the catalog itself ships the fix (equality check →
+  the shadow retires and the richer curated specs take over). Surfaces: the chat diff card (Apply/Dismiss),
+  the Studio ride card + Ground-panel ride entry (drift? badge + diff + 🩹 apply / ✕ dismiss).
+- **RH-1d** ✓ (v2.74.1568) — verify-ratchet: apply deliberately KEEPS `driftSuspect` (a heal is a hypothesis);
+  the next invoke is the trial — tickOk's success clears it (`HEAL ▸ cleared`), failure re-counts from a fresh
+  streak. The chat Apply button re-runs the ORIGINAL failed ask immediately (same gates as typing it), so the
+  verify happens in the same breath.
 
-The live Shopify break is the test vehicle for the whole ladder: RH-0a fixes it, and the capture that fixes it
-seeds RH-1c's first fixtures.
+The live Shopify break was the test vehicle: RH-0a fixed it (live-verified), and its capture shape seeds RH-1c's
+test fixtures (the Shopify class is the first end-to-end pure test).
+
+**Live-owed (the loop can't be exercised headless — the pure layers + state machine are gate-proven):**
+1. detect → bar: force a curated read to 404 twice → `HEAL ▸ suspect` + the relearn bar under the chat failure;
+2. arm → capture → match: click Relearn, do the action by hand, Done → `HEAL ▸ proposed` + the diff card;
+3. apply → verify: Apply → the ask re-runs → `INVOKE/SESSION_REPLAY → 200` + `HEAL ▸ cleared`;
+4. the Studio/panel cards show `drift?` + the proposal on the same records.
 
 ## 6. Open questions
 
-- Curated-heal round-trip: does an accepted local heal of a curated entry auto-file a catalog patch (the dev
-  bridge could draft it), or stay a local override until hand-landed? (Local override must survive the v1435
-  mechanical refresh — an explicitly-healed field may need shadowing rather than overwriting.)
+- ~~Curated-heal round-trip~~ ANSWERED (v2.74.1567): an accepted heal of a curated entry stays a LOCAL SHADOW
+  (`healOverride`, `_USER_FIELDS`-preserved, re-asserted by the v1435 merge) until the catalog ships the same
+  shape — then the shadow retires automatically (equality check) and the curated fix takes over. Auto-filing a
+  catalog patch from a confirmed heal (the dev bridge drafting it) stays future work.
 - Drift telemetry: should `HEAL ▸` events feed OUTCOMES so per-app drift frequency is visible in Studio?
 - N and the window for "consecutive" (2 failures within a day vs a week) — tune from live data.
+- Body-level GraphQL op identity: the tee is body-blind, so two gql ops sharing one bare endpoint (no ?operation
+  in the URL) are indistinguishable in captures → ambiguous → no proposal. Acceptable (never guess); a consented
+  demo-scoped body capture (the CX-8b machinery) could lift it later if a real app needs it.

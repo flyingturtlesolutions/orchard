@@ -76,6 +76,17 @@ function _rideRecipeRowHtml(r) {
   const nParams = Array.isArray(r.params) ? r.params.length : 0;
   const prov = (r.provenance && r.provenance !== 'curated') ? `<span class="ground-lifecycle-badge" title="how this recipe was learned">${escHtml(r.provenance)}</span>` : '';
   const pending = (r.reviewState === 'pending') ? '<span class="ground-lifecycle-badge" title="needs review before it can run">pending</span>' : '';
+  // RH-1a/1c (v2.74.1568) — the drift lifecycle on the review card: `drift?` = N consecutive route-misses on a
+  // proven shape (RH-1a detect); a staged healProposal renders its five-second DIFF + ✓ apply / ✕ dismiss (the
+  // same EDIT_RIDE_RECIPE door the chat relearn bar uses; reads only, enforced server-side).
+  const drift = (r.driftSuspect === true) ? '<span class="ground-lifecycle-badge" title="route drift suspected — consecutive route-miss failures on a previously-working recipe">drift?</span>' : '';
+  const heal = (r.healProposal && Array.isArray(r.healProposal.diff) && r.healProposal.diff.length)
+    ? `<div class="fragment-desc" style="white-space:pre-line">🩹 proposed fix (from your captured action ×${Number(r.healProposal.samples) || 1}):\n${escHtml(r.healProposal.diff.join('\n'))}</div>`
+    : '';
+  const healBtns = heal
+    ? `<button class="btn-action" data-ride-op="heal" data-rid="${escAttr(r.id)}" title="Apply the proposed fix — the next run verifies it">🩹 apply</button>`
+      + `<button class="btn-action danger" data-ride-op="healDismiss" data-rid="${escAttr(r.id)}" title="Dismiss the proposed fix (nothing changes)">✕ fix</button>`
+    : '';
   const review = (r.reviewState === 'pending')
     ? `<button class="btn-action" data-ride-op="review" data-ride-val="accept" data-rid="${escAttr(r.id)}" title="Accept — make this recipe armable">✓</button>`
       + `<button class="btn-action danger" data-ride-op="review" data-ride-val="reject" data-rid="${escAttr(r.id)}" title="Reject">✕</button>`
@@ -87,9 +98,10 @@ function _rideRecipeRowHtml(r) {
         <span class="fragment-name">${escHtml(r.name || r.id)}</span>
         <span class="ride-safety-pill ride-safety-${escAttr(safety)}" title="safety class">${escHtml(safety)}</span>
         <span class="fragment-health health-untested" title="${escAttr(String(r.method || 'GET'))} — ${escHtml(crud)}">${escHtml(crud)}</span>
-        ${prov}${pending}
+        ${prov}${pending}${drift}
       </div>
       ${r.does ? `<div class="fragment-desc" style="white-space:pre-line">${escHtml(r.does)}</div>` : ''}
+      ${heal}
       <div class="fragment-row-actions">
         <span class="fragment-meta" title="${escAttr(r.endpoint || '')}">${escHtml(String(r.method || 'GET'))} · ${nParams} param${nParams === 1 ? '' : 's'}</span>
         <label class="toggle-switch" title="Enable / disable this recipe">
@@ -97,7 +109,7 @@ function _rideRecipeRowHtml(r) {
           <span class="toggle-track"><span class="toggle-thumb"></span></span>
         </label>
         <button class="btn-action" data-ride-op="json" data-rid="${escAttr(r.id)}" title="View JSON (read-only)">{ }</button>
-        ${review}
+        ${healBtns}${review}
       </div>
       <pre class="ride-recipe-json" hidden>${json}</pre>
     </div>`;
@@ -6127,7 +6139,9 @@ function findLastReloadStart() {
 // v2.74.1526 — + FIELD_FOLLOWUP ▸ (CX-9j: a grounded read's field question answered from the record — field hit / "details" / absent).
 // v2.74.1530 — + OBS_PARAM ▸ (OBS-4b: a re-teach content-addressed N result-row click(s) → CLICK_BY_LABEL by search value).
 // v2.74.1546 — + TARGET ▸ (TRT-2: the TR-ladder target-resolver decision line, one per turn — DESIGN_target_routing.md §7.3).
-const _DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸|DEVBR ▸|LT ▸|CONCERN ▸|SYNC ▸|MERGE ▸|ABANDON ▸|DRIFT ▸|SPLIT ▸|FORK ▸|SCOPE ▸|WORKTREE ▸|MERGE_LOCK ▸|VERSION ▸|REVIEW ▸|DEPLOY ▸|SURFACE ▸|IL ▸|GAPS ▸|HARVEST ▸|SYNTH ▸|WRITE_GATE ▸|INTERPRET ▸|CANVAS ▸|FORAGE ▸|SESSION_REPLAY ▸|ANSWER_GUARD ▸|DEMO_WRITE ▸|CONNECTOR_INVOKE ▸|CONNECTOR_LINK ▸|CONNECTOR_TOOLS ▸|SOURCE ▸|WORKFLOW ▸|RIDE_WRITE ▸|RIDE_RESOLVE ▸|RIDE_DRILL ▸|RIDE_EACH ▸|ROUTINE ▸|CASE_BRIEF ▸|CONN ▸|SECTION_NAV ▸|DRIVE_HYDRATE ▸|DRIVE_INVOKE ▸|INTERPRET_ASK "|INTERPRET_ASK ▸|PALETTE ▸|IDENTITY_PROBE ▸|SWEEP ▸|SHOW ▸|LEG_TEST ▸|LEG_VERIFY ▸|LEARNED ▸|FIELD_FOLLOWUP ▸|OBS_PARAM ▸|TARGET ▸|INVOKE ▸)/;
+// v2.74.1560 — + INVOKE ▸ (the INVOKE_SESSION verdict twin of SESSION_REPLAY ▸ — status + body-blind shape).
+// v2.74.1566 — + HEAL ▸ (RH-1a: route-miss drift detect — suspect/cleared transitions on ride recipes, DESIGN_route_heal.md §3.1).
+const _DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸|DEVBR ▸|LT ▸|CONCERN ▸|SYNC ▸|MERGE ▸|ABANDON ▸|DRIFT ▸|SPLIT ▸|FORK ▸|SCOPE ▸|WORKTREE ▸|MERGE_LOCK ▸|VERSION ▸|REVIEW ▸|DEPLOY ▸|SURFACE ▸|IL ▸|GAPS ▸|HARVEST ▸|SYNTH ▸|WRITE_GATE ▸|INTERPRET ▸|CANVAS ▸|FORAGE ▸|SESSION_REPLAY ▸|ANSWER_GUARD ▸|DEMO_WRITE ▸|CONNECTOR_INVOKE ▸|CONNECTOR_LINK ▸|CONNECTOR_TOOLS ▸|SOURCE ▸|WORKFLOW ▸|RIDE_WRITE ▸|RIDE_RESOLVE ▸|RIDE_DRILL ▸|RIDE_EACH ▸|ROUTINE ▸|CASE_BRIEF ▸|CONN ▸|SECTION_NAV ▸|DRIVE_HYDRATE ▸|DRIVE_INVOKE ▸|INTERPRET_ASK "|INTERPRET_ASK ▸|PALETTE ▸|IDENTITY_PROBE ▸|SWEEP ▸|SHOW ▸|LEG_TEST ▸|LEG_VERIFY ▸|LEARNED ▸|FIELD_FOLLOWUP ▸|OBS_PARAM ▸|TARGET ▸|INVOKE ▸|HEAL ▸)/;
 function _isDecisionLine(entry) {
   if (!entry) return false;
   if (entry.level === 'WARN' || entry.level === 'ERROR') return true;

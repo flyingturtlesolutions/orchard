@@ -1741,7 +1741,7 @@ function _readSgSpec(groundId, url, intent) {
 
 // v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
 const _sgMessageHandlers = {
-  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript, readRideRecipes: _readRideRecipes, cloudInvokeConnector: invokeConnector, cloudLinkConnector: linkConnector, cloudUnlinkConnector: unlinkConnector, cloudListConnectorTools: listConnectorTools,
+  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript, readRideRecipes: _readRideRecipes, writeRideRecipes: _writeRideRecipes, cloudInvokeConnector: invokeConnector, cloudLinkConnector: linkConnector, cloudUnlinkConnector: unlinkConnector, cloudListConnectorTools: listConnectorTools,   // RH-1a (v2.74.1566) — writeRideRecipes: the heal tick stamps lastOkAt/driftSuspect on per-Ground records
     cloudHasSession: async () => { try { const s = await ensureFreshSession(); return !!(s && s.idToken); } catch { return false; } } }),   // CX-3 — connector domain (INVOKE_SESSION session-ride); §18 — readRideRecipes feeds the arm guard; CX-5b — cloudInvokeConnector → INVOKE_CONNECTOR broker; MP-3 — cloudLinkConnector → LINK_CONNECTOR; CX-5c — unlink + status; v1312 — link preflight
   ...createCanvasHandlers({   // CA-4 RENDER_CANVAS + CA-9 COMPOSE_CANVAS (the app authors a spec → render)
     log: (line) => { try { Logger.info('background', line); } catch { /* */ } },

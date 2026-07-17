@@ -7184,6 +7184,8 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     if (!rr || rr.success === false) {
       const hint = (rr && rr.hint) ? `  ${rr.hint}.` : '';
       _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${rr && rr.error ? ` — ${rr.error}` : ''}${rr && rr.detail ? ` (${rr.detail})` : ''}.${hint}`);
+      // RH-1b (v2.74.1568) — the executor's tick marked this recipe drift-suspect → propose the relearn arm.
+      if (rr && rr.driftSuspect && rr.driftGroundId) _healRelearnBar(msg, { groundId: rr.driftGroundId, recipeId: rr.driftRecipeId || '', host: (leg.tool && (leg.tool.sessionHost || leg.tool.origin)) || '', name: leg.name || (leg.tool && leg.tool.recipeId) || 'that read', retryAsk: ask });
       return false;
     }
     // CX-9b — the drill join (shared helper; also hooked in the planExec tail below — both transports, v1435).
@@ -7270,6 +7272,8 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   if (!res || res.success === false) {
     const hint = (res && res.hint) ? `  ${res.hint}.` : '';   // CX-4a.1 — surface "open <app> and sign in" on a connector auth miss
     _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${res && res.error ? ` — ${res.error}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);
+    // RH-1b (v2.74.1568) — the INVOKE_SESSION tick marked this recipe drift-suspect → propose the relearn arm.
+    if (res && res.driftSuspect && res.driftGroundId) _healRelearnBar(msg, { groundId: res.driftGroundId, recipeId: res.driftRecipeId || '', host: (leg.tool && (leg.tool.sessionHost || leg.tool.appHost || leg.tool.origin)) || '', name: leg.name || (leg.tool && leg.tool.recipeId) || 'that read', retryAsk: ask });
     return false;
   }
   if (leg.domain === 'connector') {
@@ -10096,6 +10100,84 @@ function _connSignInBar(msg, origins, { retryAsk = null } = {}) {
       if (input) { input.value = retryAsk; sendChatMessage(); }   // the routine-starter path — every gate identical to typing it
     }));
   }
+}
+
+// ── RH-1b (v2.74.1568, DESIGN_route_heal.md §3.2) — the consent-shaped RELEARN proposal. Rendered under a ride
+// failure whose executor tick marked the recipe DRIFT-SUSPECT (N consecutive route-misses on a PROVEN shape).
+// Reuses the passive-forage arm end-to-end (FORAGE arm — reloads the app tab for document_start capture — → the
+// USER does one action by hand → FORAGE bank; consent-gated inside startHarvestSession: this PROPOSES, never
+// silently records). The bank's RH-1c match pass stages `healProposal`s on the records; this bar renders each as
+// the five-second diff with ✓ Apply / Dismiss (EDIT_RIDE_RECIPE op:heal/healDismiss — reads only, enforced
+// server-side). Apply + a retryAsk → the original ask re-runs immediately: RH-1d's verify-on-first-use (success
+// clears driftSuspect → `HEAL ▸ cleared`; failure keeps the suspicion honest).
+function _healRelearnBar(msg, { groundId, recipeId = '', host = '', name = 'that read', retryAsk = '' } = {}) {
+  if (!groundId || !host) return;
+  const line = document.createElement('div');
+  line.style.marginTop = '6px';   // plain informational line inside the message body (no dedicated class — inherits message styling)
+  line.textContent = `⚠ ${host}'s request shape may have changed — this exact call worked before. Do one “${name}” by hand on the site and I'll relearn it.`;
+  (msg.querySelector('.message-content') || msg).appendChild(line);
+  const bar = _orchActionBar(msg);
+  const armBtn = _mkBtn('🛠 Relearn from the site', async () => {
+    let tab = null;
+    try { const tabs = await chrome.tabs.query({ url: `*://${host}/*` }); tab = (tabs || []).find((t) => t && typeof t.id === 'number') || null; } catch { /* */ }
+    if (!tab) { armBtn.textContent = `open ${host} first, then click again`; return; }
+    try { await _orchReq('FOCUS_TAB', { tabId: tab.id }); } catch { /* */ }
+    const armRes = await _orchReq('FORAGE', { groundId, sessionTabId: tab.id });
+    if (!armRes || armRes.success === false || (!armRes.armed && !armRes.banking)) {
+      armBtn.textContent = armRes && armRes.error === 'no-consent' ? 'needs Track consent (Studio → monitoring)' : `couldn’t arm${armRes && armRes.error ? ` — ${armRes.error}` : ''}`;
+      return;
+    }
+    _orchLog(`HEAL ▸ relearn armed ${recipeId || '?'} on ${host} (ground ${groundId})`);
+    line.textContent = `⛏ Armed — the ${host} tab reloaded so I can capture from its next request. Do one “${name}” there by hand (or just open the record), then come back and click Done.`;
+    armBtn.remove();
+    bar.insertBefore(_mkBtn('✓ Done — relearn now', async () => {
+      line.textContent = 'Relearning…';
+      const done = _awaitForageComplete(groundId);            // the heal count rides FORAGE_COMPLETE — listen BEFORE the bank call
+      const bankRes = await _orchReq('FORAGE', { groundId }); // 2nd call → bank + the RH-1c match pass
+      if (!bankRes || bankRes.success === false) { line.textContent = `Couldn’t bank the capture${bankRes && bankRes.error ? ` — ${bankRes.error}` : ''}.`; return; }
+      const fc = await done;
+      bar.remove();
+      let withProps = [];
+      try {
+        const rr = await _orchReq('GET_RIDE_RECIPES', { groundId, origin: host });
+        withProps = ((rr && rr.recipes) || []).filter((r) => r && r.healProposal && Array.isArray(r.healProposal.diff));
+      } catch { /* */ }
+      withProps.sort((a, b) => (a.id === recipeId ? -1 : 0) - (b.id === recipeId ? -1 : 0));   // the failed recipe's card first
+      if (!withProps.length) {
+        line.textContent = `Relearned ${fc && fc.banked ? `${fc.banked} read(s)` : 'nothing new'} — but I couldn’t confidently match your action to “${name}”, so nothing changed (an ambiguous match is never guessed). Try doing exactly one “${name}” while armed.`;
+        return;
+      }
+      line.remove();
+      for (const rec of withProps.slice(0, 3)) {
+        const card = appendMessage({ role: 'assistant', body: '' });
+        _setMessageBody(card, `🩹 **${rec.name || rec.id}** — I matched your action to this broken read. Proposed fix:\n\n\`\`\`\n${rec.healProposal.diff.join('\n')}\n\`\`\``, { markdown: true });
+        _orchFinalize(card);   // persist the diff card first; the (ephemeral) buttons attach after, like the conn card
+        const cbar = _orchActionBar(card);
+        cbar.appendChild(_mkBtn('✓ Apply fix', async () => {
+          const ar = await _orchReq('EDIT_RIDE_RECIPE', { groundId, id: rec.id, op: 'heal' });
+          cbar.remove();
+          if (!ar || ar.success === false) { _setMessageBody(card, `Couldn’t apply — ${(ar && ar.error) || 'unknown'}.`); _orchFinalize(card); return; }
+          if (retryAsk && rec.id === recipeId) {
+            _setMessageBody(card, `✓ Applied the fix to **${rec.name || rec.id}** — re-running your ask to verify…`, { markdown: true });
+            _orchFinalize(card);
+            const input = $('chat-input');
+            if (input) { input.value = retryAsk; sendChatMessage(); }   // RH-1d — the next invoke IS the trial (same gates as typing it)
+          } else {
+            _setMessageBody(card, `✓ Applied the fix to **${rec.name || rec.id}** — the next run verifies it.`, { markdown: true });
+            _orchFinalize(card);
+          }
+        }));
+        cbar.appendChild(_mkBtn('Dismiss', async () => {
+          try { await _orchReq('EDIT_RIDE_RECIPE', { groundId, id: rec.id, op: 'healDismiss' }); } catch { /* */ }
+          cbar.remove();
+          _setMessageBody(card, `Dismissed the proposed fix for **${rec.name || rec.id}** (nothing changed).`, { markdown: true });
+          _orchFinalize(card);
+        }));
+      }
+    }), bar.firstChild);
+  });
+  bar.appendChild(armBtn);
+  bar.appendChild(_mkBtn('Not now', () => { try { line.remove(); } catch { /* */ } bar.remove(); }));
 }
 async function _maybeRenderConnCard() {
   if (_currentConversationId !== OVERVIEW_ID) return;

@@ -16,13 +16,14 @@ import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
-import { CONNECTOR_RECIPES, fillEndpoint } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection; CX-9o — fillEndpoint derives the section-nav pages
+import { CONNECTOR_RECIPES, fillEndpoint, isReadOnlyGql } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection; CX-9o — fillEndpoint derives the section-nav pages; RH-1c — the heal apply re-validates a gql recipe's document is a READ
 import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads, armable as rideArmable, curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI); CX-9r — catalog-armed origins from open tabs
 import { groundVocabIndex } from '../../Core/rideVocab.js';   // CX-9q (v1462) — DOMAIN-MATCH vocab with HOST-level distinctiveness (a dup ground reinforces, never annihilates)
 import { DRIVE_ARTIFACTS, seedFromCatalog as seedDriveFromCatalog, mergeArtifacts as driveMergeArtifacts, seededDriveLegs, buildDriveFragment, buildDriveStrategy } from '../../Core/driveArtifacts.js';   // HL-1 (v2.74.1454) — the BUILT-IN DRIVE catalog (heterogeneous legs: ride answers, drive shows) + hydrate-on-first-use builders
 import { buildLegOverview } from '../../Core/legOverview.js';   // OV-1 (DESIGN_overview.md) — the cross-Ground leg inventory + work queue for the Overview workbench
 import { buildManualRecipe, parseLegSpec } from '../../Core/manualRecipe.js';   // OV-5 — author a ride recipe BY HAND (validate + method-derived safety, lands pending)
-import { recipesFromHarvest } from '../../Core/recipeFromHarvest.js';   // §17 — the crawl-as-generalizer: captures → proto ride-recipes (templated, method-classed, pending)
+import { recipesFromHarvest, healProposalsFromCaptures } from '../../Core/recipeFromHarvest.js';   // §17 — the crawl-as-generalizer: captures → proto ride-recipes (templated, method-classed, pending); RH-1c — fresh captures × drift-suspect records → heal proposals
+import { applyHeal as rideApplyHeal, dismissHeal as rideDismissHeal } from '../../Core/routeHeal.js';   // RH-1c (v2.74.1567) — the heal apply/dismiss transitions (reads only; driftSuspect stays until the RH-1d verify)
 import { applyPolish } from '../../Core/recipePolishPrompt.js';   // §17 — apply an LLM polish (name/does/param-names) onto a proto — the SAFE relabel (never touches method/safety)
 import { recipesFromObservedWrites } from '../../Core/recipeFromObservedWrite.js';   // CX-8 — a demo's captured WRITE requests → proto ride write-recipes (body templated; typed values → params, never banked)
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
@@ -696,8 +697,24 @@ export async function bankHarvested({ readRideRecipes, writeRideRecipes, groundI
     }));
   }
   const merged = rideMergeRecipes(ex, staged);
+  // RH-1c (v2.74.1567, DESIGN_route_heal.md §3.4-5) — the HEAL-MATCH pass: every bank funnel (passive forage, the
+  // §19 crawl, Explore, Discovery) now also pairs the fresh captures against this Ground's DRIFT-SUSPECT records.
+  // An unambiguous match stages a `healProposal` (the five-second diff) ON the record — HITL applies it via
+  // EDIT_RIDE_RECIPE op:heal (chat relearn bar / Studio ride card). Best-effort: never breaks banking. The log
+  // line is body-blind (field NAMES + counts; the diff itself renders panel-side only).
+  let healed = 0;
+  try {
+    const props = healProposalsFromCaptures(Array.isArray(captures) ? captures : [], merged, { now: Date.now() });
+    for (const { recipeId, proposal } of props) {
+      const i = merged.findIndex((r) => r && r.id === recipeId);
+      if (i < 0) continue;
+      merged[i] = { ...merged[i], healProposal: proposal };
+      healed++;
+      Logger.info('ride', `HEAL ▸ proposed ${recipeId} ← capture ×${proposal.samples} score ${proposal.score} (${(proposal.fields || []).join(',')})`);
+    }
+  } catch { /* the heal pass must never break banking */ }
   await writeRideRecipes(groundId, merged);
-  return { banked: staged.length, total: merged.length, recipes: merged, identityPath };
+  return { banked: staged.length, total: merged.length, recipes: merged, identityPath, healed };
 }
 
 /**
@@ -1184,12 +1201,27 @@ export function createSgMessageHandlers(ctx) {
           next = list.filter((r) => r.id !== id);
         } else {
           const r = list[idx];
+          // RH-1c (v2.74.1567) — op:heal APPLIES the staged healProposal (reads only — a GET, or a gql record whose
+          // OWN document re-validates as read-only right here; a write returns not-healable → full §18 re-review).
+          // driftSuspect stays set: the next invoke is the RH-1d trial (tickOk clears on success). op:healDismiss
+          // drops the proposal, nothing else.
+          if (op === 'heal' || op === 'healDismiss') {
+            const done = op === 'heal'
+              ? rideApplyHeal(r, Date.now(), { gqlReadOk: !!(r.gql === true && r.body && isReadOnlyGql(String((r.body && r.body.query) || ''))) })
+              : (() => { const d = rideDismissHeal(r); return d ? { record: d, fields: [] } : null; })();
+            if (!done) { sendResponse({ success: false, error: op === 'heal' ? 'not-healable (no proposal, or a write — a changed write shape needs full re-review)' : 'no proposal to dismiss' }); return; }
+            Logger.info('ride', op === 'heal'
+              ? `HEAL ▸ applied ${id.slice(0, 40)} (${done.fields.join(',')}) — the next run verifies (ground ${groundId})`
+              : `HEAL ▸ dismissed ${id.slice(0, 40)} (ground ${groundId})`);
+            next = list.slice(); next[idx] = done.record;
+          } else {
           const edited = op === 'enable'    ? rideSetEnabled(r, !!payload.value)
                        : op === 'meta'      ? rideEditMeta(r, (payload.value && typeof payload.value === 'object') ? payload.value : {})
                        : op === 'review'    ? rideReview(r, String(payload.value || ''))
                        : op === 'downgrade' ? rideDowngradeSafety(r, String(payload.value || ''))
                        : r;
           next = list.slice(); next[idx] = edited;
+          }
         }
         await ctx.writeRideRecipes(groundId, next);
         _bustRideArmedCache();   // v1446 — arming state changed → the capability-global index refreshes next interpret

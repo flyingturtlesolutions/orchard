@@ -131,6 +131,216 @@ export function templateQuery(queries) {
   return { query: parts.join('&'), params };
 }
 
+// ── RH-0b (v2.74.1565, DESIGN_route_heal.md §2) — bank the captured request-header SHAPE. The tee already strips
+// the credential class at capture; this layer strips AGAIN (defense in depth — the pure bank can't assume every
+// capture came from our tee) and then keeps only what is REPLAYABLE: a header that is present with an IDENTICAL
+// value on every capture of the endpoint group. A varying value is a nonce/trace — replaying one is wrong, and it
+// is NOT a param (unlike a path id, a per-request header has no user-facing meaning to bind). The dynamic-NAME
+// class (request ids, trace/correlation headers) is dropped even when a single capture makes it look static.
+const _CRED_HDR = /^(cookie|set-cookie|authorization|proxy-authorization)$|csrf|xsrf|token|secret|session|api[-_]?key|password|bearer|(^|[-_])auth([-_]|$)/;
+const _MECH_HDR = new Set(['content-length', 'host', 'content-type']);
+const _DYN_HDR = /request[-_]?id|trace|correlation|nonce|idempotency|timestamp|^x-b3|x-amz-date|datadog|sentry|newrelic/;
+
+/** Strip credential + mechanical headers; lowercase names; bound size (12 names, 160-char values). PURE. */
+export function sanitizeCaptureHeaders(h) {
+  if (!h || typeof h !== 'object' || Array.isArray(h)) return null;
+  const out = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(h)) {
+    const lk = String(k).toLowerCase();
+    if (_CRED_HDR.test(lk) || _MECH_HDR.has(lk) || v == null) continue;
+    out[lk] = String(v).slice(0, 160);
+    if (++n >= 12) break;
+  }
+  return out;
+}
+
+/**
+ * The header twin of templateQuery: same-endpoint captures' header sets → the STATIC shape worth banking. PURE.
+ * A header banks only when present with one identical value across EVERY capture of the group (a capture with no
+ * headers at all vetoes — if the app sometimes doesn't send it, it isn't part of the route). Dynamic-name class
+ * always drops. First-seen order; capped at 8 (a routing shape is small — Shopify's is 2).
+ */
+export function templateHeaders(headerSets) {
+  const sets = (Array.isArray(headerSets) ? headerSets : []).map(sanitizeCaptureHeaders);
+  if (!sets.length || sets.some((s) => !s || !Object.keys(s).length)) return {};
+  const out = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(sets[0])) {
+    if (_DYN_HDR.test(k)) continue;
+    if (!sets.every((s) => s[k] === v)) continue;
+    out[k] = v;
+    if (++n >= 8) break;
+  }
+  return out;
+}
+
+// ── RH-1c (v2.74.1567, DESIGN_route_heal.md §3.4-5) — MATCH a fresh capture to a DRIFT-SUSPECT recipe by what did
+// NOT drift, and derive the five-second-readable heal proposal. The tee is body-blind, so matching is URL-shaped:
+// path statics (the resource nouns survive a version-prefix or framing change), templated param count, query keys,
+// and — the gql-over-URL case (Shopify `?operation=`) — the operation identity read from the RECIPE's own body
+// (`operationName`) against the capture's URL. Ambiguous → NO proposal (spec hard line: never guess). READ recipes
+// only ever get proposals; a drifted WRITE goes through full §18 re-review (the §4 hard line) — and a healed
+// gql-read still replays OUR unchanged read document through the isReadOnlyGql belts, so a heal can never turn a
+// read into a write.
+
+const _epPath = (endpoint) => String(endpoint || '').split('?')[0];
+const _epQuery = (endpoint) => { const i = String(endpoint || '').indexOf('?'); return i >= 0 ? String(endpoint).slice(i + 1) : ''; };
+const _pathStatics = (endpoint) => _epPath(endpoint).split('/').filter((s) => s && !s.includes('{'));
+const _pathParams = (endpoint) => (_epPath(endpoint).match(/\{([^}]+)\}/g) || []).map((s) => s.slice(1, -1));
+const _queryKeys = (endpoint) => _epQuery(endpoint).split('&').filter(Boolean).map((p) => p.split('=')[0]);
+const _queryVal = (endpoint, key) => { for (const p of _epQuery(endpoint).split('&')) { const i = p.indexOf('='); if (i >= 0 && p.slice(0, i) === key) return p.slice(i + 1); } return null; };
+
+/**
+ * Does the RECIPE's own path template MATCH the candidate path, used AS A PATTERN? PURE. Same segment count, and
+ * every static recipe segment equals the candidate's (case-insensitive) — a `{param}` slot on either side matches
+ * anything. This is what makes a NON-templating literal (the Shopify `{handle}` store slug — no digits, so a
+ * capture never collapses it) still align with the recipe's param slot: the recipe knows its own shape.
+ */
+export function pathAligns(recipeEndpoint, candEndpoint) {
+  const rs = _epPath(recipeEndpoint).split('/').filter(Boolean);
+  const cs = _epPath(candEndpoint).split('/').filter(Boolean);
+  if (!rs.length || rs.length !== cs.length) return false;
+  return rs.every((seg, i) => seg.includes('{') || cs[i].includes('{') || seg.toLowerCase() === cs[i].toLowerCase());
+}
+
+/**
+ * Score a TEMPLATED candidate shape ({method, endpoint}) against a recipe record. PURE, deterministic integers.
+ * 0 = incompatible (method mismatch / empty paths). Components: recipe-as-pattern path alignment (+4 — the
+ * header/query-drift case where the path itself held), resource noun (+2), shared statics (0..3), templated-
+ * param-count parity (+2), operation identity (+3 — recipe body.operationName / ?operation= vs the candidate's
+ * ?operation=), query-key overlap (+1).
+ */
+export function scoreCandidateShape(cand, recipe) {
+  if (!cand || !recipe) return 0;
+  if (String(cand.method || 'GET').toUpperCase() !== String(recipe.method || 'GET').toUpperCase()) return 0;
+  const cs = _pathStatics(cand.endpoint).map((s) => s.toLowerCase());
+  const rs = _pathStatics(recipe.endpoint).map((s) => s.toLowerCase());
+  if (!cs.length || !rs.length) return 0;
+  let score = 0;
+  if (pathAligns(recipe.endpoint, cand.endpoint)) score += 4;                    // the path held — drift is query/header-side
+  if (cs[cs.length - 1] === rs[rs.length - 1]) score += 2;                       // the resource noun survives drift
+  const shared = rs.filter((s) => cs.includes(s)).length;
+  const denom = Math.max(cs.length, rs.length);
+  score += Math.min(3, Math.round((3 * shared) / denom));
+  if (_pathParams(cand.endpoint).length === _pathParams(recipe.endpoint).length) score += 2;
+  const rOp = (recipe.body && typeof recipe.body === 'object' && recipe.body.operationName) || _queryVal(recipe.endpoint, 'operation');
+  const cOp = _queryVal(cand.endpoint, 'operation');
+  if (rOp && cOp && String(rOp) === String(cOp)) score += 3;
+  const rq = _queryKeys(recipe.endpoint); const cq = _queryKeys(cand.endpoint);
+  if (rq.length && cq.length && rq.filter((k) => cq.includes(k)).length >= Math.ceil(rq.length / 2)) score += 1;
+  return score;
+}
+
+/** Score ONE raw capture against a recipe (solo-templated). PURE. The single-capture face of the group scorer. */
+export function matchCaptureToRecipe(capture, recipe) {
+  if (!capture || !capture.url || isNoiseCapture(capture)) return 0;
+  const { path, query } = parseUrl(capture.url);
+  const tp = templatePath([path]); const tq = templateQuery([query]);
+  return scoreCandidateShape({ method: capture.method, endpoint: tp.endpoint + (tq.query ? `?${tq.query}` : '') }, recipe);
+}
+
+/**
+ * Build the HEALED shape for a matched candidate — CONSERVATIVE by construction. PURE. Returns null when nothing
+ * needs healing or the rebase is unsafe. Path: kept from the RECIPE when statics are identical (the query/header-
+ * drift case); rebased onto the candidate with the recipe's own {param} NAMES (positional) when path-param counts
+ * match (the version-prefix case); otherwise no path heal. Query: the candidate's — it IS the working shape (its
+ * constant keys stay literal, varying keys are already {templated}). Headers: the candidate's static set. Params:
+ * only ADDITIVE (new placeholders get minimal specs; existing curated specs — hints/required/resolve — are never
+ * replaced or removed).
+ */
+export function healedShapeFor(cand, recipe) {
+  if (!cand || !recipe) return null;
+  const rNames = _pathParams(recipe.endpoint); const cNames = _pathParams(cand.endpoint);
+  let path = null;
+  if (pathAligns(recipe.endpoint, cand.endpoint)) path = _epPath(recipe.endpoint);   // path held — keep OUR template verbatim ({handle} et al. stay fillable exactly as before)
+  else if (rNames.length === cNames.length && rNames.length > 0) {
+    let i = 0;
+    path = _epPath(cand.endpoint).replace(/\{[^}]+\}/g, () => `{${rNames[i++]}}`);   // rebase: the drifted skeleton, OUR param names (the /v2-prefix class)
+  } else return null;                                              // param-shape mismatch — an unsafe rebase, never guess
+  const q = _epQuery(cand.endpoint);
+  const endpoint = path + (q ? `?${q}` : '');
+  const requestHeaders = (cand.requestHeaders && typeof cand.requestHeaders === 'object' && Object.keys(cand.requestHeaders).length) ? cand.requestHeaders : null;
+  const endpointChanged = endpoint !== String(recipe.endpoint || '');
+  const headersChanged = !!requestHeaders && JSON.stringify(requestHeaders) !== JSON.stringify(recipe.requestHeaders || null);
+  if (!endpointChanged && !headersChanged) return null;            // identical shape — the drift is elsewhere, nothing to propose
+  // additive params: placeholders NEW to the healed endpoint (not in the recipe's old endpoint, not already
+  // spec'd) get a minimal candidate-typed spec. Pre-existing placeholders ({handle} via urlParam, path ids) keep
+  // whatever filled them before — curated specs are never replaced or removed.
+  const have = new Set((Array.isArray(recipe.params) ? recipe.params : []).map((p) => p && p.name).filter(Boolean));
+  const old = new Set([..._pathParams(recipe.endpoint), ..._queryKeys(recipe.endpoint).filter((k) => _queryVal(recipe.endpoint, k) === `{${k}}`)]);
+  const specs = new Map((Array.isArray(cand.params) ? cand.params : []).map((p) => [p && p.name, p]));
+  const addParams = [...new Set([..._pathParams(endpoint), ..._queryKeys(endpoint).filter((k) => _queryVal(endpoint, k) === `{${k}}`)])]
+    .filter((n) => n && !have.has(n) && !old.has(n))
+    .map((n) => specs.get(n) || { name: n, type: 'string' });
+  return {
+    ...(endpointChanged ? { endpoint } : {}),
+    ...(headersChanged ? { requestHeaders } : {}),
+    ...(addParams.length ? { addParams } : {}),
+  };
+}
+
+/** The five-second-readable DIFF lines for a heal proposal. PURE. Template-level only — never a user value. */
+export function recipeHealDiff(recipe, healed) {
+  const lines = [];
+  if (!recipe || !healed) return lines;
+  if (healed.endpoint) lines.push(`path: ${recipe.endpoint || '(none)'} → ${healed.endpoint}`);
+  if (healed.requestHeaders) {
+    const old = (recipe.requestHeaders && typeof recipe.requestHeaders === 'object') ? recipe.requestHeaders : {};
+    for (const [k, v] of Object.entries(healed.requestHeaders)) if (old[k] !== v) lines.push(`+ header ${k}: ${String(v).slice(0, 40)}`);
+    for (const k of Object.keys(old)) if (!(k in healed.requestHeaders)) lines.push(`− header ${k}`);
+  }
+  if (Array.isArray(healed.addParams) && healed.addParams.length) lines.push(`+ param ${healed.addParams.map((p) => p.name).join(', ')}`);
+  return lines.slice(0, 10);
+}
+
+/**
+ * The RH-1c batch: fresh captures × a Ground's records → heal proposals for its DRIFT-SUSPECT READ recipes. PURE.
+ * Groups + templates the captures (GET/HEAD/POST — a POST group can heal a gql-READ recipe: the healed call still
+ * replays the recipe's own read document through the isReadOnlyGql belts), scores each candidate shape per suspect,
+ * and proposes ONLY an unambiguous winner (min score, strictly above the runner-up). Never proposes for writes.
+ * @returns {Array<{recipeId: string, proposal: {at, endpoint?, requestHeaders?, addParams?, diff, fields, samples, score}}>}
+ */
+export function healProposalsFromCaptures(captures, recipes, { now = 0, minScore = 5 } = {}) {
+  const suspects = (Array.isArray(recipes) ? recipes : []).filter((r) => r && r.driftSuspect === true
+    && (String(r.method || 'GET').toUpperCase() === 'GET' || String(r.method || 'GET').toUpperCase() === 'HEAD' || (r.gql === true && r.write !== true)));
+  if (!suspects.length) return [];
+  const valid = (Array.isArray(captures) ? captures : []).filter((c) => c && c.url && c.method
+    && ['GET', 'HEAD', 'POST'].includes(String(c.method).toUpperCase()) && !isNoiseCapture(c) && !isIdentityCall(c));
+  const groups = new Map();
+  for (const c of valid) {
+    const key = pathKey(c.method, parseUrl(c.url).path);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  const cands = [];
+  for (const [, group] of groups) {
+    const parsed = group.map((c) => parseUrl(c.url));
+    const tp = templatePath(parsed.map((p) => p.path));
+    const tq = templateQuery(parsed.map((p) => p.query));
+    cands.push({
+      method: String(group[0].method).toUpperCase(),
+      endpoint: tp.endpoint + (tq.query ? `?${tq.query}` : ''),
+      params: [...tp.params, ...tq.params],
+      requestHeaders: templateHeaders(group.map((c) => c.h)),
+      samples: group.length,
+    });
+  }
+  const out = [];
+  for (const r of suspects) {
+    const scored = cands.map((c) => ({ c, s: scoreCandidateShape(c, r) })).sort((a, b) => b.s - a.s);
+    const best = scored[0]; const second = scored[1];
+    if (!best || best.s < minScore) continue;
+    if (second && second.s === best.s) continue;                   // a tie is ambiguity — never guess (spec §3.4)
+    const healed = healedShapeFor(best.c, r);
+    if (!healed) continue;
+    const diff = recipeHealDiff(r, healed);
+    if (!diff.length) continue;
+    out.push({ recipeId: r.id, proposal: { at: Number(now), ...healed, diff, fields: Object.keys(healed), samples: best.c.samples, score: best.s } });
+  }
+  return out;
+}
+
 /** Is this capture the app's IDENTITY probe (the `{me}` source)? PURE. Excluded from recipes; surfaced separately. */
 export function isIdentityCall(capture) {
   const path = parseUrl(capture && capture.url).path;
@@ -164,6 +374,7 @@ export function recipesFromHarvest(captures, { appHost = '' } = {}) {
     const parsed = group.map((c) => parseUrl(c.url));
     const tp = templatePath(parsed.map((p) => p.path));
     const tq = templateQuery(parsed.map((p) => p.query));
+    const th = templateHeaders(group.map((c) => c.h));   // RH-0b — the STATIC app-set header shape rides the recipe (capture fidelity beats healing)
     const endpoint = tp.endpoint + (tq.query ? `?${tq.query}` : '');
     const destructive = method === 'DELETE' || /\/(merge|mark_as_spam|bulk_destroy|destroy_many)/i.test(tp.endpoint);
     // §20 — the captured API HOST (the recipe's `origin`). parseUrl strips it from the endpoint (path-only), so carry it
@@ -186,6 +397,7 @@ export function recipesFromHarvest(captures, { appHost = '' } = {}) {
       enabled: true,
       safetyClass: safetyClassForMethod(method, { destructive }),
       samples: group.length,   // how many instances the template diffed (confidence signal)
+      ...(Object.keys(th).length ? { requestHeaders: th } : {}),   // RH-0b — absent when the app set none (records stay byte-identical); recipeToLeg hop 3 already reads it (CX-10)
     });
   }
   return { recipes, identityPath };
