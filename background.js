@@ -43,7 +43,8 @@ import { createWorkflowDebugHandlers } from './background/handlers/workflowDebug
 import { createConnectorHandlers } from './background/handlers/connector.js';  // v2.74.1151 (CX-3) — the connector domain (session-ride)
 import { createCanvasHandlers } from './background/handlers/canvas.js';  // v2.74.1205 (CA-4) — the canvas domain (RENDER_CANVAS → the presentation tab)
 import { createFleetHandlers, registerFleetAlarmListener } from './background/handlers/fleet.js';  // FL-6 (v2.74.1355) — the fleet clock trigger (scheduled headless sweeps)
-import { createConnectionsHandlers, registerConnHeartbeat } from './background/handlers/connections.js';  // CP-1/2 (v2.74.1506) — the connections auth-presence registry + open-tab heartbeat
+import { createConnectionsHandlers, registerConnTransitionListener, readConnRegistry, reportAuthSignal } from './background/handlers/connections.js';  // CP-1/2 (v2.74.1506) — the connections auth-presence registry; VT (v2.74.1570) — the heartbeat moved into the vitals scheduler; the transition listener feeds vitals incidents + the sign-in catch-up
+import { initVitals, onConnTransition, createVitalsHandlers } from './background/handlers/vitals.js';   // VT-0..4 (v2.74.1569-1572, DESIGN_vitals.md) — the outcome funnel + scheduler + daily visit + incident store
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
@@ -419,8 +420,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // chrome.alarms persist across SW restarts natively, so scheduling once is durable; the listener re-registers
 // on every SW boot (this module eval). _invokeSgHandler is hoisted; the map is initialized long before any fire.
 registerFleetAlarmListener({ invokeSgHandler: _invokeSgHandler });
-// CP-2 (v2.74.1506) — the connections heartbeat: one slow alarm; probes ONLY open-tab, probe-bearing origins.
-registerConnHeartbeat({ invokeSgHandler: _invokeSgHandler });
+// VT-0..4 (v2.74.1569-1572, DESIGN_vitals.md §4) — Ground Vitals: the one `vitals:tick` scanner (absorbs the
+// CP-2 `conn:heartbeat` — initVitals clears the old registration), the launch-if-due check, the daily ephemeral
+// visit, and the outcome funnel's I/O (the executors call reportLegOutcome; the stores arrive here). The
+// connections transition listener feeds vitals its presence incidents + the signed-out→fresh catch-up (VT-4).
+initVitals({ invokeSgHandler: _invokeSgHandler, readRideRecipes: _readRideRecipes, writeRideRecipes: _writeRideRecipes, readConnRegistry, reportAuthSignal });
+registerConnTransitionListener(onConnTransition);
 
 
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
@@ -1754,6 +1759,7 @@ const _sgMessageHandlers = {
   }),
   ...createFleetHandlers({ invokeSgHandler: _invokeSgHandler }),   // FL-6 (v1355) — FLEET_SCHEDULE (set/off/status); the alarm listener registers below
   ...createConnectionsHandlers({ invokeSgHandler: _invokeSgHandler }),   // CP-1/2 (v1506) — CONN_LIST / CONN_CHECK / CONN_FOCUS (the auth-presence registry)
+  ...createVitalsHandlers(),   // VT-2 (v2.74.1571) — VITALS_STATUS / VITALS_BADGE / VITALS_CHECK_NOW (the Admin desk's read surface)
 
   ...createDiscoveryHandlers({
     readSiteMap          : _readSiteMap,

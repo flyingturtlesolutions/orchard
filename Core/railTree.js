@@ -11,7 +11,7 @@
 // chat or — in dev mode — a dev conversation, which keeps its own badge/preview in the renderer). An orphan
 // sub-task (its parent isn't present) renders PLAIN so it's never lost.
 
-import { OVERVIEW_ID } from './appDef.js';
+import { OVERVIEW_ID, ADMIN_ID } from './appDef.js';
 
 const byUpdatedDesc = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
 // AP-1 (v2.74.1211) — PINNED conversations sort to the top (a configured app pins itself on setup-complete), then recency.
@@ -64,7 +64,7 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
   // Top level = everything that isn't a sub-task of a PRESENT app (orphans fall through to plain → never lost).
   // v2.74.1234 — the Overview is a real persistent conversation now, but it's rendered as the reserved pin (below),
   // so exclude it from the regular rows or it'd appear twice (pin + a plain row).
-  const top = visible.filter((c) => c.id !== OVERVIEW_ID && (!isSub(c) || !appIds.has(c.parentId))).sort(byPinnedThenUpdated);
+  const top = visible.filter((c) => c.id !== OVERVIEW_ID && c.id !== ADMIN_ID && (!isSub(c) || !appIds.has(c.parentId))).sort(byPinnedThenUpdated);
 
   const rows = [];
 
@@ -77,6 +77,18 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
     hasChildren: false, expanded: false, active: activeId == null || activeId === OVERVIEW_ID,
     count: 0, kind: 'agent',
     summary: (overviewConv && overviewConv.summary) ? overviewConv.summary : null,
+  });
+
+  // 1b) Admin desk — the reserved vitals fixture (VT-2, v2.74.1573, DESIGN_vitals.md §8): PERMANENT in the Rail
+  // whether or not its conversation exists yet (the click get-or-creates it; "silence when green" governs its
+  // CONTENT, never its presence — the live miss: with zero incidents there was no chip and therefore no door).
+  // Excluded from the regular rows above so it never renders twice.
+  const adminConv = visible.find((c) => c.id === ADMIN_ID) || null;
+  rows.push({
+    id: ADMIN_ID, role: 'admin', title: 'Admin desk', icon: 'vitals', depth: 0,
+    hasChildren: false, expanded: false, active: activeId === ADMIN_ID,
+    count: 0, kind: 'agent',
+    summary: (adminConv && adminConv.summary) ? adminConv.summary : null,
   });
 
   // 2) Apps + plain conversations, by recency. An expanded app is immediately followed by its sub-task rows.

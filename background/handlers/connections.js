@@ -12,6 +12,12 @@
 import { Logger } from '../../Core/Logger.js';
 import { REG_KEY, authSignal, applySignal, heartbeatTargets } from '../../Core/connectionPresence.js';
 
+// VT-4 (v2.74.1572, DESIGN_vitals.md §3.2) — SW-side transition subscribers (the CONN_STATUS_CHANGED broadcast
+// does not reach the SW's own listeners): vitals registers here at wiring time (background.js) to open/close
+// presence incidents and fire the signed-out→fresh catch-up. Best-effort; a listener can never break the write.
+const _transitionListeners = [];
+export function registerConnTransitionListener(fn) { if (typeof fn === 'function') _transitionListeners.push(fn); }
+
 // ── the registry store (chained read-modify-write; single writer) ─────────────────────────────────────────────────
 let _chain = Promise.resolve();
 async function _read() {
@@ -38,6 +44,7 @@ export function reportAuthSignal(raw) {
     if (transition) {
       try { Logger.info('conn', `CONN ▸ ${transition.origin} ${transition.from} → ${transition.to}${transition.cause ? ` (${transition.cause})` : ''} [${transition.source}]`); } catch { /* */ }
       try { chrome.runtime.sendMessage({ type: 'CONN_STATUS_CHANGED', origin: transition.origin, from: transition.from, to: transition.to, cause: transition.cause || null }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
+      for (const fn of _transitionListeners) { try { fn(transition); } catch { /* VT-4 — a subscriber never breaks the write */ } }
     }
     return transition;
   }).catch(() => null);
@@ -103,20 +110,6 @@ export function createConnectionsHandlers({ invokeSgHandler } = {}) {
   };
 }
 
-// ── CP-2 — the heartbeat: one slow alarm; probes ONLY open-tab, probe-bearing, stale-enough origins ───────────────
-const ALARM = 'conn:heartbeat';
-export function registerConnHeartbeat({ invokeSgHandler } = {}) {
-  try { chrome.alarms.create(ALARM, { periodInMinutes: 20 }); } catch { /* */ }
-  try {
-    chrome.alarms.onAlarm.addListener((alarm) => {
-      if (!alarm || alarm.name !== ALARM) return;
-      (async () => {
-        const [registry, open] = await Promise.all([_read(), _openOrigins()]);
-        const targets = heartbeatTargets(registry, open, { now: Date.now(), minAgeMs: 10 * 60 * 1000, cap: 4 });
-        if (!targets.length) return;                      // nothing probeable → a silent tick (no logs, no traffic)
-        const probed = await _probeTargets(invokeSgHandler, targets);
-        try { Logger.info('conn', `CONN ▸ heartbeat probed ${probed}/${targets.length} open-tab origin(s)`); } catch { /* */ }
-      })().catch(() => { /* the heartbeat must never throw out of the alarm */ });
-    });
-  } catch { /* */ }
-}
+// CP-2's `conn:heartbeat` alarm is RETIRED (VT-1, v2.74.1570, DESIGN_vitals.md §4) — the vitals scheduler
+// (`vitals:tick`, background/handlers/vitals.js) absorbed it: same open-tab + staleness-gated probing through
+// CONN_PROBE_ORIGIN, now under the one clock owner (initVitals clears the old alarm registration on boot).

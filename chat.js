@@ -56,7 +56,7 @@ import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from
-import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
+import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId, galleryUserDefs } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance); DK-6b — galleryUserDefs ("Your desks" = customs only)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
@@ -119,6 +119,38 @@ async function _ensureOverviewConversation() {
   if (!conv) conv = await ConversationStore.create({ id: OVERVIEW_ID, title: 'Front desk' });   // Front-desk adopt (v2.74.1507) — display noun; OVERVIEW_ID stays the internal join key
   else if (conv.title === 'Overview') { try { await ConversationStore.patchMeta(OVERVIEW_ID, { title: 'Front desk' }); conv = { ...conv, title: 'Front desk' }; } catch { /* heal is best-effort */ } }   // one-time heal of existing installs
   return conv;
+}
+
+// VT-2 (v2.74.1571, DESIGN_vitals.md §8) — the ADMIN DESK: the reserved Orchard-operator conversation (vitals
+// incidents + the moved Connections/vitals card). Get-or-create like the Front desk; re-creatable if deleted.
+// v2.74.1574 — the desk carries its ROLE as a CV-2 persona seed (live: "what can you do?" in the desk answered
+// with the ACTIVE TAB's palette — the desk didn't know it was the operator console). Healed onto existing
+// installs via patchMeta (the desk may already exist seedless).
+const _ADMIN_SEED = 'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities.';
+async function _ensureAdminConversation() {
+  let conv = null;
+  try { conv = await ConversationStore.load(ADMIN_ID); } catch { /* */ }
+  if (!conv) conv = await ConversationStore.create({ id: ADMIN_ID, title: 'Admin desk', seed: _ADMIN_SEED });
+  else if (!conv.seed) { try { await ConversationStore.patchMeta(ADMIN_ID, { seed: _ADMIN_SEED }); conv = { ...conv, seed: _ADMIN_SEED }; } catch { /* heal is best-effort */ } }
+  return conv;
+}
+
+// Open the Admin desk programmatically (the Rail pin / Front-desk chip / per-desk pointers). Mirrors the
+// Front-desk pin's open shape (v2.74.1515): a NON-EMPTY conversation rehydrates; an EMPTY one pins the current
+// pointer without rehydrating (rehydrate assumes messages) — _maybeRenderAdminDesk then draws the vitals card.
+async function _openAdminDesk() {
+  if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
+  const conv = await _ensureAdminConversation();
+  if ((conv.messages || []).length) {
+    if (conv.id !== _currentConversationId) { await _rehydrateConversation(conv); await _resumeRunningInvocations(); }
+  } else if (conv.id !== _currentConversationId) {
+    _clearCurrentConversation();          // agent defaults…
+    _currentConversationId = conv.id;     // …pinned to the Admin thread so the cards (and any chat) append to it
+    _currentConversationSeed = conv.seed || _ADMIN_SEED;   // v2.74.1574 — the operator persona survives the clear (the empty-open path)
+    _resetConversation();
+  }
+  void _maybeRenderAdminDesk();
+  try { await _renderRailList(); } catch { /* */ }
 }
 
 async function _ensureConversation() {
@@ -678,6 +710,7 @@ async function _renderRailList() {
 
   for (const row of rows) {
     if (row.role === 'overview') { container.appendChild(_historyPinRow(row)); continue; }
+    if (row.role === 'admin') { container.appendChild(_historyAdminRow(row)); continue; }   // VT-2 (v2.74.1573) — the reserved vitals fixture
     if (row.role === 'new-app') { container.appendChild(_historyNewAppRow()); continue; }
     const conv = byId.get(row.id);
     if (conv) container.appendChild(_historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0));
@@ -763,6 +796,28 @@ function _historyPinRow(row) {
     _closeRail();
   });
   _wireRowKeyboard(el, () => el.click(), `Home — ${row.title}`);   // v1343 (a11y)
+  return el;
+}
+
+// VT-2 (v2.74.1573, DESIGN_vitals.md §8) — the ADMIN DESK pin: the reserved vitals fixture, always present in
+// the Rail ("silence when green" governs the desk's CONTENT, never its presence — the live miss: with zero
+// incidents there was no chip and therefore no door to the desk at all). The open-incident badge loads async
+// and stays hidden when green; click = get-or-create + open (the row never depends on the conversation existing).
+function _historyAdminRow(row) {
+  const el = document.createElement('div');
+  el.className = `rail-item rail-overview${row.active ? ' active' : ''}`;   // reuse the reserved-pin styling
+  const summaryLine = row.summary ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>` : '';
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">🩺</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}`;
+  void (async () => {   // the attention badge — one cheap storage read; green = nothing
+    try {
+      const r = await _orchReq('VITALS_BADGE', {});
+      const n = (r && r.success !== false && Number(r.open)) || 0;
+      const b = el.querySelector('[data-vt-badge]');
+      if (b && n > 0) { b.textContent = ` ⚠ ${n}`; b.hidden = false; }
+    } catch { /* */ }
+  })();
+  el.addEventListener('click', () => { _closeRail(); void _openAdminDesk(); });
+  _wireRowKeyboard(el, () => el.click(), 'Admin desk — Orchard health');   // a11y (v1343 pattern)
   return el;
 }
 
@@ -10074,9 +10129,11 @@ async function _rehydrateConversation(conv) {
   // DK-8 (v2.74.1491) — opening a desk fires its DUE routine (the v1 fire model: the alarm marked due in the SW;
   // the ask runs here where the full pipeline lives). Non-blocking; a non-desk conversation no-ops inside.
   void _maybeFireDueRoutine();
-  // CP-3 (v2.74.1506) — the Overview's standing Connections card + a desk's signed-out dependency warning.
-  void _maybeRenderConnCard();
-  void _maybeWarnDeskConnections();
+  // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — vitals authority lives in the ADMIN DESK: it renders the full
+  // vitals card + incident cards; the Front desk shows at most ONE attention chip; other desks a pointer.
+  void _maybeRenderConnCard();        // Front desk → the attention CHIP (the card moved to the Admin desk)
+  void _maybeRenderAdminDesk();       // Admin desk → the vitals card + open-incident cards
+  void _maybeWarnDeskConnections();   // any other desk → a dependency POINTER (no duplicate report surface)
 }
 
 // ── CP-3/4 (v2.74.1506) — connection presence in the panel ─────────────────────────────────────────────────────────
@@ -10179,32 +10236,92 @@ function _healRelearnBar(msg, { groundId, recipeId = '', host = '', name = 'that
   bar.appendChild(armBtn);
   bar.appendChild(_mkBtn('Not now', () => { try { line.remove(); } catch { /* */ } bar.remove(); }));
 }
+// VT-2 (v2.74.1571) — the Front desk's Connections CARD became a one-line attention CHIP (the card itself moved
+// into the Admin desk — authority MOVES, never copies; spec §8). Silence when green: zero open incidents → no
+// chip at all (an existing one is removed). TRANSIENT — status, not transcript history.
 async function _maybeRenderConnCard() {
   if (_currentConversationId !== OVERVIEW_ID) return;
+  // one-time heal of existing installs: the OLD persisted Connections card would otherwise linger as a stale,
+  // never-updating report — upsert it into a tombstone pointer (persisted, so the heal sticks).
+  try {
+    const old = document.querySelector('#messages .message[data-message-id="conn_status"]');
+    if (old && !/moved to the Admin desk/.test(old.textContent || '')) {
+      _setMessageBody(old, 'Connections status moved to the Admin desk.');
+      try { old.querySelectorAll('.orch-actions').forEach((b) => b.remove()); } catch { /* */ }
+      _orchFinalize(old);
+    }
+  } catch { /* best-effort */ }
   let r = null;
-  try { r = await _orchReq('CONN_LIST', {}); } catch { return; }
-  if (!r || r.success === false) return;
-  const body = renderConnectionsCard(r.registry || {}, { now: r.now || Date.now() });
-  if (!body) return;   // nothing connected yet → no card
-  // v2.74.1515 — the empty Front desk shows its HOME (messages pane hidden); a real card ENTERS the thread so it's
-  // visible (once it persists, the conversation is non-empty and the rehydrate path owns rendering from then on).
+  try { r = await _orchReq('VITALS_BADGE', {}); } catch { return; }
+  const open = (r && r.success !== false && Number(r.open)) || 0;
+  const existing = document.querySelector('#messages .message[data-vt-chip]');
+  if (!open) { try { if (existing) existing.remove(); } catch { /* */ } return; }
+  const body = `⚠ ${open} thing${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention (sign-ins / drifted reads) — see the Admin desk.`;
+  if (existing) { _setMessageBody(existing, body); return; }
   if ($('messages') && $('messages').classList.contains('hidden')) _enterConversation();
-  let msg = document.querySelector('#messages .message[data-message-id="conn_status"]');
-  if (msg) _setMessageBody(msg, body);
-  else { msg = appendMessage({ role: 'assistant', body, id: 'msg-conn_status' }); }
-  _orchFinalize(msg);   // persists the card (stable id → upsert; reopening shows the last-known state instantly)
-  try { msg.querySelectorAll('.orch-actions').forEach((b) => b.remove()); } catch { /* */ }   // re-render replaces the bar (no stacking)
-  const attn = attentionOrigins(r.registry || {}, Object.keys(r.registry || {}));
+  const msg = appendMessage({ role: 'assistant', body });
+  try { delete msg.dataset.messageId; } catch { /* */ }   // ephemeral — the incident store is the durable record
+  msg.dataset.vtChip = '1';
   const bar = _orchActionBar(msg);
-  for (const a of attn.slice(0, 4)) bar.appendChild(_mkBtn(`Sign in ${a.origin}`, async () => { try { await _orchReq('CONN_FOCUS', { origin: a.origin }); } catch { /* */ } }));
+  bar.appendChild(_mkBtn('Open Admin desk', () => { void _openAdminDesk(); }));
+}
+
+// VT-2 (v2.74.1571, DESIGN_vitals.md §8) — the ADMIN DESK render: the vitals card (presence rows + per-ground
+// shape rollup; persisted upsert like the old conn card) + one card per OPEN incident (transient upserts — the
+// incident STORE is the durable record; closed incidents are history, not attention). Incident heal bars reuse
+// the existing point-of-need bars verbatim: sign-in (presence) and the RH-1b relearn bar (drift).
+async function _maybeRenderAdminDesk() {
+  if (_currentConversationId !== ADMIN_ID) return;
+  let r = null;
+  try { r = await _orchReq('VITALS_STATUS', {}); } catch { return; }
+  if (!r || r.success === false) return;
+  if ($('messages') && $('messages').classList.contains('hidden')) _enterConversation();
+  const now = r.now || Date.now();
+  const presence = renderConnectionsCard(r.registry || {}, { now }) || 'No connected apps yet — connect a session-ride app and its health shows here.';
+  const gl = (r.grounds || []).map((g) => {
+    // v2.74.1574 — "never" read as alarming next to "shape ok" (live paste): lastOkAt only accrues from runs on
+    // this build, so a fresh install honestly has no stamps yet — say that, not "never".
+    const age = g.lastOkAt ? `last ok ${Math.max(1, Math.round((now - g.lastOkAt) / 3600e3))}h ago` : 'no runs yet';
+    const drift = g.driftSuspects ? ` · ⚠ ${g.driftSuspects} drift-suspect${g.proposals ? ` (${g.proposals} fix proposed)` : ''}` : ' · shape ok';
+    return `• ${g.host} — ${g.armed} read${g.armed === 1 ? '' : 's'}, ${age}${drift}`;
+  }).join('\n');
+  const body = `🩺 **Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}`;
+  let msg = document.querySelector('#messages .message[data-message-id="vitals_card"]');
+  if (msg) _setMessageBody(msg, body, { markdown: true });
+  else msg = appendMessage({ role: 'assistant', body, id: 'msg-vitals_card' });
+  _orchFinalize(msg);   // persists the card (stable id → upsert; reopening shows the last-known state instantly)
+  try { msg.querySelectorAll('.orch-actions').forEach((b) => b.remove()); } catch { /* */ }
+  const bar = _orchActionBar(msg);
+  for (const a of attentionOrigins(r.registry || {}, Object.keys(r.registry || {})).slice(0, 4)) {
+    bar.appendChild(_mkBtn(`Sign in ${a.origin}`, async () => { try { await _orchReq('CONN_FOCUS', { origin: a.origin }); } catch { /* */ } }));
+  }
   bar.appendChild(_mkBtn('Check now', async () => {
-    _setMessageBody(msg, `${body}\n\nChecking…`);
-    try { await _orchReq('CONN_CHECK', {}); } catch { /* */ }
-    void _maybeRenderConnCard();   // re-render from the refreshed registry
+    _setMessageBody(msg, `${body}\n\nChecking… (probing sessions + running due canaries — this can take a minute)`, { markdown: true });
+    try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
+    void _maybeRenderAdminDesk();
   }));
+  // open incidents → cards (transient upserts; SILENCE WHEN GREEN: none → nothing at all)
+  const open = (r.incidents || []).filter((x) => x && x.status === 'open').sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
+  for (const inc of open.slice(0, 8)) {
+    let card = document.querySelector(`#messages .message[data-vt-incident="${inc.id}"]`);
+    const tail = (inc.evidence || []).slice(-3).map((e) => `· ${new Date(e.at).toLocaleString()} — ${e.line}`).join('\n');
+    const cbody = `${inc.cls === 'presence' ? '🔌' : '🩹'} **${inc.title}**\nopen since ${new Date(inc.openedAt).toLocaleString()}${tail ? `\n${tail}` : ''}`;
+    if (card) { _setMessageBody(card, cbody, { markdown: true }); continue; }   // keep its existing bar
+    card = appendMessage({ role: 'assistant', body: '' });
+    try { delete card.dataset.messageId; } catch { /* */ }   // ephemeral — re-rendered from the store on every open
+    card.dataset.vtIncident = inc.id;
+    _setMessageBody(card, cbody, { markdown: true });
+    if (inc.cls === 'presence' && inc.origin) _connSignInBar(card, [inc.origin]);
+    else if (inc.cls === 'drift' && inc.groundId) _healRelearnBar(card, { groundId: inc.groundId, recipeId: inc.recipeId || '', host: inc.origin || '', name: inc.name || 'that read' });
+  }
+  // stale incident cards (closed since the last render) disappear on the next re-render pass
+  try {
+    const openIds = new Set(open.map((x) => x.id));
+    document.querySelectorAll('#messages .message[data-vt-incident]').forEach((el) => { if (!openIds.has(el.dataset.vtIncident)) el.remove(); });
+  } catch { /* */ }
 }
 async function _maybeWarnDeskConnections() {
-  if (!_currentConversationId || _currentConversationId === OVERVIEW_ID) return;
+  if (!_currentConversationId || _currentConversationId === OVERVIEW_ID || _currentConversationId === ADMIN_ID) return;
   const conns = _boundConnections();
   const origins = (Array.isArray(conns) ? conns : []).map((c) => c && (c.origin || c.label)).filter(Boolean);
   if (!origins.length) return;
@@ -10213,23 +10330,28 @@ async function _maybeWarnDeskConnections() {
   if (!r || r.success === false) return;
   const attn = attentionOrigins(r.registry || {}, origins);
   if (!attn.length) return;
-  // TRANSIENT (never finalized → never persisted): a status nudge, not transcript history.
-  const m = appendMessage({ role: 'assistant', body: `⚠ ${attn.map((a) => `${a.origin} looks ${a.status === 'wrong-account' ? 'signed in as the wrong account' : 'signed out'}${a.cause ? ` (${a.cause})` : ''}`).join('; ')} — this desk's rides will fail until you sign in.` });
-  _connSignInBar(m, attn.map((a) => a.origin));
+  // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — desks get AT MOST A POINTER (the CP-3 duplication fix): one line
+  // scoped to THIS desk's own dependencies, linking to the Admin desk (the single vitals authority). TRANSIENT
+  // (never finalized → never persisted): a status nudge, not transcript history.
+  const m = appendMessage({ role: 'assistant', body: `⚠ ${attn.map((a) => `${a.origin} looks ${a.status === 'wrong-account' ? 'signed in as the wrong account' : 'signed out'}`).join('; ')} — this desk's rides will fail until you sign in. See the Admin desk.` });
+  const bar = _orchActionBar(m);
+  bar.appendChild(_mkBtn('Open Admin desk', () => { void _openAdminDesk(); }));
 }
-// CP-4 — live transitions: the SW broadcasts CONN_STATUS_CHANGED on a REAL change (never heartbeat ticks). The open
-// panel refreshes the Overview card; if the Overview is the current conversation, the transition gets its own line.
+// CP-4 / VT-2 (v2.74.1571) — live transitions: the SW broadcasts CONN_STATUS_CHANGED on a REAL change (never
+// heartbeat ticks). The transition LINE now lands in the ADMIN DESK (the vitals authority); the Front desk just
+// refreshes its chip. VITALS_CHANGED (incident open/close) refreshes whichever of the two surfaces is current.
 try {
   chrome.runtime.onMessage.addListener((m) => {
-    if (!m || m.type !== 'CONN_STATUS_CHANGED') return;
-    if (_currentConversationId === OVERVIEW_ID) {
+    if (!m || (m.type !== 'CONN_STATUS_CHANGED' && m.type !== 'VITALS_CHANGED')) return;
+    if (m.type === 'CONN_STATUS_CHANGED' && _currentConversationId === ADMIN_ID) {
       const line = (m.to === 'fresh')
         ? `● ${m.origin} is signed in again.`
         : `✖ ${m.origin} ${m.to === 'wrong-account' ? 'is signed in as the wrong account' : 'signed out'}${m.cause ? ` (${m.cause})` : ''}.`;
       const note = appendMessage({ role: 'assistant', body: line });
       if (m.to !== 'fresh') _connSignInBar(note, [m.origin]);
-      void _maybeRenderConnCard();
     }
+    if (_currentConversationId === ADMIN_ID) void _maybeRenderAdminDesk();
+    else if (_currentConversationId === OVERVIEW_ID) void _maybeRenderConnCard();
   });
 } catch { /* */ }
 

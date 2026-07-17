@@ -16,7 +16,7 @@
 import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql } from '../../Core/connectorRecipes.js';
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
-import { isRouteMiss, tickOk, tickRouteMiss } from '../../Core/routeHeal.js';   // RH-1a (v2.74.1566) — DETECT: route-miss classification + the drift-suspect state machine (DESIGN_route_heal.md §3.1)
+import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
 import { BROKER_CATALOG } from '../../Core/brokerCatalog.js';   // v1342 — UNLINK clears this provider's liveTools cache entries
 import { pkcePair, authorizeUrl, parseAuthRedirect } from '../../Core/oauthLink.js';   // MP-3 — the pure client half of the link dance (§5.2 pinned contract)
@@ -24,7 +24,7 @@ import { providerScopes } from '../../Core/mcpServers.js';                      
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
 import { armRideAuthCapture, markEngineBusy } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js); FL-1c — SHOW_SOURCES busy-marks its driven navigation (Invariant #2)
 import { reportAuthSignal } from './connections.js';   // CP-1 (v2.74.1506) — every auth outcome feeds the connections registry (one write door)
-import { assessLiveness, rideOutcomeSignal } from '../../Core/connectionPresence.js';   // CP-1 — the json-liveness probe verdict + ride-outcome→signal classifier
+import { assessLiveness } from '../../Core/connectionPresence.js';   // CP-1 — the json-liveness probe verdict (the ride-outcome→signal classifier moved into the VT-0 funnel, Core/vitals.js)
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
 const IDLE_CLOSE_MS = 8000;                 // close an Orchard-opened tab this long after its last ride (burst-reuse window)
@@ -323,32 +323,11 @@ async function _writeLiveTools(map) {
 }
 
 export function createConnectorHandlers({ ensureContentScript, readRideRecipes, writeRideRecipes, cloudInvokeConnector, cloudLinkConnector, cloudUnlinkConnector, cloudListConnectorTools, cloudHasSession } = {}) {
-  // RH-1a (v2.74.1566, DESIGN_route_heal.md §3.1) — the DETECT tick, called fire-and-forget after every ride
-  // outcome that says something about the ROUTE: success stamps `lastOkAt` (throttled — Core/routeHeal.js) and
-  // ratchet-clears any drift state; a route-miss-class failure (404/405/410, no structured body) on a PROVEN
-  // recipe counts toward `driftSuspect` (N=2 consecutive → the RH-1b arm proposal's trigger). Auth/param/5xx
-  // failures are no evidence either way and never reach this. Best-effort telemetry: a read-modify-write over
-  // the chained store (writes serialize per ground; a lost race costs one tick, never data) that must never
-  // delay or break the call it observes.
-  // Returns the post-tick drift state (RH-1b's trigger — the failure response carries it so the panel can render
-  // the consent-shaped relearn proposal), or null when the outcome was no evidence / nothing persisted.
-  async function _healTick({ groundId, recipeId, ok, status = null, error = '', jsonBody = false, origin = '' } = {}) {
-    try {
-      if (!groundId || !recipeId || typeof readRideRecipes !== 'function' || typeof writeRideRecipes !== 'function') return null;
-      if (!ok && !isRouteMiss({ status, error, jsonBody })) return null;   // cheap pre-gate: skip the storage read for non-evidence failures
-      const list = await readRideRecipes(groundId);
-      const i = Array.isArray(list) ? list.findIndex((r) => r && r.id === recipeId) : -1;
-      if (i < 0) return null;
-      const t = ok ? tickOk(list[i], Date.now()) : tickRouteMiss(list[i], Date.now());
-      if (!t) return null;
-      const next = list.slice(); next[i] = t.record;
-      await writeRideRecipes(groundId, next);
-      if (t.becameSuspect) Logger.info('ride', `HEAL ▸ suspect ${recipeId} (${origin} ${status || error || '?'} ×${t.streak}) — the request shape may have changed`);
-      else if (t.cleared) Logger.info('ride', `HEAL ▸ cleared ${recipeId} (${origin} verified ok)`);
-      return { suspect: t.record.driftSuspect === true, becameSuspect: !!t.becameSuspect };
-    } catch { /* healing telemetry must never break the call it observes */ }
-    return null;
-  }
+  // VT-0 (v2.74.1569) — the v1566 `_healTick` moved INTO the vitals funnel (background/handlers/vitals.js):
+  // every ride outcome makes ONE `reportLegOutcome` call; the funnel classifies presence FIRST (feeding the
+  // connections registry, probe-spec self-heal riding along), gates drift evidence on the registry verdict
+  // (the 404-on-anonymous false-drift fix), applies the routeHeal ticks, and records incidents. writeRideRecipes
+  // stays in this ctx for the vitals wiring (background.js passes the same stores to initVitals).
   // v2.74.1340 (review A) — `confirmed` rides through to SESSION_FETCH so the CONTENT-SCRIPT boundary can hold its
   // own fail-closed write belt (second belt): only a caller that already passed the HITL gate hands it a write.
   const fetchVia = (tabId, url, method, body, confirmed = false, contentType = '', extra = null) =>
@@ -874,16 +853,19 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               : (_v == null ? 'empty' : typeof _v);
             Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${reply && reply.success ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}`);
           } catch { /* observability must never break the call */ }
-          // RH-1a — the DETECT tick. jsonBody: the content-script marks a failed body's JSON-ness (`json`); a
-          // rewritten failure (graphql-error / op-hash-stale) carries no http-NNN error → never a miss. Success
-          // ticks fire-and-forget (pure latency otherwise); a FAILURE awaits the tick so the response can carry
-          // the drift state — RH-1b: the panel renders the "do one by hand and I'll relearn it" bar on it.
+          // VT-0 (v2.74.1569) — the ONE outcome-funnel call (presence → drift, in order; DESIGN_vitals.md §4).
+          // jsonBody: the content-script marks a failed body's JSON-ness (`json`); a rewritten failure
+          // (graphql-error / op-hash-stale) carries no http-NNN error → never route-miss evidence. Success is
+          // fire-and-forget (pure latency otherwise); a FAILURE awaits the funnel so the response can carry the
+          // drift state — RH-1b: the panel renders the "do one by hand and I'll relearn it" bar on it.
+          const _evtBase = { transport: 'ride', origin, groundId: (payload && payload.groundId) || null, recipeId: (payload && payload.recipeId) || null,
+            csrfInvolved: !!(payload && (payload.gql || payload.csrf)), probePath: (payload && payload.identityProbe) || null, probeAccept: (payload && payload.probeAccept) || null, probeHeaders: (payload && payload.requestHeaders) || null };
           if (reply && reply.success) {
-            try { void _healTick({ groundId: payload && payload.groundId, recipeId: payload && payload.recipeId, ok: true, origin }); } catch { /* */ }
+            try { void reportLegOutcome({ ..._evtBase, ok: true }); } catch { /* */ }
             sendResponse({ ...reply, origin, urlArgs: _urlArgs });
           } else {
             let _heal = null;
-            try { _heal = await _healTick({ groundId: payload && payload.groundId, recipeId: payload && payload.recipeId, ok: false, status: reply && reply.status, error: (reply && reply.error) || '', jsonBody: !!(reply && reply.json === true), origin }); } catch { /* */ }
+            try { _heal = await reportLegOutcome({ ..._evtBase, ok: false, status: reply && reply.status, error: (reply && reply.error) || '', jsonBody: !!(reply && reply.json === true) }); } catch { /* */ }
             sendResponse({ ...(reply || { success: false, error: 'no-reply' }), ...(_heal && _heal.suspect ? { driftSuspect: true, driftGroundId: (payload && payload.groundId) || null, driftRecipeId: (payload && payload.recipeId) || null } : {}) });
           }
         } catch (e) {
@@ -1191,7 +1173,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               const r2 = out2 && out2[0] && out2[0].result;
               if (r2 && r2.status && r2.status < 400 && !(r2.body && typeof r2.body === 'object' && Array.isArray(r2.body.errors) && r2.body.errors.length)) {
                 try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → retry ${r2.mode || '?'}${r2.hdrs ? '+hdrs' : ''} ${r2.status} (was ${r.status}${r.capAge != null ? ` bearer≈${r.capAge}m` : ''}) (tab_${tab.id})`); } catch { /* */ }
-                try { void _healTick({ groundId: payload && payload.groundId, recipeId: payload && payload.recipeId, ok: true, origin: apiHost }); } catch { /* RH-1a */ }
+                try { void reportLegOutcome({ transport: 'ride', ok: true, origin: sessionHost, groundId: (payload && payload.groundId) || null, recipeId: (payload && payload.recipeId) || null }); } catch { /* VT-0 */ }
                 sendResponse({ success: true, value: r2.body, status: r2.status, origin: apiHost }); return;
               }
             }
@@ -1204,21 +1186,19 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           }
           if (r.status >= 400) {
             try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''} ${r.status} http-error${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ }
-            // CP-1 (v2.74.1506) — classify the failure as an auth signal (401 always; 403 only without csrf/gql — the
-            // v1389 lesson): the live gap was a VendorSuite 403 that told the registry nothing.
-            const _as = rideOutcomeSignal({ ok: false, httpStatus: r.status, csrfInvolved: !!(payload && (payload.gql || payload.csrf)) });
-            if (_as) void reportAuthSignal({ origin: sessionHost, status: _as, cause: `http-${r.status}`, source: 'ride', probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null });
-            // RH-1a — the DETECT tick: a structured (object) body means the app answered; empty/text/HTML means the
-            // route missed. Awaited so the failure response can carry the drift state (RH-1b's relearn bar).
+            // VT-0 (v2.74.1569) — the ONE outcome-funnel call subsumes the v1506 auth classification + the v1566
+            // drift tick (presence → drift in order; the registry gate refuses drift evidence on a signed-out
+            // origin). Awaited so the failure response carries the drift state (RH-1b's relearn bar). A structured
+            // (object) body means the app answered; empty/text/HTML means the route missed.
             let _heal = null;
-            try { _heal = await _healTick({ groundId: payload && payload.groundId, recipeId: payload && payload.recipeId, ok: false, status: r.status, jsonBody: !!(r.body && typeof r.body === 'object'), origin: apiHost }); } catch { /* */ }
-            sendResponse({ success: false, error: `http-${r.status}`, ...(_as === 'signed-out' ? { reauthOrigin: sessionHost } : {}), hint: r.srvMsg ? `the server said: ${r.srvMsg}` : 'the server rejected the request', status: r.status, value: r.body, ...(_heal && _heal.suspect ? { driftSuspect: true, driftGroundId: (payload && payload.groundId) || null, driftRecipeId: (payload && payload.recipeId) || null } : {}) }); return;
+            try { _heal = await reportLegOutcome({ transport: 'ride', ok: false, status: r.status, jsonBody: !!(r.body && typeof r.body === 'object'), csrfInvolved: !!(payload && (payload.gql || payload.csrf)), origin: sessionHost, groundId: (payload && payload.groundId) || null, recipeId: (payload && payload.recipeId) || null, probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null }); } catch { /* */ }
+            sendResponse({ success: false, error: `http-${r.status}`, ...(_heal && _heal.auth === 'signed-out' ? { reauthOrigin: sessionHost } : {}), hint: r.srvMsg ? `the server said: ${r.srvMsg}` : 'the server rejected the request', status: r.status, value: r.body, ...(_heal && _heal.suspect ? { driftSuspect: true, driftGroundId: (payload && payload.groundId) || null, driftRecipeId: (payload && payload.recipeId) || null } : {}) }); return;
           }
           try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode ? r.mode + ' ' : ''}${r.status}${_ctx}${_jwt} ${_shape}${_keys} (tab_${tab.id})`); } catch { /* */ }
-          // CP-1 — a successful ride is a FREE fresh signal; it also TEACHES the registry this origin's probe spec
-          // (VendorSuite's json-liveness probe registers on the first good ride — the heartbeat can watch it from then on).
-          void reportAuthSignal({ origin: sessionHost, status: 'fresh', source: 'ride', probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null });
-          try { void _healTick({ groundId: payload && payload.groundId, recipeId: payload && payload.recipeId, ok: true, origin: apiHost }); } catch { /* RH-1a — stamp lastOkAt + ratchet-clear */ }
+          // VT-0 (v2.74.1569) — one funnel call: a successful ride is a FREE fresh signal (probe-spec self-heal
+          // riding along — VendorSuite's json-liveness probe registers on the first good ride) + the lastOkAt
+          // stamp/ratchet-clear (RH-1a) in one door.
+          try { void reportLegOutcome({ transport: 'ride', ok: true, origin: sessionHost, groundId: (payload && payload.groundId) || null, recipeId: (payload && payload.recipeId) || null, probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null }); } catch { /* */ }
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
       })();

@@ -16,6 +16,7 @@
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 
 export const OVERVIEW_ID = 'overview';                 // the reserved, undeletable general-assistant conversation
+export const ADMIN_ID = 'admin_desk';                  // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — the reserved Admin desk: Orchard-operator role; queue = vitals incidents; scope = all grounds. Re-creatable (get-or-create on demand); silence when green.
 export const ARCHETYPES = ['operator', 'monitor', 'executor'];   // the RUN-shape (how it works); see APP_TYPES for the OBJECT-model
 export const SOURCES = ['builtin', 'user', 'shared'];
 // OM (object-model) — the abstract, friendly catalog TYPES (what the app works ON), orthogonal to the archetype

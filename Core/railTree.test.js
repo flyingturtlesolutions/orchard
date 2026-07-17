@@ -4,17 +4,27 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRailTree, subTasksOf } from './railTree.js';
-import { OVERVIEW_ID } from './appDef.js';
+import { OVERVIEW_ID, ADMIN_ID } from './appDef.js';
 
 const roles = (rows) => rows.map((r) => r.role);
 
 describe('railTree — buildRailTree', () => {
-  it('always pins Overview first and New-app last, even with no conversations', () => {
+  it('always pins Overview first, the Admin desk second, and New-app last, even with no conversations', () => {
     const rows = buildRailTree([]);
     assert.equal(rows[0].role, 'overview');
     assert.equal(rows[0].id, OVERVIEW_ID);
+    assert.equal(rows[1].role, 'admin', 'VT-2 (v2.74.1573) — the vitals fixture is PERMANENT (silence-when-green governs content, never presence)');
+    assert.equal(rows[1].id, ADMIN_ID);
     assert.equal(rows[rows.length - 1].role, 'new-app');
     assert.equal(rows[rows.length - 1].id, null);
+  });
+
+  it('an existing Admin-desk conversation feeds the fixture (summary, no double row) instead of rendering plain', () => {
+    const rows = buildRailTree([{ id: ADMIN_ID, title: 'Admin desk', kind: 'agent', updatedAt: 99, summary: '2 open incidents' }]);
+    const admin = rows.filter((r) => r.id === ADMIN_ID);
+    assert.equal(admin.length, 1, 'the fixture absorbs the conversation — never a second plain row');
+    assert.equal(admin[0].role, 'admin');
+    assert.equal(admin[0].summary, '2 open incidents');
   });
 
   it('an app collapsed shows a count + chevron but hides its sub-tasks; expanded reveals them after it', () => {
@@ -83,8 +93,8 @@ describe('railTree — buildRailTree', () => {
       { id: 'old', title: 'Old', kind: 'agent', updatedAt: 10 },
       { id: 'new', title: 'New', kind: 'agent', appId: 'x', updatedAt: 99 },
     ]);
-    // drop the Overview pin (first) and New-app (last); the middle is recency-ordered
-    const middle = rows.slice(1, -1).map((r) => r.id);
+    // drop the pins (Overview + Admin-desk fixture, v2.74.1573) and New-app (last); the middle is recency-ordered
+    const middle = rows.slice(2, -1).map((r) => r.id);
     assert.deepEqual(middle, ['new', 'old']);
   });
 });
