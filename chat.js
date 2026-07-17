@@ -3596,7 +3596,7 @@ function _accreteFocusFromRead({ leg, params = null, labels = null, value, label
 // PROVEN _openRecordOnSite arc (walk replay with the division filled, drill fallback). The SYNTHESIZED canonical
 // phrase is what runs and what alias-records — a demonstrative can never key an alias. Last resort: a banked
 // itemUrl template filled entirely from the record's own ids (curated template + banked ids — never a minted URL).
-async function _openFocusEntry(entry, originalText, opts = {}) {
+async function _openFocusEntry(entry, originalText) {
   const find = recordFind(entry);
   if (!find) return false;
   const div = recordDivision(entry);
@@ -3605,7 +3605,12 @@ async function _openFocusEntry(entry, originalText, opts = {}) {
   const synth = `show ticket ${find}${div ? ` in ${div}` : ''} on ${host ? siteWord : 'the site'}`;
   try { _orchLog(`FOCUS ▸ "${String(originalText).slice(0, 40)}" → ${String(entry.label || 'record').slice(0, 40)} (${find}${div ? `, ${div}` : ''}) on ${host || 'site'}`); } catch { /* */ }
   try { _orchLog(`TARGET ▸ tier=TR-2/focus target=${host || '(drill-scoped)'} why=focus(${entry.noun || 'record'}) auto`); } catch { /* */ }
-  if (await _openRecordOnSite(synth, find, siteWord, opts)) return true;
+  // v2.74.1557 — the claim shows WORK immediately: a transient thinking bubble names the record + venue while
+  // the match + start-establish + walk run (live report: echo → tab focus → 2-3s of NOTHING → the walk — no
+  // indicator). _openRecordOnSite converts it to the assistant reply on whichever path acts; unconsumed (total
+  // miss) → removed (thinking messages are transient, never persisted).
+  const mW = appendMessage({ role: 'thinking', body: `Opening ${String(entry.label || `ticket ${find}`).slice(0, 60)}${div ? ` (${div})` : ''} on ${host || 'the site'}…` });
+  if (await _openRecordOnSite(synth, find, siteWord, { statusMsg: mW })) return true;
   const prov = entry.provenance || {};
   if (host && prov.itemUrl) {
     try {
@@ -3613,13 +3618,15 @@ async function _openFocusEntry(entry, originalText, opts = {}) {
       if (path && !path.includes('{')) {
         const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}${path.startsWith('/') ? path : '/' + path}`] });
         if (r && r.success !== false) {
-          const m = appendMessage({ role: 'assistant', body: `${r.reused ? 'Focused' : 'Opened'} ${entry.label || 'the record'} on ${host}.` });
-          _orchFinalize(m);
+          mW.classList.remove('thinking'); mW.classList.add('assistant');
+          _setMessageBody(mW, `${r.reused ? 'Focused' : 'Opened'} ${entry.label || 'the record'} on ${host}.`);
+          _orchFinalize(mW);
           return true;
         }
       }
     } catch { /* the walk/drill path already reported */ }
   }
+  try { mW.remove(); } catch { /* transient — never persisted */ }
   return false;
 }
 // FC-5 — re-pull the focus head's record via its DRILL provenance: same leg family, same join id, fresh fields.
@@ -4557,6 +4564,35 @@ async function _goToOrigin() {
   _orchFinalize(m);
 }
 
+// v2.74.1554 — the RIDE-SCAN CACHE: _showSection + _openRecordOnSite probe armed grounds + per-host recipes to
+// DECIDE whether they claim — ~18 sequential SW roundtrips with 7 connections, paid on every "show …" ask, even
+// on a MISS that falls through to interpret (live 142359/144407: the ensure-burst alone ~1.6s warm; cold >5s —
+// the composer-stuck report). 60s TTL, the same accepted staleness as TARGET_RESOLVE's fingerprint cache: a
+// just-banked leg (or the GET_RIDE_RECIPES curated merge — idempotent, it just refreshes ≤1×/min/host now)
+// surfaces within a minute. ENSURE_GROUND_FOR_URL stays dedup-before-mint — caching its result is safe.
+let _rideScanCache = { armed: null, armedAt: 0, recs: new Map() };   // recs: host → { at, groundId, recipes }
+async function _cachedArmedGrounds() {
+  const now = Date.now();
+  if (_rideScanCache.armed && (now - _rideScanCache.armedAt) < 60000) return _rideScanCache.armed;
+  let grounds = [];
+  try { const rg = await _orchReq('GET_RIDE_ARMED_GROUNDS', {}); grounds = (rg && rg.grounds) || []; } catch { grounds = []; }
+  _rideScanCache.armed = grounds; _rideScanCache.armedAt = now;
+  return grounds;
+}
+async function _cachedHostRecipes(host, { groundId = null } = {}) {
+  const h = String(host || '').toLowerCase();
+  if (!h) return { at: 0, groundId: '', recipes: [] };
+  const now = Date.now();
+  const hit = _rideScanCache.recs.get(h);
+  if (hit && (now - hit.at) < 60000) return hit;
+  let gid = groundId;
+  if (!gid) { try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${h}/` }); gid = (g && g.groundId) || ''; } catch { gid = ''; } }
+  let recipes = [];
+  if (gid) { try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: gid, origin: h }); recipes = (rr && rr.recipes) || []; } catch { recipes = []; } }
+  const entry = { at: now, groundId: gid || '', recipes };
+  _rideScanCache.recs.set(h, entry);
+  return entry;
+}
 // FL-1e (v2.74.1433) — "show/go to <section>" opens a grounded site's SECTION page by NAVIGATING to a ride recipe's
 // listUrl/itemUrl that fills to a bare path with NO leftover params (e.g. VendorSuite's '/#warranty'). This is why the
 // user says "show" and not "get": a section-open needs NO {divisionId}/{taskId}, so it works where a data read would
@@ -4594,7 +4630,7 @@ async function _showSection(word) {
   // CX-9n (v2.74.1452) — ALSO every ride-armed Ground: a section on ANY ride site resolves from ANY tab (live:
   // `view warranty task` from a foreign tab scanned only connections ∪ active tab → no match → silent fallthrough
   // to the router → a Zendesk mis-pick. The tab is context, never a capability filter — the section-opener too.)
-  try { const rg = await _orchReq('GET_RIDE_ARMED_GROUNDS', {}); for (const g of ((rg && rg.grounds) || [])) add(g && g.host); } catch { /* */ }
+  try { for (const g of (await _cachedArmedGrounds())) add(g && g.host); } catch { /* */ }   // v1554 — 60s scan cache
   // CX-9n (v2.74.1451) — match the FULL phrase first ("warranty task" ⊂ "Warranty tasks by status"), then fall back
   // to its ≥4-char TOKENS ("view the warranty section" → "warranty" hits '/#warranty' even though "section" is
   // nobody's word). First query with a hit wins — phrase specificity beats token looseness.
@@ -4602,9 +4638,8 @@ async function _showSection(word) {
   const cands = siteScope ? hosts.filter((h) => h.includes(siteScope)) : hosts;   // v1521 — "on <app>" narrows the sites
   let best = null;   // strongest match across all sites — a section PATH containing the word beats a mere name/does hit,
   for (const host of cands) {   // so "warranty" → '/#warranty', never '/#dashboard' whose recipe NAME ("Warranty counts") also says warranty
-    let groundId = ''; try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${host}/` }); groundId = (g && g.groundId) || ''; } catch { /* */ }
+    const { groundId, recipes: recs } = await _cachedHostRecipes(host);   // v1554 — was ENSURE + GET per host per ask (the >5s "show" scan)
     if (!groundId) continue;
-    let recs = []; try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId, origin: host }); recs = (rr && rr.recipes) || []; } catch { /* */ }
     for (const r of recs) {
       if (!r) continue;
       for (const tmpl of [r.listUrl, r.itemUrl]) {
@@ -4625,8 +4660,7 @@ async function _showSection(word) {
     }
   }
   if (!best) return false;
-  appendMessage({ role: 'user', body: `show ${word}` });
-  const m = appendMessage({ role: 'assistant', body: '' });
+  const m = appendMessage({ role: 'assistant', body: '' });   // v2.74.1554 — the user's words were echoed at ENTRY (invariant #4); no per-intercept echo
   const url = `https://${best.host}${best.path.startsWith('/') ? best.path : '/' + best.path}`;
   const res = await _orchReq('SHOW_SOURCES', { origin: best.host, urls: [url] });
   _setMessageBody(m, res && res.success !== false ? `${res.reused ? 'Focused' : 'Opened'} the ${best.host} tab on its ${w} page.` : `Couldn’t open ${best.host} — ${(res && res.error) || 'error'}.`);
@@ -4676,7 +4710,7 @@ async function _fieldFollowup(text) {
   const q = (fieldRefOk ? fieldRef[1] : (mv ? mv[1] : bare)).trim().toLowerCase().replace(/\s+/g, ' ');
   const norm = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase().trim();
   const nice = (k) => { const s = norm(k); return s.charAt(0).toUpperCase() + s.slice(1); };
-  const msgFor = (body) => { appendMessage({ role: 'user', body: text }); const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };
+  const msgFor = (body) => { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };   // v2.74.1554 — the user echo happens at sendChatMessage ENTRY (invariant #4)
   // "details / everything / all fields / full record" → the full deterministic record render
   if (/^(details|everything|all(\s+fields)?|full\s+record)$/.test(q)) {
     const lines = renderConnectorLines(obj, { name: (g.leg && g.leg.name) || 'Record' });
@@ -6783,7 +6817,7 @@ function _contextDivision() {
   const label = g.labels && g.labels.divisionId;
   return String((label != null && label !== '') ? label : id);
 }
-async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v2.74.1553 — opts.echoAsk:false when the caller already echoed the user's ORIGINAL words (the focus referent stage)
+async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v2.74.1554 — no user echo here: the turn claims at sendChatMessage ENTRY (invariant #4); `ask` (the canonical phrase) still drives matching + alias recording. v1557 — opts.statusMsg: a thinking bubble the caller already showed; consumed (→ assistant) by whichever path acts
   const generic = ['site', 'page', 'tab', 'browser', 'web'].includes(siteWord);
   // v2.74.1533 — an EXPLICIT division in the ask ("show ticket X IN Raleigh on vendorsuite") WINS over the context
   // division. Live bug: "in Raleigh" searched "Mobile" — a stale last-read division leaked via _contextDivision and
@@ -6795,21 +6829,37 @@ async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v
   // The deterministic DRILL candidate (API read → navigate → text-click the row's address) is landmark-free — the
   // RELIABLE path. Built up front so it serves BOTH as the cold route AND as the FALLBACK when a taught capability
   // fails to replay. v2.74.1525 — same-host duplicate grounds dedupe to ONE candidate.
-  let grounds = [];
-  try { const rg = await _orchReq('GET_RIDE_ARMED_GROUNDS', {}); grounds = (rg && rg.grounds) || []; } catch { grounds = []; }
+  const grounds = await _cachedArmedGrounds();   // v1554 — 60s scan cache (this scan + an LLM match ran before ANY visible turn pre-1554)
   const cands = []; const seenLeg = new Set();
   for (const g of grounds) {
     if (!g || !g.host || !g.gid) continue;
     if (!generic && !String(g.host).toLowerCase().includes(siteWord)) continue;
-    let recs = [];
-    try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: g.gid, origin: g.host }); recs = (rr && rr.recipes) || []; } catch { continue; }
+    const { recipes: recs } = await _cachedHostRecipes(g.host, { groundId: g.gid });
+    if (!recs.length) continue;
     const leg = harvestedRecipeLegs(recs, { host: g.host, mode: 'ask', groundId: g.gid })
       .find((l) => l && l.tool && l.tool.drill && l.tool.drill.matchOn && l.tool.listUrl);
     if (!leg) continue;
     const key = `${String(g.host).toLowerCase()}·${leg.tool.recipeId || leg.key}`;
-    if (!seenLeg.has(key)) { seenLeg.add(key); cands.push({ leg, gid: g.gid }); }
+    if (!seenLeg.has(key)) { seenLeg.add(key); cands.push({ leg, gid: g.gid, host: g.host }); }
   }
   const drill = cands.length === 1 ? cands[0] : null;   // 0 = nothing drillable; >1 on a generic tail = ambiguous
+  // v2.74.1555/1556 — the ON-SITE open is TAB-INDEPENDENT (live 175025: one ask, four outcomes by tab state):
+  // ENSURE the drill ground's tab exists + focus it (fixes NO-APP-TAB — the ride and the walk need a tab), and
+  // run both the match (below) and the replay against THAT ground/tab — the active tab is context, never the
+  // venue (CX-9n's rule, applied to the record opener). focusOnly: an EXISTING tab is left exactly where it is —
+  // v1555 navigated it to the bare site root, which is a FULL reload and a DIFFERENT page than a hash-route
+  // start like "#dashboard" (live 180622: broke step 0, the reload the user saw). The walk's recorded start is
+  // now established INSIDE the replay (start-establish via cap.startUrl — a same-document hash-nav, no reload).
+  if (drill && drill.host) {
+    try {
+      const sr = await _orchReq('SHOW_SOURCES', { origin: drill.host, urls: [`https://${drill.host}/`], focusOnly: true });
+      if (sr && sr.success !== false && typeof sr.tabId === 'number') tabId = sr.tabId;
+    } catch { /* the active-tab flow below still stands */ }
+  }
+  // v2.74.1557 — a drill-bearing intercept ALWAYS acts (replay or drill), so show work NOW: the LLM match +
+  // start-establish take 3-8 silent seconds otherwise (the "no progress indicator" report). The v1522 direct
+  // path gets its own bubble here; the focus referent stage passes one in (statusMsg) — never both.
+  if (drill && !opts.statusMsg) opts.statusMsg = appendMessage({ role: 'thinking', body: `Opening ${recordValue} on ${drill.host}…` });
   if (drill) _lastReteach = { groundId: drill.gid, tabId, ask };   // v1533 — `re-teach` re-records this even when the walk WORKS (a success shows no failure-only offer)
   const runDrill = async (msg) => {
     const { leg, gid } = drill;
@@ -6834,7 +6884,11 @@ async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v
   // match for any non-exact-alias phrasing (a different ticket number, or "in <division>"), so it could NEVER
   // reach the binds-ticket replay — 0 candidates → miss → drill (live 200236). The binds-ticket gate below still
   // guards which capability actually replays.
-  try { m = await _orchReq('ORCH_MATCH', { tabId, ask, includeActions: true }); } catch { m = null; }
+  // v2.74.1555 — scope the match to the DRILL GROUND when one exists: from a foreign tab (gmail) the tab-scoped
+  // match saw only that tab's candidates (here=1, "Ask Gemini") → miss → drill — the taught walk was never even
+  // considered (live 175025 turns A/B). The ground-scoped form is the same one the TRT explicit-off-tab enforce
+  // uses; no drill → the tab-scoped behavior is unchanged.
+  try { m = await _orchReq('ORCH_MATCH', drill ? { groundId: drill.gid, ask, includeActions: true } : { tabId, ask, includeActions: true }); } catch { m = null; }
   const hit = m && m.success !== false && m.capabilityId && m.decision !== 'miss';
   const turn = hit ? planAssistantTurn(m) : null;
   // v2.74.1531 — replay the taught WALK for a NON-exact hit too, WHEN the match binds THIS ticket number: the
@@ -6857,11 +6911,12 @@ async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v
     } catch { return null; }
   })();
   if (turn && ((turn.action === 'run' && turn.reason === 'alias-exact') || bindsTicket || _ticketParamName)) {
-    if (opts.echoAsk !== false) appendMessage({ role: 'user', body: ask });
     // v2.74.1540 — a `re-teach` after THIS run replaces THIS capability (works after success AND failure): stamp
     // it so the record flow retires the superseded walk on accept ("…and I'll replace it" — the replace half).
     _lastReteach = { groundId: m.groundId, tabId, ask, replaceCapabilityId: m.capabilityId };
-    const rmsg = appendMessage({ role: 'assistant', body: ((turn.action === 'run' && turn.say) ? turn.say : null) || `Opening ${recordValue}…` });
+    const _rbody = ((turn.action === 'run' && turn.say) ? turn.say : null) || `Opening ${recordValue}…`;
+    let rmsg = opts.statusMsg || appendMessage({ role: 'assistant', body: _rbody });
+    if (opts.statusMsg) { rmsg.classList.remove('thinking'); rmsg.classList.add('assistant'); _setMessageBody(rmsg, _rbody); }   // v1557 — the thinking bubble becomes the working reply
     // v2.74.1534 — thread the DIVISION into the walk so its parameterized {{DIVISION}} step (CLICK_BY_LABEL in
     // #divisionMenu, from the re-teach) selects the TICKET's division on the page — the whole point of "the walk
     // selects the division". Precedence: an explicit "in <division>" in the ask wins; else the case/last-read context
@@ -6902,8 +6957,9 @@ async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v
   }
   if (hit && !drill) return false;   // a non-exact hit with no reliable drill → let interpret arbitrate (unchanged)
   if (!drill) return false;
-  if (opts.echoAsk !== false) appendMessage({ role: 'user', body: ask });
-  await runDrill(appendMessage({ role: 'assistant', body: `Looking up ${recordValue}…` }));
+  let dmsg = opts.statusMsg || appendMessage({ role: 'assistant', body: `Looking up ${recordValue}…` });
+  if (opts.statusMsg) { dmsg.classList.remove('thinking'); dmsg.classList.add('assistant'); _setMessageBody(dmsg, `Looking up ${recordValue}…`); }   // v1557
+  await runDrill(dmsg);
   return true;
 }
 
@@ -7790,6 +7846,16 @@ async function sendChatMessage() {
     }
     _lastSendStamp = { key: k, at: now };
   }
+  // v2.74.1554 — THE TURN CLAIMS AT ENTRY (invariant #4): ONE composer clear + ONE user echo for EVERY turn,
+  // BEFORE any intercept runs. The old shape — each branch clearing/echoing at ITS claim — meant decide-by-doing
+  // intercepts (_showSection's per-host scan, _openRecordOnSite's LLM match + walk replay) held the ask in the
+  // composer with an EMPTY thread for 5–20s (live 165125: that silence invited the double-send; live report
+  // 1553: "show" asks stuck >5s, message absent from Rail/Thread until the result). appendMessage persists a
+  // user message immediately (chat.js:1112 → Rail refresh), so the turn is visible everywhere the moment it's
+  // sent. Intercepts add REPLIES — never the echo, never the clear. (The `seed:` flow deliberately REFILLS the
+  // composer after this; the default door still owns its dataset/placeholder/button bookkeeping.)
+  input.value = ''; _autosizeInput();
+  appendMessage({ role: 'user', body: text });
 
   // v2.74.1029 — DEV CONVERSATION: every typed message routes straight to the Claude Code bridge (no `dev:`
   // prefix), and NOTHING else runs — not template-detection, not STOP, not the capability matcher. This is
@@ -7797,8 +7863,7 @@ async function sendChatMessage() {
   // was typed) and pass skipEcho so the bridge doesn't double it; bridge sub-verbs (gl/gc/gch/bug:/pause/
   // history/model/turns/relay/new) still work because maybeHandle normalizes bare input to `dev: …`.
   if (_currentConversationKind === 'dev') {
-    input.value = ''; _autosizeInput(); $('btn-chat-send').disabled = true;
-    appendMessage({ role: 'user', body: text });
+    $('btn-chat-send').disabled = true;
     try { await _getDevBridge().maybeHandle(text, { devConversation: true, skipEcho: true, conversationId: _currentConversationId }); }
     catch (e) { try { console.warn('[chat] dev-conversation route failed:', e?.message); } catch { /* */ } }
     $('btn-chat-send').disabled = false;
@@ -7822,8 +7887,6 @@ async function sendChatMessage() {
     // ^ v2.74.1340 (review J-setup) — COMMAND FALL-THROUGH: a command-shaped message (`link: google`, `memory`,
     // `workflows`, `il: …`) is NOT consumed as a site answer — it falls through to the normal cascade below and
     // the setup flow stays paused-in-place (type a site or `setup` to continue).
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     if (/^(cancel|stop|exit|nevermind|never mind|quit)$/i.test(text)) {
       _setupState = null;
       _persistSetupState();
@@ -7866,9 +7929,7 @@ async function sendChatMessage() {
   // confident persona (a support agent absorbing "create a draft" → "which ticket?") never reaches — this is the
   // always-available entrance. Resolves the active tab + its Ground, then hands both to the shared _orchRecordFlow.
   if (/^teach:/i.test(text)) {
-    input.value = ''; _autosizeInput();
     const ask = text.replace(/^teach:\s*/i, '').trim();
-    appendMessage({ role: 'user', body: text });
     const msg = appendMessage({ role: 'assistant', body: '' });
     if (!ask) { _setMessageBody(msg, 'usage: `teach: <what to do>` — I’ll record so you can show me on this page, then reuse it next time.'); _orchFinalize(msg); return; }
     try {
@@ -7889,10 +7950,8 @@ async function sendChatMessage() {
   // ("create a calendar event" → the google-calendar broker leg instead of the brittle DOM). The user-facing trigger
   // the arc owed: `link: google` → the consent screen → linked.
   if (/^(un)?link:/i.test(text)) {
-    input.value = ''; _autosizeInput();
     const un = /^unlink:/i.test(text);
     const provider = text.replace(/^(un)?link:\s*/i, '').trim().toLowerCase();
-    appendMessage({ role: 'user', body: text });
     const msg = appendMessage({ role: 'assistant', body: '' });
     if (!provider) { _setMessageBody(msg, `usage: \`${un ? 'unlink' : 'link'}: <provider>\` — e.g. \`link: google\`.`); _orchFinalize(msg); return; }
     _setMessageBody(msg, un ? `Unlinking ${provider}…` : `Opening ${provider} sign-in — approve the consent screen to link…`);
@@ -7910,8 +7969,6 @@ async function sendChatMessage() {
   // chat-native edit affordance (see it, tweak it, send it). The seed was write-once-at-creation before this;
   // an app's constitution must be inspectable and editable after the fact.
   if (/^seed\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const cur = _currentConversationSeed || '';
     const m = appendMessage({ role: 'assistant', body: '' });
     _setMessageBody(m, cur
@@ -7933,9 +7990,7 @@ async function sendChatMessage() {
   // instead of resurrecting the setup-time snapshot. Existing sub-tasks keep their composed seeds (spawn-time
   // copies, by design); future spawns compose from the new one.
   if (/^seed:/i.test(text)) {
-    input.value = ''; _autosizeInput();
     const _seed = text.replace(/^seed:\s*/i, '').trim();
-    appendMessage({ role: 'user', body: text });
     try {
       await _ensureConversation();
       _currentConversationSeed = _seed;
@@ -7961,8 +8016,6 @@ async function sendChatMessage() {
   // CV-4 (v2.74.1171) — `subtasks: a, b, c` fans the CURRENT app out into one sub-task conversation per item. A
   // utility command (handled before routing) — it creates conversations under the app, it isn't a website ask.
   if (/^subtasks?:/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _spawnSubTasks(text.replace(/^subtasks?:\s*/i, '')); }
     catch (e) { try { console.warn('[chat] subtasks command failed:', e?.message); } catch { /* */ } }
     return;
@@ -7971,8 +8024,6 @@ async function sendChatMessage() {
   // DK-7c (v2.74.1490) — STOP a RUNNING each fan-out: the loop checks the latch between items and pauses with a
   // resume point. Only intercepts while the fan-out is actually mid-run — every other "stop" meaning is untouched.
   if (_rideEachRunning && /^(stop|pause|cancel)[.!]?$/i.test(text.trim())) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     _rideEachAbort = true;
     return;
   }
@@ -7981,8 +8032,6 @@ async function sendChatMessage() {
   // live bug: "continue" routed to interpret, re-ran the SAME first window, and recorded "continue" as a connector
   // alias). Scoped hard: only these bare words, only while the cursor from THIS panel session is under 10 min old.
   if (/^(continue|next|more)[.!]?$/i.test(text.trim()) && _rideEachCursor && (Date.now() - _rideEachCursor.at) < 600000) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const cur = _rideEachCursor; _rideEachCursor = null;
     const m = appendMessage({ role: 'assistant', body: '' });
     await _rideEachFanOut(m, { leg: cur.leg, ask: cur.ask, tabId: cur.tabId, groundId: cur.groundId, params: cur.params, each: { ...cur.each, offset: cur.offset } });
@@ -7991,23 +8040,17 @@ async function sendChatMessage() {
   }
   // DK-8 (v2.74.1491) — the routine surface: list / enable / run now / remove.
   if (/^routines?$/i.test(text.trim())) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     await _renderRoutines();
     return;
   }
   // CV-5 (v2.74.1173) — `save as desk: <name>` promotes THIS conversation (its seed) into a reusable user app;
   // `forget desk: <name>` removes one. Utility commands, handled before routing (they manage the catalog, not a site).
   if (/^save as (?:desk|app):/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _promoteToApp(text.replace(/^save as (?:desk|app):\s*/i, '')); }
     catch (e) { try { console.warn('[chat] save-as-app failed:', e?.message); } catch { /* */ } }
     return;
   }
   if (/^forget (?:desk|app):/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _forgetApp(text.replace(/^forget (?:desk|app):\s*/i, '')); }
     catch (e) { try { console.warn('[chat] forget-app failed:', e?.message); } catch { /* */ } }
     return;
@@ -8018,8 +8061,6 @@ async function sendChatMessage() {
   // each answer until the flow completes (or `cancel`). Matches "setup" / "set up" / "setup:" only — "setup my X"
   // falls through to normal routing.
   if (/^set\s*up:?\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _startSetupFlow(); }
     catch (e) { try { console.warn('[chat] setup command failed:', e?.message); } catch { /* */ } }
     return;
@@ -8028,8 +8069,6 @@ async function sendChatMessage() {
   // AL-3b (v2.74.1193) — `memory` shows what THIS app has LEARNED (banked beliefs/deltas — the goal store, AL-2/3);
   // `forget memory` clears it. Utility commands (before routing): they read/clear the app's own memory, not a site.
   if (/^forget\s+memory\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     if (!_currentConversationAppId) { _setMessageBody(m, 'Open a desk — goal memory is per-desk.'); _orchFinalize(m); return; }
     try { await clearGoalMemory(_memoryId()); } catch { /* */ }   // AP-0 — clear THIS instance's memory
@@ -8042,8 +8081,6 @@ async function sendChatMessage() {
   // only from scattered reply hints; typing "help" routed to the LLM (or, mid-setup, shaped to `https://help`). This
   // is a utility guard (before routing) that lists them, grouped. Static text through the escape-first markdown path.
   if (/^(help|commands?|\?|how do i use (this|you)|what commands?)\s*\??$/i.test(text)) {   // NB: bare "what can you do here" stays the app-abilities intent menu (below), not this reference
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     _setMessageBody(m, [
       'Just **type what you want** — I interpret it and act, ask, or answer. Commands for specific things:',
@@ -8085,8 +8122,6 @@ async function sendChatMessage() {
   // by design. All NATURAL LANGUAGE ("review the queue", "show me both tickets", "open zendesk") routes through
   // interpret via the fleet legs (palette.fleetOfferedLegs — v1348; never static regex, the v1166 inversion). ───
   if (/^sweep\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     await _runFleetSweep();
     return;
   }
@@ -8095,20 +8130,14 @@ async function sendChatMessage() {
   {
     const mEvery = text.match(/^sweep every\s+(.+)$/i);
     if (mEvery && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       await _scheduleSweep(mEvery[1]);
       return;
     }
     if (/^sweep off\s*$/i.test(text) && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       await _scheduleSweep(null, { off: true });
       return;
     }
     if (/^sweep schedule\s*$/i.test(text) && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const r = await _orchReq('FLEET_SCHEDULE', { instanceId: _memoryId() });
       const m5 = appendMessage({ role: 'assistant', body: '' });
       _setMessageBody(m5, r && r.schedule ? `Sweeping every ${r.schedule.every}${r.schedule.source === 'seed' ? ' (from the seed)' : ''}${r.schedule.nextAt ? ` — next in ${fmtCountdown(r.schedule.nextAt - Date.now())}` : ''}. \`sweep off\` stops it.` : 'No schedule — say `sweep every 30m` (or “sweep every hour”), or state it in the `seed`.', { markdown: true });
@@ -8117,8 +8146,6 @@ async function sendChatMessage() {
     }
   }
   if (/^pending\s*$/i.test(text) && _memoryId()) {   // app conversations only — "pending" in Overview stays a normal ask
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const pend = (await loadProposals(_memoryId())).filter((p) => p.status === 'pending');
     _renderProposalBatch(pend);
     return;
@@ -8126,8 +8153,6 @@ async function sendChatMessage() {
   {
     const mApprove = text.match(/^approve\s+(all|[\d,\s]+)\s*$/i);
     if (mApprove && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const inst1 = _memoryId();
       const pend = (await loadProposals(inst1)).filter((p) => p.status === 'pending');
       let ids = [];
@@ -8145,8 +8170,6 @@ async function sendChatMessage() {
     }
     const mReject = text.match(/^reject\s+(\d+)\s*(.*)$/i);
     if (mReject && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const id = _sweepBatchIndex[parseInt(mReject[1], 10) - 1];
       if (!id) { const m2 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m2, 'No such proposal number — run `pending` to renumber.', { markdown: true }); _orchFinalize(m2); return; }
       await _rejectProposal(id, (mReject[2] || '').trim());
@@ -8157,8 +8180,6 @@ async function sendChatMessage() {
     // With several pending, ask for the number instead of falling through to interpret's clarify dead-end.
     const mBare = text.match(/^(approve|reject)\b\s*(.*)$/i);
     if (mBare && _memoryId() && !/^(all|\d)/i.test(mBare[2] || '')) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const pendB = (await loadProposals(_memoryId())).filter((p) => p.status === 'pending');
       if (pendB.length === 1) {
         if (/^approve$/i.test(mBare[1])) await _approveProposal(pendB[0].id);
@@ -8175,8 +8196,6 @@ async function sendChatMessage() {
     // FL-1c (v1347) — `show N`: open proposal N's GROUND-TRUTH pages (reuse-then-navigate; a merge shows both tickets).
     const mShow = text.match(/^show\s+(\d+)\s*$/i);
     if (mShow && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const id = _sweepBatchIndex[parseInt(mShow[1], 10) - 1];
       const p = id ? (await loadProposals(_memoryId())).find((x) => x.id === id) : null;
       if (!p) { const m4 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m4, 'No such proposal number — run `pending` to renumber.', { markdown: true }); _orchFinalize(m4); return; }
@@ -8197,21 +8216,15 @@ async function sendChatMessage() {
       if (_fx.length) {
         const bound = bindReferent(text, _fx);
         if (bound && bound.ambiguous) {
-          input.value = ''; _autosizeInput();
-          appendMessage({ role: 'user', body: text });
           const mA = appendMessage({ role: 'assistant', body: '' });
           _setMessageBody(mA, `Which one — ${bound.ambiguous.map((e) => `**${e.label}**`).join(' or ')}? Say it with the name.`, { markdown: true });
           _orchFinalize(mA);
           return;
         }
         if (bound && bound.entry && bound.entry.kind === 'record') {
-          // v2.74.1553 — CLAIM INSTANTLY: clear the composer + echo the user's words BEFORE the ~20s open.
-          // Live 165125: the stage awaited the whole open with the text still sitting in the box and nothing
-          // on the thread — the user (reasonably) pressed Enter again → two interleaved drill runs broke each
-          // other's row-click. A record-bind now always claims the turn; an unopenable record says so honestly.
-          input.value = ''; _autosizeInput();
-          appendMessage({ role: 'user', body: text });
-          if (await _openFocusEntry(bound.entry, text, { echoAsk: false })) return;
+          // v2.74.1553/1554 — the turn was claimed AT ENTRY (invariant #4); the ~20s open runs under a visible
+          // echo. A record-bind always claims the turn; an unopenable record says so honestly.
+          if (await _openFocusEntry(bound.entry, text)) return;
           const mF = appendMessage({ role: 'assistant', body: '' });
           _setMessageBody(mF, `Couldn’t open **${bound.entry.label}** on its site — no findable record number, or no site path is armed. Ask for a field instead, or say \`refresh\`.`, { markdown: true });
           _orchFinalize(mF);
@@ -8225,8 +8238,6 @@ async function sendChatMessage() {
     if (/^(?:refresh|re-?pull)(?:\s+(?:the\s+)?(?:record|case|task|ticket|details?))?\s*$/i.test(text)) {
       const head = (_currentConversationFocus || []).find((e) => e && e.kind === 'record' && e.provenance && e.provenance.groundId && e.provenance.drill);
       if (head) {
-        input.value = ''; _autosizeInput();
-        appendMessage({ role: 'user', body: text });
         await _refreshFocusHead(head);
         return;
       }
@@ -8240,22 +8251,16 @@ async function sendChatMessage() {
     // operations the sniffer has captured off the open admin tab — a session-ride op replays only once its store's
     // hash is banked (do the action by hand once, with the tab open, to capture it).
     if (/^(shopify\s+ops|captured\s+ops|ride\s+ops|ops)\s*$/i.test(text)) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       await _showRideOps();
       return;
     }
     if (/^show(\s+(me|the|it|tickets?|items?|sources?|profile|customer|order|orders|record|page))*\s*$/i.test(text) && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       await _showItemSources({});
       return;
     }
   }
   // v1354 — `clear chat`: the terse command twin of the CLEAR_CHAT leg (NL "start over" routes via interpret).
   if (/^clear chat\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     await _clearCurrentChat();
     return;
   }
@@ -8266,7 +8271,7 @@ async function sendChatMessage() {
   // status word: "open warranty tasks" is a LIST read, never a navigation).
   {
     const mSectionShow = text.match(/^(?:show|view|go\s+to)\s+(?:the\s+)?([a-z][\w ]*?)\s*$/i);
-    if (mSectionShow && await _showSection(mSectionShow[1].trim())) { input.value = ''; _autosizeInput(); return; }
+    if (mSectionShow && await _showSection(mSectionShow[1].trim())) return;
   }
   // v2.74.1533 — `re-teach` (also `reteach` / `show me again`): re-record the last on-site capability EVEN WHEN IT
   // WORKS. A successful walk shows no failure-only "● Show me" offer, so there was no way to improve it (e.g. add
@@ -8274,8 +8279,6 @@ async function sendChatMessage() {
   {
     const mRe = text.match(/^(?:re-?teach|show\s+me\s+again)\s*:?\s*([\s\S]*)$/i);
     if (mRe) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const arg = (mRe[1] || '').trim();
       const rt = arg && _lastReteach ? { ..._lastReteach, ask: arg } : _lastReteach;
       const m2 = appendMessage({ role: 'assistant', body: '' });
@@ -8295,17 +8298,15 @@ async function sendChatMessage() {
   // matches the number, walks statuses, and the on-site phrase drives the open). No match shape → interpret.
   {
     const mOnSite = text.match(/^(?:show|open|view|pull\s+up|bring\s+up|go\s+to)\b[^\n]*?\b(\d{3,})\b[^\n]*\b(?:on|in)\s+(?:the\s+)?([a-z][\w.-]{2,})\s*$/i);
-    if (mOnSite && await _openRecordOnSite(text, mOnSite[1], mOnSite[2].toLowerCase())) { input.value = ''; _autosizeInput(); return; }
+    if (mOnSite && await _openRecordOnSite(text, mOnSite[1], mOnSite[2].toLowerCase())) return;
   }
   // CX-9j (v2.74.1444) — field follow-up on the last grounded read ("what are the instructions?" after a task read →
   // the record's OWN Instructions field, full text, deterministic). Acts only on a fresh read + a real field match;
   // everything else falls through untouched (so "what are the instructions?" with no recent read still routes normally).
-  if (await _fieldFollowup(text)) { input.value = ''; _autosizeInput(); return; }
+  if (await _fieldFollowup(text)) return;
   // OV (v2.74.1417, DESIGN_overview.md) — the Overview LEG WORKBENCH commands (author / test / verify legs before an
   // app consumes them). Numbered + terse, like `ops` / `approve N`. `legs` populates the number index the others use.
   if (/^legs\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     await _showLegOverview();
     return;
   }
@@ -8315,8 +8316,6 @@ async function sendChatMessage() {
     const mAddHost = text.match(/^add\s+leg\s+on\s+([^\s:]+[^:]*?)\s*:\s*(.+)$/i);
     const mAddActive = mAddHost ? null : text.match(/^add\s+leg\s*:\s*(.+)$/i);
     if (mAddHost || mAddActive || /^add\s+leg\s*$/i.test(text)) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       if (mAddHost) await _addLegOnHost(mAddHost[1].trim(), mAddHost[2].trim());
       else if (mAddActive) await _addLegActive(mAddActive[1].trim());
       else await _addLegClasses();
@@ -8324,8 +8323,6 @@ async function sendChatMessage() {
     }
     const mTest = text.match(/^test\s+(?:leg\s+)?#?(\d+)\s*(.*)$/i);
     if (mTest) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       await _testLeg(parseInt(mTest[1], 10), _parseKvParams(mTest[2]));
       return;
     }
@@ -8335,8 +8332,6 @@ async function sendChatMessage() {
     // twin filled a URL and 500'd). Guarded to clearly-workbench forms (contains = or <) so a conversational
     // "test my zendesk connection" still reaches the router.
     if (/^test\s+\S/i.test(text) && /[=<]/.test(text)) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const mT = appendMessage({ role: 'assistant', body: '' });
       _setMessageBody(mT, 'The workbench needs the leg **number** — run `legs` to see them, then e.g. `test 12 divisionId=83 status=fixed` (replace 12 with the number shown).', { markdown: true });
       _orchFinalize(mT);
@@ -8344,8 +8339,6 @@ async function sendChatMessage() {
     }
     const mVerify = text.match(/^(?:verify|arm)\s+(?:leg\s+)?#?(\d+)\s*$/i);
     if (mVerify) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       await _verifyLeg(parseInt(mVerify[1], 10));
       return;
     }
@@ -8353,16 +8346,12 @@ async function sendChatMessage() {
   // FL-1e (v1352) — `show work`: the last run's step-by-step audit (a terse console command; NL "what did you
   // just do" / "why no proposals" routes through the SHOW_WORK leg).
   if (/^show work\s*$/i.test(text) && _memoryId()) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     await _renderWorkTraceMsg();
     return;
   }
   {
     const mLedger = text.match(/^ledger(?:\s+(hour|today))?\s*$/i);
     if (mLedger && _memoryId()) {
-      input.value = ''; _autosizeInput();
-      appendMessage({ role: 'user', body: text });
       const inst2 = _memoryId();
       const items = await loadLedger(inst2);
       const m3 = appendMessage({ role: 'assistant', body: '' });
@@ -8382,8 +8371,6 @@ async function sendChatMessage() {
   }
 
   if (/^memory\s*$/i.test(text) || /^(show me )?what (do |have )?you('ve| have)? ?(know|knows|learned|learnt|remember|remembered)\??$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _renderAppMemory(); }
     catch (e) { try { console.warn('[chat] memory view failed:', e?.message); } catch { /* */ } }
     return;
@@ -8392,8 +8379,6 @@ async function sendChatMessage() {
   // WF-2 — `workflows` lists THIS app's saved IL workflows (name/ask/steps/runs) with ▶ Run / 🗑 Delete per row. A
   // utility command (before routing): it manages the app's saved workflows, it isn't a website ask.
   if (/^workflows?\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _renderWorkflows(); }
     catch (e) { try { console.warn('[chat] workflows view failed:', e?.message); } catch { /* */ } }
     return;
@@ -8402,8 +8387,6 @@ async function sendChatMessage() {
   // §10.2 — `distill` (or `teach preset`) lists THIS app's confirmed learned rules and offers to teach each (abstracted,
   // HITL) to its app-type preset, so new apps of that type start smarter. A utility command, before routing.
   if (/^(distill|teach\s+preset)\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _renderDistill(); }
     catch (e) { try { console.warn('[chat] distill view failed:', e?.message); } catch { /* */ } }
     return;
@@ -8418,8 +8401,6 @@ async function sendChatMessage() {
   // deterministic: bank + the honest ack, never a model turn.
   const _mRemember = text.match(/^(?:remember\s*:|remember\s+this\s*[:,—–-]|add\s+(?:this\s+)?to\s+(?:your\s+)?memory\s*[:,—–-]?|save\s+(?:this\s+)?to\s+(?:your\s+)?memory\s*[:,—–-]?|memorize\s*[:,—–-])\s*(\S[\s\S]*)$/i);
   if (_mRemember) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     if (!_currentConversationAppId) { _setMessageBody(m, 'Open a desk — standing rules are per-desk.'); _orchFinalize(m); return; }
     const rule = standingRuleFromText(_mRemember[1]);
@@ -8434,8 +8415,6 @@ async function sendChatMessage() {
   // read-only extraction → kb: refs minted over its media → the app's next draft composes FROM it ("compose a
   // troubleshooting guide for James from this article") with images/videos referenced by menu, never minted URLs.
   if (/^source$/i.test(text.trim())) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     const appId = _currentConversationAppId;
     if (!appId) { _setMessageBody(m, 'Open a desk first — sources are banked per-desk (they feed its canvas composes).'); _orchFinalize(m); return; }
@@ -8457,8 +8436,6 @@ async function sendChatMessage() {
   // composes (up to 3 banked pages — an egress surface worth seeing); `sources clear` drops them all.
   if (/^sources(\s+clear)?\s*$/i.test(text)) {
     const clearing = /clear/i.test(text);
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     const appId = _currentConversationAppId;
     if (!appId) { _setMessageBody(m, 'Open a desk first — sources are banked per-desk.'); _orchFinalize(m); return; }
@@ -8480,8 +8457,6 @@ async function sendChatMessage() {
   // CA-9 (v2.74.1206) — `canvas: <ask>` has the app COMPOSE a fresh view (LLM → CanvasSpec → the verified render
   // pipeline). The closed vocabulary is enforced at the handler's normalizeCanvasSpec, so an odd reply can't inject.
   if (/^canvas:\s*\S/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     const appId = _currentConversationAppId;
     let pres = null; try { pres = appId ? (builtinApp(appId)?.presentation || null) : null; } catch { /* */ }
@@ -8501,8 +8476,6 @@ async function sendChatMessage() {
   // DESIGN_canvas.md). It renders the app's presentation DEFAULT through the RENDER_CANVAS handler (exercising the
   // full CA-4 pipeline). Only apps that DEFINE a presentation layer (appDef.presentation) have a canvas — env.canvas.
   if (/^(canvas|open (the )?canvas|dashboard)\s*$/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     const appId = _currentConversationAppId;
     let pres = null; try { pres = appId ? (builtinApp(appId)?.presentation || null) : null; } catch { /* */ }
@@ -8520,8 +8493,6 @@ async function sendChatMessage() {
   // ask, so `i:` is now a redundant alias kept for muscle memory (it forces interpret + falls back to the IL loop on
   // unavailable, same as the default). `i:` ≠ `il:` — the regex needs `i` immediately followed by `:`.
   if (/^i:/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     const iask = text.replace(/^i:\s*/i, '').trim();
     try { if (await _tryInterpret(iask)) return; } catch (e) { try { console.warn('[chat] interpret command failed:', e?.message); } catch { /* */ } }
     try { await _tryIlCommand('il: ' + iask); } catch (e) { try { console.warn('[chat] i: fallback failed:', e?.message); } catch { /* */ } }
@@ -8532,8 +8503,6 @@ async function sendChatMessage() {
   // routing inversion below), so `il:` is no longer required. Kept so existing muscle memory still works — it runs
   // the inference-layer loop directly (bypassing the utility-command guards), exactly as before.
   if (/^il:/i.test(text)) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     try { await _tryIlCommand(text); } catch (e) { try { console.warn('[chat] il command failed:', e?.message); } catch { /* */ } }
     return;
   }
@@ -8552,9 +8521,6 @@ async function sendChatMessage() {
   // v2.74.907 — STOP keyword: "stop"/"end"/"cancel" (full-match — a real ask like "stop showing ads on X"
   // falls through) halts the walk + cancels live invocations. Runs BEFORE any routing.
   if (_STOP_RE.test(text)) {
-    input.value = '';
-    _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     await _stopLongRunning();
     return;
   }
@@ -8563,8 +8529,6 @@ async function sendChatMessage() {
   // SPECIFIC (this tab) closes the active tab immediately.
   const _closeScope = _matchCloseTabs(text);
   if (_closeScope) {
-    input.value = ''; _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     if (_closeScope.scope === 'all') {
       const m = appendMessage({ role: 'assistant', body: '' });
       _setMessageBody(m, 'Close all other tabs and keep only Studio?');
@@ -8599,9 +8563,6 @@ async function sendChatMessage() {
   // If the user types an old dev verb here out of muscle memory, point them at the conversations menu rather
   // than letting `dev: …` / `gl` leak into the capability matcher as a website ask.
   if (_DEV_VERB_RE.test(text)) {
-    input.value = '';
-    _autosizeInput();
-    appendMessage({ role: 'user', body: text });
     _orchFinalize(appendMessage({ role: 'assistant', body: 'Dev now lives in its own conversation. Open the conversations menu (the ☰ history button) and pick “New dev conversation” to chat with Claude Code — no “dev:” prefix needed there.' }));
     return;
   }
@@ -8610,14 +8571,12 @@ async function sendChatMessage() {
   const targetId   = input.dataset.targetCapabilityId;
   const targetName = input.dataset.targetCapabilityName;
 
-  input.value = '';
   delete input.dataset.targetCapabilityId;
   delete input.dataset.targetCapabilityName;
   input.placeholder = 'Message Orchard…  (type / for capabilities)';   // v2.74.1343 (review Batch 6) — keep the product name + the "/" hint (was "Message Agent HUB…", losing both)
   _autosizeInput();
   $('btn-chat-send').disabled = true;
 
-  appendMessage({ role: 'user', body: text });
 
   if (targetId) {
     // Direct invocation against a specific assistant

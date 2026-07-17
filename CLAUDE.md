@@ -45,6 +45,13 @@ Plus: `GET_RIDE_RECIPES` (`background/handlers/sg.js`) MERGES curated into a NON
 
 **Why this keeps biting (the "re-learn per ride" lesson):** the ride MODEL generalized cleanly, but ACTIVATION (reachable + fresh + armed) was hardcoded to the Zendesk/Shopify connected-app shape, so each new transport/field was dropped on the seeded path one at a time — cookie-ride auth (v1430), palette projection (v1428), `itemUrl` for "show warranty" (v1432). Same class every time: the curated app worked, the forged/seeded Ground silently lost the marker. The v1432 spread makes hop 2 automatic; hops 1 + 3 (+ the merge) are the residual two-line discipline.
 
+## 4. New chat intercept → the turn claims at ENTRY, never in the intercept
+**Trigger:** you add a branch/intercept to `sendChatMessage` (chat.js), or any helper it awaits before acting.
+
+**Rule:** the composer clear + the user-bubble echo happen ONCE, at the top of `sendChatMessage` (v2.74.1554) — an intercept must never re-echo the user (`appendMessage({role:'user',…})`), never clear/refill the composer (exception: the `seed:` prefill flow), and never run a slow probe just to DECIDE whether it claims. Decide-by-doing scans belong behind the 60s `_rideScanCache` (`_cachedArmedGrounds`/`_cachedHostRecipes`).
+
+**Why this bites:** pre-1554, each branch cleared/echoed at ITS claim, so decide-by-doing intercepts (`_showSection`'s ~18-roundtrip scan, `_openRecordOnSite`'s LLM match + walk replay) held the ask in the composer with an empty Thread/Rail for 5–20s — which read as "nothing happened" and invited duplicate sends whose interleaved engine runs corrupted each other's DOM waits (findings 165125). `appendMessage` persists user messages immediately — the echo IS the Rail/Thread update; delaying it hides the turn everywhere.
+
 ---
 
 # Working conventions (from the build/run loop)

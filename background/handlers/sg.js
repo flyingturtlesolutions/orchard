@@ -1285,6 +1285,12 @@ export function createSgMessageHandlers(ctx) {
           catch (e) { sendResponse({ success: false, error: `drive run failed: ${e.message}` }); return; }
         } else { sendResponse({ success: false, error: 'artifact hydrated without a runnable entity' }); return; }
         const ok = !!(result && result.success);
+        // v2.74.1556 — SELF-STAMP the recorded start on LEGACY capabilities (accepted before startUrl existed):
+        // a successful run proves the pre-run page was a working start — bank it (raw, hash intact) so the next
+        // replay can start-establish instead of depending on where the tab happens to sit.
+        if (ok && !cap.startUrl && liveUrl && (!cap.localeUrl || _orig(liveUrl) === _orig(cap.localeUrl))) {
+          try { await ctx.writeSgCapability(groundId, { ...cap, startUrl: liveUrl }); Logger.info('background', `REPLAY_SG_CAPABILITY — startUrl self-stamped (${_pageHash(liveUrl) || '/'})`); } catch { /* best-effort */ }
+        }
         // Verify-on-first-use promotion: a clean run upgrades 'observed' → 'trial-pass' (the run IS the trial —
         // the same doctrine as PS-3's staged caps) + healthStatus 'ready' on the backing records. A failure
         // leaves the verdict honest; nothing is silently promoted.
@@ -2571,6 +2577,11 @@ export function createSgMessageHandlers(ctx) {
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, description: capDescription, shape: 'observed', source: 'observed',
           localeUrl, perspectiveId,
+          // v2.74.1556 — the RAW recorded start (hash intact): localeUrl goes through pageKey normalization which
+          // STRIPS the hash, so a hash-routed SPA's "#dashboard" start was unrecoverable — replay from "#warranty"
+          // (or bare "/", a DIFFERENT page) failed at step 0 (live 175025/180622). REPLAY establishes this page
+          // before running (start-establish), and self-stamps it on legacy capabilities at their next success.
+          startUrl: (phasesRaw[0] && phasesRaw[0].url) || '',
           ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragmentIds,
           landmarkUids: [...seenUid], params: namedParams, aliases: seedAliases, phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
@@ -4771,6 +4782,21 @@ export function createSgMessageHandlers(ctx) {
         if (cap.localeUrl && liveUrl && _orig(liveUrl) && _orig(cap.localeUrl) && _orig(liveUrl) !== _orig(cap.localeUrl)) {
           sendResponse({ success: true, ran: false, reason: `this capability is for ${_orig(cap.localeUrl)} but you're on ${_orig(liveUrl)} — go there and re-run` });
           return;
+        }
+        // v2.74.1556 — START-ESTABLISH: a walk is only as reliable as its STARTING state, and the RAW recorded
+        // start (hash intact — localeUrl is pageKey-normalized and loses it) is on the record as `startUrl`
+        // (stamped at accept, self-stamped below for legacy records). Same site + different page → navigate the
+        // tab to the recorded start. For hash routes ("#warranty" → "#dashboard") tabs.update is a SAME-DOCUMENT
+        // navigation — no reload (v1555's chat-side root-nav forced a FULL reload to bare "/", a DIFFERENT page
+        // than "#dashboard", and broke step 0 — live 180622); a full-path nav polls to complete the same way.
+        const _pageHash = (u) => { try { const x = new URL(u); return x.pathname.replace(/\/+$/, '') + x.hash; } catch { return ''; } };
+        if (typeof tabId === 'number' && cap.startUrl && liveUrl && _orig(liveUrl) === _orig(cap.startUrl) && _pageHash(liveUrl) !== _pageHash(cap.startUrl)) {
+          try {
+            Logger.info('background', `REPLAY_SG_CAPABILITY — start-establish: ${_pageHash(liveUrl) || '/'} → ${_pageHash(cap.startUrl) || '/'}`);
+            await chrome.tabs.update(tabId, { url: cap.startUrl });
+            for (let i = 0; i < 25; i++) { try { const t = await chrome.tabs.get(tabId); if (t && t.status === 'complete') break; } catch { break; } await new Promise((r) => setTimeout(r, 200)); }
+            await new Promise((r) => setTimeout(r, 700));   // a hash-route view swap has no load event — give the SPA a beat
+          } catch { /* establishment is best-effort — probe-or-recover still owns the steps */ }
         }
         // Preferred: run the saved, landmark-backed Strategy (the promoted library entity).
         if (cap.strategyId) {
