@@ -190,3 +190,15 @@ describe('catalogArmedEntries — CX-9r catalog-armed origins (v2.74.1463)', () 
     assert.deepEqual(catalogArmedEntries(['x.zendesk.com'], null), []);
   });
 });
+
+describe('rideRecipe — LEG-1 (v2.74.1593): lastUrlArgs is user-state (a catalog refresh must keep it)', () => {
+  it('mergeRecipes preserves the funnel-banked lastUrlArgs while mechanical fields refresh', () => {
+    const existing = [{ id: 'sh_pulse', endpoint: '/api/shopify/{handle}?operation=Shop&type=query', lastOkAt: 5, lastUrlArgs: { handle: 'deako' } }];
+    const reseed = [{ id: 'sh_pulse', endpoint: '/api/shopify/{handle}?operation=ShopV2&type=query' }];
+    const merged = mergeRecipes(existing, reseed);
+    const rec = merged.find((r) => r.id === 'sh_pulse');
+    assert.match(rec.endpoint, /ShopV2/, 'mechanical field refreshed from the catalog');
+    assert.deepEqual(rec.lastUrlArgs, { handle: 'deako' }, 'the banked handle survives — the ephemeral canary depends on it');
+    assert.equal(rec.lastOkAt, 5, 'proof-of-life untouched');
+  });
+});

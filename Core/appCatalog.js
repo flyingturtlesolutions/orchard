@@ -126,8 +126,10 @@ const PRESETS = [
     // operator/inbox harness, a different bound noun. DK-6 (v2.74.1486) — promoted to the FIRST PRECONFIGURED DESK:
     // `sites` ships its connection set (setup pre-picks them, review-and-Confirm) and the seed widens to the
     // homeowner's whole record (VendorSuite tasks · Zendesk tickets · Shopify orders · HubSpot CRM) — the DK-4
-    // federation's live vehicle. HubSpot has no curated legs yet: the connection rides along; harvested reads (§20)
-    // grow its legs. The curated ride legs for the other three are catalog-armed (CX-9r) — readable with no grounding.
+    // federation's live vehicle. HS-1 (v2.74.1595) — HubSpot now ships curated legs too (hubspot_me/teams/contact,
+    // HAR-authored); harvested reads (§20) grow the rest. The curated ride legs for all four are catalog-armed
+    // (CX-9r) — readable with no grounding (they project the moment the connection binds; a stale SW is the only
+    // gotcha — a background-catalog change needs the extension reloaded, not just the panel reopened).
     // v2.74.1508 — the rail/gallery badge the KIND ('desk'), so the NAME drops the descriptor ('desk Warranty desk' read twice).
     id: 'warranty-manager', name: 'Warranty', icon: 'ti-tools', archetype: 'operator', type: 'inbox', version: 1, source: 'builtin',
     description: 'Work your warranty queue across VendorSuite, Zendesk, Shopify, and HubSpot — one case per homeowner, correlated across systems.',

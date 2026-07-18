@@ -46,7 +46,7 @@ import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.j
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`)
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
-import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport)
+import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
@@ -4130,6 +4130,44 @@ async function _showGroundedReadView() {
 }
 
 // CX-7d (v2.74.1396) — the persisted-op bank viewer: which write operations the sniffer has captured off the open
+// KA-1 (v2.74.1599) — the keep-alive picker (`keepalive`, or the Admin card's button). Per-connection OPT-IN;
+// the row shows the honest state: the LEARNED idle window (from observed deaths — KA-0 samples every origin,
+// opted in or not), the ping cadence, the last ping, and futility ("pinging provably doesn't extend this site's
+// session — stopped"). The header states the consent gate: pings run only while YOU are actively using Chrome.
+async function _showKeepAlive() {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const r = await _orchReq('VITALS_KEEPALIVE', { op: 'list' });
+  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t read keep-alive — ${_errWord(r && r.error)}.`); _orchFinalize(m); return; }
+  const rows = Array.isArray(r.rows) ? r.rows : [];
+  const _render = (rs) => {
+    const hWord = (ms) => { const h = ms / 3600e3; return h >= 1 ? `~${Math.round(h * 10) / 10}h` : `~${Math.round(ms / 60e3)}m`; };
+    const lines = rs.map((row) => {
+      const state = row.futile ? '∅' : row.on ? '⟳' : '○';
+      const win = row.est ? `window ${hWord(row.est)} (learned from ${row.samples} sign-out${row.samples === 1 ? '' : 's'})` : 'window unknown yet';
+      const cad = row.on && !row.futile && row.cadence ? ` · pings every ${hWord(row.cadence)}` : '';
+      const last = row.lastPingAt ? ` · last ping ${ageWordMs(Date.now() - row.lastPingAt)}` : '';
+      const fut = row.futile ? ' · pinging didn’t help here (fixed expiry or token-based) — stopped' : '';
+      return `${state} **${row.origin}** — ${win}${cad}${last}${fut}`;
+    });
+    return [
+      'Keep-alive pings a site’s session so it doesn’t idle out **while you’re actively using Chrome** — step away and the pings stop, so each site’s own walk-away timeout still protects you. Sites where pinging provably doesn’t extend the session stop themselves.',
+      '',
+      ...(lines.length ? lines : ['No connections yet — connect a site first.']),
+    ].join('\n');
+  };
+  _setMessageBody(m, _render(rows), { markdown: true });
+  const bar = _orchActionBar(m);
+  for (const row of rows.slice(0, 6)) {
+    bar.appendChild(_mkBtn(`${row.on ? 'Stop' : 'Keep'} ${row.origin.replace(/^www\./, '')}`, async () => {
+      const r2 = await _orchReq('VITALS_KEEPALIVE', { op: 'set', origin: row.origin, on: !row.on });
+      try { bar.remove(); } catch { /* */ }
+      if (r2 && r2.success !== false) { try { m.remove(); } catch { /* */ } await _showKeepAlive(); }
+    }));
+  }
+  _orchFinalize(m);
+}
+function ageWordMs(ms) { const mn = Math.floor(ms / 60e3); if (mn < 1) return 'just now'; if (mn < 60) return `${mn}m ago`; const h = Math.floor(mn / 60); return h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`; }
+
 // admin tab (T4 verification). A session-ride write replays only once its per-store hash is banked — so this is how
 // you confirm "do it once by hand" worked before trying the write.
 async function _showRideOps() {
@@ -4138,6 +4176,24 @@ async function _showRideOps() {
   if (!r || r.success === false) { _setMessageBody(m, `Couldn’t check captured operations — ${_errWord(r && r.error)}.`); _orchFinalize(m); return; }
   if (!r.tab) { _setMessageBody(m, 'No open Shopify admin tab to check — open your store admin (a `/store/…` page) and try again.', { markdown: true }); _orchFinalize(m); return; }
   const ops = Array.isArray(r.ops) ? r.ops : [];
+  const wanted = Array.isArray(r.wanted) ? r.wanted : [];
+  // LEG-2a (v2.74.1594) — the T4 CHECKLIST: wanted-vs-banked with per-op by-hand coaching (the viewer used to
+  // show only what happened to be captured — you couldn't see what was still NEEDED or how to bank it).
+  if (wanted.length) {
+    const done = wanted.filter((w) => w.banked);
+    const missing = wanted.filter((w) => !w.banked);
+    const lines = [
+      ...done.map((w) => `✓ **${w.op}** — banked (\`${w.sha8}…\`) — “${w.recipeName}” is ready to run (it still asks your confirm)`),
+      ...missing.map((w) => `○ **${w.op}** — needed by “${w.recipeName}”. To bank it: ${opCaptureHint(w.op)} — I capture the operation as you do it.`),
+    ];
+    const extras = ops.filter((o) => !wanted.some((w) => w.op === o.name));
+    if (extras.length) lines.push(`_(also captured: ${extras.map((o) => o.name).join(', ')})_`);
+    const foot = missing.length
+      ? `\n\nDo the missing one${missing.length === 1 ? '' : 's'} in any order with this tab open, then run \`ops\` again — when everything shows ✓, the write legs go live behind their confirms.`
+      : '\n\nAll banked — the write legs are live (each still asks for your confirm before sending).';
+    _setMessageBody(m, `Write operations on **${r.origin}**:\n${lines.join('\n')}${foot}`, { markdown: true });
+    _orchFinalize(m); return;
+  }
   if (!ops.length) {
     _setMessageBody(m, `No write operations captured yet on **${r.origin}**.\n\nPerform the action once **by hand** in the admin (e.g. **Customers → Add customer**, Save) with this tab open — the operation is captured, then it can replay. Run \`ops\` again to confirm.`, { markdown: true });
     _orchFinalize(m); return;
@@ -4936,9 +4992,14 @@ async function _fieldFollowup(text) {
     // Instructions field). Gated to an UNAMBIGUOUS field reference so a genuine reasoning aside ("is this urgent?")
     // still falls through: an explicit "field" reference, a verbed READ (mv), or an "any <X>?"/noun phrase that does
     // NOT lead with a reasoning interrogative.
-    const _reasoning = /^(is|are|was|were|does|do|did|should|can|could|will|would|has|have|how|why|when|who|which|may|might)\b/i;
-    const fieldProbe = fieldRefOk || !!mv || (!!bare && (/^any\b/i.test(q) || !_reasoning.test(q)));
-    if (!fieldProbe) return false;   // genuinely conversational → normal routing (unchanged)
+    // v2.74.1597 — a BARE phrase that matches NO field DECLINES the turn (live: "add leg", "legs", "show user in
+    // hubspot" — console commands and cross-system asks sitting BELOW this stage were eaten by the "There's no X
+    // field" dump whenever a read was in focus; the bare form's own charter (v1561) is "acts only on a literal
+    // field/details match", so a bare MISS has no claim). The honest-absence answer stays for the EXPLICIT forms —
+    // a named-field reference, a verbed read, or an "any <X>?" probe (the v1526 anti-fabrication net) — where the
+    // user unambiguously asked THIS record for a field.
+    const fieldProbe = fieldRefOk || !!mv || (!!bare && /^any\b/i.test(q));
+    if (!fieldProbe) return false;   // bare miss / genuinely conversational → normal routing
     const labels = Object.entries(obj)
       .filter(([, v]) => v != null && v !== '' && !(typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length))
       .map(([k]) => nice(k));
@@ -7184,6 +7245,30 @@ function _shapeScope(params, labels) {
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
 async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false }) {
   const _askConvId = _currentConversationId;   // FC-6 — focus accretes to the conversation the ask was typed in
+  // v2.74.1597/1598 — the NAMED-SYSTEM fence: an ask that says a system's NAME ("search hubspot for…", "in
+  // hubspot") must never silently run another system's leg (live 1596: it ran the ZENDESK search and reported
+  // 25 tickets without naming the system — no HubSpot search leg exists). v1598 — this is TR-5's FIRST
+  // enforcement tooth (DESIGN_target_routing.md; the rung was observe-only, and the live miss above is exactly
+  // the graded `TARGET ▸` disagreement it waited for): the turn's OWN resolver verdict is consumed FIRST — an
+  // EXPLICIT (TR-1, the-ask-named-it) verdict whose host disagrees with the selected leg declines. ONE
+  // vocabulary (the resolver's); the catalog-token check is only the FALLBACK for turns the resolver didn't
+  // cover (no ground exists yet for the named system — catalog hosts know a system before any visit; or this
+  // dispatch path didn't resolve). Declines with the honest gap; render-then-return-false (the rp.error shape).
+  if (leg && leg.domain === 'connector') {
+    const _legHost = (leg.tool && (leg.tool.appHost || leg.tool.origin)) || '';
+    const _nh = (s) => String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/[/?#].*$/, '').trim();
+    const _tr = (_lastTargetResolve.decision && _lastTargetResolve.ask === String(ask || '').trim()) ? _lastTargetResolve.decision : null;
+    const _trMiss = !!(_tr && _tr.tier === 'explicit' && _tr.host && _legHost && _nh(_tr.host) !== _nh(_legHost));
+    const _gapSys = _trMiss
+      ? ((/named "([^"]+)"/.exec(_tr.why || '') || [])[1] || _nh(_tr.host))
+      : askNamesOtherSystem(ask, _legHost);
+    if (_gapSys) {
+      try { _orchLog(`TARGET ▸ named-system fence (${_trMiss ? 'tr-explicit' : 'catalog'}): ask names "${_gapSys}", selected leg is ${_legHost} (${(leg.tool && leg.tool.recipeId) || leg.key}) — declined`); } catch { /* */ }
+      _setMessageBody(msg, `I can’t do that on **${_gapSys}** yet — my closest match runs on **${_legHost}**, which isn’t what you asked for. Teach me the ${_gapSys} way (say “show me”), or ask me to use ${_legHost} instead.`, { markdown: true });
+      _orchFinalize(msg);
+      return false;
+    }
+  }
   // FC (v2.74.1559) — REQUIRED ride params fill from the conversation's FOCUS head: in a case, "homeowner's
   // phone?" / "get contacts" needs no id — the case record already carries TaskId (live 195557: the binder fed
   // the human TICKET number as the internal id → the known junk-id http-500). Deterministic: exact-normalized
@@ -8494,6 +8579,11 @@ async function sendChatMessage() {
     // hash is banked (do the action by hand once, with the tab open, to capture it).
     if (/^(shopify\s+ops|captured\s+ops|ride\s+ops|ops)\s*$/i.test(text)) {
       await _showRideOps();
+      return;
+    }
+    // KA-1 (v2.74.1599) — the keep-alive picker: per-connection opt-in, learned windows shown honestly.
+    if (/^keep[-\s]?alives?\s*$/i.test(text)) {
+      await _showKeepAlive();
       return;
     }
     if (/^show(\s+(me|the|it|tickets?|items?|sources?|profile|customer|order|orders|record|page))*\s*$/i.test(text) && _memoryId()) {
@@ -10445,6 +10535,7 @@ async function _maybeRenderAdminDesk() {
     try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
     void _maybeRenderAdminDesk();
   }));
+  bar.appendChild(_mkBtn('Keep-alive…', () => { void _showKeepAlive(); }));   // KA-1 (v1599) — the per-connection opt-in picker
   // VT-2b (v2.74.1587) — incidents are CASES (sub-conversations under this desk, in the Rail), not cards in this
   // timeline (live 1586 report: the card-in-thread was the recorded v1 deviation; the requirement was a case).
   // Mint/refresh them; the desk thread stays quiet — the vitals card above carries the one-line pointer.

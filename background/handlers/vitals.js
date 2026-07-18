@@ -14,7 +14,8 @@
 import { Logger } from '../../Core/Logger.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveIncident, openIncidents,
-  tallyClassOf, tallyTick, tallySummary, tallyByDay } from '../../Core/vitals.js';
+  tallyClassOf, tallyTick, tallySummary, tallyByDay,
+  kaSetOptIn, kaCadenceMs, kaNotePing, kaRecordDeath, kaPlan } from '../../Core/vitals.js';   // KA-0/1 (v2.74.1599) — keep-alive: learned windows + the idle-gated opt-in probe plan
 import { buildAdminDashboardSpec, buildDeskDashboardSpec, buildFrontDashboardSpec, ageWord } from '../../Core/vitalsDashboard.js';
 import { tickOk, tickRouteMiss } from '../../Core/routeHeal.js';
 import { heartbeatTargets } from '../../Core/connectionPresence.js';
@@ -28,6 +29,7 @@ const LAST_DAILY_KEY = 'vitals:lastDaily';
 const SETTINGS_KEY = 'settings:vitals';
 const INC_KEY = 'vitals:incidents';
 const TALLY_KEY = 'vitals:tally';
+const KA_KEY = 'vitals:ka';           // KA-0/1 — { [origin]: { on, samples[], est, lastPingAt, lastPingOkAt, strikes, futile } }
 
 let _ctx = null;
 
@@ -94,6 +96,32 @@ async function _readTally() {
   try { return (await chrome.storage.local.get(TALLY_KEY))?.[TALLY_KEY] || {}; } catch { return {}; }
 }
 
+// ── KA-0/1 (v2.74.1599) — the keep-alive book: serialized RMW (deaths + pings + toggles share one chain) ──────────
+let _kaChain = Promise.resolve();
+function _kaMutate(fn) {
+  const step = _kaChain.then(async () => {
+    let book = {};
+    try { book = (await chrome.storage.local.get(KA_KEY))?.[KA_KEY] || {}; } catch { /* */ }
+    const next = fn((book && typeof book === 'object') ? book : {});
+    try { await chrome.storage.local.set({ [KA_KEY]: next }); } catch { /* */ }
+    return next;
+  }).catch(() => ({}));
+  _kaChain = step.then(() => {}, () => {});
+  return step;
+}
+async function _kaBook() {
+  try { const b = (await chrome.storage.local.get(KA_KEY))?.[KA_KEY]; return (b && typeof b === 'object') ? b : {}; } catch { return {}; }
+}
+// The consent gate: keep-alive fires ONLY while the user is actively using the browser (chrome.idle 'active',
+// 5-min detection window). Fail-CLOSED — no idle verdict (missing permission, API error) means no pings: the
+// walk-away property is the design ("don't let my session rot while I'm working", never "defeat the timeout").
+function _userActive() {
+  return new Promise((resolve) => {
+    try { chrome.idle.queryState(300, (st) => { void chrome.runtime.lastError; resolve(st === 'active'); }); }
+    catch { resolve(false); }
+  });
+}
+
 async function _openIncident(fields) {
   const r = await _mutateIncidents((l) => upsertIncident(l, { ...fields, now: Date.now() }));
   if (r.opened) { try { Logger.info('conn', `VITALS ▸ incident open [${fields.cls}] ${fields.subject}`); } catch { /* */ } }
@@ -115,7 +143,8 @@ export async function reportLegOutcome(evt) {
   try {
     if (!_ctx) return null;
     const { transport = 'ride', ok = false, status = null, error = '', jsonBody = false, csrfInvolved = false,
-      origin = '', groundId = null, recipeId = null, probePath = null, probeHeaders = null, probeAccept = null } = evt || {};
+      origin = '', groundId = null, recipeId = null, probePath = null, probeHeaders = null, probeAccept = null,
+      urlArgs = null } = evt || {};   // LEG-1 (v2.74.1593) — tab-derived urlParam values ride the outcome so the record banks them
     const cls = classifyLegOutcome({ transport, ok, status, error, jsonBody, csrfInvolved });
     if (cls.auth && origin && typeof _ctx.reportAuthSignal === 'function') {
       void _ctx.reportAuthSignal({
@@ -139,21 +168,31 @@ export async function reportLegOutcome(evt) {
         const i = Array.isArray(list) ? list.findIndex((r) => r && r.id === recipeId) : -1;
         if (i >= 0) {
           const t = cls.drift === 'ok' ? tickOk(list[i], Date.now()) : tickRouteMiss(list[i], Date.now());
-          if (t) {
-            const next = list.slice(); next[i] = t.record;
+          // LEG-1 (v2.74.1593) — bank the tab-derived urlArgs (e.g. Shopify's {handle}) on SUCCESSFUL runs: the
+          // ephemeral daily canary has no /store/ tab, so the executor's urlParam fill falls back to this banked
+          // value (trusted tab provenance — the executor never lets the model supply it). Written only when it
+          // actually changed, riding the same list-write as the tick when both fire.
+          const wantArgs = (ok && urlArgs && typeof urlArgs === 'object' && Object.keys(urlArgs).length) ? urlArgs : null;
+          let rec = t ? t.record : list[i];
+          let dirty = !!t;
+          if (wantArgs && JSON.stringify(rec.lastUrlArgs || null) !== JSON.stringify(wantArgs)) { rec = { ...rec, lastUrlArgs: wantArgs }; dirty = true; }
+          if (dirty) {
+            const next = list.slice(); next[i] = rec;
             await _ctx.writeRideRecipes(groundId, next);
-            suspect = t.record.driftSuspect === true;
+          }
+          if (t) {
+            suspect = rec.driftSuspect === true;
             becameSuspect = !!t.becameSuspect;
             if (t.becameSuspect) {
               Logger.info('ride', `HEAL ▸ suspect ${recipeId} (${origin} ${status || error || '?'} ×${t.streak}) — the request shape may have changed`);
-              void _openIncident({ cls: 'drift', subject: recipeId, origin, groundId, recipeId, name: list[i].name || recipeId,
-                title: `“${list[i].name || recipeId}” on ${origin} may have changed its request shape`, line: `${status || error || '?'} ×${t.streak}` });
+              void _openIncident({ cls: 'drift', subject: recipeId, origin, groundId, recipeId, name: rec.name || recipeId,
+                title: `“${rec.name || recipeId}” on ${origin} may have changed its request shape`, line: `${status || error || '?'} ×${t.streak}` });
             } else if (t.cleared) {
               Logger.info('ride', `HEAL ▸ cleared ${recipeId} (${origin} verified ok)`);
               void _closeIncident({ cls: 'drift', subject: recipeId, line: 'verified ok' });
             }
           } else if (cls.drift === 'ok') {
-            suspect = list[i].driftSuspect === true;   // throttled stamp — state unchanged
+            suspect = rec.driftSuspect === true;   // throttled stamp — drift state unchanged
           }
         }
       }
@@ -174,6 +213,11 @@ export function onConnTransition(tr) {
       void _openIncident({ cls: 'presence', subject: tr.origin, origin: tr.origin,
         title: `${tr.origin} ${tr.to === 'wrong-account' ? 'is signed in as the wrong account' : 'looks signed out'}`,
         line: `${tr.from} → ${tr.to}${tr.cause ? ` (${tr.cause})` : ''}` });
+      // KA-0 (v2.74.1599) — every observed death teaches the origin's idle window (gap = last fresh evidence →
+      // this observation), opted in or not; a death that beat a recent successful ping is the futility strike.
+      if (tr.to === 'signed-out' && tr.prevVerifiedAt > 0) {
+        void _kaMutate((b) => kaRecordDeath(b, tr.origin, { gapMs: Date.now() - tr.prevVerifiedAt, now: Date.now() }));
+      }
     } else if (tr.to === 'fresh') {
       void _closeIncident({ cls: 'presence', subject: tr.origin, line: 'signed in again' });
       void _recoveryCatchUp(tr.origin);   // spec §3.2 — the deferred checks fire on the RECOVERY transition, not the next alarm
@@ -217,6 +261,7 @@ async function _tick() {
   if (!_ctx) return;
   const s = await _settings(); if (!s.enabled) return;
   await _presenceSweep(s);
+  await _keepAliveSweep(s);   // KA-1 — after presence: an opted-in FRESH origin past its cadence gets its ping
   let last = 0;
   try { last = Number((await chrome.storage.local.get(LAST_DAILY_KEY))?.[LAST_DAILY_KEY] || 0); } catch { /* */ }
   if (Date.now() - last >= s.dailyWindowH * 3600e3) {
@@ -278,6 +323,42 @@ async function _runCanary(groundId, rec) {
     const r = await _ctx.invokeSgHandler('INVOKE_SESSION', plan.payload);
     return r ? { success: r.success !== false, error: r.error || null, status: r.status || null } : null;
   } catch { return null; }
+}
+
+// ── KA-1 (v2.74.1599) — the keep-alive sweep: opt-in per origin, USER-ACTIVE-gated, learned cadence. An open tab
+// gets the light identity probe (the registry's learned spec, real tab context); a closed tab rides the §16
+// ephemeral canary (value discarded; the funnel's ok stamps fresh) when that tier is on. Futile origins are
+// skipped by the plan itself — the honest end state for absolute-expiry / bearer-class sites.
+async function _keepAliveSweep(s) {
+  try {
+    const book = await _kaBook();
+    if (!Object.values(book).some((r) => r && r.on)) return;        // nobody opted in — zero cost
+    if (!(await _userActive())) return;                             // the consent gate: walk away → pings stop → the site times out naturally
+    const [registry, open] = await Promise.all([_registry(), _openOrigins()]);
+    const plan = kaPlan(book, registry, { now: Date.now(), openOrigins: open, ephemeralOk: s.ephemeral });
+    for (const p of plan) {
+      let ok = false;
+      try {
+        if (p.mode === 'probe') {
+          const r = await _ctx.invokeSgHandler('CONN_PROBE_ORIGIN', { origin: p.origin, probePath: p.probePath, probeHeaders: p.probeHeaders, probeAccept: p.probeAccept, source: 'heartbeat' });
+          ok = !!(r && r.success !== false);
+        } else {
+          const g = (await _vitalsGrounds()).find((x) => x.host === p.origin);
+          const canary = g && pickCanary(g.armed);
+          if (!canary) {
+            Logger.info('conn', `VITALS ▸ keepalive ${p.origin} skip — no safe canary (open its tab once, or run any read)`);
+            await _kaMutate((b) => kaNotePing(b, p.origin, { ok: false, now: Date.now() }));   // stamp the ATTEMPT so the skip throttles to cadence
+            continue;
+          }
+          const r = await _runCanary(g.groundId, canary);
+          ok = !!(r && r.success);
+        }
+      } catch { ok = false; }
+      await _kaMutate((b) => kaNotePing(b, p.origin, { ok, now: Date.now() }));
+      Logger.info('conn', `VITALS ▸ keepalive ${p.origin} ${p.mode} → ${ok ? 'ok' : 'FAIL'}`);
+      await new Promise((res) => setTimeout(res, 800));             // politeness spacing
+    }
+  } catch { /* */ }
 }
 
 async function _dailySweep(s) {
@@ -431,6 +512,32 @@ export function createVitalsHandlers() {
           await _dailySweep(s);
           sendResponse({ success: true });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'vitals-check-failed' }); }
+      })();
+      return true;
+    },
+    // KA-1 (v2.74.1599) — the keep-alive door: list (every registry origin joined with its learned window +
+    // opt-in state) and set (toggle one origin). The panel's `keepalive` picker is the only writer.
+    VITALS_KEEPALIVE: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const op = payload && payload.op;
+          let book = await _kaBook();
+          if (op === 'set' && payload.origin) {
+            book = await _kaMutate((b) => kaSetOptIn(b, payload.origin, payload.on === true));
+            Logger.info('conn', `VITALS ▸ keepalive ${String(payload.origin).toLowerCase()} ${payload.on === true ? 'ON' : 'off'} (user)`);
+          }
+          const registry = await _registry();
+          const origins = [...new Set([...Object.keys(registry), ...Object.keys(book)])].sort();
+          const rows = origins.map((o) => {
+            const rec = book[o] || {};
+            const e = registry[o] || {};
+            const cadence = kaCadenceMs({ on: false, samples: [], est: rec.est ?? null, futile: rec.futile === true, strikes: rec.strikes || 0, lastPingAt: 0, lastPingOkAt: 0, ...rec });
+            return { origin: o, on: rec.on === true, est: rec.est || null, samples: (rec.samples || []).length,
+              cadence, futile: rec.futile === true, lastPingAt: rec.lastPingAt || 0, lastPingOkAt: rec.lastPingOkAt || 0,
+              status: e.status || null, lastVerifiedAt: e.lastVerifiedAt || 0 };
+          });
+          sendResponse({ success: true, rows, ephemeral: (await _settings()).ephemeral });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'keepalive-failed' }); }
       })();
       return true;
     },

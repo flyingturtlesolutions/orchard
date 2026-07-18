@@ -120,6 +120,9 @@ const _GQL_ORDERS = 'query Orders($q: String!, $n: Int!) { orders(first: $n, que
 const _GQL_PRODUCTS = 'query Products($q: String!, $n: Int!) { products(first: $n, query: $q) { edges { node { id title status totalInventory variants(first: 10) { edges { node { id title sku price inventoryQuantity } } } } } } }';
 // CX-7c — the LIVENESS probe document: `{ shop { name } }` (spec §2 probeShopify). `shopProbe:true` makes
 // INVOKE_SESSION run it once (cached) before the call — a clean signed-out verdict instead of a mid-call surprise.
+// LEG-1 (v2.74.1593) — the same read, NAMED, as a standalone recipe document (the RH-0a contract 404s anonymous
+// docs): the store-pulse canary's query. Tiny on purpose — the VERDICT is the value (session + route health).
+const _GQL_SHOP = 'query Shop { shop { name currencyCode } }';
 const SH = Object.freeze({
   app: 'shopify', appHost: 'admin.shopify.com', method: 'POST', gql: true, csrf: 'sniff', contentType: 'application/json',
   endpoint: '/api/shopify/{handle}', urlParam: { name: 'handle', pattern: '\\/store\\/([^\\/]+)' }, shopProbe: true,
@@ -175,6 +178,25 @@ const AC = Object.freeze({
   identityProbe: '/v5/users/current_user?activation_state=active', requestHeaders: _AC_HDR,
 });
 const AC_GQL = Object.freeze({ ...AC, method: 'POST', gql: true, contentType: 'application/json' });
+
+// ── HubSpot (HS-1, v2.74.1595) — HAR-authored from app.hubspot.com (2026-07-17 capture, credential-blind analysis).
+// SAME-ORIGIN COOKIE-RIDE: the app's own /api/* reads on app.hubspot.com, riding the user's logged-in session — NO
+// Bearer. {portalId} = the HubSpot account/hub id, in the app URL path (`app.hubspot.com/<section>/<portalId>/…`,
+// referer-proven) AND required as `?portalId=` on every API call — so it fills from the RIDE TAB's URL (`urlParam`,
+// the Shopify-{handle} pattern; but in the QUERY, not the path), never from the model. One workspace per session
+// (the HAR carried exactly 1 portalId). CSRF: the app sends `x-hubspot-csrf-hubspotapi` on POSTs (credential class,
+// sniffed at runtime, NEVER banked) — the GET reads below need no token. LIVENESS (CP-1 pattern, mirrors VendorSuite):
+// a JSON-2xx from `/api/login-verify/hub-user-info` = signed in; a redirect/401/non-JSON = signed out. NOT a
+// `verifyIdentity` probe — hub-user-info's user shape is `{user_id, email}` (not the `{id}` probedUser/isAnonUser
+// key on), so identity extraction would MISFIRE a signed-in user as anon; JSON-liveness is the honest verdict, and
+// the identity NAME is deliberately absent (like the vendorsuite row). Frontend telemetry query params
+// (`hs_static_app`/`clienttimeout`) are DROPPED — not part of the API contract; route-heal surfaces a surprise.
+// Object type-ids are stable HubSpot constants: 0-1 Contact, 0-2 Company, 0-3 Deal, 0-5 Ticket.
+const HS = Object.freeze({
+  app: 'hubspot', appHost: 'app.hubspot.com', method: 'GET',
+  identityProbe: '/api/login-verify/hub-user-info', probeAccept: 'json',
+  urlParam: { name: 'portalId', pattern: 'app\\.hubspot\\.com\\/[a-z][a-z0-9-]*\\/(\\d{5,})' },
+});
 
 /**
  * CX-7c (v2.74.1388) — coerce a Shopify object id to a gid. Reads return `id` as a full gid
@@ -394,6 +416,16 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/shopify/{handle}?operation=Products&type=query',
     body: { operationName: 'Products', query: _GQL_PRODUCTS, variables: { q: '{query}', n: 5 } },
     params: [{ name: 'query', type: 'string', required: true }] },
+  // LEG-1 (v2.74.1593) — the STORE PULSE: the CX-7c liveness document promoted to a standalone, PARAMS-FREE
+  // curated read. This is Shopify's CANARY (DESIGN_vitals.md §6 — the recorded no-canary blind spot): every other
+  // SH read takes a required param, so the daily visit had nothing safe to run and the ground sat drift-blind
+  // between real uses. pulse-marked so pickCanary prefers it; {handle} fills from the ride tab or the funnel-banked
+  // lastUrlArgs (the ephemeral visit has no /store/ tab — the banked fallback is what makes this runnable there).
+  { ...SH, id: 'shopify_shop_pulse', name: 'Shopify store pulse', pulse: { kind: 'liveness' },
+    does: 'confirm the Shopify admin session and store identity (a tiny read-only health check — the canary the daily visit runs), riding your admin login',
+    endpoint: '/api/shopify/{handle}?operation=Shop&type=query',
+    body: { operationName: 'Shop', query: _GQL_SHOP, variables: {} },
+    params: [] },
   // SH-Q1 (v2.74.1558) — the QUEUE leg: the first LIST-shaped Shopify read, the entry point the desk/case
   // machinery fans out over (sweep → per-order cases → "show this order"), mirroring vs_warranty_tasks' shape:
   // listUrl = the section-open + on-site-open eligibility; drill = dossier depth at case spawn + the cold
@@ -533,6 +565,22 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/Vendor/Announcement/{divisionId}',
     params: [{ name: 'divisionId', type: 'string', required: true }] },
 
+  // ── HubSpot (HS-1) — the HAR-PROVEN same-origin cookie-ride GET reads. All READ-ONLY (GET). {portalId} fills from
+  // the ride tab (urlParam); {id} is the record id from a lookup/URL. The v3 batch/read + graphql search POSTs are a
+  // documented follow-on (they need the REST-POST-read write-gate carve-out — a safety-surface change deferred to
+  // its own slice; a by-email SEARCH isn't in this HAR at all — HubSpot's public search is a POST /search, unproven
+  // here). itemUrl opens the record's human page: app.hubspot.com/contacts/{portalId}/record/0-1/{id}. ──
+  { ...HS, id: 'hubspot_me', name: 'My HubSpot portal', pulse: { kind: 'liveness' },
+    does: 'confirm your HubSpot session and read your portal + user identity (account id, your name/email, whether the portal is expired) — a tiny read-only health check, riding your login',
+    endpoint: '/api/login-verify/hub-user-info?portalId={portalId}', params: [] },
+  { ...HS, id: 'hubspot_teams', name: 'HubSpot teams',
+    does: 'list the teams in your HubSpot portal (name, member user ids, child teams), riding your login — answers "what teams are there?", "who is on <team>?"',
+    endpoint: '/api/app-users/v1/teams?portalId={portalId}', params: [] },
+  { ...HS, id: 'hubspot_contact', name: 'Look up a HubSpot contact', itemUrl: '/contacts/{portalId}/record/0-1/{id}',
+    does: 'read one HubSpot CONTACT by its record id (all properties — name, email, phone, company, lifecycle stage, owner), riding your login. NOTE: this reads by the internal record id; a by-email search is a separate leg (not yet built)',
+    endpoint: '/api/inbounddb-objects/v1/crm-objects/0-1/{id}?portalId={portalId}&allPropertiesFetchMode=latest_version',
+    params: [{ name: 'id', type: 'string', required: true, hint: 'the contact\'s HubSpot record id (the long number in the record URL), NOT an email' }] },
+
   // ── Aircall Workspace — supervisor / inbox reads ───────────────────────────────────────────────────────────────
   // DK-2 (DESIGN_desks.md §5) — capClass:'presence' = operator STATE (my/team availability, roster, set). A desk
   // carries it, but the queue SWEEP never sweeps it as backlog ("set my availability" is not a queue item); it stays
@@ -654,6 +702,61 @@ export function recipeLegs({ account = 'me', trusted = true } = {}) {
  * STRING (the LLM often includes a "#", e.g. "#64775") → its digits as a Number — so `{id}` fills to `64775`, not the
  * URL-encoded `%2364775` that the server rejects (the read_ticket http-400). Unknown / already-typed params pass through.
  */
+// ── v2.74.1597 — the NAMED-SYSTEM fence (pure): does the ask explicitly designate a DIFFERENT system than the
+// leg selected to run? The live break: "search hubspot for <email>" had no HubSpot search leg, so interpret picked
+// the closest semantic match — the ZENDESK search — and answered with 25 tickets WITHOUT naming the system. An ask
+// that says the system's name must never be silently served by another system. Tokens derive from the catalog's own
+// appHosts (labels minus generic ones), so a new connector fences itself the day its base lands. The designator
+// grammar is deliberately NARROW — "on/in/from/via/at <system>" or "<verb> <system>" — so a token mentioned as
+// CONTENT ("tickets about hubspot") never fences a legitimate search.
+// v1598 SCOPE NOTE: at the dispatch site this is the FALLBACK only — the turn's TARGET_RESOLVE verdict (TR-1
+// explicit, the ONE routing vocabulary) is consumed first; this catches the residue the resolver can't see (a
+// system with NO ground yet — the catalog knows it before any visit — or a dispatch path that didn't resolve). ──
+const _GENERIC_HOST_LABELS = new Set(['app', 'www', 'admin', 'api', 'workspace', 'my', 'com', 'io', 'net', 'org', 'co']);
+function _hostLabels(host) {
+  return String(host || '').toLowerCase().replace(/^https?:\/\//, '').split('.').filter((l) => l && !_GENERIC_HOST_LABELS.has(l));
+}
+/** @returns {string|null} the named system token when the ask designates one the leg does NOT belong to. PURE. */
+export function askNamesOtherSystem(ask, legHost) {
+  const t = String(ask || '').toLowerCase();
+  if (!t) return null;
+  const legLabels = new Set(_hostLabels(legHost));
+  if (!legLabels.size) return null;
+  const tokens = new Set();
+  for (const r of CONNECTOR_RECIPES) { for (const l of _hostLabels(r && r.appHost)) tokens.add(l); }
+  for (const tok of tokens) {
+    if (legLabels.has(tok)) continue;                       // the leg IS that system — no gap
+    const des = new RegExp(`\\b(?:on|in|from|via|at)\\s+(?:the\\s+)?${tok}\\b|\\b(?:search|check|open|show|ask|query|find\\s+in|look\\s*up)\\s+${tok}\\b`, 'i');
+    if (des.test(t)) return tok;
+  }
+  return null;
+}
+
+// ── LEG-2a (v2.74.1594) — the SH-T4 checklist surface ──────────────────────────────────────────────────────────────
+// The op bank is STORE-CAPTURED (a persisted-op hash only exists after the human performs the action once by hand
+// with the tab open); these helpers expose the catalog's DEMANDS on it, so the `ops` viewer can show wanted-vs-
+// banked instead of only what happens to be captured — the by-hand banking session becomes a checklist.
+
+/** The catalog's persisted-op WRITES for a host. PURE. @returns {Array<{op, recipeId, recipeName}>} */
+export function persistedOpsForHost(host) {
+  const h = String(host || '').toLowerCase();
+  if (!h) return [];
+  return CONNECTOR_RECIPES
+    .filter((r) => r && r.persistedOp && r.appHost && (h === r.appHost || h.endsWith(`.${r.appHost}`)))
+    .map((r) => ({ op: String(r.persistedOp), recipeId: r.id, recipeName: r.name }));
+}
+
+// How a human banks each op — the "do it once by hand" coaching, per op (reversible test actions on purpose).
+const _OP_CAPTURE_HINTS = {
+  CustomerCreate: 'create any customer by hand (Customers → Add customer — test values are fine; you can delete it right after)',
+  EditCustomer: 'edit any customer by hand (open one, change a field — e.g. add a tag — and Save; you can undo it right after)',
+  DraftOrderCreate: 'create a draft order by hand (Orders → Drafts → Create order, any product; you can delete the draft right after)',
+};
+/** The by-hand capture instruction for an op. PURE (a safe default for unmapped ops). */
+export function opCaptureHint(op) {
+  return _OP_CAPTURE_HINTS[String(op || '')] || 'perform that action once by hand in the admin with this tab open';
+}
+
 export function coerceParams(params, paramSchema) {
   const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
   const out = {};

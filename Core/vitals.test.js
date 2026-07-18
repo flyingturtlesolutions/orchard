@@ -3,8 +3,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveIncident, openIncidents, INCIDENT_CAP, EVIDENCE_CAP,
-  tallyClassOf, tallyDayKey, tallyTick, tallySummary, tallyByDay, TALLY_KEEP_DAYS } from './vitals.js';
+import { classifyLegOutcome, pickCanary, canaryPlaceholdersFillable, dueForDaily, upsertIncident, resolveIncident, openIncidents, INCIDENT_CAP, EVIDENCE_CAP,
+  tallyClassOf, tallyDayKey, tallyTick, tallySummary, tallyByDay, TALLY_KEEP_DAYS,
+  kaSetOptIn, kaCadenceMs, kaNotePing, kaRecordDeath, kaPlan, KA_FLOOR_MS, KA_DEFAULT_MS, KA_SAMPLE_CAP } from './vitals.js';
 
 const NOW = 1750000000000;
 
@@ -156,5 +157,106 @@ describe('vitals — the VT-2c rolling tally (rates the binary drift flag cannot
     assert.equal(days.length, 2);
     assert.ok(days[0].day < days[1].day, 'oldest first');
     assert.deepEqual({ total: days[0].total, ok: days[0].ok }, { total: 2, ok: 1 }, 'cross-ground rollup on the shared day');
+  });
+});
+
+describe('vitals — pickCanary LEG-1 widening (v2.74.1593: gql reads + banked urlParam placeholders)', () => {
+  const GQL = { id: 'sh_pulse', enabled: true, reviewState: 'accepted', provenance: 'curated', method: 'POST', gql: true,
+    origin: 'admin.shopify.com', endpoint: '/api/shopify/{handle}?operation=Shop&type=query',
+    urlParam: { name: 'handle', pattern: '/store/([^/]+)' }, pulse: { kind: 'liveness' }, params: [] };
+  it('a curated read-only gql POST qualifies once its {handle} has a banked fill; without one it stays out (honest no-canary)', () => {
+    assert.equal(pickCanary([GQL]), null, 'no banked handle → the ephemeral visit could not fill it');
+    const banked = { ...GQL, lastUrlArgs: { handle: 'deako' } };
+    assert.equal(pickCanary([banked]).id, 'sh_pulse');
+  });
+  it('a gql WRITE never qualifies, and a non-urlParam placeholder still disqualifies (params are never improvised)', () => {
+    assert.equal(pickCanary([{ ...GQL, lastUrlArgs: { handle: 'deako' }, write: true }]), null);
+    assert.equal(pickCanary([{ ...GQL, endpoint: '/api/shopify/{handle}/t/{id}', lastUrlArgs: { handle: 'deako' } }]), null, 'the {id} placeholder is a user param — no fill, no canary');
+  });
+  it('canaryPlaceholdersFillable: none → true; urlParam+banked → true; empty banked value → false', () => {
+    assert.equal(canaryPlaceholdersFillable({ endpoint: '/api/plain' }), true);
+    assert.equal(canaryPlaceholdersFillable(GQL), false);
+    assert.equal(canaryPlaceholdersFillable({ ...GQL, lastUrlArgs: { handle: 'deako' } }), true);
+    assert.equal(canaryPlaceholdersFillable({ ...GQL, lastUrlArgs: { handle: '' } }), false);
+  });
+  it('the plain-GET rules are unchanged (no accidental widening of the non-gql class)', () => {
+    const GET = { id: 'g', enabled: true, reviewState: 'accepted', provenance: 'curated', method: 'GET', origin: 'x.test', endpoint: '/api/t/{id}' };
+    assert.equal(pickCanary([GET]), null, 'a GET with a user-param placeholder stays out');
+    assert.equal(pickCanary([{ ...GET, endpoint: '/api/t' }]).id, 'g');
+  });
+});
+
+describe('vitals — KA-0/KA-1 (v2.74.1599): learned idle windows + the keep-alive plan', () => {
+  const H = 3600e3, M = 60e3;
+  it('kaSetOptIn toggles; re-enabling clears futility (the site policy may have changed)', () => {
+    let b = kaSetOptIn({}, 'App.HubSpot.com', true);
+    assert.equal(b['app.hubspot.com'].on, true, 'origin normalized to a bare lowercase host');
+    b = { 'app.hubspot.com': { ...b['app.hubspot.com'], futile: true, strikes: 2 } };
+    b = kaSetOptIn(b, 'app.hubspot.com', true);
+    assert.equal(b['app.hubspot.com'].futile, false);
+    assert.equal(b['app.hubspot.com'].strikes, 0);
+    assert.equal(kaSetOptIn(b, 'app.hubspot.com', false)['app.hubspot.com'].on, false);
+  });
+  it('kaCadenceMs: default 30m with no learned window; learned/3 with the 20m floor; futile → null (stopped)', () => {
+    assert.equal(kaCadenceMs({ on: true, samples: [], est: null, futile: false }), KA_DEFAULT_MS);
+    assert.equal(kaCadenceMs({ est: 6 * H, futile: false }), 2 * H);
+    assert.equal(kaCadenceMs({ est: 30 * M, futile: false }), KA_FLOOR_MS, 'est/3=10m floors to the tick cadence');
+    assert.equal(kaCadenceMs({ est: 6 * H, futile: true }), null);
+  });
+  it('kaRecordDeath learns the MIN window (clamped), caps samples, and never strikes without a recent OK ping', () => {
+    let b = kaRecordDeath({}, 'x.com', { gapMs: 5 * H, now: 100 * H });
+    assert.equal(b['x.com'].est, 5 * H);
+    b = kaRecordDeath(b, 'x.com', { gapMs: 3 * H, now: 110 * H });
+    assert.equal(b['x.com'].est, 3 * H, 'min of samples = the tightest observed death window');
+    assert.equal(b['x.com'].strikes, 0, 'not opted in / no recent ping → a death is a lesson, not a strike');
+    for (let i = 0; i < 10; i++) b = kaRecordDeath(b, 'x.com', { gapMs: (4 + i) * H, now: (120 + i) * H });
+    assert.equal(b['x.com'].samples.length, KA_SAMPLE_CAP);
+  });
+  it('kaRecordDeath strikes when the death BEAT a recent successful ping (opted in) — two strikes → futile', () => {
+    const now = 1000 * H;
+    let b = kaSetOptIn({}, 'x.com', true);
+    b['x.com'] = { ...b['x.com'], est: 3 * H, lastPingOkAt: now - 30 * M };   // cadence 1h; pinged ok 30m before the death
+    b = kaRecordDeath(b, 'x.com', { gapMs: 3 * H, now });
+    assert.equal(b['x.com'].strikes, 1, 'the ping provably did not slide the session');
+    assert.equal(b['x.com'].futile, false);
+    b['x.com'].lastPingOkAt = now + 2 * H;
+    b = kaRecordDeath(b, 'x.com', { gapMs: 3 * H, now: now + 2.5 * H });
+    assert.equal(b['x.com'].futile, true, 'second strike stops the probes honestly');
+    assert.equal(kaCadenceMs(b['x.com']), null);
+  });
+  it('kaPlan: only opted-in FRESH origins past their cadence; open tab → probe (spec rides), else canary when ephemeral is on', () => {
+    const now = 100 * H;
+    const book = {
+      'a.com': { on: true, samples: [], est: null, lastPingAt: 0, lastPingOkAt: 0, strikes: 0, futile: false },
+      'b.com': { on: true, samples: [], est: null, lastPingAt: 0, lastPingOkAt: 0, strikes: 0, futile: false },
+      'c.com': { on: false, samples: [], est: null, lastPingAt: 0, lastPingOkAt: 0, strikes: 0, futile: false },
+      'd.com': { on: true, samples: [], est: null, lastPingAt: 0, lastPingOkAt: 0, strikes: 0, futile: true },
+      'e.com': { on: true, samples: [], est: null, lastPingAt: 0, lastPingOkAt: 0, strikes: 0, futile: false },
+    };
+    const registry = {
+      'a.com': { origin: 'a.com', status: 'fresh', lastVerifiedAt: now - 2 * H, probePath: '/api/me', probeAccept: 'json' },
+      'b.com': { origin: 'b.com', status: 'fresh', lastVerifiedAt: now - 1 * H },
+      'c.com': { origin: 'c.com', status: 'fresh', lastVerifiedAt: now - 9 * H, probePath: '/me' },
+      'd.com': { origin: 'd.com', status: 'fresh', lastVerifiedAt: now - 9 * H, probePath: '/me' },
+      'e.com': { origin: 'e.com', status: 'signed-out', lastVerifiedAt: now - 9 * H, probePath: '/me' },
+    };
+    const plan = kaPlan(book, registry, { now, openOrigins: ['a.com'], ephemeralOk: true });
+    assert.deepEqual(plan.map((p) => `${p.origin}:${p.mode}`), ['a.com:probe', 'b.com:canary'], 'c off · d futile · e not fresh; stalest-first among due');
+    assert.equal(plan[0].probePath, '/api/me', 'the registry’s learned spec rides the probe entry');
+    const noEph = kaPlan(book, registry, { now, openOrigins: [], ephemeralOk: false });
+    assert.deepEqual(noEph, [], 'no tab + ephemeral tier off → nothing (never a silent background reach)');
+    const fresh = kaPlan(book, registry, { now: now - 1.9 * H, openOrigins: ['a.com'], ephemeralOk: true });
+    assert.ok(!fresh.some((p) => p.origin === 'a.com'), 'inside the cadence window → left alone');
+  });
+});
+
+describe('vitals — KA attempt-throttle (bcp polish)', () => {
+  it('a recent ATTEMPT (even a failed/skipped one) suppresses re-planning until the cadence elapses', () => {
+    const H = 3600e3, now = 100 * H;
+    const book = { 'a.com': { on: true, samples: [], est: null, lastPingAt: now - 10 * 60e3, lastPingOkAt: 0, strikes: 0, futile: false } };
+    const registry = { 'a.com': { origin: 'a.com', status: 'fresh', lastVerifiedAt: now - 9 * H, probePath: '/me' } };
+    assert.deepEqual(kaPlan(book, registry, { now, openOrigins: ['a.com'], ephemeralOk: true }), [], 'pinged 10m ago (cadence 30m) → left alone even though verification is stale');
+    book['a.com'].lastPingAt = now - 2 * H;
+    assert.equal(kaPlan(book, registry, { now, openOrigins: ['a.com'], ephemeralOk: true }).length, 1, 'attempt older than the cadence → due again');
   });
 });

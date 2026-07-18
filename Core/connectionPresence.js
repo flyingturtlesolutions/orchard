@@ -63,7 +63,8 @@ export function applySignal(registry, signal) {
   const from = (prev && prev.status) || STATUS.UNKNOWN;
   const attention = (s) => s === STATUS.SIGNED_OUT || s === STATUS.WRONG_ACCOUNT;
   const transition = (from !== sig.status && (attention(sig.status) || attention(from)))
-    ? { origin: sig.origin, from, to: sig.status, cause: sig.cause, source: sig.source }
+    ? { origin: sig.origin, from, to: sig.status, cause: sig.cause, source: sig.source,
+        prevVerifiedAt: (prev && prev.lastVerifiedAt) || 0 }   // KA-0 (v2.74.1599) — the death GAP (last fresh evidence → observed signed-out) teaches the origin's idle window
     : null;
   return { registry: { ...reg, [sig.origin]: entry }, transition };
 }

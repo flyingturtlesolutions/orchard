@@ -125,7 +125,9 @@ export function mergeRideCatalogForAnswer(curated, stored) {
 // catalog refresh must never erase the proof-of-life stamp or the drift evidence.
 // RH-1c (v2.74.1567) — the heal lifecycle rides too: `healProposal` (the pending HITL diff), `healOverride` (an
 // APPLIED heal's shadow — see mergeRecipes), `healedAt`.
-const _USER_FIELDS = ['name', 'does', 'enabled', 'reviewState', 'safetyClass', 'trust', 'lastOkAt', 'missStreak', 'driftSuspect', 'driftAt', 'healProposal', 'healOverride', 'healedAt'];
+// LEG-1 (v2.74.1593) — `lastUrlArgs` rides too: the funnel-banked tab-derived urlParam values (e.g. Shopify's
+// {handle}) — runtime evidence like lastOkAt, and the ephemeral canary's only fill source. A refresh must keep it.
+const _USER_FIELDS = ['name', 'does', 'enabled', 'reviewState', 'safetyClass', 'trust', 'lastOkAt', 'missStreak', 'driftSuspect', 'driftAt', 'healProposal', 'healOverride', 'healedAt', 'lastUrlArgs'];
 
 /**
  * Merge `incoming` into `existing` BY id, PRESERVING user state. PURE. Mechanical fields (method/endpoint/params/body/

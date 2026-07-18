@@ -13,7 +13,7 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql } from '../../Core/connectorRecipes.js';
+import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost } from '../../Core/connectorRecipes.js';   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
@@ -622,7 +622,13 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           let banked = {};
           if (origin) { try { const got = await chrome.storage.local.get(_OPS_KEY(origin)); banked = got[_OPS_KEY(origin)] || {}; } catch { /* */ } }
           const ops = Object.entries(banked).map(([name, o]) => ({ name, sha8: String((o && o.sha) || '').slice(0, 8), handle: (o && o.handle) || null, at: (o && o.at) || 0 }));
-          sendResponse({ success: true, origin: origin || null, ops, tab: !!tab });
+          // LEG-2a (v2.74.1594) — wanted-vs-banked: the catalog's persisted-op writes for this origin, each marked
+          // banked or missing — the checklist that makes the T4 by-hand banking session turnkey.
+          const wanted = persistedOpsForHost(origin).map((w) => {
+            const b = banked[w.op];
+            return { ...w, banked: !!(b && b.sha), sha8: (b && b.sha) ? String(b.sha).slice(0, 8) : null, at: (b && b.at) || 0 };
+          });
+          sendResponse({ success: true, origin: origin || null, ops, wanted, tab: !!tab });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'ride-ops-failed' }); }
       })();
       return true;
@@ -706,6 +712,18 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               const m = String((t && t.url) || '').match(new RegExp(payload.urlParam.pattern));
               if (m && m[1]) args[payload.urlParam.name] = m[1];
             } catch { /* */ }
+            // LEG-1 (v2.74.1593) — the BANKED fallback: the last tab-derived value, stamped onto the record by the
+            // outcome funnel on every successful ride (lastUrlArgs). Same trust class as the tab match (it CAME
+            // from a real /store/ tab; the model still never supplies it). This is what lets the ephemeral daily
+            // canary run when no /store/… tab exists — the recorded no-canary-skip limitation.
+            if (args[payload.urlParam.name] == null && payload.groundId && payload.recipeId && typeof readRideRecipes === 'function') {
+              try {
+                const list = await readRideRecipes(payload.groundId);
+                const rec = Array.isArray(list) ? list.find((r) => r && r.id === payload.recipeId) : null;
+                const banked = rec && rec.lastUrlArgs && rec.lastUrlArgs[payload.urlParam.name];
+                if (banked != null && banked !== '') args[payload.urlParam.name] = String(banked);
+              } catch { /* */ }
+            }
             if (args[payload.urlParam.name] == null) {
               sendResponse({ success: false, error: 'no-url-param', origin, hint: `open your ${appHost || origin} workspace (a /store/… page) so the {${payload.urlParam.name}} can be read from the tab` });
               return;
@@ -861,7 +879,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const _evtBase = { transport: 'ride', origin, groundId: (payload && payload.groundId) || null, recipeId: (payload && payload.recipeId) || null,
             csrfInvolved: !!(payload && (payload.gql || payload.csrf)), probePath: (payload && payload.identityProbe) || null, probeAccept: (payload && payload.probeAccept) || null, probeHeaders: (payload && payload.requestHeaders) || null };
           if (reply && reply.success) {
-            try { void reportLegOutcome({ ..._evtBase, ok: true }); } catch { /* */ }
+            try { void reportLegOutcome({ ..._evtBase, ok: true, urlArgs: _urlArgs || null }); } catch { /* LEG-1 — the funnel banks lastUrlArgs off successful rides */ }
             sendResponse({ ...reply, origin, urlArgs: _urlArgs });
           } else {
             let _heal = null;

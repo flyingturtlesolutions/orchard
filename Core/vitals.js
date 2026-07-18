@@ -25,20 +25,33 @@ export function classifyLegOutcome({ transport = 'ride', ok = false, status = nu
   return { auth, drift: isRouteMiss({ status, error, jsonBody }) ? 'miss' : null };
 }
 
-const _PLACEHOLDER_RE = /\{[^}]+\}/;
+// LEG-1 (v2.74.1593) — endpoint placeholders are canary-fatal UNLESS every one is the recipe's own tab-derived
+// urlParam with a funnel-BANKED fill (`lastUrlArgs` — trusted tab provenance; the executor's fallback supplies it
+// when the ephemeral visit has no ride tab). User-param placeholders still disqualify — never improvised. PURE.
+export function canaryPlaceholdersFillable(r) {
+  const eps = String((r && r.endpoint) || '').match(/\{[^}]+\}/g) || [];
+  if (!eps.length) return true;
+  const uname = r && r.urlParam && r.urlParam.name;
+  return eps.every((p) => {
+    const n = p.slice(1, -1);
+    return n === uname && r.lastUrlArgs && r.lastUrlArgs[n] != null && r.lastUrlArgs[n] !== '';
+  });
+}
 
 /**
- * Pick a ground's CANARY read (spec §6 discipline, hard-line order): armable, non-write GET/HEAD, ZERO endpoint
- * placeholders, no required params, PROVEN (curated or ever-succeeded). Preference: `pulse`-marked (the digest
- * legs are exactly canary-shaped) > curated > freshest lastOkAt. Null when the ground has no safe canary — the
- * sweep says so honestly rather than improvising params.
+ * Pick a ground's CANARY read (spec §6 discipline, hard-line order): armable, non-write, transport-READ
+ * (GET/HEAD, or a curated GraphQL QUERY — a gql POST is a read by DOCUMENT; the read-only belts re-validate the
+ * document at both dispatch boundaries, so selection here never widens what can execute), placeholders fillable
+ * (none, or the banked urlParam — LEG-1), no required params, PROVEN (curated or ever-succeeded). Preference:
+ * `pulse`-marked (the digest legs are exactly canary-shaped) > curated > freshest lastOkAt. Null when the ground
+ * has no safe canary — the sweep says so honestly rather than improvising params.
  */
 export function pickCanary(recipes) {
   const cands = (Array.isArray(recipes) ? recipes : []).filter((r) => r
     && armable(r)
     && r.write !== true
-    && ['GET', 'HEAD'].includes(String(r.method || 'GET').toUpperCase())
-    && !_PLACEHOLDER_RE.test(String(r.endpoint || ''))
+    && (['GET', 'HEAD'].includes(String(r.method || 'GET').toUpperCase()) || r.gql === true)
+    && canaryPlaceholdersFillable(r)
     && !(Array.isArray(r.params) && r.params.some((p) => p && p.required))
     && (r.provenance === 'curated' || r.lastOkAt));
   if (!cands.length) return null;
@@ -195,4 +208,100 @@ export function tallyByDay(book, groundIds, { now = 0, days = 14 } = {}) {
     }
   }
   return [...byDay.values()].filter((d) => d.total > 0).sort((a, b2) => (a.day < b2.day ? -1 : 1));
+}
+
+// ── KA-0/KA-1 (v2.74.1599) — keep-alive: LEARNED idle windows + the user-active-gated opt-in probe plan ─────────────
+// Session expiry is org-configured and unknowable a priori (sliding idle / absolute cap / bearer refresh / SSO —
+// usually layered), so keep-alive is EMPIRICAL: each observed death teaches the origin's window (a sample = the gap
+// between the last fresh evidence and the observed signed-out; the MIN of recent samples is the tightest window a
+// session has been SEEN to die inside), the probe cadence is a third of the learned window, and a death that lands
+// DESPITE a recent successful ping is a FUTILITY strike (absolute-expiry / bearer class — pinging doesn't slide it;
+// two strikes stop the probes honestly instead of burning requests forever). Deaths are learned for EVERY origin
+// (KA-0), so the picker can show the observed window before anyone opts in; probing (KA-1) is per-origin OPT-IN and
+// the handler additionally gates every sweep on chrome.idle === 'active' — keep-alive means "don't let my session
+// rot while I'm actively working in other tabs", never "defeat the site's walk-away timeout". All pure; the handler
+// owns storage, clocks, and the idle gate.
+export const KA_FLOOR_MS = 20 * 60e3;          // never probe faster than the tick cadence
+export const KA_DEFAULT_MS = 30 * 60e3;        // no learned window yet → the presence-window default
+export const KA_EST_MAX_MS = 24 * 3600e3;
+export const KA_SAMPLE_CAP = 8;
+export const KA_STRIKES_FUTILE = 2;
+export const KA_PLAN_CAP = 6;
+
+const _kaKey = (origin) => String(origin || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+const _kaRec = (book, k) => {
+  const r = (book && typeof book === 'object' && book[k]) || {};
+  return { on: false, samples: [], est: null, lastPingAt: 0, lastPingOkAt: 0, strikes: 0, futile: false, ...r };
+};
+
+/** Toggle keep-alive for an origin. Re-enabling clears futility (the site's policy may have changed). PURE. */
+export function kaSetOptIn(book, origin, on) {
+  const k = _kaKey(origin);
+  if (!k) return book || {};
+  const rec = _kaRec(book, k);
+  const next = { ...rec, on: on === true };
+  if (on === true) { next.futile = false; next.strikes = 0; }
+  return { ...(book || {}), [k]: next };
+}
+
+/** The probe cadence for a record: futile → null (stop); learned window/3, floored; else the default. PURE. */
+export function kaCadenceMs(rec) {
+  if (!rec || rec.futile === true) return null;
+  const est = Number(rec.est) || 0;
+  return est > 0 ? Math.max(KA_FLOOR_MS, Math.round(est / 3)) : KA_DEFAULT_MS;
+}
+
+/** Stamp a ping attempt (ok also refreshes lastPingOkAt). PURE. */
+export function kaNotePing(book, origin, { ok = false, now = 0 } = {}) {
+  const k = _kaKey(origin);
+  if (!k) return book || {};
+  const rec = _kaRec(book, k);
+  return { ...(book || {}), [k]: { ...rec, lastPingAt: Number(now) || 0, ...(ok ? { lastPingOkAt: Number(now) || 0 } : {}) } };
+}
+
+/**
+ * Learn from an observed death (fresh → signed-out). The gap sample teaches the window; a death within 1.5×cadence
+ * of the last SUCCESSFUL ping is a futility strike — the ping provably didn't slide the session. PURE.
+ */
+export function kaRecordDeath(book, origin, { gapMs = 0, now = 0 } = {}) {
+  const k = _kaKey(origin);
+  if (!k) return book || {};
+  const rec = _kaRec(book, k);
+  const g = Number(gapMs);
+  const samples = (Number.isFinite(g) && g > 0 && g < KA_EST_MAX_MS * 2)
+    ? [...rec.samples, Math.round(g)].slice(-KA_SAMPLE_CAP) : rec.samples;
+  const est = samples.length ? Math.min(KA_EST_MAX_MS, Math.max(KA_FLOOR_MS, Math.min(...samples))) : rec.est;
+  const cad = kaCadenceMs(rec);
+  const struck = rec.on && cad != null && rec.lastPingOkAt > 0 && (Number(now) - rec.lastPingOkAt) <= cad * 1.5;
+  const strikes = struck ? rec.strikes + 1 : rec.strikes;
+  return { ...(book || {}), [k]: { ...rec, samples, est, strikes, futile: rec.futile || strikes >= KA_STRIKES_FUTILE } };
+}
+
+/**
+ * The sweep plan: which opted-in origins to touch NOW, and how. Only FRESH entries qualify — keep-alive keeps a
+ * live session alive; recovery from signed-out belongs to the human (and wrong-account is never probed). An open
+ * tab → 'probe' (the registry's learned spec rides along); no tab → 'canary' when the ephemeral tier is on (the
+ * §16 vehicle — the handler resolves the ground; a ground with no safe canary skips honestly). Stalest first. PURE.
+ */
+export function kaPlan(book, registry, { now = 0, openOrigins = [], ephemeralOk = false } = {}) {
+  const open = new Set((Array.isArray(openOrigins) ? openOrigins : []).map(_kaKey).filter(Boolean));
+  const out = [];
+  for (const [k, rec0] of Object.entries(book || {})) {
+    const rec = _kaRec(book, k);
+    if (!rec.on || rec0 == null) continue;
+    const cad = kaCadenceMs(rec);
+    if (cad == null) continue;                                     // futile — stopped honestly
+    const e = (registry || {})[k];
+    if (!e || e.status !== 'fresh') continue;                      // only a LIVE session is kept alive
+    const age = Number(now) - (Number(e.lastVerifiedAt) || 0);
+    if (age < cad) continue;
+    if (rec.lastPingAt > 0 && (Number(now) - rec.lastPingAt) < cad) continue;   // ATTEMPT-throttle: a failing/skipping origin retries at cadence, never every tick
+    if (open.has(k)) {
+      if (!e.probePath) continue;                                  // no learned probe spec yet — the first ride teaches it
+      out.push({ origin: k, mode: 'probe', age, probePath: e.probePath, probeHeaders: e.probeHeaders || null, probeAccept: e.probeAccept || 'identity' });
+    } else if (ephemeralOk) {
+      out.push({ origin: k, mode: 'canary', age });
+    }
+  }
+  return out.sort((a, b) => b.age - a.age).slice(0, KA_PLAN_CAP);
 }

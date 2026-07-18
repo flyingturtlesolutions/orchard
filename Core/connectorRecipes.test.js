@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid, acGqlBody, acGqlEndpoint } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem } from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
@@ -655,5 +655,96 @@ describe('DK-7 (v2.74.1488) — the each-mode marker rides the resolve spec thro
     const entry = CONNECTOR_RECIPES.find((r) => r.id === 'vs_task_contacts');
     const p = (entry.params || []).find((x) => x && x.name === 'taskId');
     assert.ok(p && p.required && /INTERNAL/i.test(p.hint || ''), 'the hint carries the internal-id discipline (live 195557: a ticket NUMBER fed as the id → http-500)');
+  });
+});
+
+describe('connectorRecipes — LEG-1 (v2.74.1593): the Shopify store-pulse canary leg', () => {
+  it('shopify_shop_pulse: params-free, pulse-marked, a NAMED read-only document on the RH-0a contract', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_shop_pulse');
+    assert.ok(rec, 'the pulse leg exists');
+    assert.deepEqual(rec.params, [], 'zero params — canary-eligible by construction');
+    assert.equal(rec.pulse && rec.pulse.kind, 'liveness');
+    assert.equal(rec.gql, true);
+    assert.notEqual(rec.write, true);
+    assert.match(rec.endpoint, /operation=Shop&type=query/, 'routes on the named-op contract (anonymous docs 404)');
+    assert.equal(rec.body.operationName, 'Shop');
+    assert.match(rec.body.query, /^query Shop\b/, 'the document is NAMED (the RH-0a lesson)');
+    assert.equal(isReadOnlyGql(rec.body.query), true, 'the read-only belts accept it');
+    assert.equal(rec.urlParam && rec.urlParam.name, 'handle', 'the only placeholder is the tab/banked handle');
+  });
+});
+
+describe('connectorRecipes — LEG-2a (v2.74.1594): the SH-T4 checklist surface (wanted persisted-ops + coaching)', () => {
+  it('persistedOpsForHost lists the catalog’s op-hash writes for the Shopify admin; other hosts get none', () => {
+    const wanted = persistedOpsForHost('admin.shopify.com');
+    const ops = wanted.map((w) => w.op).sort();
+    assert.deepEqual(ops, ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer'], 'the three SH-T5 writes');
+    for (const w of wanted) { assert.ok(w.recipeId && w.recipeName, 'each carries its recipe identity for the checklist line'); }
+    assert.deepEqual(persistedOpsForHost('deako.zendesk.com'), [], 'Zendesk writes are REST — no op-hash demands');
+    assert.deepEqual(persistedOpsForHost(''), []);
+  });
+  it('opCaptureHint coaches each known op with a REVERSIBLE by-hand action; unknown ops get the safe default', () => {
+    assert.match(opCaptureHint('CustomerCreate'), /Add customer/i);
+    assert.match(opCaptureHint('CustomerCreate'), /delete it right after/i, 'the test action is reversible on purpose');
+    assert.match(opCaptureHint('EditCustomer'), /tag/i);
+    assert.match(opCaptureHint('DraftOrderCreate'), /draft order/i);
+    assert.match(opCaptureHint('SomeFutureOp'), /once by hand/i);
+  });
+});
+
+describe('connectorRecipes — HubSpot legs (HS-1, v2.74.1595: HAR-authored same-origin cookie-ride GET reads)', () => {
+  const hs = () => CONNECTOR_RECIPES.filter((r) => r && r.app === 'hubspot');
+  it('three GET reads on app.hubspot.com, all read-only, no write recipes', () => {
+    const legs = hs();
+    assert.deepEqual(legs.map((r) => r.id).sort(), ['hubspot_contact', 'hubspot_me', 'hubspot_teams']);
+    for (const r of legs) {
+      assert.equal(r.appHost, 'app.hubspot.com');
+      assert.equal(r.method, 'GET', `${r.id} is a GET (no write-gate carve-out needed)`);
+      assert.notEqual(r.write, true, `${r.id} is not a write`);
+      assert.equal(r.probeAccept, 'json', 'JSON-liveness presence (the VendorSuite pattern) — no verifyIdentity misfire');
+      assert.notEqual(r.verifyIdentity, true);
+    }
+  });
+  it('{portalId} is the tab-URL urlParam (query position); {id} is the user param — both fill on the contact read', () => {
+    const c = hs().find((r) => r.id === 'hubspot_contact');
+    assert.equal(c.urlParam.name, 'portalId');
+    // the tab-URL pattern captures the portal id from the app path (app.hubspot.com/<section>/<portalId>/…)
+    const m = 'https://app.hubspot.com/contacts/1234567/record/0-1/998877'.match(new RegExp(c.urlParam.pattern));
+    assert.equal(m && m[1], '1234567', 'portalId extracts from the ride tab, not the record id later in the path');
+    // {id} is a required user param, {portalId} is NOT in the param list (tab-filled)
+    assert.deepEqual(c.params.map((p) => p.name), ['id']);
+    // fillEndpoint threads BOTH placeholders (portalId from tab-args, id from the user arg)
+    assert.equal(fillEndpoint(c.endpoint, { portalId: '1234567', id: '998877' }),
+      '/api/inbounddb-objects/v1/crm-objects/0-1/998877?portalId=1234567&allPropertiesFetchMode=latest_version');
+  });
+  it('hubspot_me is the params-free liveness CANARY (pulse-marked; its only placeholder is the tab-fillable {portalId})', () => {
+    const me = hs().find((r) => r.id === 'hubspot_me');
+    assert.deepEqual(me.params, []);
+    assert.equal(me.pulse.kind, 'liveness');
+    assert.match(me.endpoint, /\{portalId\}/);
+    assert.match(me.endpoint, /login-verify\/hub-user-info/, 'the same endpoint as the base identityProbe (one read, two roles)');
+    assert.equal(me.identityProbe, '/api/login-verify/hub-user-info');
+  });
+});
+
+describe('connectorRecipes — askNamesOtherSystem (v2.74.1597: the named-system fence)', () => {
+  it('the live break: "search hubspot for <email>" running a ZENDESK leg → fenced with "hubspot"', () => {
+    assert.equal(askNamesOtherSystem('search hubspot for dmonk@deako.com', 'deako.zendesk.com'), 'hubspot');
+    assert.equal(askNamesOtherSystem('show user in hubspot', 'deako.zendesk.com'), 'hubspot');
+  });
+  it('the leg that IS the named system passes (no gap)', () => {
+    assert.equal(askNamesOtherSystem('search hubspot for dmonk@deako.com', 'app.hubspot.com'), null);
+    assert.equal(askNamesOtherSystem('search zendesk for that email', 'deako.zendesk.com'), null);
+  });
+  it('a system named as CONTENT does not fence ("tickets about hubspot" is a legitimate zendesk search)', () => {
+    assert.equal(askNamesOtherSystem('find tickets about hubspot', 'deako.zendesk.com'), null);
+    assert.equal(askNamesOtherSystem('search for the hubspot integration bug', 'deako.zendesk.com'), null);
+  });
+  it('shared labels never self-fence: "in deako" with the deako.zendesk.com leg is that system', () => {
+    assert.equal(askNamesOtherSystem('open the case in deako', 'deako.zendesk.com'), null);
+  });
+  it('degrades: empty ask / unknown leg host → null', () => {
+    assert.equal(askNamesOtherSystem('', 'deako.zendesk.com'), null);
+    assert.equal(askNamesOtherSystem('search hubspot for x', ''), null);
   });
 });
