@@ -79,7 +79,7 @@ function personaRole(persona) {
  *          coverage?:{authoredCount:number,total:number,coveragePct:number}|null, url?:string }} args
  * @returns {{ system:string, user:string }}
  */
-export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '', seed = '', connections = [], ride = [], learned = '', objects = '', subTasks = [], history = [] } = {}) {
+export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '', seed = '', connections = [], ride = [], learned = '', objects = '', subTasks = [], history = [], verifiedAsks = [] } = {}) {
   const capLines = (Array.isArray(capabilities) ? capabilities : [])
     .map((c) => { const n = c && (c.name || c.alias); return n ? `- ${n}${c.alias ? '  (you\'ve used this)' : ''}` : null; })
     .filter(Boolean)
@@ -122,6 +122,24 @@ export function buildAnswerMessages({ ask, capabilities = [], affordances = [], 
     if (ridePending.length) parts.push(`(+${ridePending.length} harvested but PENDING — the user accepts them in the Ride section before they can run)`);
     parts.push('</RIDE>');
   }
+  // v2.74.1577 — VERIFIED example asks (the user's rule: example phrases in answers must be TESTED, never
+  // composed). The list is the alias stores' ground truth — exact asks that ran successfully before. Rendered
+  // even when empty so the quote-only rule below always has its referent.
+  const va = (Array.isArray(verifiedAsks) ? verifiedAsks : [])
+    .map((v) => (v && v.ask) ? `- "${String(v.ask).trim()}"${v.host ? `  (${String(v.host).trim()})` : ''}` : null)
+    .filter(Boolean)
+    .filter((x, i, a) => a.indexOf(x) === i)
+    .slice(0, 12);
+  parts.push(
+    '',
+    '<VERIFIED_ASKS note="exact phrases that have RUN SUCCESSFULLY before — the ONLY example asks you may quote">',
+    va.length ? va.join('\n') : '(none recorded yet)',
+    '</VERIFIED_ASKS>',
+    '',
+    'RULE — example asks: when you offer example phrases or suggested asks, quote ONLY from VERIFIED_ASKS,',
+    'verbatim, and you may note they are tested. If the list is empty or nothing fits, say that tested examples',
+    'will appear here as asks succeed — NEVER invent, compose, or paraphrase an example ask.',
+  );
   const objectsText = String(objects ?? '').trim();   // OM — the app's object model (its schema)
   if (objectsText) parts.push('', '<OBJECTS note="what this app works on — its objects, states, and the verbs that change state">', objectsText, '</OBJECTS>');
   const learnedText = String(learned ?? '').trim();   // AL-4 — the app's learned rules + relevant facts

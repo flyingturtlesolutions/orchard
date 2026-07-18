@@ -16,10 +16,9 @@ describe('railTree — pinned sorts to the top (AP-1)', () => {
       { id: 'b', title: 'Fresh chat', updatedAt: 999 },
     ], { activeId: null });
     assert.equal(rows[0].role, 'overview');     // Overview always first
-    assert.equal(rows[1].role, 'admin');        // VT-2 (v2.74.1573) — then the Admin-desk fixture
-    assert.equal(rows[2].id, 'a');              // then the pinned app, despite older updatedAt
-    assert.equal(rows[2].pinned, true);
-    assert.equal(rows[3].id, 'b');
+    assert.equal(rows[1].id, 'a');              // then the pinned app, despite older updatedAt (the Admin fixture moved to the BOTTOM, v2.74.1582)
+    assert.equal(rows[1].pinned, true);
+    assert.equal(rows[2].id, 'b');
   });
   it('among unpinned, recency still wins', () => {
     const rows = buildRailTree([{ id: 'x', title: 'older', updatedAt: 1 }, { id: 'y', title: 'newer', updatedAt: 2 }]);

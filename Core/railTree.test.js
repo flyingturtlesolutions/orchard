@@ -9,12 +9,12 @@ import { OVERVIEW_ID, ADMIN_ID } from './appDef.js';
 const roles = (rows) => rows.map((r) => r.role);
 
 describe('railTree — buildRailTree', () => {
-  it('always pins Overview first, the Admin desk second, and New-app last, even with no conversations', () => {
+  it('always pins Overview first, the Admin desk as the LAST conversation, and New-app last, even with no conversations', () => {
     const rows = buildRailTree([]);
     assert.equal(rows[0].role, 'overview');
     assert.equal(rows[0].id, OVERVIEW_ID);
-    assert.equal(rows[1].role, 'admin', 'VT-2 (v2.74.1573) — the vitals fixture is PERMANENT (silence-when-green governs content, never presence)');
-    assert.equal(rows[1].id, ADMIN_ID);
+    assert.equal(rows[rows.length - 2].role, 'admin', 'VT-2 (v2.74.1582) — the vitals fixture is PERMANENT and sits at the BOTTOM (the operator console under the work), just above the constructor entry');
+    assert.equal(rows[rows.length - 2].id, ADMIN_ID);
     assert.equal(rows[rows.length - 1].role, 'new-app');
     assert.equal(rows[rows.length - 1].id, null);
   });
@@ -25,6 +25,27 @@ describe('railTree — buildRailTree', () => {
     assert.equal(admin.length, 1, 'the fixture absorbs the conversation — never a second plain row');
     assert.equal(admin[0].role, 'admin');
     assert.equal(admin[0].summary, '2 open incidents');
+  });
+
+  it('VT-2b/1589 — incident CASES (Admin children) collapse/expand under the fixture like an app\'s, never plain', () => {
+    const summaries = [
+      { id: 'vtc_a', title: 'vendorsuite looks signed out', kind: 'agent', parentId: ADMIN_ID, updatedAt: 90, summary: 'fresh → signed-out' },
+      { id: 'vtc_b', title: 'Read X may have drifted', kind: 'agent', parentId: ADMIN_ID, updatedAt: 95 },
+      { id: 'chat', title: 'Free chat', kind: 'agent', updatedAt: 99 },
+    ];
+    const collapsed = buildRailTree(summaries);
+    const fix = collapsed.find((r) => r.role === 'admin');
+    assert.equal(fix.count, 2, 'the fixture carries the case count');
+    assert.equal(fix.hasChildren, true);
+    assert.equal(fix.expanded, false, 'collapsed by default — the chevron is the door (app-row parity)');
+    assert.equal(collapsed.some((r) => String(r.id).startsWith('vtc_')), false, 'collapsed hides the cases');
+    const open = buildRailTree(summaries, { expanded: [ADMIN_ID] });
+    const adminIdx = open.findIndex((r) => r.role === 'admin');
+    assert.equal(open[adminIdx].expanded, true);
+    assert.deepEqual([open[adminIdx + 1].id, open[adminIdx + 2].id], ['vtc_b', 'vtc_a'], 'expanded cases sit under the fixture, newest first');
+    assert.equal(open[adminIdx + 1].role, 'subtask');
+    assert.equal(open[open.length - 1].role, 'new-app', 'the constructor entry stays last');
+    assert.equal(open.filter((r) => r.role === 'plain' && String(r.id).startsWith('vtc_')).length, 0, 'a case never leaks as a plain row');
   });
 
   it('an app collapsed shows a count + chevron but hides its sub-tasks; expanded reveals them after it', () => {
@@ -93,8 +114,8 @@ describe('railTree — buildRailTree', () => {
       { id: 'old', title: 'Old', kind: 'agent', updatedAt: 10 },
       { id: 'new', title: 'New', kind: 'agent', appId: 'x', updatedAt: 99 },
     ]);
-    // drop the pins (Overview + Admin-desk fixture, v2.74.1573) and New-app (last); the middle is recency-ordered
-    const middle = rows.slice(2, -1).map((r) => r.id);
+    // drop the Overview pin (first) and the trailing fixtures (Admin desk + New-app, v2.74.1582); the middle is recency-ordered
+    const middle = rows.slice(1, -2).map((r) => r.id);
     assert.deepEqual(middle, ['new', 'old']);
   });
 });

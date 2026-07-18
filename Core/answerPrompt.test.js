@@ -19,6 +19,25 @@ describe('buildAnswerMessages — answer a meta ask, grounded in real page conte
     assert.match(system, /navigate|tabs/i);                                     // built-ins named
   });
 
+  it('v2.74.1577 — VERIFIED_ASKS renders the tested phrases verbatim + the quote-only rule; empty list still carries the rule (no invented examples)', () => {
+    const { user } = buildAnswerMessages({
+      ask: 'what can you do',
+      verifiedAsks: [
+        { ask: 'who’s the primary homeowner?', host: 'vendorsuite.drhorton.com' },
+        { ask: 'does Mousab have a shopify profile?', host: 'admin.shopify.com' },
+        { ask: 'who’s the primary homeowner?', host: 'vendorsuite.drhorton.com' },   // dupe → collapsed
+      ],
+    });
+    assert.match(user, /<VERIFIED_ASKS note="exact phrases that have RUN SUCCESSFULLY/);
+    assert.match(user, /- "who’s the primary homeowner\?" {2}\(vendorsuite\.drhorton\.com\)/);
+    assert.equal((user.match(/primary homeowner/g) || []).length, 1, 'deduped');
+    assert.match(user, /quote ONLY from VERIFIED_ASKS/);
+    assert.match(user, /NEVER invent, compose, or paraphrase an example ask/);
+    const empty = buildAnswerMessages({ ask: 'what can you do' }).user;
+    assert.match(empty, /\(none recorded yet\)/);
+    assert.match(empty, /NEVER invent, compose, or paraphrase/, 'the rule stands even with nothing to quote');
+  });
+
   it('#1 — surfaces the live page affordances + URL', () => {
     const { user } = buildAnswerMessages({ ask: 'what can you do', affordances: ['Illustrations', 'Vectors', 'Search box'], url: 'https://pixabay.com/' });
     assert.match(user, /CURRENT PAGE: https:\/\/pixabay\.com\//);

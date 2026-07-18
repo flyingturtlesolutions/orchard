@@ -215,3 +215,77 @@ describe('canvasSpec — GD-7e media refs + video (§8.7, refs-not-URLs)', () =>
     assert.match(out.blocks[2].text, /ok\.example/);          // prose never touched
   });
 });
+
+describe('canvasSpec — table blocks (VT-2d v2.74.1583: the dashboard grid, safe by construction)', () => {
+  it('normalizes headers + rows to plain STRINGS (numbers stringify; nothing executable survives as a value type)', () => {
+    const b = normalizeBlock({ kind: 'table', id: 't', headers: ['Host', 7], rows: [['a.test', 42, null], ['b.test', { x: 1 }, true]] });
+    assert.equal(b.kind, 'table');
+    assert.deepEqual(b.headers, ['Host', '7']);
+    assert.equal(b.rows.length, 2);
+    for (const row of b.rows) for (const cell of row) assert.equal(typeof cell, 'string');
+    assert.equal(b.rows[0][1], '42');
+  });
+  it('drops a rowless table (the safety default) and bounds rows × cols', () => {
+    assert.equal(normalizeBlock({ kind: 'table', headers: ['h'], rows: [] }), null);
+    assert.equal(normalizeBlock({ kind: 'table', rows: 'not-an-array' }), null);
+    const big = normalizeBlock({ kind: 'table', rows: Array.from({ length: 100 }, () => Array.from({ length: 30 }, (_, i) => i)) });
+    assert.equal(big.rows.length, 60, 'row cap');
+    assert.equal(big.rows[0].length, 12, 'column cap');
+  });
+  it('rides normalizeCanvasSpec + diffSpec like any other kind (stable id → changed, not add/remove)', () => {
+    const prev = { anchor: { appId: 'x' }, blocks: [{ id: 't1', kind: 'table', headers: ['H'], rows: [['a']] }] };
+    const next = { anchor: { appId: 'x' }, blocks: [{ id: 't1', kind: 'table', headers: ['H'], rows: [['b']] }] };
+    assert.equal(normalizeCanvasSpec(prev).blocks.length, 1);
+    const d = diffSpec(prev, next);
+    assert.equal(d.changed.length, 1);
+    assert.equal(d.added.length + d.removed.length, 0);
+  });
+});
+
+describe('canvasSpec — the VT-2e dashboard vocabulary (cells · cards · help · sub)', () => {
+  it('table cells: the closed union — chips clamp tone, bars clamp 0..1, mixes floor to counts, dots enum, text slices', () => {
+    const b = normalizeBlock({ kind: 'table', id: 't', rows: [[
+      { chip: 'drift?', tone: 'danger' },
+      { chip: 'x', tone: 'chartreuse' },                    // unknown tone → mute
+      { bar: 1.7, label: '95%' },                           // clamps to 1
+      { bar: 'nope' },                                      // NaN → 0
+      { mix: { ok: 3.9, auth: -2, miss: 'x', other: 1 } },  // floor + non-negative
+      { dot: 'out', label: 'out · 07:02' },
+      { dot: 'sideways' },                                  // unknown dot → unknown
+      { text: 'a.test', sub: '6 armed', mono: true },
+      { evil: '<script>' },                                 // unrecognized object → ''
+    ]] });
+    const r = b.rows[0];
+    assert.deepEqual(r[0], { chip: 'drift?', tone: 'danger' });
+    assert.equal(r[1].tone, 'mute');
+    assert.equal(r[2].bar, 1);
+    assert.equal(r[3].bar, 0);
+    assert.deepEqual(r[4].mix, { ok: 3, auth: 0, miss: 0, other: 1 });
+    assert.deepEqual(r[5], { dot: 'out', label: 'out · 07:02' });
+    assert.equal(r[6].dot, 'unknown');
+    assert.deepEqual(r[7], { text: 'a.test', sub: '6 armed', mono: true });
+    assert.equal(r[8], '', 'an unrecognized object collapses to empty — never rendered raw');
+  });
+  it('cards: closed tones, titleless items drop, itemless block drops, strings slice', () => {
+    const b = normalizeBlock({ kind: 'cards', id: 'c', items: [
+      { tone: 'open', title: 'Session expired — vendorsuite', when: 'open 5m', body: 'b', marker: '[presence] x' },
+      { tone: 'plaid', title: 'T2' },                        // unknown tone → info
+      { tone: 'open', body: 'no title' },                    // titleless → dropped
+      'junk',
+    ] });
+    assert.equal(b.items.length, 2);
+    assert.equal(b.items[0].tone, 'open');
+    assert.equal(b.items[1].tone, 'info');
+    assert.equal(normalizeBlock({ kind: 'cards', items: [] }), null);
+    const many = normalizeBlock({ kind: 'cards', items: Array.from({ length: 30 }, (_, i) => ({ title: `t${i}` })) });
+    assert.equal(many.items.length, 12, 'item cap');
+  });
+  it('help rides ANY kind (sliced, value-only) and metric gains the sub line', () => {
+    const m = normalizeBlock({ kind: 'metric', label: 'Ride success', value: '95%', sub: '42 runs', help: 'x'.repeat(500) });
+    assert.equal(m.sub, '42 runs');
+    assert.equal(m.help.length, 240);
+    const md = normalizeBlock({ kind: 'markdown', text: 'hi', help: 'what this section means' });
+    assert.equal(md.help, 'what this section means');
+    assert.equal(normalizeBlock({ kind: 'markdown', text: 'hi', help: '   ' }).help, undefined, 'blank help never lands');
+  });
+});

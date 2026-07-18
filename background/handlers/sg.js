@@ -2027,7 +2027,22 @@ export function createSgMessageHandlers(ctx) {
           }
         } catch { /* best-effort — curated connection rides still list */ }
         try { ride = mergeRideCatalogForAnswer(ride, storedRide); } catch { /* */ }
-        let answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, ride, learned, objects, subTasks, history });
+        // v2.74.1577 — VERIFIED example asks (the user's rule: example phrases in answers must be TESTED, never
+        // composed). Ground truth = the alias stores: a connector alias records the EXACT ask that ran a leg
+        // successfully (the teach-once flywheel); an SG capability's `alias` is its taught, replayed phrase.
+        // Newest-first, deduped, capped — the prompt's quote-only rule does the rest.
+        let verifiedAsks = [];
+        try {
+          const al = (await chrome.storage.local.get('connector:aliases'))?.['connector:aliases'];
+          verifiedAsks = (Array.isArray(al) ? al : []).slice()
+            .sort((a, b) => ((b && b.at) || 0) - ((a && a.at) || 0))
+            .map((a) => (a && a.ask) ? { ask: String(a.ask), host: String(a.host || '') } : null)
+            .filter(Boolean);
+        } catch { /* */ }
+        try { for (const c of rawCaps) if (c && c.alias) verifiedAsks.push({ ask: String(c.alias), host: '' }); } catch { /* */ }
+        const _seenAsk = new Set();
+        verifiedAsks = verifiedAsks.filter((v) => { const k = v.ask.trim().toLowerCase(); if (!k || _seenAsk.has(k)) return false; _seenAsk.add(k); return true; }).slice(0, 12);
+        let answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, ride, learned, objects, subTasks, history, verifiedAsks });
         // Honesty belt (v2.74.1295) — the answer path dispatched NOTHING, so a completion claim on a side-effect
         // COMMAND is a fabrication (the calendar "✅ I created it" bug, findings 2026-06-27 21:27). Neutralize +
         // log so a trace SHOWS the override. The answerPrompt BASE rule is primary; this is the deterministic backstop.

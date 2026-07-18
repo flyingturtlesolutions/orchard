@@ -3,7 +3,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveIncident, openIncidents, INCIDENT_CAP, EVIDENCE_CAP } from './vitals.js';
+import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveIncident, openIncidents, INCIDENT_CAP, EVIDENCE_CAP,
+  tallyClassOf, tallyDayKey, tallyTick, tallySummary, tallyByDay, TALLY_KEEP_DAYS } from './vitals.js';
 
 const NOW = 1750000000000;
 
@@ -99,5 +100,61 @@ describe('vitals — incidents (one open per (class, subject); evidence appends;
     for (let i = 1; i < EVIDENCE_CAP + 5; i++) one = upsertIncident(one.list, { cls: 'presence', subject: 's', line: `e${i}`, now: NOW + i });
     assert.equal(one.list[0].evidence.length, EVIDENCE_CAP, 'evidence keeps the newest CAP entries');
     assert.equal(one.list[0].evidence[EVIDENCE_CAP - 1].line, `e${EVIDENCE_CAP + 4}`, 'the newest line survives the cap');
+  });
+});
+
+describe('vitals — the VT-2c rolling tally (rates the binary drift flag cannot carry)', () => {
+  it('tallyClassOf maps the partition to the four buckets — and a GATED miss counts as auth (the cause)', () => {
+    assert.equal(tallyClassOf({ ok: true }), 'ok');
+    assert.equal(tallyClassOf({ ok: false, auth: 'signed-out' }), 'auth');
+    assert.equal(tallyClassOf({ ok: false, auth: 'wrong-account' }), 'auth');
+    assert.equal(tallyClassOf({ ok: false, drift: 'miss' }), 'miss');
+    assert.equal(tallyClassOf({ ok: false, drift: 'miss', gatedMiss: true }), 'auth', 'the 404-on-anonymous class is auth evidence, never route evidence');
+    assert.equal(tallyClassOf({ ok: false, auth: null, drift: null }), 'other');
+  });
+  it('tallyTick increments per-ground per-day, copy-on-write, and prunes beyond the keep window', () => {
+    let book = tallyTick({}, { groundId: 'g1', cls: 'ok', now: NOW });
+    const day = tallyDayKey(NOW);
+    assert.equal(book.g1[day].ok, 1);
+    const before = JSON.stringify(book);
+    book = tallyTick(book, { groundId: 'g1', cls: 'miss', now: NOW });
+    assert.equal(book.g1[day].ok, 1);
+    assert.equal(book.g1[day].miss, 1);
+    assert.equal(JSON.stringify(JSON.parse(before).g1[day]), JSON.stringify({ ok: 1, auth: 0, miss: 0, other: 0 }), 'prior book untouched (copy-on-write)');
+    // an entry older than the keep window is pruned by the next tick
+    const old = tallyTick({}, { groundId: 'g1', cls: 'ok', now: NOW - (TALLY_KEEP_DAYS + 2) * 86400e3 });
+    const merged = { g1: { ...old.g1, ...book.g1 } };
+    const next = tallyTick(merged, { groundId: 'g2', cls: 'auth', now: NOW });
+    assert.equal(Object.keys(next.g1).length, 1, 'the stale day aged out');
+    assert.equal(next.g2[day].auth, 1);
+  });
+  it('ignores an unknown class or a missing ground (no accidental buckets)', () => {
+    assert.deepEqual(tallyTick({}, { groundId: 'g1', cls: 'weird', now: NOW }), {});
+    assert.deepEqual(tallyTick({}, { cls: 'ok', now: NOW }), {});
+  });
+  it('tallySummary windows + rates; groundIds = one, many, or ALL (null)', () => {
+    let book = {};
+    for (let i = 0; i < 3; i++) book = tallyTick(book, { groundId: 'g1', cls: 'ok', now: NOW - i * 86400e3 });
+    book = tallyTick(book, { groundId: 'g1', cls: 'auth', now: NOW });
+    book = tallyTick(book, { groundId: 'g2', cls: 'ok', now: NOW });
+    book = tallyTick(book, { groundId: 'g1', cls: 'ok', now: NOW - 9 * 86400e3 });   // outside the 7d window
+    const one = tallySummary(book, 'g1', { now: NOW, days: 7 });
+    assert.equal(one.total, 4);
+    assert.equal(one.ok, 3);
+    assert.equal(one.auth, 1);
+    assert.ok(Math.abs(one.rate - 0.75) < 1e-9);
+    const all = tallySummary(book, null, { now: NOW, days: 7 });
+    assert.equal(all.total, 5, 'g2 joins the all-grounds sum; the 9d-old run stays outside');
+    assert.equal(tallySummary({}, null, { now: NOW }).rate, null, 'no runs → rate null (never a fake 100%)');
+  });
+  it('tallyByDay rolls up per day, oldest→newest, and skips empty days', () => {
+    let book = {};
+    book = tallyTick(book, { groundId: 'g1', cls: 'ok', now: NOW - 2 * 86400e3 });
+    book = tallyTick(book, { groundId: 'g2', cls: 'miss', now: NOW - 2 * 86400e3 });
+    book = tallyTick(book, { groundId: 'g1', cls: 'ok', now: NOW });
+    const days = tallyByDay(book, null, { now: NOW, days: 14 });
+    assert.equal(days.length, 2);
+    assert.ok(days[0].day < days[1].day, 'oldest first');
+    assert.deepEqual({ total: days[0].total, ok: days[0].ok }, { total: 2, ok: 1 }, 'cross-ground rollup on the shared day');
   });
 });

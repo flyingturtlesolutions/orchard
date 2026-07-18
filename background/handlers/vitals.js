@@ -13,7 +13,9 @@
 
 import { Logger } from '../../Core/Logger.js';
 import { StorageManager } from '../../Services/StorageManager.js';
-import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveIncident, openIncidents } from '../../Core/vitals.js';
+import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveIncident, openIncidents,
+  tallyClassOf, tallyTick, tallySummary, tallyByDay } from '../../Core/vitals.js';
+import { buildAdminDashboardSpec, buildDeskDashboardSpec, buildFrontDashboardSpec, ageWord } from '../../Core/vitalsDashboard.js';
 import { tickOk, tickRouteMiss } from '../../Core/routeHeal.js';
 import { heartbeatTargets } from '../../Core/connectionPresence.js';
 import { armable } from '../../Core/rideRecipe.js';
@@ -25,6 +27,7 @@ const CONFIRM_PREFIX = 'vitals:confirm:';
 const LAST_DAILY_KEY = 'vitals:lastDaily';
 const SETTINGS_KEY = 'settings:vitals';
 const INC_KEY = 'vitals:incidents';
+const TALLY_KEY = 'vitals:tally';
 
 let _ctx = null;
 
@@ -74,6 +77,23 @@ async function readIncidents() {
 function _broadcastVitals() {
   try { chrome.runtime.sendMessage({ type: 'VITALS_CHANGED' }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
 }
+// ── VT-2c (v2.74.1583) — the rolling outcome tally: one serialized RMW per funnel event (the funnel is often
+// fire-and-forget from the executor, so unserialized writes would race and drop counts). Body-blind counts only.
+let _tallyChain = Promise.resolve();
+function _tallyWrite(groundId, cls) {
+  const step = _tallyChain.then(async () => {
+    let book = {};
+    try { book = (await chrome.storage.local.get(TALLY_KEY))?.[TALLY_KEY] || {}; } catch { /* */ }
+    const next = tallyTick(book, { groundId, cls, now: Date.now() });
+    try { await chrome.storage.local.set({ [TALLY_KEY]: next }); } catch { /* */ }
+  }).catch(() => { /* the tally must never break the funnel */ });
+  _tallyChain = step;
+  return step;
+}
+async function _readTally() {
+  try { return (await chrome.storage.local.get(TALLY_KEY))?.[TALLY_KEY] || {}; } catch { return {}; }
+}
+
 async function _openIncident(fields) {
   const r = await _mutateIncidents((l) => upsertIncident(l, { ...fields, now: Date.now() }));
   if (r.opened) { try { Logger.info('conn', `VITALS ▸ incident open [${fields.cls}] ${fields.subject}`); } catch { /* */ } }
@@ -104,16 +124,17 @@ export async function reportLegOutcome(evt) {
         probePath, probeHeaders, probeAccept,
       });
     }
+    // spec §3.1 — the reactive half of presence-gates-drift: refuse route-miss evidence while the REGISTRY
+    // says the session is out (the 404-on-anonymous class — a logged-out app must never read as drift).
+    // Hoisted (v2.74.1583) so the recipe tick AND the tally share ONE gate verdict.
+    let gatedMiss = false;
+    if (cls.drift === 'miss') {
+      const ps = await _presenceStatus(origin);
+      gatedMiss = ps === 'signed-out' || ps === 'wrong-account';
+    }
     let suspect = false, becameSuspect = false;
     if (groundId && recipeId && cls.drift !== null) {
-      // spec §3.1 — the reactive half of presence-gates-drift: refuse route-miss evidence while the REGISTRY
-      // says the session is out (the 404-on-anonymous class — a logged-out app must never read as drift).
-      let gated = false;
-      if (cls.drift === 'miss') {
-        const ps = await _presenceStatus(origin);
-        gated = ps === 'signed-out' || ps === 'wrong-account';
-      }
-      if (!gated) {
+      if (!gatedMiss) {
         const list = await _ctx.readRideRecipes(groundId);
         const i = Array.isArray(list) ? list.findIndex((r) => r && r.id === recipeId) : -1;
         if (i >= 0) {
@@ -137,6 +158,9 @@ export async function reportLegOutcome(evt) {
         }
       }
     }
+    // VT-2c — the tally tick: per-ground per-day counts (the rates the binary drift flag can't carry). The gated
+    // miss counts as AUTH (the cause) — the same honesty the recipe tick applies. Fire-and-forget, serialized.
+    if (groundId) void _tallyWrite(groundId, tallyClassOf({ ok, auth: cls.auth, drift: cls.drift, gatedMiss }));
     return { auth: cls.auth, suspect, becameSuspect };
   } catch { /* the funnel must never break the call it observes */ }
   return null;
@@ -326,6 +350,73 @@ export function createVitalsHandlers() {
       (async () => {
         try { const open = openIncidents(await readIncidents()); sendResponse({ success: true, open: open.length }); }
         catch { sendResponse({ success: true, open: 0 }); }
+      })();
+      return true;
+    },
+    // VT-2d (v2.74.1583) — the CONTEXT dashboard: assemble the scope's model from the real stores (registry ·
+    // incidents · recipes · the VT-2c tally · aliases) and shape it through the pure builders into a CanvasSpec.
+    // scope: 'admin' (full vitals) | 'desk' (payload.origins slice + payload.cases) | 'front' (payload.desks
+    // roster). The panel renders the returned spec via RENDER_CANVAS — this handler never opens a tab itself.
+    VITALS_DASHBOARD: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const p = (payload && typeof payload === 'object') ? payload : {};
+          const scope = ['admin', 'desk', 'front'].includes(p.scope) ? p.scope : 'admin';
+          const now = Date.now();
+          const norm = (o) => String(o || '').toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/\/.*$/, '');
+          const origins = Array.isArray(p.origins) ? p.origins.map(norm).filter(Boolean) : null;
+          const inScope = (host) => !origins || origins.includes(String(host || '').toLowerCase());
+          const [registryAll, incidentsAll, book, gsRaw] = await Promise.all([_registry(), readIncidents(), _readTally(), _vitalsGrounds()]);
+          const gs = gsRaw.filter((g) => scope !== 'desk' || inScope(g.host));
+          const grounds = gs.map((g) => {
+            const st = (registryAll[g.host] && registryAll[g.host].status) || null;
+            return {
+              host: g.host, groundId: g.groundId, armed: g.armed.length,
+              proven: g.armed.filter((r) => Number(r.lastOkAt) > 0 || r.provenance === 'curated').length,
+              suspects: g.armed.filter((r) => r.driftSuspect === true).length,
+              proposals: g.armed.filter((r) => r.healProposal).length,
+              healedRecently: g.armed.some((r) => Number(r.healedAt) > now - 7 * 86400e3),
+              canary: !!pickCanary(g.armed),
+              presence: st === 'fresh' ? 'in' : (st === 'signed-out' || st === 'wrong-account') ? 'out' : 'unknown',
+              lastOkAge: ageWord(Math.max(0, ...g.armed.map((r) => Number(r.lastOkAt) || 0)) || 0, now),
+              tally: tallySummary(book, g.groundId, { now, days: 7 }),
+            };
+          });
+          const gids = gs.map((g) => g.groundId);
+          const registry = scope === 'desk' ? Object.fromEntries(Object.entries(registryAll).filter(([o]) => inScope(o))) : registryAll;
+          const incidents = scope === 'desk' ? incidentsAll.filter((i) => i && (inScope(i.origin) || gids.includes(i.groundId))) : incidentsAll;
+          let asks = [];
+          try {
+            const al = (await chrome.storage.local.get('connector:aliases'))?.['connector:aliases'];
+            const seen = new Set();
+            asks = (Array.isArray(al) ? al : []).slice()
+              .sort((a, b) => ((b && b.at) || 0) - ((a && a.at) || 0))
+              .map((a) => (a && a.ask) ? { ask: String(a.ask), host: String(a.host || '').toLowerCase() } : null)
+              .filter(Boolean)
+              .filter((a) => scope !== 'desk' || !a.host || inScope(a.host))
+              .filter((v) => { const k = v.ask.trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; })
+              .slice(0, 8);
+          } catch { /* */ }
+          let lastDaily = 0; try { lastDaily = Number((await chrome.storage.local.get(LAST_DAILY_KEY))?.[LAST_DAILY_KEY] || 0); } catch { /* */ }
+          const model = {
+            now, registry, incidents, grounds, asks, lastDaily, origins,
+            deskName: String(p.deskName || ''),
+            cases: (p.cases && typeof p.cases === 'object') ? p.cases : null,
+            desks: Array.isArray(p.desks) ? p.desks : [],
+            tallyAll: tallySummary(book, scope === 'desk' ? gids : null, { now, days: 7 }),
+            byDay: tallyByDay(book, scope === 'desk' ? gids : null, { now, days: 14 }),
+            canaryHave: grounds.filter((g) => g.canary).length,
+            canaryOf: grounds.length,
+            signedIn: Object.values(registryAll).filter((e) => e && e.status === 'fresh').length,
+            originCount: Object.keys(registryAll).length,
+          };
+          const spec = scope === 'admin' ? buildAdminDashboardSpec(model)
+            : scope === 'desk' ? buildDeskDashboardSpec(model)
+            : buildFrontDashboardSpec(model);
+          const anchor = { appId: scope === 'desk' ? String(p.appId || 'desk') : (scope === 'admin' ? 'admin_desk' : 'front_desk'), conversationId: null };
+          Logger.info('conn', `DASH ▸ ${scope}${scope === 'desk' ? ` [${(origins || []).join(',') || 'no-origins'}]` : ''} → ${spec.blocks.length} blocks (${grounds.length} ground(s), ${model.tallyAll.total} run(s) 7d)`);
+          sendResponse({ success: true, spec, anchor, scope });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'vitals-dashboard-failed' }); }
       })();
       return true;
     },

@@ -57,6 +57,8 @@ import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flus
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
+import { parseDashboardAsk, friendlyVitalsLine, clockWord } from './Core/vitalsDashboard.js';   // VT-2d (v2.74.1583) — the context dashboard door; v1590 — the human-words layer for incident cases
+import { friendlyError as _errWord, actionPhrase as _actionPhrase, recordNounWord as _recordNounWord } from './Core/chatVoice.js';   // v2.74.1591 — ONE chat voice: slugs/codes → phrases, catalog verbs → sentences, leg names → nouns
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId, galleryUserDefs } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance); DK-6b — galleryUserDefs ("Your desks" = customs only)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
@@ -126,12 +128,18 @@ async function _ensureOverviewConversation() {
 // v2.74.1574 — the desk carries its ROLE as a CV-2 persona seed (live: "what can you do?" in the desk answered
 // with the ACTIVE TAB's palette — the desk didn't know it was the operator console). Healed onto existing
 // installs via patchMeta (the desk may already exist seedless).
-const _ADMIN_SEED = 'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities.';
+const _ADMIN_SEED = 'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.';
+// Prior revisions of OUR seed text — heal-eligible (a seed matching one upgrades to the current text; anything
+// else is user-edited and is never touched). v1575's empty-only guard couldn't ship seed-text improvements.
+const _ADMIN_SEED_PRIOR = [
+  'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities.',
+  'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.',
+];
 async function _ensureAdminConversation() {
   let conv = null;
   try { conv = await ConversationStore.load(ADMIN_ID); } catch { /* */ }
   if (!conv) conv = await ConversationStore.create({ id: ADMIN_ID, title: 'Admin desk', seed: _ADMIN_SEED });
-  else if (!conv.seed) { try { await ConversationStore.patchMeta(ADMIN_ID, { seed: _ADMIN_SEED }); conv = { ...conv, seed: _ADMIN_SEED }; } catch { /* heal is best-effort */ } }
+  else if (!conv.seed || _ADMIN_SEED_PRIOR.includes(conv.seed)) { try { await ConversationStore.patchMeta(ADMIN_ID, { seed: _ADMIN_SEED }); conv = { ...conv, seed: _ADMIN_SEED }; } catch { /* heal is best-effort */ } }   // v1576 — prior revisions of OUR text upgrade; user edits never touched
   return conv;
 }
 
@@ -671,7 +679,21 @@ function _stopRailStatusTimer() { if (_railStatusTimer) { clearInterval(_railSta
 
 let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the drawer accordion (collapsed by default)
 
+// v2.74.1588 — COALESCE re-entrant renders: the body clears the container synchronously then awaits (list /
+// pending counts / alarms) before appending, so two OVERLAPPING calls each appended a full row set — the whole
+// Rail doubled (live 1587: the VT-2b reconcile + a broadcast refresh landed while the open-render was mid-await).
+// Latest-wins: a call during a running pass queues exactly ONE re-run at the end.
+let _railRendering = false, _railRenderQueued = false;
 async function _renderRailList() {
+  if (_railRendering) { _railRenderQueued = true; return; }
+  _railRendering = true;
+  try { await _renderRailListNow(); }
+  finally {
+    _railRendering = false;
+    if (_railRenderQueued) { _railRenderQueued = false; void _renderRailList(); }
+  }
+}
+async function _renderRailListNow() {
   const container = $('rail-list');
   container.innerHTML = '';
 
@@ -772,7 +794,10 @@ function _historyPinRow(row) {
   el.className = `rail-item rail-overview${row.active ? ' active' : ''}`;
   // v2.74.1219 — the Overview "pick up where you left off" peek = the last active conversation's summary (drawerTree).
   const summaryLine = row.summary ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>` : '';
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
+  // v2.74.1580 — HOME vector (the feather idiom, matching the Admin desk's gear in size + stroke theme) replaces
+  // the ⌂ character; both pins share the fixed 16px glyph slot so their titles align.
+  const homeIcon = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>';
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${homeIcon}</span>${escHtml(row.title)}</div>${summaryLine}`;
   // v2.74.1234 — Overview is a REAL persistent conversation: clicking it LOADS its own thread (its history) and closes
   // the drawer. An empty Overview shows the general-assistant home (suggestion cards), but pinned to the thread so
   // chatting appends to it.
@@ -805,9 +830,22 @@ function _historyPinRow(row) {
 // and stays hidden when green; click = get-or-create + open (the row never depends on the conversation existing).
 function _historyAdminRow(row) {
   const el = document.createElement('div');
-  el.className = `rail-item rail-overview${row.active ? ' active' : ''}`;   // reuse the reserved-pin styling
+  // v2.74.1578 — FIRST-CLASS desk: share the reserved-pin classes exactly (same flex title, same left edge as
+  // the Front desk — no indent), and a VECTOR glyph (the house feather idiom — the pulse/activity waveform)
+  // instead of an emoji, whose wider metrics made the row read as indented.
+  el.className = `rail-item rail-overview rail-admin${row.active ? ' active' : ''}`;
   const summaryLine = row.summary ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>` : '';
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">🩺</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}`;
+  // v2.74.1579 — GEAR vector (user directive; the feather settings icon) — the operator-console glyph.
+  const icon = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+  // v2.74.1589 — APP-ROW PARITY for cases (user directive: "admin desk doesn't have case buttons"): the same
+  // chevron (collapse/expand its incident cases, with count) and the same "+" (open a case by hand — an operator
+  // scratch case via the normal spawn) that every app row carries. Same classes → same styling + hover behavior.
+  if (row.hasChildren) el.classList.add('has-children');
+  const chevron = row.hasChildren
+    ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+    : '';
+  const subtaskBtn = `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}${chevron}${subtaskBtn}`;
   void (async () => {   // the attention badge — one cheap storage read; green = nothing
     try {
       const r = await _orchReq('VITALS_BADGE', {});
@@ -816,7 +854,21 @@ function _historyAdminRow(row) {
       if (b && n > 0) { b.textContent = ` ⚠ ${n}`; b.hidden = false; }
     } catch { /* */ }
   })();
-  el.addEventListener('click', () => { _closeRail(); void _openAdminDesk(); });
+  el.querySelector('.rail-chevron')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (_expandedApps.has(ADMIN_ID)) _expandedApps.delete(ADMIN_ID); else _expandedApps.add(ADMIN_ID);
+    await _renderRailList();
+  });
+  el.querySelector('.rail-item-subtask')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await _ensureAdminConversation();       // the parent must exist before a child hangs off it
+    _expandedApps.add(ADMIN_ID);            // reveal the new case immediately
+    await _spawnSubTask(ADMIN_ID);
+  });
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask')) return;
+    _closeRail(); void _openAdminDesk();
+  });
   _wireRowKeyboard(el, () => el.click(), 'Admin desk — Orchard health');   // a11y (v1343 pattern)
   return el;
 }
@@ -1327,51 +1379,49 @@ async function renderSuggestionCards() {
         return;
       }
     } catch { /* fall through to the Studio hint */ }
-    subtitle.innerHTML = 'No capabilities available yet. Open Studio to set up your first Ground and author a Fragment. ' +
-      '<button class="inline-studio-btn" id="btn-empty-open-studio">Open Studio →</button>';
-    // Wire the inline button to trigger the same launcher as the header icon
-    $('btn-empty-open-studio')?.addEventListener('click', () => {
-      $('btn-open-studio')?.click();
-    });
-    return;
   }
 
-  subtitle.textContent = capabilities.length === 1
-    ? '1 capability is ready. Try it below or describe what you need.'
-    : `${capabilities.length} capabilities are ready. Try one below or describe what you need.`;
+  // v2.74.1592 — the FRONT DESK empty state reflects the front-door ROLE (user directive: it no longer did).
+  // Two stale eras replaced: the Studio-authoring hint ("author a Fragment") and the capability-library cards
+  // ("N capabilities are ready" → runTaskCapability). Today's role: ask anything HERE, pick up a DESK, and the
+  // teach-once flywheel. Cards are REAL things only — your desks (recency + pin ordered) and TESTED asks from
+  // the alias ledger (the v1577 no-inventions rule; verbatim, host-tagged) — plus the constructor.
+  let desks = [];
+  try {
+    const all = await ConversationStore.list();
+    desks = (all || []).filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev')
+      .sort((a, b) => (Number(!!b.pinned) - Number(!!a.pinned)) || ((b.updatedAt || 0) - (a.updatedAt || 0)));
+  } catch { /* */ }
+  let asks = [];
+  try {
+    const got = await chrome.storage.local.get('connector:aliases');
+    const al = Array.isArray(got['connector:aliases']) ? got['connector:aliases'] : [];
+    const seen = new Set();
+    asks = al.slice().sort((a, b) => ((b && b.at) || 0) - ((a && a.at) || 0))
+      .map((x) => (x && x.ask) ? { ask: String(x.ask), host: String(x.host || '') } : null)
+      .filter(Boolean)
+      .filter((v) => { const k = v.ask.trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; })
+      .slice(0, 2);
+  } catch { /* */ }
 
-  // v2.74.1221 — DEDUP by name before sampling cards. The store can hold near-duplicate capabilities authored across
-  // runs (same intent, distinct ids — GA-6 catches structural dups, but same-name re-authors slip through), which
-  // otherwise filled the empty state with the SAME suggestion 3-4×. Keep the first of each name.
-  const seenNames = new Set();
-  const distinct = [];
-  for (const cap of capabilities) {
-    const key = String((cap && cap.name) || '').trim().toLowerCase();
-    if (!key || seenNames.has(key)) continue;
-    seenNames.add(key);
-    distinct.push(cap);
-  }
+  subtitle.textContent = desks.length
+    ? 'Ask anything here, or pick up a desk — I learn a task the first time and recall it when you ask again, even worded differently.'
+    : 'Open a site and tell me what to do — I learn it the first time, then recall it when you ask again, even worded differently.';
 
-  // Show up to 4 DISTINCT suggestion cards in the empty state.
-  distinct.slice(0, 4).forEach(cap => {
+  const mkCard = (name, sub, onClick) => {
     const card = document.createElement('button');
     card.className = 'suggestion-card';
-    card.dataset.capabilityId = cap.id;
-    // v2.74.1221 — only show the summary when it ADDS information; many capabilities carry summary === name, which
-    // rendered the same line twice.
-    const summary = String(cap.summary || '').trim();
-    const showSummary = summary && summary.toLowerCase() !== String(cap.name || '').trim().toLowerCase();
-    card.innerHTML = `
-      <div class="suggestion-card-name">${escHtml(cap.name)}</div>
-      ${showSummary ? `<div class="suggestion-card-summary">${escHtml(cap.summary)}</div>` : ''}
-      <div class="suggestion-card-meta">
-        <span class="suggestion-card-kind">${cap.kind === 'task' ? 'Task' : 'Assistant'}</span>
-      </div>`;
-    card.addEventListener('click', () => {
-      cap.kind === 'task' ? runTaskCapability(cap) : focusForAssistant(cap);
-    });
+    card.innerHTML = `<div class="suggestion-card-name">${escHtml(name)}</div>${sub ? `<div class="suggestion-card-summary">${escHtml(sub)}</div>` : ''}`;
+    card.addEventListener('click', onClick);
     container.appendChild(card);
-  });
+  };
+  for (const d of desks.slice(0, asks.length ? 2 : 3)) {
+    mkCard(d.title || 'Desk', `${d.pinned ? 'pinned · ' : ''}${relTime(d.updatedAt)}`, () => { void _openConvFullTimeline(d); });
+  }
+  for (const a of asks) {
+    mkCard(`“${a.ask}”`, `tested${a.host ? ` · ${a.host}` : ''}`, () => { input.value = a.ask; void sendChatMessage(); });
+  }
+  mkCard('＋ New desk', 'set up a role on its sites', () => { _renderAppGallery(); });
 }
 
 function focusForAssistant(cap) {
@@ -1484,6 +1534,19 @@ async function _renderNewDeskChooser(container) {
 async function _spawnSubTask(appConvId) {
   let app = null;
   try { app = await ConversationStore.load(appConvId); } catch { /* */ }
+  // VT-2b/1589 — the ADMIN desk spawns cases too (it has no appId — a plain child carrying the operator seed;
+  // incident cases mint themselves via _syncIncidentCases, this is the BY-HAND ops case the row's "+" opens).
+  if (app && app.id === ADMIN_ID && !app.parentId) {
+    let n = 1; let titles = new Set();
+    try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === ADMIN_ID); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
+    while (titles.has(`Ops case #${n}`)) n++;
+    try {
+      await ConversationStore.create({ title: `Ops case #${n}`, kind: 'agent', seed: app.seed || _ADMIN_SEED, parentId: ADMIN_ID });
+      _expandedApps.add(ADMIN_ID);
+      await _revealRail();
+    } catch (e) { try { console.warn('[chat] ops-case spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the case.', 'err'); }
+    return;
+  }
   if (!app || !app.appId || app.parentId) { toast('Cases open under a desk.', 'err'); return; }
   let n = 1; let titles = new Set();
   try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === appConvId); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
@@ -1937,7 +2000,7 @@ async function _runChildTask(child, task) {
     // a session-ride READ — safe to run unattended.
     const run = await _runConnectorLeg(cleg, coerceParams(d.params || {}, cleg.paramSchema), { tabId });
     if (run.ok) { const lines = renderConnectorLines(run.value, { name: cleg.name || 'Results' }); body = lines ? lines.join('\n') : 'Done.'; status = 'done'; }
-    else { body = `Needs you — couldn’t ${_legFailName(cleg, 'run that')}${run.error ? ` — ${run.error}` : ''}.${run.hint ? `  ${run.hint}.` : ''}`; }
+    else { body = `Needs you — couldn’t ${_legFailName(cleg, 'run that')}${run.error ? ` — ${_errWord(run.error)}` : ''}.${run.hint ? `  ${run.hint}.` : ''}`; }
   } else if (d && d.intent === 'act' && d.capabilityId) {
     // a page action / write capability — NOT run unattended (the safety pause).
     body = `Needs you — “${task}” needs a page action or a write I won’t run unattended. Open this conversation to continue.`;
@@ -2682,7 +2745,7 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
   _setMessageBody(msg, `Running “${intent || 'it'}”…`);
   const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues });
   if (!res || res.success === false) {
-    _setMessageBody(msg, `That didn’t run${res && res.error ? ` — ${res.error}` : ''}.`);
+    _setMessageBody(msg, `That didn’t run${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`);
     _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
     _bankCapabilityOutcome(ask, capabilityId, false);   // AL-3e — outcome FAILURE → a low-confidence mismatch delta (don't corroborate the positive)
   } else if (res.ran === false) {
@@ -2902,7 +2965,7 @@ async function _orchFeedbackFlow(msg, { kind = '', text = '' } = {}) {
   if (!ctx) { _setMessageBody(msg, 'Nothing recent to correct — ask me something first.'); return; }
   _setMessageBody(msg, 'Noting that…');
   const res = await _orchReq('ORCH_FEEDBACK', { groundId: ctx.groundId, capabilityId: ctx.capabilityId, ask: ctx.ask, kind, text, context: { intent: ctx.intent, ask: ctx.ask, bindings: ctx.bindings, params: ctx.params } });
-  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t apply that${res && res.error ? ` — ${res.error}` : ''}.`); return; }
+  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t apply that${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`); return; }
   _setMessageBody(msg, res.say || 'Done.');
   const fu = res.followup;
   if (fu === 'rerun' && res.correction) {                       // wrong_value → re-run with the corrected binding
@@ -3139,13 +3202,13 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false, ma
   } else if (openEach && fe) {
     _setMessageBody(msg, (env && env.ok)
       ? `Opened ${fe.done} ${fe.done === 1 ? 'page' : 'pages'} in new tabs${fe.skipped ? ` (${fe.skipped} had no link to open)` : ''}${fe.capped ? ` — capped at ${fe.done + fe.skipped} of ${fe.items} for safety` : ''}.`
-      : `Opened ${fe.done} before stopping${env && env.error && !_stopped ? ` — ${env.error}` : ''}.`);
+      : `Opened ${fe.done} before stopping${env && env.error && !_stopped ? ` — ${_errWord(env.error)}` : ''}.`);
   } else if (gate) {
     // PREDICATE → GATE: report the analysis decision — did the conditional action run, or was it skipped?
-    _setMessageBody(msg, !(env && env.ok) ? `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`
+    _setMessageBody(msg, !(env && env.ok) ? `Couldn’t complete that${env && env.error ? ` — ${_errWord(env.error)}` : ''}.`
       : gate.pass ? 'The condition held — I ran it.' : 'The condition didn’t hold — I left it alone.');
   } else {
-    _setMessageBody(msg, (env && env.ok) ? 'Done.' : `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`);
+    _setMessageBody(msg, (env && env.ok) ? 'Done.' : `Couldn’t complete that${env && env.error ? ` — ${_errWord(env.error)}` : ''}.`);
   }
   _orchFinalize(msg);   // v2.74.938 (CR-U1) — the plan's terminal summary survives reload
   // T2 — a control-flow run (a collection foreach OR a conditional gate) can be PROMOTED to a durable composite.
@@ -3183,7 +3246,7 @@ async function _runResolvedStep({ tabId, groundId, ask, capabilityId, bindings =
   }
   const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues: (bindings && typeof bindings === 'object') ? bindings : {} });
   if (!res || res.success === false || res.ran === false || res.ok === false) {
-    return { ok: false, why: (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '' };
+    return { ok: false, why: (res && (res.error || res.reason)) ? ` — ${_errWord(res.error || res.reason)}` : '' };   // v1591
   }
   _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // flywheel per step
   await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
@@ -3248,7 +3311,7 @@ async function _orchNlFallback(msg, { tabId, groundId, ask, onAuthored = null })
   _setMessageBody(msg, `Working out “${ask}” from the page…`);
   const res = await _orchReq('RUN_SG_TRIAL', { tabId, groundId, intent: ask, tier2: true });
   if (!res || res.success === false) {
-    _setMessageBody(msg, `I couldn’t work out “${ask}”${res && res.error ? ` — ${res.error}` : ''}.`);
+    _setMessageBody(msg, `I couldn’t work out “${ask}”${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`);
     _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way', onAuthored });
     return false;
   }
@@ -3331,7 +3394,7 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask, onAuthored = nul
     : 'the value to read';
   _setMessageBody(msg, _isList ? `◎ Point at ONE of ${_ptLabel} (e.g. the FIRST) — I’ll read them all.` : `◎ Point at ${_ptLabel} on the page…`);
   const picked = await _orchPickOnce({ tabId });
-  if (!picked || !picked.selector || picked.error) { _setMessageBody(msg, `Didn’t catch that${picked && picked.error ? ` (${picked.error})` : ''} — ask again to retry.`); return; }
+  if (!picked || !picked.selector || picked.error) { _setMessageBody(msg, `Didn’t catch that${picked && picked.error ? ` — ${_errWord(picked.error)}` : ''} — ask again to retry.`); return; }
   // A LIST read needs a per-ITEM pick. If the click landed on a list CONTAINER (ul/ol/table…), reading it gives
   // the whole list as one blob (and the archetype matches sibling containers, not items) — re-prompt for a single
   // item rather than capture a coarse observation.
@@ -3365,7 +3428,7 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask, onAuthored = nul
     // the same way the action trial/record paths do via onAuthored.
     if (typeof onAuthored === 'function') { try { onAuthored({ capabilityId: res.capability.id, groundId, ask, via: 'observe', value: res.verifiedValue }); } catch { /* */ } }
   } else {
-    _setMessageBody(msg, `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
+    _setMessageBody(msg, `Couldn’t set that up${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`);
   }
 }
 
@@ -3377,7 +3440,7 @@ async function _orchVisualCapture(msg, { groundId, tabId, ask }) {
   _setMessageBody(msg, 'Looking at the page…');
   const outputType = classifyReadAsk(ask).outputType === 'list' ? 'list' : 'count';
   const res = await _orchReq('CAPTURE_VISUAL_OBSERVATION', { tabId, groundId, ask, outputType });
-  if (!res || res.success === false || !res.capability) { _setMessageBody(msg, `Couldn’t set up a visual read${res && res.error ? ` — ${res.error}` : ''}.`); return; }
+  if (!res || res.success === false || !res.capability) { _setMessageBody(msg, `Couldn’t set up a visual read${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`); return; }
   const v = res.verify;
   _setMessageBody(msg, `Saved a visual read — I’ll look at the page to answer this.${v ? ` (Right now I see ${v.count}.)` : ''}`);
   _orchFeedbackBar(msg);
@@ -3387,7 +3450,7 @@ async function _orchVisualCapture(msg, { groundId, tabId, ask }) {
 async function _orchRunObservation(msg, { groundId, tabId, capabilityId, intent, ask }) {
   _setMessageBody(msg, `Reading “${intent || 'it'}”…`);
   const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId });
-  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t read that${res && res.error ? ` — ${res.error}` : ''}.`); _orchFinalize(msg); return; }
+  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t read that${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`); _orchFinalize(msg); return; }
   if (res.ok === false) { _setMessageBody(msg, res.reason || 'Couldn’t read that on this page.'); _orchFinalize(msg); return; }
   // READ-SINGULARIZATION (v2.74.883) — a singular/ordinal ask ("the FIRST video", "the 2nd result", "the last")
   // that matched a LIST observation gets the asked ITEM, not all N. The list run returns items[]; slice to the
@@ -3418,7 +3481,7 @@ async function _orchAdminFlow(admin) {
   const tab = await _orchActiveTab();
   const msg = appendMessage({ role: 'assistant', body: 'Checking the library…' });
   const c = await _orchReq('ORCH_ADMIN', { tabId: tab && tab.id, op: 'count', kinds: admin.kinds, scope: admin.scope });
-  if (!c || c.success === false) { _setMessageBody(msg, `Couldn’t read the library${c && c.error ? ` — ${c.error}` : ''}.`); return; }
+  if (!c || c.success === false) { _setMessageBody(msg, `Couldn’t read the library${c && c.error ? ` — ${_errWord(c.error)}` : ''}.`); return; }
   const present = Object.entries(c.counts || {}).filter(([, n]) => n > 0);
   if (!present.length) {
     _setMessageBody(msg, admin.scope === 'all'
@@ -3434,7 +3497,7 @@ async function _orchAdminFlow(admin) {
     bar.remove(); _setMessageBody(msg, 'Deleting…');
     const d = await _orchReq('ORCH_ADMIN', { tabId: tab && tab.id, op: 'delete', kinds: admin.kinds, scope: admin.scope });
     if (d && d.success) { const dp = Object.entries(d.counts || {}).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(', '); _setMessageBody(msg, `Deleted ${dp || 'nothing'}.`); _lastOrch = null; }
-    else _setMessageBody(msg, `Delete failed${d && d.error ? ` — ${d.error}` : ''}.`);
+    else _setMessageBody(msg, `Delete failed${d && d.error ? ` — ${_errWord(d.error)}` : ''}.`);
   }));
   bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(msg, 'Cancelled — nothing was deleted.'); }));
 }
@@ -3445,7 +3508,7 @@ async function _orchAdminFlow(admin) {
 async function _orchDedupFlow() {
   const msg = appendMessage({ role: 'assistant', body: 'Scanning your Grounds for duplicates…' });
   const r = await _orchReq('DETECT_DUPLICATE_GROUNDS', {});
-  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t scan Grounds${r && r.error ? ` — ${r.error}` : ''}.`); return; }
+  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t scan Grounds${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`); return; }
   const clusters = Array.isArray(r.clusters) ? r.clusters : [];
   if (!clusters.length) {
     _setMessageBody(msg, `No duplicates — your ${r.groundCount || 0} Ground${r.groundCount === 1 ? '' : 's'} are all distinct sites.`);
@@ -3467,7 +3530,7 @@ async function _orchDedupFlow() {
       if (res && res.success) {
         _setMessageBody(m2, `✓ Merged “${c.key}” → ${res.canonicalHost || 'one Ground'}: moved ${res.movedCapabilities} capabilit${res.movedCapabilities === 1 ? 'y' : 'ies'}, removed ${res.absorbed} duplicate Ground${res.absorbed === 1 ? '' : 's'}.`);
       } else {
-        _setMessageBody(m2, `Couldn’t merge “${c.key}”${res && res.error ? ` — ${res.error}` : ''}.`);
+        _setMessageBody(m2, `Couldn’t merge “${c.key}”${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`);
       }
     }));
   });
@@ -3480,7 +3543,7 @@ async function _orchListFlow(admin) {
   const tab = await _orchActiveTab();
   const msg = appendMessage({ role: 'assistant', body: 'Reading your library…' });
   const r = await _orchReq('ORCH_LIST', { target: admin.target, scope: admin.scope, tabId: tab && tab.id });
-  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t read the library${r && r.error ? ` — ${r.error}` : ''}.`); return; }
+  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t read the library${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`); return; }
   const items = Array.isArray(r.items) ? r.items : [];
   if (admin.target === 'grounds') {
     if (!items.length) { _setMessageBody(msg, 'No Grounds yet — explore a site to create one.'); return; }
@@ -3527,7 +3590,7 @@ async function _orchRenameFlow(admin) {
   const doRename = async (name) => {
     _setMessageBody(msg, 'Renaming…');
     const r = await _orchReq('RENAME_GROUND', { name, tabId: tab && tab.id });
-    _setMessageBody(msg, (r && r.success) ? `✓ Renamed this Ground to “${r.name}”.` : `Couldn’t rename${r && r.error ? ` — ${r.error}` : ''}.`);
+    _setMessageBody(msg, (r && r.success) ? `✓ Renamed this Ground to “${r.name}”.` : `Couldn’t rename${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`);
   };
   if (admin.name) { await doRename(admin.name); return; }
   _setMessageBody(msg, 'What should I name this Ground?');
@@ -3548,14 +3611,14 @@ async function _orchPruneFlow(admin) {
     _setMessageBody(msg, r.removed
       ? `✓ Removed ${r.removed} orphaned capabilit${r.removed === 1 ? 'y' : 'ies'} (their backing strategy was gone)${admin.scope === 'all' ? ' across all sites' : ' here'}.`
       : `No orphaned capabilities${admin.scope === 'all' ? '' : ' here'} — nothing to prune.`);
-  } else _setMessageBody(msg, `Couldn’t prune${r && r.error ? ` — ${r.error}` : ''}.`);
+  } else _setMessageBody(msg, `Couldn’t prune${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`);
 }
 
 // STATS (v2.74.819) — a one-glance library overview.
 async function _orchStatsFlow() {
   const msg = appendMessage({ role: 'assistant', body: 'Tallying your library…' });
   const r = await _orchReq('STATS', {});
-  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t read the library${r && r.error ? ` — ${r.error}` : ''}.`); return; }
+  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t read the library${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`); return; }
   _setMessageBody(msg, `Library: ${r.grounds} Ground${r.grounds === 1 ? '' : 's'} · ${r.capabilities} capabilit${r.capabilities === 1 ? 'y' : 'ies'}${r.orphans ? ` (${r.orphans} orphaned — try “prune orphans”)` : ''} · ${r.workflows} saved workflow${r.workflows === 1 ? '' : 's'}.`);
 }
 
@@ -3642,13 +3705,31 @@ function _persistFocus() {
   if (!_currentConversationId || _currentConversationKind !== 'agent') return;
   try { ConversationStore.patchMeta(_currentConversationId, { focus: _currentConversationFocus }).catch(() => { /* best-effort */ }); } catch { /* */ }
 }
-function _pushFocusEntry(entry) {
+function _pushFocusEntry(entry, convId = null) {
   if (!entry) return;
+  // FC-6 (v2.74.1586) — the focus write is FENCED to the conversation the ask was typed in: a slow read that
+  // completes AFTER a desk switch must never accrete into the NEW desk's working set (live 1585: a warranty
+  // Shopify lookup landed in the Admin desk's focus, and "show dashboard" there answered as a field question
+  // about the customer record). Same-conv (or a legacy id-less caller) pushes live; a cross-conv completion
+  // persists to ITS OWN conversation's stored focus — the case still holds its record when reopened.
+  if (convId && convId !== _currentConversationId) {
+    (async () => {
+      try {
+        const conv = await ConversationStore.load(convId);
+        if (!conv || conv.kind === 'dev') return;
+        const focus = pushFocus(Array.isArray(conv.focus) ? conv.focus : [], entry);
+        await ConversationStore.patchMeta(convId, { focus });
+        try { _orchLog(`FOCUS ▸ fenced — read finished after a desk switch; record kept on its own conversation (${String(convId).slice(0, 12)}…)`); } catch { /* */ }
+      } catch { /* best-effort — the read itself already succeeded */ }
+    })();
+    return;
+  }
   _currentConversationFocus = pushFocus(_currentConversationFocus, entry);
   _persistFocus();
 }
 // FC-3 — a grounded read accretes a focus entry: a single record (primaryObject) or a list (its first rows).
-function _accreteFocusFromRead({ leg, params = null, labels = null, value, label = '' } = {}) {
+// FC-6 — callers capture the conversation id AT ASK TIME and thread it as `convId` (the fence above).
+function _accreteFocusFromRead({ leg, params = null, labels = null, value, label = '', convId = null } = {}) {
   try {
     if (!leg || value === undefined) return;
     const obj = primaryObject(value);
@@ -3657,7 +3738,7 @@ function _accreteFocusFromRead({ leg, params = null, labels = null, value, label
     const entry = obj
       ? focusRecordEntry({ label: lbl, noun: nounFromLeg(leg), fields: obj, leg, params, labels, at: Date.now() })
       : (Array.isArray(rows) && rows.length ? focusListEntry({ label: lbl, noun: nounFromLeg(leg), rows, leg, params, labels, at: Date.now() }) : null);
-    if (entry) _pushFocusEntry(entry);
+    if (entry) _pushFocusEntry(entry, convId);
   } catch { /* accretion is best-effort — the read itself already succeeded */ }
 }
 // v2.74.1559 — flatten a SIDECAR read (drill.also: contacts…) into dossier fields: the first entry's scalars,
@@ -3697,8 +3778,9 @@ function _sidecarFields(value, alsoLeg) {
 // v2.74.1559 — failure lines lead with the leg NAME (short), never `does` first (harvested does are full
 // sentences — live 195557: "Couldn't Returns the warranty task contacts associated with a specific…").
 function _legFailName(leg, fallback = 'do that') {
-  const n = String((leg && (leg.name || leg.does)) || '').trim();
-  return n ? n.charAt(0).toLowerCase() + n.slice(1) : fallback;
+  // v2.74.1591 — read as a SENTENCE after "couldn’t": catalog names are third-person ("Returns the warranty
+  // task contacts"), so the naive lowercase produced "Couldn’t returns …" (the broken-verb class).
+  return _actionPhrase(String((leg && (leg.name || leg.does)) || '').trim(), fallback);
 }
 // FC-2 — dereference a bound RECORD entry to its on-site page. The find value + division come from the entry's
 // FIELDS/labels (structure, not re-parsed prose); the venue is the entry's provenance host; the run is the
@@ -3741,6 +3823,7 @@ async function _openFocusEntry(entry, originalText) {
 // FC-5 — re-pull the focus head's record via its DRILL provenance: same leg family, same join id, fresh fields.
 // Updates the entry + the case_record card; any failure reports honestly and leaves the snapshot standing.
 async function _refreshFocusHead(head) {
+  const _askConvId = _currentConversationId;   // FC-6 — the refreshed record belongs to the conv that asked
   const m = appendMessage({ role: 'assistant', body: '' });
   try {
     const prov = head.provenance;
@@ -3754,12 +3837,12 @@ async function _refreshFocusHead(head) {
     const viaLeg = await _rideDrillLeg(parentLeg, prov.drill.via, prov.groundId);
     if (!viaLeg) { _setMessageBody(m, `Can’t re-pull — the “${prov.drill.via}” detail leg isn’t available.`); _orchFinalize(m); return; }
     const dr = await _rideExecOnce(viaLeg, { [prov.drill.param || 'id']: joinVal }, { groundId: prov.groundId });
-    if (!dr.ok) { _setMessageBody(m, `Re-pull failed — ${dr.error || 'the read errored'}. The record on file is unchanged.`); _orchFinalize(m); return; }
+    if (!dr.ok) { _setMessageBody(m, `Re-pull failed — ${_errWord(dr.error, 'the read errored')}. The record on file is unchanged.`); _orchFinalize(m); return; }
     const detailObj = primaryObject(dr.value) || dr.value;
     const fresh = focusRecordEntry({ label: head.label, noun: head.noun, fields: { ...(head.fields || {}), ...((detailObj && typeof detailObj === 'object' && !Array.isArray(detailObj)) ? detailObj : {}) }, pinned: !!head.pinned, at: Date.now() });
     if (!fresh) { _setMessageBody(m, 'Re-pull returned nothing readable — the record on file is unchanged.'); _orchFinalize(m); return; }
     fresh.provenance = prov;   // the rebuilt entry keeps its ORIGINAL provenance (focusRecordEntry had no leg here)
-    _pushFocusEntry(fresh);
+    _pushFocusEntry(fresh, _askConvId);   // FC-6
     const lines = dossierLines(detailObj, { max: 24 });
     if (lines.length && _currentConversationId) {
       try { await ConversationStore.updateMessage(_currentConversationId, 'case_record', { role: 'assistant', body: `${head.label}\n\n${lines.join('\n')}\n\n— Refreshed just now — ask for any field.` }, { upsert: true }); } catch { /* card is best-effort */ }
@@ -3852,7 +3935,7 @@ async function _runFleetSweep() {
   let reads = []; let legs = [];
   try {
     const r = await _orchReq('SWEEP_PROPOSE', { ...base, phase: 'reads' });
-    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t plan the sweep — ${(r && r.error) || 'no reply'}.${r && r.hint ? ` (${r.hint})` : ''}`); _orchFinalize(msg); return; }
+    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t plan the sweep — ${_errWord(r && r.error, 'no reply')}.${r && r.hint ? ` (${r.hint})` : ''}`); _orchFinalize(msg); return; }
     reads = Array.isArray(r.reads) ? r.reads : [];
     legs = Array.isArray(r.legs) ? r.legs : [];
   } catch (e) { _setMessageBody(msg, `Couldn’t plan the sweep — ${(e && e.message) || 'error'}.`); _orchFinalize(msg); return; }
@@ -3883,7 +3966,7 @@ async function _runFleetSweep() {
     let r = null;
     try { r = await _orchReq('SWEEP_PROPOSE', { ...base, phase: 'propose', round, context: rejCtx, results: results.map((x) => ({ key: x.key, params: x.params, value: x.value })) }); }
     catch (e) { _setMessageBody(msg, `The sweep couldn’t propose — ${(e && e.message) || 'error'}.`); _orchFinalize(msg); return; }
-    if (!r || r.success === false) { _setMessageBody(msg, `The sweep couldn’t propose — ${(r && r.error) || 'no reply'}.`); _orchFinalize(msg); return; }
+    if (!r || r.success === false) { _setMessageBody(msg, `The sweep couldn’t propose — ${_errWord(r && r.error, 'no reply')}.`); _orchFinalize(msg); return; }
     proposals = Array.isArray(r.proposals) ? r.proposals : [];
     summary = r.summary || '';
     const needs = (round === 1 && Array.isArray(r.needs)) ? r.needs : [];
@@ -4006,7 +4089,7 @@ async function _showItemSources(params = {}) {
       let host = ''; try { host = new URL(urls[0]).host; } catch { /* */ }
       const m = appendMessage({ role: 'assistant', body: '' });
       const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: urls.slice(0, 6) });
-      _setMessageBody(m, r && r.success !== false ? `Opened ${urls.length} page${urls.length === 1 ? '' : 's'} in the ${host} tab.` : `Couldn’t open them — ${(r && r.error) || 'error'}.`);
+      _setMessageBody(m, r && r.success !== false ? `Opened ${urls.length} page${urls.length === 1 ? '' : 's'} in the ${host} tab.` : `Couldn’t open them — ${_errWord(r && r.error)}.`);
       _orchFinalize(m); return;
     }
   }
@@ -4042,7 +4125,7 @@ async function _showGroundedReadView() {
     ? (kind === 'record' ? `${verb} the ${host} tab on that record’s page.`
       : (kind === 'view' ? `${verb} the ${g.leg.name || 'source'} view in ${host}.`
         : `${verb} ${host} — the exact page isn’t mapped for “${g.leg.name || 'that read'}” yet.`))
-    : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
+    : `Couldn’t open ${host} — ${_errWord(r && r.error)}.`);
   _orchFinalize(m);
 }
 
@@ -4052,7 +4135,7 @@ async function _showGroundedReadView() {
 async function _showRideOps() {
   const m = appendMessage({ role: 'assistant', body: '' });
   const r = await _orchReq('GET_RIDE_OPS', {});
-  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t check captured operations — ${(r && r.error) || 'error'}.`); _orchFinalize(m); return; }
+  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t check captured operations — ${_errWord(r && r.error)}.`); _orchFinalize(m); return; }
   if (!r.tab) { _setMessageBody(m, 'No open Shopify admin tab to check — open your store admin (a `/store/…` page) and try again.', { markdown: true }); _orchFinalize(m); return; }
   const ops = Array.isArray(r.ops) ? r.ops : [];
   if (!ops.length) {
@@ -4095,7 +4178,7 @@ function _parseKvParams(s) {
 async function _showLegOverview() {
   const m = appendMessage({ role: 'assistant', body: '' });
   const r = await _orchReq('GET_LEG_OVERVIEW', {});
-  if (!r || r.success === false || !r.overview) { _setMessageBody(m, `Couldn’t read the leg inventory${r && r.error ? ` — ${r.error}` : ''}.`); _orchFinalize(m); return; }
+  if (!r || r.success === false || !r.overview) { _setMessageBody(m, `Couldn’t read the leg inventory${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`); _orchFinalize(m); return; }
   const ov = r.overview;
   const legs = Array.isArray(ov.legs) ? ov.legs : [];
   const queue = Array.isArray(ov.queue) ? ov.queue : [];
@@ -4177,7 +4260,7 @@ async function _verifyLeg(n) {
   if (e.class !== 'ride') { _setMessageBody(m, `Leg #${n} is a **${e.class}** leg — arm it from its own surface (Studio / connector panel).`, { markdown: true }); _orchFinalize(m); return; }
   if (e.verified) { _setMessageBody(m, `**${e.name}** is already armed — desks can use it.`, { markdown: true }); _orchFinalize(m); return; }
   const r = await _orchReq('EDIT_RIDE_RECIPE', { groundId: e.groundId, id: e.id, op: 'review', value: 'accept' });
-  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t arm it — ${(r && r.error) || 'error'}.`); _orchFinalize(m); return; }
+  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t arm it — ${_errWord(r && r.error)}.`); _orchFinalize(m); return; }
   e.reviewState = 'accepted'; e.armable = true; e.verified = true;   // reflect locally so a follow-up `test`/`legs` render is consistent
   try { _orchLog(`LEG_VERIFY ▸ #${n} ${e.id} → armed (${e.safetyClass})`); } catch { /* */ }
   const note = (e.safetyClass !== 'auto') ? '  It still asks for your confirm on each write (§9).' : '';
@@ -4281,12 +4364,12 @@ async function _runDiscovery(site) {
   const m = appendMessage({ role: 'assistant', body: '' });
   _setMessageBody(m, `Grounding ${site.host}…`);
   const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: site.url });
-  if (!g || g.success === false || !g.groundId) { _setMessageBody(m, `Couldn’t ground ${site.host}${g && g.error ? ` — ${g.error}` : ''}.`); _orchFinalize(m); return; }
+  if (!g || g.success === false || !g.groundId) { _setMessageBody(m, `Couldn’t ground ${site.host}${g && g.error ? ` — ${_errWord(g.error)}` : ''}.`); _orchFinalize(m); return; }
   try { if (Number.isInteger(site.id)) await _orchReq('FOCUS_TAB', { tabId: site.id }); } catch { /* */ }
   _orchLog(`EXPLORE ▸ add-leg discovery → ground ${g.groundId} (${g.created ? 'minted' : 'reused'}) [${site.host}]`);
   _setMessageBody(m, `🔍 Discovering ${site.host} — mapping the page (a few seconds; I’ll poke around it)…`);
   const res = await _orchReq('EXPLORE_PAGE_STRUCTURE', { tabId: site.id, groundId: g.groundId });
-  if (!res || res.success === false) { _setMessageBody(m, `Discovery didn’t finish${res && res.error ? ` — ${res.error}` : ' (it may still be running — check the page)'}.`); _orchFinalize(m); return; }
+  if (!res || res.success === false) { _setMessageBody(m, `Discovery didn’t finish${res && res.error ? ` — ${_errWord(res.error)}` : ' (it may still be running — check the page)'}.`); _orchFinalize(m); return; }
   const nFeat = Number.isFinite(res.featureCount) ? res.featureCount : null;
   _setMessageBody(m, `✓ Discovered ${site.host}${nFeat != null ? ` — ${nFeat} feature${nFeat === 1 ? '' : 's'}` : ''}. Run \`legs\` to see the new Drive capabilities.`, { markdown: true });
   _orchFinalize(m);
@@ -4314,12 +4397,12 @@ async function _runForge(site) {
   _addLegMsg = m;
   _setMessageBody(m, `Grounding ${site.host}…`);
   const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: site.url });
-  if (!g || g.success === false || !g.groundId) { _setMessageBody(m, `Couldn’t ground ${site.host}${g && g.error ? ` — ${g.error}` : ''}.`); _orchFinalize(m); _addLegMsg = null; return; }
+  if (!g || g.success === false || !g.groundId) { _setMessageBody(m, `Couldn’t ground ${site.host}${g && g.error ? ` — ${_errWord(g.error)}` : ''}.`); _orchFinalize(m); _addLegMsg = null; return; }
   const groundId = g.groundId;
   if (!Number.isInteger(site.id)) { _setMessageBody(m, `Couldn’t find ${site.host}’s tab to forge on — reopen it and try again.`); _orchFinalize(m); _addLegMsg = null; return; }
   try { await _orchReq('FOCUS_TAB', { tabId: site.id }); } catch { /* */ }
   const armRes = await _orchReq('FORAGE', { groundId, sessionTabId: site.id });
-  if (!armRes || armRes.success === false || !armRes.armed) { _setMessageBody(m, `Couldn’t start forge on ${site.host}${armRes && armRes.error ? ` — ${armRes.error}` : ''}.`); _orchFinalize(m); _addLegMsg = null; return; }
+  if (!armRes || armRes.success === false || !armRes.armed) { _setMessageBody(m, `Couldn’t start forge on ${site.host}${armRes && armRes.error ? ` — ${_errWord(armRes.error)}` : ''}.`); _orchFinalize(m); _addLegMsg = null; return; }
   _orchLog(`FORAGE ▸ add-leg arm → ground ${groundId} [${site.host}]`);
   _setMessageBody(m, `⛏ **Foraging ${site.host}** — browse the site now (open a few pages / records) so I can capture its data reads. Then **Bank recipes**.`, { markdown: true });
   const body = m.querySelector('.message-content') || m;
@@ -4331,7 +4414,7 @@ async function _runForge(site) {
       _setMessageBody(t, `Banking foraged reads on ${site.host}…`);
       const done = _awaitForageComplete(groundId);   // the banked COUNT arrives via FORAGE_COMPLETE, not the FORAGE response — listen BEFORE the call
       const bankRes = await _orchReq('FORAGE', { groundId });   // 2nd call → bank what the browsing captured
-      if (!bankRes || bankRes.success === false) { _setMessageBody(t, `Couldn’t bank${bankRes && bankRes.error ? ` — ${bankRes.error}` : ''}.`); _orchFinalize(t); return; }
+      if (!bankRes || bankRes.success === false) { _setMessageBody(t, `Couldn’t bank${bankRes && bankRes.error ? ` — ${_errWord(bankRes.error)}` : ''}.`); _orchFinalize(t); return; }
       const fc = await done;
       const banked = (fc && typeof fc.banked === 'number') ? fc.banked : null;
       if (banked && banked > 0) {
@@ -4455,12 +4538,12 @@ async function _addLegToSite(m, site, spec) {
   let groundId = site.groundId || null;
   if (!groundId && site.url) {
     const eg = await _orchReq('ENSURE_GROUND_FOR_URL', { url: site.url });
-    if (!eg || eg.success === false || !eg.groundId) { _setMessageBody(m, `Couldn’t ground **${site.host}** — ${(eg && eg.error) || 'error'}.`, { markdown: true }); _orchFinalize(m); return; }
+    if (!eg || eg.success === false || !eg.groundId) { _setMessageBody(m, `Couldn’t ground **${site.host}** — ${_errWord(eg && eg.error)}.`, { markdown: true }); _orchFinalize(m); return; }
     groundId = eg.groundId;
   }
   if (!groundId) { _setMessageBody(m, `Couldn’t resolve a ground for **${site.host}**.`, { markdown: true }); _orchFinalize(m); return; }
   const r = await _orchReq('ADD_RIDE_RECIPE', { groundId, origin: site.host, spec });
-  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t add it — ${(r && r.error) || 'error'}.`, { markdown: true }); _orchFinalize(m); return; }
+  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t add it — ${_errWord(r && r.error)}.`, { markdown: true }); _orchFinalize(m); return; }
   const rec = r.recipe || {};
   _setMessageBody(m, `Added **${rec.name}** (${rec.method} ${rec.endpoint}) on ${site.host} — it’s **pending**. Run \`legs\`, \`test\` it, then \`verify\` to arm it for desks.`, { markdown: true });
   _orchFinalize(m);
@@ -4476,7 +4559,7 @@ async function _showBatchSources() {
   if (!urls.length) { _setMessageBody(m, pend.length ? 'No source pages on the pending proposals.' : 'Nothing pending to show — run `sweep` first, or say `go to origin`.', { markdown: true }); _orchFinalize(m); return; }
   let host = ''; try { host = new URL(urls[0]).host; } catch { /* */ }
   const r = await _orchReq('SHOW_SOURCES', { origin: host, urls });
-  _setMessageBody(m, r && r.success !== false ? `Opened ${urls.length} page${urls.length === 1 ? '' : 's'} in the ${host} tab.` : `Couldn’t open them — ${(r && r.error) || 'error'}.`);
+  _setMessageBody(m, r && r.success !== false ? `Opened ${urls.length} page${urls.length === 1 ? '' : 's'} in the ${host} tab.` : `Couldn’t open them — ${_errWord(r && r.error)}.`);
   _orchFinalize(m);
 }
 
@@ -4505,7 +4588,7 @@ async function _scheduleSweep(everyText, { off = false } = {}) {
   if (!inst || !_currentConversationId) { _setMessageBody(m, 'Open a desk first — schedules are per-desk.'); _orchFinalize(m); return; }
   if (off) {
     const r = await _orchReq('FLEET_SCHEDULE', { instanceId: inst, off: true });
-    _setMessageBody(m, r && r.success !== false ? 'Scheduled sweeps stopped.' : `Couldn’t stop the schedule — ${(r && r.error) || 'error'}.`);
+    _setMessageBody(m, r && r.success !== false ? 'Scheduled sweeps stopped.' : `Couldn’t stop the schedule — ${_errWord(r && r.error)}.`);
     _orchFinalize(m); return;
   }
   const minutes = parseEvery(everyText);
@@ -4513,7 +4596,7 @@ async function _scheduleSweep(everyText, { off = false } = {}) {
   const r = await _orchReq('FLEET_SCHEDULE', { instanceId: inst, convId: _currentConversationId, minutes });
   _setMessageBody(m, r && r.success !== false
     ? `Sweeping every **${describeEvery(minutes)}** — it runs in the background on your signed-in session (a signed-out run skips and notes it in \`show work\`). Reversible actions the app’s policy marks \`auto\` run on their own (the \`ledger\` keeps the trail); everything else waits in \`pending\` — this app’s card shows the count. \`sweep off\` stops it.`
-    : `Couldn’t schedule — ${(r && r.error) || 'error'}.`, { markdown: true });
+    : `Couldn’t schedule — ${_errWord(r && r.error)}.`, { markdown: true });
   _orchFinalize(m);
 }
 
@@ -4669,7 +4752,7 @@ async function _goToOrigin() {
   try { host = new URL(/^https?:\/\//i.test(conns[0].origin) ? conns[0].origin : `https://${conns[0].origin}`).host; } catch { /* */ }
   if (!host) { _setMessageBody(m, 'Couldn’t resolve the connected origin.'); _orchFinalize(m); return; }
   const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}/`] });
-  _setMessageBody(m, r && r.success !== false ? `${r.reused ? 'Focused' : 'Opened'} ${host}.` : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
+  _setMessageBody(m, r && r.success !== false ? `${r.reused ? 'Focused' : 'Opened'} ${host}.` : `Couldn’t open ${host} — ${_errWord(r && r.error)}.`);
   _orchFinalize(m);
 }
 
@@ -4772,7 +4855,7 @@ async function _showSection(word) {
   const m = appendMessage({ role: 'assistant', body: '' });   // v2.74.1554 — the user's words were echoed at ENTRY (invariant #4); no per-intercept echo
   const url = `https://${best.host}${best.path.startsWith('/') ? best.path : '/' + best.path}`;
   const res = await _orchReq('SHOW_SOURCES', { origin: best.host, urls: [url] });
-  _setMessageBody(m, res && res.success !== false ? `${res.reused ? 'Focused' : 'Opened'} the ${best.host} tab on its ${w} page.` : `Couldn’t open ${best.host} — ${(res && res.error) || 'error'}.`);
+  _setMessageBody(m, res && res.success !== false ? `${res.reused ? 'Focused' : 'Opened'} the ${best.host} tab on its ${w} page.` : `Couldn’t open ${best.host} — ${_errWord(res && res.error)}.`);
   _orchFinalize(m);
   return true;
 }
@@ -4869,7 +4952,7 @@ async function _fieldFollowup(text) {
       const ov = norm(k).split(' ').filter((w) => qtok.has(w)).length;
       if (ov > bestOv) { bestOv = ov; closest = nice(k); }
     }
-    const recordNoun = (g.leg && g.leg.name) ? String(g.leg.name).replace(/\s+details?$/i, '').toLowerCase() : 'record';
+    const recordNoun = _recordNounWord(g.leg && g.leg.name);   // v1591 — a NOUN, never the whole leg phrase ("this find a shopify customer by email")
     _lastFieldSuggestion = closest ? { field: closest, at: Date.now() } : null;   // v2.74.1561 — a bare "yes" answers the suggestion
     msgFor(`There’s no **${named}** field on this ${recordNoun}.${closest ? ` Did you mean **${closest}**?` : ''}\n\nFields on file: ${labels.join(' · ')}.`);
     try { _orchLog(`FIELD_FOLLOWUP ▸ "${q}" → absent (${labels.length} field(s)${closest ? `, nearest=${closest}` : ''})`); } catch { /* */ }
@@ -4923,7 +5006,7 @@ async function _approveProposal(id) {
   await appendLedger(inst, ledgerEntry('execution', { action: p.name, targets: p.targets, proposalId: id, ok, error: ok ? '' : ((res && res.error) || 'failed'), urls: p.urls }));
   _setMessageBody(msg, ok
     ? `✓ ${p.name}${p.targets && p.targets.length ? ` — ${p.targets.join(', ')}` : ''} done.`
-    : `✗ ${p.name} failed — ${(res && res.error) || 'error'}${res && res.hint ? ` (${res.hint})` : ''}`);
+    : `✗ ${p.name} failed — ${_errWord(res && res.error)}${res && res.hint ? ` (${res.hint})` : ''}`);
   _orchFinalize(msg);
 }
 
@@ -5053,7 +5136,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         const _readAsk = fanoutReadAsk(clause.text) || clause.text;
         const cr = await _chainConnectorRun(_readAsk, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
         if (cr && cr.ok) { st.lastValue = cr.value; st.lastLeg = cr.leg; }
-        else if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg ? _legFailName(cr.leg) : 'read the list to fan out over'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
+        else if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg ? _legFailName(cr.leg) : 'read the list to fan out over'}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
       }
       const _foCap = fanoutLimit(clause.text);   // DK-8g — "open the first as a case" / "open 3 cases" caps the spawn (the single-case test primitive)
       const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
@@ -5093,12 +5176,12 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           const _authErr = /^(http-40[13]|session-expired|not-logged-in)$/.test(String(cr.error || ''));
           const _authOrigin = _authErr ? String((cr.leg.tool && (cr.leg.tool.sessionHost || cr.leg.tool.origin)) || '') : '';
           if (_authErr && _authOrigin) {
-            _setMessageBody(msg, `Ran ${i} of ${total}. ${_authOrigin} looks signed out (${cr.error}) — sign in, then try again.`);
+            _setMessageBody(msg, `Ran ${i} of ${total}. ${_authOrigin} looks signed out — sign in, then try again.`);   // v1591 — the sentence IS the cause; no raw slug
             _orchFinalize(msg);
             _connSignInBar(msg, [_authOrigin], { retryAsk: ask });
             return;
           }
-          _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${_legFailName(cr.leg, 'run that')}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
+          _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${_legFailName(cr.leg, 'run that')}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
         }
       }
       const gid = (m && m.groundId) || st.chainGroundId;
@@ -5165,7 +5248,7 @@ function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null 
   bar.appendChild(_mkBtn(label, async () => {
     bar.remove();
     const r = await _orchReq('ACCEPT_COMPOUND', { tabId, groundId, ask, steps: usable, ...(cf && plan ? { plan } : {}) });
-    if (!(r && r.success && r.capability)) { appendMessage({ role: 'assistant', body: `Couldn’t save${r && r.error ? ` — ${r.error}` : ''}.` }); return; }
+    if (!(r && r.success && r.capability)) { appendMessage({ role: 'assistant', body: `Couldn’t save${r && r.error ? ` — ${_errWord(r.error)}` : ''}.` }); return; }
     // CONVERGE — a control-flow composite ALSO promotes to a CANONICAL Strategy: Studio-visible, ParamForm-
     // launchable, run by the one ExecutionEngine. Best-effort + additive — a promote miss (visual condition,
     // unresolved leaf) leaves the chat composite exactly as-is (it still runs via the ORCH interpreter).
@@ -5443,7 +5526,7 @@ async function _tryGlobalMatch(ask, existingMsg = null, excludeGroundId = null) 
 async function _orchRunOnGround(msg, { ask, hit }) {
   _setMessageBody(msg, `Setting up on ${hit.groundName}…`);
   const b = await _orchReq('BUILD_SG_ON_GROUND_WORKFLOW', { ask, groundId: hit.groundId, capabilityId: hit.capabilityId });
-  if (!b || b.success === false || !b.workflow) { _setMessageBody(msg, `Couldn’t set that up${b && b.error ? ` — ${b.error}` : ''}.`); return; }
+  if (!b || b.success === false || !b.workflow) { _setMessageBody(msg, `Couldn’t set that up${b && b.error ? ` — ${_errWord(b.error)}` : ''}.`); return; }
   _orchRunWorkflow(msg, { workflow: b.workflow, ask });
 }
 
@@ -5869,7 +5952,7 @@ async function _orchSaveWorkflow(msg, { workflow }) {
   const saved = await _orchReq('SAVE_WORKFLOW', { workflow });
   _setMessageBody(msg, (saved && saved.success !== false && saved.workflow)
     ? `Saved “${workflow.name || 'workflow'}” — you can run it anytime.`
-    : `Couldn’t save${saved && saved.error ? ` — ${saved.error}` : ''}.`);
+    : `Couldn’t save${saved && saved.error ? ` — ${_errWord(saved.error)}` : ''}.`);
 }
 
 // RUN the previewed Workflow EPHEMERALLY (v2.74.810): invoke the workflow INLINE — no SAVE — so a one-off Run doesn't
@@ -5887,7 +5970,7 @@ async function _orchRunWorkflow(msg, { workflow, ask, paramValues = {} }) {
     return;
   }
   if (res.success === false) {
-    let m = `That didn’t finish${res.error ? ` — ${res.error}` : ''}.`;
+    let m = `That didn’t finish${res.error ? ` — ${_errWord(res.error)}` : ''}.`;
     if (Array.isArray(res.compensation) && res.compensation.length) {
       const undone = res.compensation.filter((c) => c && c.success).length;
       m += ` Rolled back ${undone}/${res.compensation.length} completed step${res.compensation.length === 1 ? '' : 's'}.`;
@@ -5975,7 +6058,7 @@ async function _orchTeachGap(msg, { groundId, groundName, groundUrl, clause, ask
 async function _orchRecheckWorkflow(ask, groundName = '', clause = '') {
   const msg = appendMessage({ role: 'assistant', body: 'Re-checking the workflow…' });
   const cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask });
-  if (!cg || cg.success === false) { _setMessageBody(msg, `Couldn’t re-check${cg && cg.error ? ` — ${cg.error}` : ''}.`); return; }
+  if (!cg || cg.success === false) { _setMessageBody(msg, `Couldn’t re-check${cg && cg.error ? ` — ${_errWord(cg.error)}` : ''}.`); return; }
   const stillGaps = Array.isArray(cg.repairs) && cg.repairs.length > 0;
   const head = clause ? `Learned “${clause}”${groundName ? ` on ${groundName}` : ''}. ` : '';
   _setMessageBody(msg, head + (cg.runnable ? 'The workflow’s ready now.' : (stillGaps ? 'One step still needs teaching:' : 'Here’s the updated plan:')));
@@ -6383,7 +6466,7 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null, r
         _setMessageBody(msg, `Got it — I learned “${res.capability.intent}”. Ask me again and I’ll do it.`);
       }
     } else {
-      _setMessageBody(msg, `I couldn’t turn that into a capability${res && res.error ? ` — ${res.error}` : ''}.`);
+      _setMessageBody(msg, `I couldn’t turn that into a capability${res && res.error ? ` — ${_errWord(res.error)}` : ''}.`);
     }
   });
 }
@@ -6718,6 +6801,7 @@ function _rideEachRows(value) {
 // consumer is an unattended flow (a daily sweep opening new tasks in sub-tasks), not a human pager. Typed "stop"
 // pauses between items (the abort latch); "continue" is now the RESUME after a stop, not the pager.
 async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each }) {
+  const _askConvId = _currentConversationId;   // FC-6 — focus accretes to the conversation the ask was typed in
   const noun = String(each.name || '').replace(/Id$/i, '') || 'item';
   const legName = leg.name || leg.key;
   const all = Array.isArray(each.values) ? each.values : [];
@@ -6763,7 +6847,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
       const dj2 = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: one.rows, where: ` in ${one.label}` });
       if (dj2 === true) {
         _lastGroundedRead = { leg, params, at: Date.now(), value: { results: one.rows.map((r) => ({ [noun]: one.label, ...r })) } };
-        _accreteFocusFromRead({ leg, params, value: _lastGroundedRead.value, label: one.label });   // FC-3
+        _accreteFocusFromRead({ leg, params, value: _lastGroundedRead.value, label: one.label, convId: _askConvId });   // FC-3/6
         return true;
       }
     }
@@ -6804,7 +6888,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   const tagged = [];
   for (const it of view) for (const row of it.rows) { if (tagged.length >= 200) break; tagged.push({ [noun]: it.label, ...row }); }
   _lastGroundedRead = { leg, params, at: Date.now(), value: { results: tagged } };
-  _accreteFocusFromRead({ leg, params, value: _lastGroundedRead.value });   // FC-3 — the each-mode sweep holds as ONE list entry
+  _accreteFocusFromRead({ leg, params, value: _lastGroundedRead.value, convId: _askConvId });   // FC-3/6 — the each-mode sweep holds as ONE list entry
   return true;
 }
 
@@ -6858,7 +6942,7 @@ async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, w
       if (r.tabId != null) { try { c = await _orchReq('CLICK_TEXT_ON_TAB', { tabId: r.tabId, text: clickText }); } catch { c = null; } }
       _setMessageBody(n, (c && c.success)
         ? `Opened “${clickText}” on ${host} — make the update there; I’ll see the change on the next read.`
-        : `${r.reused ? 'Focused' : 'Opened'} ${host}’s page — couldn’t auto-open “${clickText}” (${(c && c.error) || 'no match'}); it’s in that list.`);
+        : `${r.reused ? 'Focused' : 'Opened'} ${host}’s page — couldn’t auto-open “${clickText}” (${_errWord(c && c.error, 'no match')}); it’s in that list.`);
       try { _orchLog(`SECTION_NAV ▸ ${host} (drill open) find="${clickText.slice(0, 40)}" → ${(c && c.success) ? 'clicked' : 'click-miss'}`); } catch { /* */ }
       _orchFinalize(n);
     };
@@ -7099,6 +7183,7 @@ function _shapeScope(params, labels) {
 // Dispatch a builtin leg JUDGE picked. A PANEL (ACT×Self) leg runs locally (above); a Browser/Self READ leg goes
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
 async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false }) {
+  const _askConvId = _currentConversationId;   // FC-6 — focus accretes to the conversation the ask was typed in
   // FC (v2.74.1559) — REQUIRED ride params fill from the conversation's FOCUS head: in a case, "homeowner's
   // phone?" / "get contacts" needs no id — the case record already carries TaskId (live 195557: the binder fed
   // the human TICKET number as the internal id → the known junk-id http-500). Deterministic: exact-normalized
@@ -7169,13 +7254,13 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     const host = String(leg.tool.origin || '');
     const shownLabel = secs[label] ? label : Object.keys(secs)[0];
     const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}${path.startsWith('/') ? path : '/' + path}`] });
-    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`); return false; }
+    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t open ${host} — ${_errWord(r && r.error)}.`); return false; }
     let clickNote = '';
     const find = String(params.find || '').trim();
     if (find && r.tabId != null) {
       let c = null;
       try { c = await _orchReq('CLICK_TEXT_ON_TAB', { tabId: r.tabId, text: find }); } catch { c = null; }
-      clickNote = (c && c.success) ? ` and opened “${find}”` : ` — couldn’t auto-open “${find}” there (${(c && c.error) || 'no match'}); it’s on that page`;
+      clickNote = (c && c.success) ? ` and opened “${find}”` : ` — couldn’t auto-open “${find}” there (${_errWord(c && c.error, 'no match')}); it’s on that page`;
     }
     _setMessageBody(msg, `${r.reused ? 'Focused' : 'Opened'} ${host} on its ${shownLabel} page${clickNote}.`);
     try { _orchLog(`SECTION_NAV ▸ ${host} ${shownLabel}${find ? ` find="${find.slice(0, 40)}"` : ''}${clickNote.startsWith(' and') ? ' → clicked' : (find ? ' → click-miss' : '')}`); } catch { /* */ }
@@ -7192,7 +7277,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     const firstUse = !leg.tool.hydrated;
     _setMessageBody(msg, firstUse ? `Opening ${host} — first use of “${leg.name}”, verifying the steps on the live page…` : `Opening ${host}…`);
     const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}${path.startsWith('/') ? path : '/' + path}`] });
-    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`); return false; }
+    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t open ${host} — ${_errWord(r && r.error)}.`); return false; }
     let d = null;
     try { d = await _orchReq('INVOKE_DRIVE_ARTIFACT', { groundId: leg.tool.groundId || groundId || null, driveId: leg.tool.driveId, tabId: r.tabId, origin: host, params }); } catch { d = null; }
     const bound = Object.entries(params || {}).filter(([, v]) => v != null && String(v).trim() !== '').map(([, v]) => `“${String(v).slice(0, 40)}”`).join(', ');
@@ -7200,7 +7285,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       _setMessageBody(msg, `${leg.name || 'Done'} — walked the ${host} page${bound ? ` to ${bound}` : ''}.${d.promoted ? ' (First run verified — this now replays instantly.)' : ''}`);
       return true;
     }
-    const why = (d && (d.reason || d.error)) || 'a step failed';
+    const why = _errWord(d && (d.reason || d.error), 'a step failed');   // v1591
     _setMessageBody(msg, `Opened ${host}, but couldn’t finish “${leg.name || 'the walk'}” — ${why}. The page is open where it stopped.`);
     return false;
   }
@@ -7227,7 +7312,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
       let wr = null;
       try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, bodyTemplate: leg.tool.body || null, contentType: contentType || 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, identityGql: leg.tool.identityGql || null }); } catch { /* */ }   // v1479 — identityGql rides so the EXECUTOR fills {me} from the AGENT read   // v1340 arm-guard pair · v1464 routing headers · v1471 — TEMPLATE + probe ride so the EXECUTOR fills {me} (chat-side fill silently DROPPED ID:'{me}')
-      if (!wr || wr.success === false || (typeof wr.status === 'number' && wr.status >= 400)) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg, 'send that')}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
+      if (!wr || wr.success === false || (typeof wr.status === 'number' && wr.status >= 400)) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg, 'send that')}${wr && wr.error ? ` — ${_errWord(wr.error)}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
       _setMessageBody(msg, `Sent — ${_method} ${leg.tool.endpoint} → ${wr.status || 'ok'}.`);
       return true;
     }
@@ -7238,7 +7323,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) }); } catch { /* */ }   // v1340 (review A/§18) — the arm-guard pair rides the read too; v1464 — routing headers; v1471 — probe + template so the EXECUTOR fills {me}
     if (!rr || rr.success === false) {
       const hint = (rr && rr.hint) ? `  ${rr.hint}.` : '';
-      _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${rr && rr.error ? ` — ${rr.error}` : ''}${rr && rr.detail ? ` (${rr.detail})` : ''}.${hint}`);
+      _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${rr && rr.error ? ` — ${_errWord(rr.error)}` : ''}${rr && rr.detail ? ` (${rr.detail})` : ''}.${hint}`);
       // RH-1b (v2.74.1568) — the executor's tick marked this recipe drift-suspect → propose the relearn arm.
       if (rr && rr.driftSuspect && rr.driftGroundId) _healRelearnBar(msg, { groundId: rr.driftGroundId, recipeId: rr.driftRecipeId || '', host: (leg.tool && (leg.tool.sessionHost || leg.tool.origin)) || '', name: leg.name || (leg.tool && leg.tool.recipeId) || 'that read', retryAsk: ask });
       return false;
@@ -7249,7 +7334,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       if (dj !== null) return dj;
     }
     _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), value: rr.value };   // FL-1d — this read grounds the coming answer; CX-9j — the VALUE stays (panel memory) so a follow-up ("what are the instructions?") answers from THIS record; v1534 — labels carry the human division NAME for a follow-up on-site open
-    _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: rr.value });   // FC-3
+    _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: rr.value, convId: _askConvId });   // FC-3/6
     const facts = readShapeFacts(rr.value);
     // CX-9j (v2.74.1445) — an explicit DETAILS-intent in the ask ("… and show details", "warranty details for …") on a
     // SINGLE record → the FULL FORMATTED RECORD, deterministically (live: the clause rode along as words and the shaper
@@ -7280,7 +7365,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     if (!okd) { _setMessageBody(msg, 'Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C)
     let br = null;
     try { br = await _orchReq('INVOKE_CONNECTOR', { ...plan0.payload, confirmed: true }); } catch { /* */ }
-    if (!br || br.success === false) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${br && br.error ? ` — ${br.error}` : ''}${br && br.detail ? ` (${br.detail})` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
+    if (!br || br.success === false) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${br && br.error ? ` — ${_errWord(br.error)}` : ''}${br && br.detail ? ` (${br.detail})` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
     _setMessageBody(msg, `Done — ${plan0.payload.tool} sent.`);
     return true;
   }
@@ -7299,7 +7384,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
     let sw = null;
     try { sw = await _orchReq(planW.channel, { ...planW.payload, body: bodyW, contentType: ctW, confirmed: true }); } catch { /* */ }
-    if (!sw || sw.success === false) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg, 'send that')}${sw && sw.error ? ` — ${sw.error}` : ''}${sw && sw.detail ? ` (${sw.detail})` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }   // CX-7 — surface the GraphQL `detail` (the real userErrors/errors message names the wrong field)
+    if (!sw || sw.success === false) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg, 'send that')}${sw && sw.error ? ` — ${_errWord(sw.error)}` : ''}${sw && sw.detail ? ` (${sw.detail})` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }   // CX-7 — surface the GraphQL `detail` (the real userErrors/errors message names the wrong field)
     // CX-7f (v2.74.1404) — a WRITE that created a record leaves a navigable "last read" so "show it" opens the new
     // record (the write leg carries an itemUrl; createdRecordId digs the new id out of the mutation reply's
     // data.<op>.<entity>). Only when we actually have an id + itemUrl — else a plain "Done." (nothing to open).
@@ -7326,7 +7411,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
   if (!res || res.success === false) {
     const hint = (res && res.hint) ? `  ${res.hint}.` : '';   // CX-4a.1 — surface "open <app> and sign in" on a connector auth miss
-    _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${res && res.error ? ` — ${res.error}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);
+    _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${res && res.error ? ` — ${_errWord(res.error)}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);
     // RH-1b (v2.74.1568) — the INVOKE_SESSION tick marked this recipe drift-suspect → propose the relearn arm.
     if (res && res.driftSuspect && res.driftGroundId) _healRelearnBar(msg, { groundId: res.driftGroundId, recipeId: res.driftRecipeId || '', host: (leg.tool && (leg.tool.sessionHost || leg.tool.appHost || leg.tool.origin)) || '', name: leg.name || (leg.tool && leg.tool.recipeId) || 'that read', retryAsk: ask });
     return false;
@@ -7345,7 +7430,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // FL-1d — this read grounds the coming answer. CX-7e — also remember the RETURNED record's id + the read's
     // tab-derived urlArgs (handle), so "show profile" can open that record's admin page even for a by-email lookup.
     _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null, value: res.value };   // CX-9j — the value stays for field follow-ups; v1534 — labels carry the division NAME
-    _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: res.value });   // FC-3
+    _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: res.value, convId: _askConvId });   // FC-3/6
     const facts = readShapeFacts(res.value);
     // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
@@ -7590,7 +7675,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     const deg = (ok && r && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';
     const rec = (ok && r && r.recreated) ? ' Your old Doc was gone, so I created a fresh one.' : '';   // v1341 (review G) — a recreate is never silent
     _setMessageBody(msg, ok ? `Drafted it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg} — keep steering from here (“change the first line”, “make it warmer”).${rec}`
-      : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
+      : `Couldn’t compose the canvas${r && r.error ? ` — ${_errWord(r.error)}` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
     _orchFinalize(msg);
     // AL-3e — bank the outcome, EXCEPT infra/setup failures (broker down, API not enabled, doc plumbing): those say
     // nothing about whether COMPOSE fits the ask, and banking them as a mismatch poisons the recall that steers the
@@ -7644,7 +7729,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
       try { msg.remove(); } catch { /* */ }
       const m2 = appendMessage({ role: 'assistant', body: '' });
       const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}/`], focusOnly: true });
-      _setMessageBody(m2, r && r.success !== false ? `${r.reused ? `Focused your existing ${host} tab` : `Opened ${host}`}.` : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
+      _setMessageBody(m2, r && r.success !== false ? `${r.reused ? `Focused your existing ${host} tab` : `Opened ${host}`}.` : `Couldn’t open ${host} — ${_errWord(r && r.error)}.`);
       _orchFinalize(m2);
       return true;
     }
@@ -7798,11 +7883,11 @@ async function _chatExplore({ thenMenu = false, msg: passedMsg = null } = {}) {
   const msg = passedMsg || appendMessage({ role: 'assistant', body: '' });   // IL-3c — reuse the il bubble when invoked as a panel leg
   _setMessageBody(msg, `Grounding ${host}…`);
   const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: tab.url });
-  if (!g?.success || !g.groundId) { _setMessageBody(msg, `Couldn't ground this page${g && g.error ? ` — ${g.error}` : ''}.`); return false; }
+  if (!g?.success || !g.groundId) { _setMessageBody(msg, `Couldn't ground this page${g && g.error ? ` — ${_errWord(g.error)}` : ''}.`); return false; }
   _orchLog(`EXPLORE ▸ chat ask → ground ${g.groundId} (${g.created ? 'minted' : 'reused'}; readiness ${g.readiness || '?'})`);
   _setMessageBody(msg, `Exploring ${host} — this takes a few seconds (I'll poke around the page to map what it offers)…`);
   const res = await _orchReq('EXPLORE_PAGE_STRUCTURE', { tabId: tab.id, groundId: g.groundId });
-  if (!res?.success) { _setMessageBody(msg, `Explore didn't finish${res && res.error ? ` — ${res.error}` : ' (it may still be running — check the page)'}.`); return false; }
+  if (!res?.success) { _setMessageBody(msg, `Explore didn't finish${res && res.error ? ` — ${_errWord(res.error)}` : ' (it may still be running — check the page)'}.`); return false; }
   // v2.74.925 (CR-T2) — the response's `structure` is the sweep artifact ({surface, controls, stats…});
   // it never carried features/goals, so the .910 counts were silently null. The handler now attaches the
   // LOCALE's counts (featureCount/goalCount) on both the full-build and fresh-skip paths.
@@ -8114,7 +8199,7 @@ async function sendChatMessage() {
     _setMessageBody(msg, un ? `Unlinking ${provider}…` : `Opening ${provider} sign-in — approve the consent screen to link…`);
     try {
       const r = await _orchReq(un ? 'UNLINK_CONNECTOR' : 'LINK_CONNECTOR', { provider });
-      if (!r || r.success === false) _setMessageBody(msg, `Couldn’t ${un ? 'unlink' : 'link'} ${provider}${r && r.error ? ` — ${r.error}` : ''}.${r && r.hint ? `  ${r.hint}.` : ''}`);
+      if (!r || r.success === false) _setMessageBody(msg, `Couldn’t ${un ? 'unlink' : 'link'} ${provider}${r && r.error ? ` — ${_errWord(r.error)}` : ''}.${r && r.hint ? `  ${r.hint}.` : ''}`);
       else if (un) _setMessageBody(msg, `${provider} unlinked.`);
       else _setMessageBody(msg, `${provider} linked — its official-API tools are now in the palette${r.scope ? ` (scope: ${r.scope})` : ''}.`);
     } catch (e) { _setMessageBody(msg, `Couldn’t ${un ? 'unlink' : 'link'} ${provider}: ${e && e.message ? e.message : e}`); }
@@ -8421,6 +8506,62 @@ async function sendChatMessage() {
     await _clearCurrentChat();
     return;
   }
+  // CA-6 (v2.74.1205) — `canvas` opens this app's PRESENTATION tab (the roomy display/compose surface,
+  // DESIGN_canvas.md); only apps that DEFINE a presentation layer have one. VT-2d (v2.74.1583) — the DASHBOARD
+  // door is CONTEXT-DETERMINED (user directive): "show dashboard" on the Admin desk = the VITALS dashboard; on a
+  // work desk = THAT desk's dashboard (its origins' vitals slice + its cases); on the Front desk = the cross-desk
+  // overview. "show admin dashboard" / "show vitals dashboard" forces the vitals view from anywhere. An app that
+  // defines its own presentation keeps it for a bare "dashboard" (the app-defined HUD is that desk's dashboard).
+  // v2.74.1586 — HOISTED above the section-nav AND the referent/field stages: position IS part of a phrase's
+  // meaning — at the old CA-6 slot, `_showSection` ate "show dashboard" (vendorsuite has a literal dashboard
+  // page, live 1584) and `_fieldFollowup` answered it as a field question off the focus record (live 1585).
+  // The door must claim before any other "show" consumer.
+  {
+    const dashAsk = parseDashboardAsk(text);
+    const canvasAsk = /^(canvas|open (the )?canvas)\s*$/i.test(text);
+    if (dashAsk || canvasAsk) {
+      const m = appendMessage({ role: 'assistant', body: '' });
+      const appId = _currentConversationAppId;
+      let pres = null; try { pres = appId ? (builtinApp(appId)?.presentation || null) : null; } catch { /* */ }
+      const onAdmin = _currentConversationId === ADMIN_ID;
+      if (canvasAsk || (pres && dashAsk && !dashAsk.explicitAdmin && !onAdmin)) {
+        if (!pres) { _setMessageBody(m, 'This desk works in the panel — it has no canvas. (Desks that define a presentation layer, like the Financial monitor, open one.)'); _orchFinalize(m); return; }
+        const anchor = { appId, conversationId: null };   // a watcher's dashboard is per-APP (one standing HUD), not per-conversation
+        const spec = { title: pres.title || null, blocks: Array.isArray(pres.blocks) ? pres.blocks : [] };
+        try {
+          const r = await _orchReq('RENDER_CANVAS', { op: 'display', spec, anchor });
+          _setMessageBody(m, (r && r.success !== false) ? 'Opened the canvas in a tab — it updates live as the desk composes it.' : `Couldn’t open the canvas${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`);
+        } catch { _setMessageBody(m, 'Couldn’t open the canvas.'); }
+        _orchFinalize(m); return;
+      }
+      const scope = (dashAsk.explicitAdmin || onAdmin) ? 'admin' : (appId ? 'desk' : 'front');
+      const payload = { scope };
+      if (scope === 'desk') {
+        payload.appId = appId;
+        payload.origins = _boundConnections().map((c) => c.origin);
+        payload.deskName = (_currentConversationConfig && (_currentConversationConfig.name || _currentConversationConfig.title)) || 'This desk';
+        try { payload.cases = { count: (await _childSummariesForCurrent()).length }; } catch { /* */ }
+      } else if (scope === 'front') {
+        try {
+          const list = await ConversationStore.list();
+          payload.desks = (list || []).filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev')
+            .map((c) => ({ name: c.title || c.appId, cases: (list || []).filter((k) => k && k.parentId === c.id).length, updatedAt: c.updatedAt || 0, pinned: !!c.pinned }));
+        } catch { payload.desks = []; }
+      }
+      _setMessageBody(m, 'opening the dashboard…');
+      try {
+        const r = await _orchReq('VITALS_DASHBOARD', payload);
+        if (!r || r.success === false || !r.spec) { _setMessageBody(m, `Couldn’t build the dashboard${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`); _orchFinalize(m); return; }
+        const r2 = await _orchReq('RENDER_CANVAS', { op: 'display', spec: r.spec, anchor: r.anchor });
+        const word = scope === 'admin' ? 'the vitals dashboard' : scope === 'desk' ? 'this desk’s dashboard' : 'the desks overview';
+        _setMessageBody(m, (r2 && r2.success !== false)
+          ? `Opened ${word} in a tab — live counts from the outcome funnel; re-ask to refresh it.`
+          : `Couldn’t open the dashboard${r2 && r2.error ? ` — ${_errWord(r2.error)}` : ''}.`);
+      } catch { _setMessageBody(m, 'Couldn’t open the dashboard.'); }
+      _orchFinalize(m); return;
+    }
+  }
+
   // FL-1e (v2.74.1433) — "show/go to <section>" (e.g. "show warranty"): navigate a grounded site to a PARAM-FREE section
   // page (a ride recipe's listUrl/itemUrl that fills with no params). Runs AFTER the in-memory `show N` / bare-show
   // handlers (they return first) and only ACTS on a real section match — else `_showSection` returns false and the ask
@@ -8428,7 +8569,11 @@ async function sendChatMessage() {
   // status word: "open warranty tasks" is a LIST read, never a navigation).
   {
     const mSectionShow = text.match(/^(?:show|view|go\s+to)\s+(?:the\s+)?([a-z][\w ]*?)\s*$/i);
-    if (mSectionShow && await _showSection(mSectionShow[1].trim())) return;
+    // VT-2d (v2.74.1584) — the DASHBOARD phrase is RESERVED for the context-determined desk dashboard (the door
+    // below): live 1583 run — vendorsuite's literal "dashboard" section swallowed "show dashboard" here, and
+    // "show admin dashboard" matched a zendesk section page. The site's OWN dashboard page stays reachable via
+    // "go to dashboard" (parseDashboardAsk claims only show/open/display + the bare word).
+    if (mSectionShow && !parseDashboardAsk(text) && await _showSection(mSectionShow[1].trim())) return;
   }
   // v2.74.1533 — `re-teach` (also `reteach` / `show me again`): re-record the last on-site capability EVEN WHEN IT
   // WORKS. A successful walk shows no failure-only "● Show me" offer, so there was no way to improve it (e.g. add
@@ -8584,7 +8729,7 @@ async function sendChatMessage() {
       const safeTitle = (String(r.title || '').replace(/[\[\]*_`\\]/g, '') || 'page');   // untrusted page title on a markdown-rendered line — strip link/emphasis metachars
       _setMessageBody(m, `Banked “${safeTitle}” as a source (${r.images} image${r.images === 1 ? '' : 's'}, ${r.videos} video${r.videos === 1 ? '' : 's'}; ${r.banked} banked). Now ask me to draft from it.\n\n_It rides every future draft this desk composes until it rotates out — “sources” lists what’s banked, “sources clear” drops it._`, { markdown: true });
     } else {
-      _setMessageBody(m, `Couldn’t bank this page${r && r.error ? ` (${r.error})` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
+      _setMessageBody(m, `Couldn’t bank this page${r && r.error ? ` — ${_errWord(r.error)}` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
     }
     _orchFinalize(m); return;
   }
@@ -8598,7 +8743,7 @@ async function sendChatMessage() {
     if (!appId) { _setMessageBody(m, 'Open a desk first — sources are banked per-desk.'); _orchFinalize(m); return; }
     let r = null;
     try { r = await _orchReq(clearing ? 'CLEAR_SOURCES' : 'LIST_SOURCES', { appId }); } catch { /* */ }
-    if (!r || r.success === false) { _setMessageBody(m, `Couldn’t ${clearing ? 'clear' : 'list'} the sources${r && r.error ? ` (${r.error})` : ''}.`); _orchFinalize(m); return; }
+    if (!r || r.success === false) { _setMessageBody(m, `Couldn’t ${clearing ? 'clear' : 'list'} the sources${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`); _orchFinalize(m); return; }
     if (clearing) {
       _setMessageBody(m, r.cleared ? `Dropped ${r.cleared} banked source${r.cleared === 1 ? '' : 's'} — future drafts compose without them.` : 'Nothing was banked.');
     } else if (!Array.isArray(r.sources) || !r.sources.length) {
@@ -8624,25 +8769,8 @@ async function sendChatMessage() {
       const r = await _orchReq('COMPOSE_CANVAS', { ask, appId, seed: _currentConversationSeed, anchor: { appId, conversationId: null } });
       const deg = (r && r.success !== false && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';   // GD-7a — §8.3 named downgrade
       const rec = (r && r.success !== false && r.recreated) ? ' Your old Doc was gone, so I created a fresh one.' : '';   // v1341 (review G)
-      _setMessageBody(m, (r && r.success !== false) ? `Composed it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg}.${rec}` : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}.`);
+      _setMessageBody(m, (r && r.success !== false) ? `Composed it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg}.${rec}` : `Couldn’t compose the canvas${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`);
     } catch { _setMessageBody(m, 'Couldn’t compose the canvas.'); }
-    _orchFinalize(m); return;
-  }
-
-  // CA-6 (v2.74.1205) — `canvas` opens this app's PRESENTATION tab (the roomy display/compose surface,
-  // DESIGN_canvas.md). It renders the app's presentation DEFAULT through the RENDER_CANVAS handler (exercising the
-  // full CA-4 pipeline). Only apps that DEFINE a presentation layer (appDef.presentation) have a canvas — env.canvas.
-  if (/^(canvas|open (the )?canvas|dashboard)\s*$/i.test(text)) {
-    const m = appendMessage({ role: 'assistant', body: '' });
-    const appId = _currentConversationAppId;
-    let pres = null; try { pres = appId ? (builtinApp(appId)?.presentation || null) : null; } catch { /* */ }
-    if (!pres) { _setMessageBody(m, 'This desk works in the panel — it has no canvas. (Desks that define a presentation layer, like the Financial monitor, open one.)'); _orchFinalize(m); return; }
-    const anchor = { appId, conversationId: null };   // a watcher's dashboard is per-APP (one standing HUD), not per-conversation
-    const spec = { title: pres.title || null, blocks: Array.isArray(pres.blocks) ? pres.blocks : [] };
-    try {
-      const r = await _orchReq('RENDER_CANVAS', { op: 'display', spec, anchor });
-      _setMessageBody(m, (r && r.success !== false) ? 'Opened the canvas in a tab — it updates live as the desk composes it.' : `Couldn’t open the canvas${r && r.error ? ` (${r.error})` : ''}.`);
-    } catch { _setMessageBody(m, 'Couldn’t open the canvas.'); }
     _orchFinalize(m); return;
   }
 
@@ -8693,7 +8821,7 @@ async function sendChatMessage() {
       bar.appendChild(_mkBtn('Close all ▸', async () => {
         bar.remove();
         const r = await _orchReq('CLOSE_TABS', { scope: 'all' });
-        _setMessageBody(m, (r && r.success) ? `Closed ${r.closed} tab(s) — only Studio remains.` : `Couldn’t close tabs${r && r.error ? ` — ${r.error}` : ''}.`);
+        _setMessageBody(m, (r && r.success) ? `Closed ${r.closed} tab(s) — only Studio remains.` : `Couldn’t close tabs${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`);
         _orchFinalize(m);
       }));
       bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(m, 'Kept your tabs.'); _orchFinalize(m); }));
@@ -8704,12 +8832,12 @@ async function sendChatMessage() {
       const r = await _orchReq('CLOSE_TABS', { scope: 'site', site });
       const body = (r && r.success)
         ? (r.closed ? `Closed ${r.closed} ${site} tab(s).` : `No open ${site} tabs to close.`)
-        : `Couldn’t close ${site} tabs${r && r.error ? ` — ${r.error}` : ''}.`;
+        : `Couldn’t close ${site} tabs${r && r.error ? ` — ${_errWord(r.error)}` : ''}.`;
       _orchFinalize(appendMessage({ role: 'assistant', body }));
     } else {
       const tab = await _orchActiveTab();
       const r = (tab && typeof tab.id === 'number') ? await _orchReq('CLOSE_TABS', { scope: 'tab', tabId: tab.id }) : null;
-      const m = appendMessage({ role: 'assistant', body: (r && r.success) ? 'Closed this tab.' : `Couldn’t close this tab${r && r.error ? ` — ${r.error}` : ''}.` });
+      const m = appendMessage({ role: 'assistant', body: (r && r.success) ? 'Closed this tab.' : `Couldn’t close this tab${r && r.error ? ` — ${_errWord(r.error)}` : ''}.` });
       _orchFinalize(m);
     }
     return;
@@ -9129,7 +9257,7 @@ async function handleInvocationCompleted(event) {
       const ok = !(event && (event.error || (event.result && event.result.error)));
       const body = ok
         ? 'Finished while you were in another conversation.'
-        : `Didn’t finish${event.error ? ` — ${event.error}` : ''}.`;
+        : `Didn’t finish${event.error ? ` — ${_errWord(event.error)}` : ''}.`;
       try {
         await ConversationStore.updateMessage(convId, String(event.invocationId),
           { id: String(event.invocationId), ts: Date.now(), role: 'assistant', body, markdown: false, html: false, invocationId: event.invocationId },
@@ -9318,7 +9446,7 @@ function renderStepResults(stepResults) {
           <span class="step-icon">${icon}</span>
           <span class="step-name">${escHtml(r.fragmentName ?? '?')}</span>
           ${meta}
-          ${r.success ? '' : `<span class="step-error">${escHtml(r.error ?? 'failed')}</span>`}
+          ${r.success ? '' : `<span class="step-error">${escHtml(_errWord(r.error, 'failed'))}</span>`}
         </div>`;
     }
 
@@ -9353,7 +9481,7 @@ function renderStepResults(stepResults) {
               <span class="step-icon">${icon}</span>
               <span class="step-name">${escHtml(displayName)}</span>
               ${meta}
-              ${r.success ? '' : `<span class="step-error">${escHtml(r.error ?? 'failed')}</span>`}
+              ${r.success ? '' : `<span class="step-error">${escHtml(_errWord(r.error, 'failed'))}</span>`}
             </div>`;
         }).join('')
       : '';
@@ -10046,6 +10174,9 @@ async function _rehydrateConversation(conv) {
   // update the now-detached thinkingMsg.
   _cancelOpenParamForms();
   _currentConversationId = conv.id;
+  // VT-2b (v2.74.1587) — opening an incident CASE refreshes its card + action bar from the live store (deferred
+  // past this paint; the persisted incident_card renders first, then the pass upserts + re-arms the bar).
+  if (String(conv.id || '').startsWith('vtc_')) { try { setTimeout(() => { void _maybeRenderIncidentCase(); }, 250); } catch { /* */ } }
   _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
   _currentConversationSeed = (conv.kind !== 'dev' && conv.seed) ? String(conv.seed).trim() : '';   // v2.74.1163 (CV-2b) — restore the IL seed (agent convs only; dev `seed` is a one-shot prefill)
   _currentConversationFocus = (conv.kind !== 'dev' && Array.isArray(conv.focus)) ? conv.focus : [];   // FC (v2.74.1552) — restore the working set: a REOPENED case still holds its record
@@ -10181,7 +10312,7 @@ function _healRelearnBar(msg, { groundId, recipeId = '', host = '', name = 'that
     try { await _orchReq('FOCUS_TAB', { tabId: tab.id }); } catch { /* */ }
     const armRes = await _orchReq('FORAGE', { groundId, sessionTabId: tab.id });
     if (!armRes || armRes.success === false || (!armRes.armed && !armRes.banking)) {
-      armBtn.textContent = armRes && armRes.error === 'no-consent' ? 'needs Track consent (Studio → monitoring)' : `couldn’t arm${armRes && armRes.error ? ` — ${armRes.error}` : ''}`;
+      armBtn.textContent = armRes && armRes.error === 'no-consent' ? 'needs Track consent (Studio → monitoring)' : `couldn’t arm${armRes && armRes.error ? ` — ${_errWord(armRes.error)}` : ''}`;
       return;
     }
     _orchLog(`HEAL ▸ relearn armed ${recipeId || '?'} on ${host} (ground ${groundId})`);
@@ -10191,7 +10322,7 @@ function _healRelearnBar(msg, { groundId, recipeId = '', host = '', name = 'that
       line.textContent = 'Relearning…';
       const done = _awaitForageComplete(groundId);            // the heal count rides FORAGE_COMPLETE — listen BEFORE the bank call
       const bankRes = await _orchReq('FORAGE', { groundId }); // 2nd call → bank + the RH-1c match pass
-      if (!bankRes || bankRes.success === false) { line.textContent = `Couldn’t bank the capture${bankRes && bankRes.error ? ` — ${bankRes.error}` : ''}.`; return; }
+      if (!bankRes || bankRes.success === false) { line.textContent = `Couldn’t bank the capture${bankRes && bankRes.error ? ` — ${_errWord(bankRes.error)}` : ''}.`; return; }
       const fc = await done;
       bar.remove();
       let withProps = [];
@@ -10213,7 +10344,7 @@ function _healRelearnBar(msg, { groundId, recipeId = '', host = '', name = 'that
         cbar.appendChild(_mkBtn('✓ Apply fix', async () => {
           const ar = await _orchReq('EDIT_RIDE_RECIPE', { groundId, id: rec.id, op: 'heal' });
           cbar.remove();
-          if (!ar || ar.success === false) { _setMessageBody(card, `Couldn’t apply — ${(ar && ar.error) || 'unknown'}.`); _orchFinalize(card); return; }
+          if (!ar || ar.success === false) { _setMessageBody(card, `Couldn’t apply — ${_errWord(ar && ar.error, 'unknown')}.`); _orchFinalize(card); return; }
           if (retryAsk && rec.id === recipeId) {
             _setMessageBody(card, `✓ Applied the fix to **${rec.name || rec.id}** — re-running your ask to verify…`, { markdown: true });
             _orchFinalize(card);
@@ -10272,6 +10403,16 @@ async function _maybeRenderConnCard() {
 // the existing point-of-need bars verbatim: sign-in (presence) and the RH-1b relearn bar (drift).
 async function _maybeRenderAdminDesk() {
   if (_currentConversationId !== ADMIN_ID) return;
+  // v2.74.1575 — the persona heal must cover EVERY door into the desk (live: the panel BOOT-RESTORED the Admin
+  // desk as the current conversation — a path that never passes _openAdminDesk, so the ensure-time patchMeta
+  // heal never ran, the store seed stayed empty, and "what can you do?" answered from the active tab again —
+  // twice). This hook fires on every open of the desk, whichever door was used. v2.74.1576 — OUR prior seed
+  // revisions are upgrade-eligible too (the honesty-rule addition — live: the persona called presence-unknown
+  // grounds "all connected"); anything else is user-edited and is never touched.
+  if (!_currentConversationSeed || _ADMIN_SEED_PRIOR.includes(_currentConversationSeed)) {
+    _currentConversationSeed = _ADMIN_SEED;
+    try { void ConversationStore.patchMeta(ADMIN_ID, { seed: _ADMIN_SEED }); } catch { /* */ }
+  }
   let r = null;
   try { r = await _orchReq('VITALS_STATUS', {}); } catch { return; }
   if (!r || r.success === false) return;
@@ -10285,7 +10426,11 @@ async function _maybeRenderAdminDesk() {
     const drift = g.driftSuspects ? ` · ⚠ ${g.driftSuspects} drift-suspect${g.proposals ? ` (${g.proposals} fix proposed)` : ''}` : ' · shape ok';
     return `• ${g.host} — ${g.armed} read${g.armed === 1 ? '' : 's'}, ${age}${drift}`;
   }).join('\n');
-  const body = `🩺 **Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}`;
+  // VT-2b (v2.74.1587) — the desk timeline stays quiet: open incidents live as CASES in the Rail; the card carries
+  // ONE pointer line (silence when green: none → no line at all).
+  const openInc = (r.incidents || []).filter((x) => x && x.status === 'open');
+  const incLine = openInc.length ? `\n\n⚠ ${openInc.length} open incident${openInc.length === 1 ? '' : 's'} — see the case${openInc.length === 1 ? '' : 's'} under Admin desk in the Rail.` : '';
+  const body = `**Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}${incLine}`;   // v2.74.1581 — emoji-free chrome (user directive)
   let msg = document.querySelector('#messages .message[data-message-id="vitals_card"]');
   if (msg) _setMessageBody(msg, body, { markdown: true });
   else msg = appendMessage({ role: 'assistant', body, id: 'msg-vitals_card' });
@@ -10300,25 +10445,93 @@ async function _maybeRenderAdminDesk() {
     try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
     void _maybeRenderAdminDesk();
   }));
-  // open incidents → cards (transient upserts; SILENCE WHEN GREEN: none → nothing at all)
-  const open = (r.incidents || []).filter((x) => x && x.status === 'open').sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
-  for (const inc of open.slice(0, 8)) {
-    let card = document.querySelector(`#messages .message[data-vt-incident="${inc.id}"]`);
-    const tail = (inc.evidence || []).slice(-3).map((e) => `· ${new Date(e.at).toLocaleString()} — ${e.line}`).join('\n');
-    const cbody = `${inc.cls === 'presence' ? '🔌' : '🩹'} **${inc.title}**\nopen since ${new Date(inc.openedAt).toLocaleString()}${tail ? `\n${tail}` : ''}`;
-    if (card) { _setMessageBody(card, cbody, { markdown: true }); continue; }   // keep its existing bar
-    card = appendMessage({ role: 'assistant', body: '' });
-    try { delete card.dataset.messageId; } catch { /* */ }   // ephemeral — re-rendered from the store on every open
-    card.dataset.vtIncident = inc.id;
-    _setMessageBody(card, cbody, { markdown: true });
-    if (inc.cls === 'presence' && inc.origin) _connSignInBar(card, [inc.origin]);
-    else if (inc.cls === 'drift' && inc.groundId) _healRelearnBar(card, { groundId: inc.groundId, recipeId: inc.recipeId || '', host: inc.origin || '', name: inc.name || 'that read' });
+  // VT-2b (v2.74.1587) — incidents are CASES (sub-conversations under this desk, in the Rail), not cards in this
+  // timeline (live 1586 report: the card-in-thread was the recorded v1 deviation; the requirement was a case).
+  // Mint/refresh them; the desk thread stays quiet — the vitals card above carries the one-line pointer.
+  void _syncIncidentCases(r);
+  try { document.querySelectorAll('#messages .message[data-vt-incident]').forEach((el) => el.remove()); } catch { /* legacy cards */ }
+}
+
+// ── VT-2b (v2.74.1587) — incidents as CASES: one sub-conversation per incident, under the Admin desk ─────────────
+const _vtCaseId = (incId) => `vtc_${incId}`;
+// v2.74.1590 — the case card speaks HUMAN (live report: raw state-machine grammar + full machine timestamps +
+// a ✓ over a still-present-tense title). Friendly clock stamps, translated evidence, a past-tense resolved
+// head, and a one-line what-to-do hint while open.
+function _incidentCardBody(inc) {
+  const now = Date.now();
+  const tail = (inc.evidence || []).slice(-6).map((e) => `- ${clockWord(e.at, now)} — ${friendlyVitalsLine(e.line)}`).join('\n');
+  const timeline = tail ? `\n\n**Timeline**\n${tail}` : '';
+  const mins = (inc.closedAt && inc.openedAt) ? Math.max(1, Math.round((inc.closedAt - inc.openedAt) / 60e3)) : null;
+  const durWord = mins == null ? '' : (mins < 90 ? `${mins}m` : `${Math.round(mins / 60)}h`);
+  if (inc.status === 'open') {
+    const hint = inc.cls === 'presence'
+      ? 'Sign in on the site and its reads resume — this case closes itself.'
+      : 'A relearn can re-point the read — this case closes when a run verifies.';
+    return `⚠ **${inc.title}**\nsince ${clockWord(inc.openedAt, now)}\n\n${hint}${timeline}`;
   }
-  // stale incident cards (closed since the last render) disappear on the next re-render pass
-  try {
-    const openIds = new Set(open.map((x) => x.id));
-    document.querySelectorAll('#messages .message[data-vt-incident]').forEach((el) => { if (!openIds.has(el.dataset.vtIncident)) el.remove(); });
-  } catch { /* */ }
+  const done = String(inc.title || '')
+    .replace(/looks signed out/i, 'was signed out')
+    .replace(/is signed in as the wrong account/i, 'was on the wrong account')
+    .replace(/may have changed its request shape/i, 'request shape drifted');
+  return `✓ **${done}** — all clear\nresolved ${clockWord(inc.closedAt || now, now)}${durWord ? ` · ${inc.cls === 'presence' ? 'out' : 'open'} for ${durWord}` : ''}${timeline}`;
+}
+// Reconcile the incident store → case conversations: an OPEN incident without a case mints one (deterministic id
+// — no meta needed); every synced case carries the incident's timeline as its persisted `incident_card` message
+// (upsert — reopening shows the latest state); a CLOSE appends the quiet resolution and marks the case resolved.
+// Closed incidents that never had a case (pre-VT-2b history) are left alone — no retro-minting.
+let _vtSyncChain = Promise.resolve();
+function _syncIncidentCases(status = null) {
+  const step = _vtSyncChain.then(async () => {
+    let r = status;
+    if (!r) { try { r = await _orchReq('VITALS_STATUS', {}); } catch { return; } }
+    if (!r || r.success === false) return;
+    let railDirty = false;
+    for (const inc of (Array.isArray(r.incidents) ? r.incidents : [])) {
+      if (!inc || !inc.id) continue;
+      const caseId = _vtCaseId(inc.id);
+      let conv = null; try { conv = await ConversationStore.load(caseId); } catch { conv = null; }
+      if (!conv && inc.status === 'open') {
+        try {
+          conv = await ConversationStore.create({ id: caseId, title: inc.title || String(inc.subject || 'Incident'), kind: 'agent', parentId: ADMIN_ID });
+          railDirty = true;
+          _expandedApps.add(ADMIN_ID);   // v1589 — a NEW incident case must be visible, not hidden behind the chevron
+          try { _orchLog(`VITALS ▸ case opened — [${inc.cls}] ${String(inc.subject || '').slice(0, 48)}`); } catch { /* */ }
+        } catch { conv = null; }
+      }
+      if (!conv) continue;
+      try { await ConversationStore.updateMessage(caseId, 'incident_card', { role: 'assistant', body: _incidentCardBody(inc) }, { upsert: true }); } catch { /* */ }
+      const last = (inc.evidence || []).slice(-1)[0];
+      const peek = inc.status === 'open' ? (last ? friendlyVitalsLine(last.line).slice(0, 80) : 'open') : 'resolved';   // v1590 — human words in the Rail peek too
+      if (conv.summary !== peek) { try { await ConversationStore.patchMeta(caseId, { summary: peek }); railDirty = true; } catch { /* */ } }
+      if (inc.status === 'closed' && !conv.resolvedAt) {
+        try { await ConversationStore.patchMeta(caseId, { resolvedAt: inc.closedAt || Date.now() }); } catch { /* */ }
+        try { _orchLog(`VITALS ▸ case resolved — [${inc.cls}] ${String(inc.subject || '').slice(0, 48)}`); } catch { /* */ }
+      }
+    }
+    if (railDirty) { try { await _refreshRailIfOpen(); } catch { /* */ } }   // v1588 — drawer-aware (closed pays nothing) + coalesced
+  }).catch(() => { /* reconcile is best-effort */ });
+  _vtSyncChain = step;
+  return step;
+}
+// The case's own render pass (fires on open + on VITALS_CHANGED while a case is current): refresh the persisted
+// card from the live store and attach the ACTION bar — sign-in for presence, the RH-1b relearn bar for drift —
+// while the incident is open; a resolved case shows its quiet ✓ card, no bar.
+async function _maybeRenderIncidentCase() {
+  const cid = String(_currentConversationId || '');
+  if (!cid.startsWith('vtc_')) return;
+  let r = null; try { r = await _orchReq('VITALS_STATUS', {}); } catch { return; }
+  if (!r || r.success === false) return;
+  const inc = (r.incidents || []).find((x) => x && _vtCaseId(x.id) === cid);
+  if (!inc) return;
+  await _syncIncidentCases(r);
+  const el = document.querySelector('#messages .message[data-message-id="incident_card"]');
+  if (!el) return;
+  _setMessageBody(el, _incidentCardBody(inc), { markdown: true });
+  try { el.querySelectorAll('.orch-actions').forEach((b) => b.remove()); } catch { /* */ }
+  if (inc.status === 'open') {
+    if (inc.cls === 'presence' && inc.origin) _connSignInBar(el, [inc.origin]);
+    else if (inc.cls === 'drift' && inc.groundId) _healRelearnBar(el, { groundId: inc.groundId, recipeId: inc.recipeId || '', host: inc.origin || '', name: inc.name || 'that read' });
+  }
 }
 async function _maybeWarnDeskConnections() {
   if (!_currentConversationId || _currentConversationId === OVERVIEW_ID || _currentConversationId === ADMIN_ID) return;
@@ -10338,20 +10551,18 @@ async function _maybeWarnDeskConnections() {
   bar.appendChild(_mkBtn('Open Admin desk', () => { void _openAdminDesk(); }));
 }
 // CP-4 / VT-2 (v2.74.1571) — live transitions: the SW broadcasts CONN_STATUS_CHANGED on a REAL change (never
-// heartbeat ticks). The transition LINE now lands in the ADMIN DESK (the vitals authority); the Front desk just
-// refreshes its chip. VITALS_CHANGED (incident open/close) refreshes whichever of the two surfaces is current.
+// heartbeat ticks). VT-2b (v2.74.1587) — the transition lands in its CASE (the incident's own timeline carries
+// the story + the sign-in bar), never as a line in the Admin desk thread (live 1586: the requirement was a case).
+// The current surface refreshes: Admin desk re-renders its card, an open case re-renders itself, Front its chip.
 try {
   chrome.runtime.onMessage.addListener((m) => {
     if (!m || (m.type !== 'CONN_STATUS_CHANGED' && m.type !== 'VITALS_CHANGED')) return;
-    if (m.type === 'CONN_STATUS_CHANGED' && _currentConversationId === ADMIN_ID) {
-      const line = (m.to === 'fresh')
-        ? `● ${m.origin} is signed in again.`
-        : `✖ ${m.origin} ${m.to === 'wrong-account' ? 'is signed in as the wrong account' : 'signed out'}${m.cause ? ` (${m.cause})` : ''}.`;
-      const note = appendMessage({ role: 'assistant', body: line });
-      if (m.to !== 'fresh') _connSignInBar(note, [m.origin]);
-    }
+    void _syncIncidentCases();
     if (_currentConversationId === ADMIN_ID) void _maybeRenderAdminDesk();
+    else if (String(_currentConversationId || '').startsWith('vtc_')) void _maybeRenderIncidentCase();
     else if (_currentConversationId === OVERVIEW_ID) void _maybeRenderConnCard();
   });
 } catch { /* */ }
+// VT-2b — one reconcile at boot: incidents opened while the panel was closed still mint their cases.
+try { setTimeout(() => { void _syncIncidentCases(); }, 2500); } catch { /* */ }
 

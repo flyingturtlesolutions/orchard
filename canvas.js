@@ -104,6 +104,30 @@ function _chartSvg(block) {
   return `<svg class="cv-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="chart">${body}${ticks}</svg>`;
 }
 
+// VT-2e — one table CELL of the closed union → safe HTML (every string escaped; numbers computed here).
+function _cellHtml(c) {
+  if (c == null) return '';
+  if (typeof c !== 'object') return esc(c);
+  if (c.chip != null) return `<span class="cv-chip ${esc(c.tone || 'mute')}">${esc(c.chip)}</span>`;
+  if (c.bar != null) {
+    const pct = Math.round(Math.max(0, Math.min(1, Number(c.bar) || 0)) * 100);
+    return `<span class="cv-barcell${pct < 90 ? ' low' : ''}"><span class="lbl">${esc(c.label || `${pct}%`)}</span><span class="cv-bartrack"><i class="cv-barfill" style="width:${pct}%"></i></span></span>`;
+  }
+  if (c.mix != null) {
+    const m = c.mix || {};
+    const n = (k) => Math.max(0, Number(m[k]) || 0);
+    const total = n('ok') + n('auth') + n('miss') + n('other');
+    if (!total) return '<span class="cv-cell-sub">—</span>';
+    const seg = (k) => { const w = (n(k) / total) * 100; return w ? `<i class="m-${k}" style="width:${w.toFixed(1)}%"></i>` : ''; };
+    return `<span class="cv-mix" title="ok ${n('ok')} · auth ${n('auth')} · route ${n('miss')} · other ${n('other')}">${seg('ok')}${seg('auth')}${seg('miss')}${seg('other')}</span>`;
+  }
+  if (c.dot != null) return `<span class="cv-dotcell"><span class="cv-presdot ${esc(c.dot)}"></span>${esc(c.label || c.dot)}</span>`;
+  if (c.text != null) return `<span class="${c.mono ? 'cv-cell-main' : ''}">${esc(c.text)}</span>${c.sub ? `<br><span class="cv-cell-sub">${esc(c.sub)}</span>` : ''}`;
+  return '';
+}
+
+const _HELP_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+
 // Build one block's DOM node (keyed by data-id so live updates are surgical).
 function _blockNode(block) {
   const el = document.createElement('div');
@@ -115,9 +139,31 @@ function _blockNode(block) {
   } else if (block.kind === 'metric') {
     const dn = (block.delta != null && block.delta !== '');
     const dir = dn && String(block.delta).trim().startsWith('-') ? 'down' : 'up';
-    el.innerHTML = `<div class="cv-metric-label">${esc(block.label)}</div><div class="cv-metric-value">${esc(block.value)}${dn ? ` <span class="cv-delta ${dir}">${esc(block.delta)}</span>` : ''}</div>`;
+    el.innerHTML = `<div class="cv-metric-label">${esc(block.label)}</div>`
+      + `<div class="cv-metric-value">${esc(block.value)}${dn ? ` <span class="cv-delta ${dir}">${esc(block.delta)}</span>` : ''}</div>`
+      + (block.sub ? `<div class="cv-metric-sub">${esc(block.sub)}</div>` : '');
   } else if (block.kind === 'chart') {
     el.innerHTML = _chartSvg(block);
+  } else if (block.kind === 'table') {
+    // VT-2d/2e — every string escaped in _cellHtml; wide tables scroll inside their own container
+    const head = (Array.isArray(block.headers) && block.headers.length)
+      ? `<thead><tr>${block.headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead>` : '';
+    const body = `<tbody>${(block.rows || []).map((r) => `<tr>${r.map((c) => `<td>${_cellHtml(c)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+    el.innerHTML = `<div class="cv-table-scroll"><table class="cv-table-el">${head}${body}</table></div>`;
+  } else if (block.kind === 'cards') {
+    // VT-2e — severity-striped cards; textContent throughout (untrusted-safe by construction)
+    for (const it of (block.items || [])) {
+      const card = document.createElement('div');
+      card.className = `cv-icard ${it.tone || 'info'}`;
+      const row = document.createElement('div'); row.className = 'cv-icard-row';
+      const t = document.createElement('span'); t.className = 'cv-icard-title'; t.textContent = it.title || '';
+      row.appendChild(t);
+      if (it.when) { const w = document.createElement('span'); w.className = 'cv-icard-when'; w.textContent = it.when; row.appendChild(w); }
+      card.appendChild(row);
+      if (it.body) { const b = document.createElement('div'); b.className = 'cv-icard-body'; b.textContent = it.body; card.appendChild(b); }
+      if (it.marker) { const mk = document.createElement('div'); mk.className = 'cv-icard-marker'; mk.textContent = it.marker; card.appendChild(mk); }
+      el.appendChild(card);
+    }
   } else if (block.kind === 'image') {
     if (block.src) {                                             // GD-7e — a ref-only image (unresolved) renders its alt as a visible placeholder, never a broken img
       const img = document.createElement('img');
@@ -147,6 +193,15 @@ function _blockNode(block) {
       t = setTimeout(() => { _saveEdit(block.id, ta.value); }, 400);
     });
     el.appendChild(ta);
+  }
+  // VT-2e — the hover ⓘ (never click): block.help renders as an aria-labelled corner icon + CSS-revealed tip.
+  if (block.help) {
+    const h = document.createElement('span');
+    h.className = 'cv-help'; h.setAttribute('tabindex', '0'); h.setAttribute('aria-label', block.help);
+    h.innerHTML = _HELP_SVG;
+    const tip = document.createElement('span'); tip.className = 'cv-tip'; tip.setAttribute('role', 'tooltip'); tip.textContent = block.help;
+    h.appendChild(tip);
+    el.appendChild(h);
   }
   return el;
 }

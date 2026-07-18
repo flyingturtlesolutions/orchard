@@ -108,3 +108,91 @@ export function resolveIncident(list, { cls, subject, line = '', now = 0 } = {})
 export function openIncidents(list) {
   return (Array.isArray(list) ? list : []).filter((x) => x && x.status === 'open').sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
 }
+
+// ── VT-2c (v2.74.1583) — the rolling outcome TALLY: per-ground per-day {ok,auth,miss,other} counts, the funnel's ──
+// one new write path. This is the metric class the binary drift flag can't carry (a ground at 82% is telling you
+// something "shape ok" can't) — success RATES + failure MIX for the dashboard, body-blind by construction (counts
+// only; no params, no bodies, no asks). Book shape: { [groundId]: { 'YYYY-MM-DD': {ok,auth,miss,other} } }.
+
+export const TALLY_CLASSES = ['ok', 'auth', 'miss', 'other'];
+export const TALLY_KEEP_DAYS = 14;    // two windows of the 7d rate — enough for a delta, small enough to never matter
+
+/** The tally class of one funnel outcome — the classifier's partition mapped to the four counted buckets. PURE.
+ * `gatedMiss` = a route-miss shape seen while the REGISTRY says signed-out (the 404-on-anonymous class): counted
+ * as AUTH (the cause), never as route evidence — the same honesty rule the recipe tick applies. */
+export function tallyClassOf({ ok = false, auth = null, drift = null, gatedMiss = false } = {}) {
+  if (ok) return 'ok';
+  if (auth === 'signed-out' || auth === 'wrong-account') return 'auth';
+  if (drift === 'miss') return gatedMiss ? 'auth' : 'miss';
+  return 'other';
+}
+
+/** Local-date day key for a timestamp. PURE (now injected). */
+export function tallyDayKey(now) {
+  const d = new Date(Number(now) || 0);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Tick one outcome into the book — copy-on-write; prunes entries older than keepDays as it goes. PURE. */
+export function tallyTick(book, { groundId, cls, now = 0, keepDays = TALLY_KEEP_DAYS } = {}) {
+  const b = (book && typeof book === 'object') ? book : {};
+  const gid = String(groundId || '');
+  if (!gid || !TALLY_CLASSES.includes(cls)) return b;
+  const day = tallyDayKey(now);
+  const floor = tallyDayKey(Number(now) - keepDays * 86400e3);
+  const next = {};
+  for (const [g, days] of Object.entries(b)) {
+    if (!days || typeof days !== 'object') continue;
+    const kept = {};
+    for (const [k, v] of Object.entries(days)) if (k >= floor && v && typeof v === 'object') kept[k] = v;
+    if (Object.keys(kept).length) next[g] = kept;
+  }
+  const gDays = { ...(next[gid] || {}) };
+  const cell = { ok: 0, auth: 0, miss: 0, other: 0, ...(gDays[day] || {}) };
+  cell[cls] = (Number(cell[cls]) || 0) + 1;
+  gDays[day] = cell;
+  next[gid] = gDays;
+  return next;
+}
+
+/** Sum a window: groundIds = one id, an array, or null for ALL grounds. PURE.
+ * @returns {{ total:number, ok:number, auth:number, miss:number, other:number, rate:number|null }} */
+export function tallySummary(book, groundIds, { now = 0, days = 7 } = {}) {
+  const b = (book && typeof book === 'object') ? book : {};
+  const ids = groundIds == null ? Object.keys(b) : (Array.isArray(groundIds) ? groundIds : [groundIds]).map(String);
+  const floor = tallyDayKey(Number(now) - days * 86400e3);
+  const sum = { total: 0, ok: 0, auth: 0, miss: 0, other: 0, rate: null };
+  for (const gid of ids) {
+    const gDays = b[gid];
+    if (!gDays || typeof gDays !== 'object') continue;
+    for (const [k, v] of Object.entries(gDays)) {
+      if (k < floor || !v || typeof v !== 'object') continue;
+      for (const c of TALLY_CLASSES) sum[c] += Number(v[c]) || 0;
+    }
+  }
+  sum.total = sum.ok + sum.auth + sum.miss + sum.other;
+  sum.rate = sum.total ? sum.ok / sum.total : null;
+  return sum;
+}
+
+/** Per-day rollup across grounds for the trend chart, oldest→newest, days with runs only. PURE.
+ * @returns {Array<{day:string, total:number, ok:number}>} */
+export function tallyByDay(book, groundIds, { now = 0, days = 14 } = {}) {
+  const b = (book && typeof book === 'object') ? book : {};
+  const ids = groundIds == null ? Object.keys(b) : (Array.isArray(groundIds) ? groundIds : [groundIds]).map(String);
+  const floor = tallyDayKey(Number(now) - days * 86400e3);
+  const byDay = new Map();
+  for (const gid of ids) {
+    const gDays = b[gid];
+    if (!gDays || typeof gDays !== 'object') continue;
+    for (const [k, v] of Object.entries(gDays)) {
+      if (k < floor || !v || typeof v !== 'object') continue;
+      const cell = byDay.get(k) || { day: k, total: 0, ok: 0 };
+      for (const c of TALLY_CLASSES) cell.total += Number(v[c]) || 0;
+      cell.ok += Number(v.ok) || 0;
+      byDay.set(k, cell);
+    }
+  }
+  return [...byDay.values()].filter((d) => d.total > 0).sort((a, b2) => (a.day < b2.day ? -1 : 1));
+}

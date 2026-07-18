@@ -16,12 +16,42 @@
 //                                                its current content (composeContent) — the canvas owns NO send.
 // An unknown kind is DROPPED (not rendered) — that drop is the safety property, so do not loosen it casually.
 
-export const BLOCK_KINDS = ['markdown', 'metric', 'chart', 'image', 'video', 'compose'];
+//   • table    — { headers[], rows[][] }        → a data table; cells are STRINGS or one of the closed CELL shapes
+//                                                 ({chip,tone} · {bar,label} · {mix:{ok,auth,miss,other}} ·
+//                                                 {dot,label} · {text,sub,mono}) — enums clamped, numbers bounded,
+//                                                 strings escaped at render (VT-2d/2e — the dashboard grid).
+//   • cards    — { items:[{tone,title,when,body,marker}] } → severity-striped cards (incidents/heals; VT-2e).
+// Any block may carry `help` (≤240 chars) — the renderer shows it as a hover ⓘ, never content.
+export const BLOCK_KINDS = ['markdown', 'metric', 'chart', 'image', 'video', 'compose', 'table', 'cards'];
 export const EFFECTS = ['none', 'fade', 'typewriter', 'count'];        // optional render hints; the canvas owns motion defaults
 export const CHART_TYPES = ['line', 'bar', 'area', 'pie', 'scatter'];  // the vetted set CA-5's lib understands
 
 const _str = (v) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
 const _oneOf = (v, allowed, dflt) => (allowed.includes(v) ? v : dflt);
+
+// VT-2e — one TABLE CELL of the closed union. PURE. An unrecognized object collapses to '' (never rendered raw).
+function _tableCell(c) {
+  if (c == null) return '';
+  if (typeof c !== 'object') return _str(c);
+  if (c.chip != null) return { chip: _str(c.chip).slice(0, 40), tone: _oneOf(c.tone, ['ok', 'warn', 'danger', 'violet', 'mute'], 'mute') };
+  if (c.bar != null) {
+    const v = Number(c.bar);
+    return { bar: Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0, label: _str(c.label).slice(0, 24) };
+  }
+  if (c.mix != null && typeof c.mix === 'object') {
+    const m = {};
+    for (const k of ['ok', 'auth', 'miss', 'other']) m[k] = Math.max(0, Math.floor(Number(c.mix[k]) || 0));
+    return { mix: m };
+  }
+  if (c.dot != null) return { dot: _oneOf(c.dot, ['in', 'out', 'unknown'], 'unknown'), label: _str(c.label).slice(0, 40) };
+  if (c.text != null) {
+    const cell = { text: _str(c.text).slice(0, 120) };
+    if (c.sub != null && _str(c.sub).trim()) cell.sub = _str(c.sub).slice(0, 80);
+    if (c.mono) cell.mono = true;
+    return cell;
+  }
+  return '';
+}
 
 /**
  * The image-src safety gate (§5). PURE. Returns a SAFE src or '' (an empty src → the block is dropped, never an
@@ -62,6 +92,8 @@ export function normalizeBlock(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (!BLOCK_KINDS.includes(raw.kind)) return null;                 // closed vocabulary — unknown kinds never render
   const base = { id: _str(raw.id), kind: raw.kind, effect: _oneOf(raw.effect, EFFECTS, 'none') };
+  const help = _str(raw.help).trim();
+  if (help) base.help = help.slice(0, 240);                         // VT-2e — the hover ⓘ; a VALUE, never markup
 
   if (raw.kind === 'markdown') return { ...base, text: _str(raw.text) };
 
@@ -69,7 +101,37 @@ export function normalizeBlock(raw) {
     const value = (typeof raw.value === 'number') ? raw.value : (typeof raw.value === 'string') ? raw.value : '';
     const block = { ...base, label: _str(raw.label), value };
     if (raw.delta != null && raw.delta !== '') block.delta = (typeof raw.delta === 'number') ? raw.delta : _str(raw.delta);
+    if (raw.sub != null && _str(raw.sub).trim()) block.sub = _str(raw.sub).slice(0, 80);   // VT-2e — the tile's small context line
     return block;
+  }
+
+  if (raw.kind === 'table') {
+    // VT-2d/2e — cells are a CLOSED union (plain string, or one of five typed shapes with clamped enums/numbers
+    // and sliced strings — nothing executable survives as a value), bounded 60 rows × 12 cols so an LLM-authored
+    // table can't balloon the spec. No rows → drop (the safety default).
+    const headers = (Array.isArray(raw.headers) ? raw.headers : []).slice(0, 12).map(_str);
+    const rows = (Array.isArray(raw.rows) ? raw.rows : []).slice(0, 60)
+      .map((r) => (Array.isArray(r) ? r.slice(0, 12).map(_tableCell) : null))
+      .filter((r) => r && r.length);
+    if (!rows.length) return null;
+    return { ...base, headers, rows };
+  }
+
+  if (raw.kind === 'cards') {
+    // VT-2e — severity-striped cards (the dashboard's incidents/heals). Tones are a closed enum; every field a
+    // sliced string. A titleless item drops; an itemless block drops.
+    const items = (Array.isArray(raw.items) ? raw.items : []).slice(0, 12).map((it) => {
+      if (!it || typeof it !== 'object') return null;
+      const title = _str(it.title).slice(0, 120);
+      if (!title) return null;
+      const card = { tone: _oneOf(it.tone, ['open', 'heal', 'closed', 'info'], 'info'), title };
+      if (_str(it.when).trim()) card.when = _str(it.when).slice(0, 40);
+      if (_str(it.body).trim()) card.body = _str(it.body).slice(0, 400);
+      if (_str(it.marker).trim()) card.marker = _str(it.marker).slice(0, 80);
+      return card;
+    }).filter(Boolean);
+    if (!items.length) return null;
+    return { ...base, items };
   }
 
   if (raw.kind === 'chart') {

@@ -125,10 +125,12 @@ body.chat-page.tinted {
   background-attachment: fixed;
 }
 
-body.chat-page.tinted .app-header,
-body.chat-page.tinted .input-area {
+body.chat-page.tinted .app-header {
   background: transparent;
 }
+/* v2.74.1580 — .input-area REMOVED from the tinted-transparent override: it now carries the Rail's frost
+   (var(--c-rail-bg) + blur), and --c-rail-bg is translucent by design (RAIL_ALPHA, tabTint-written) — the
+   transparent override would strip the tint from the frost and make the two surfaces diverge under tint. */
 
 /* ── Light panel (v2.74.1416) ─────────────────────────────────────────────
  * Set alongside .tinted when the sampled page is light enough that Core/tabTint.js
@@ -903,11 +905,19 @@ textarea {
 }
 
 /* ── Input area ──────────────────────────────────────────────────────────── */
+/* v2.74.1580 — the input frame carries the SAME frost as the Rail (var(--c-rail-bg) tint + blur; tabTint.js
+   re-tints --c-rail-bg with the active tab, so both surfaces stay in step). Same-document backdrop rule as the
+   Rail: the body's fixed-attachment tint gradient paints beneath this element, so the blur has real content. */
 .input-area {
   flex-shrink: 0;
   padding: var(--sp-3) var(--sp-4) var(--sp-4) var(--sp-4);
-  background: var(--c-bg);
+  background: var(--c-rail-bg, var(--c-bg));
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
   border-top: 1px solid var(--c-border-soft);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .input-area { background: var(--c-bg); }   /* no frost → the old opaque surface (mirror of the Rail fallback) */
 }
 
 .input-container {
@@ -1624,6 +1634,10 @@ textarea {
 .rail-overview .rail-item-title,
 .rail-new-app  .rail-item-title { display: flex; align-items: center; gap: var(--sp-2); }
 .rail-glyph { color: var(--c-text-subtle); font-weight: 600; }
+/* v2.74.1579 — the reserved pins' glyphs occupy a FIXED slot so both titles start at the same x regardless of
+   glyph width (the ⌂ character vs the Admin desk's gear SVG — the width delta read as an indent). rail-admin
+   carries rail-overview too, so one selector serves both pins. */
+.rail-overview .rail-glyph { width: 16px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .rail-glyph.leaf { margin-right: 5px; font-weight: 700; }
 .rail-new-app { color: var(--c-text-subtle); }
 .rail-new-app:hover .rail-item-title { color: var(--c-text); }
@@ -1713,9 +1727,13 @@ textarea {
   max-height: calc(3 * 1.35em + 2px);
   transition: max-height 0.32s ease;
 }
-/* v2.74.1225 — hovering a row VERTICALLY EXPANDS the card: the 3-line clamp lifts so the full last-LLM-message peek
-   shows. The row grows to fit (the drawer is a flex column), so neighbours reflow down. */
-.rail-item:hover .rail-item-summary {
+/* v2.74.1225 — hovering VERTICALLY EXPANDS the card: the 3-line clamp lifts so the full last-LLM-message peek
+   shows. The row grows to fit (the drawer is a flex column), so neighbours reflow down.
+   v2.74.1580 — scope the trigger to the TEXT section only (title or the summary itself): hovering the row's
+   action controls (the expand-case chevron, the + open-case button, delete/preview) must NOT expand the card —
+   they are separate elements, so an element-scoped hover simply never matches them. */
+.rail-item .rail-item-title:hover ~ .rail-item-summary,
+.rail-item .rail-item-summary:hover {
   -webkit-line-clamp: unset;
   overflow: hidden;              /* v1516 — stay hidden so the growing max-height IS the reveal */
   max-height: max-content;

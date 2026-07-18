@@ -63,8 +63,10 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
   const appIds = new Set(visible.filter(isApp).map((c) => c.id));
   // Top level = everything that isn't a sub-task of a PRESENT app (orphans fall through to plain → never lost).
   // v2.74.1234 — the Overview is a real persistent conversation now, but it's rendered as the reserved pin (below),
-  // so exclude it from the regular rows or it'd appear twice (pin + a plain row).
-  const top = visible.filter((c) => c.id !== OVERVIEW_ID && c.id !== ADMIN_ID && (!isSub(c) || !appIds.has(c.parentId))).sort(byPinnedThenUpdated);
+  // so exclude it from the regular rows or it'd appear twice (pin + a plain row). VT-2b (v2.74.1587) — the Admin
+  // desk's children (incident CASES) attach under the fixture below, never as plain rows.
+  const top = visible.filter((c) => c.id !== OVERVIEW_ID && c.id !== ADMIN_ID
+    && (!isSub(c) || (!appIds.has(c.parentId) && c.parentId !== ADMIN_ID))).sort(byPinnedThenUpdated);
 
   const rows = [];
 
@@ -77,18 +79,6 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
     hasChildren: false, expanded: false, active: activeId == null || activeId === OVERVIEW_ID,
     count: 0, kind: 'agent',
     summary: (overviewConv && overviewConv.summary) ? overviewConv.summary : null,
-  });
-
-  // 1b) Admin desk — the reserved vitals fixture (VT-2, v2.74.1573, DESIGN_vitals.md §8): PERMANENT in the Rail
-  // whether or not its conversation exists yet (the click get-or-creates it; "silence when green" governs its
-  // CONTENT, never its presence — the live miss: with zero incidents there was no chip and therefore no door).
-  // Excluded from the regular rows above so it never renders twice.
-  const adminConv = visible.find((c) => c.id === ADMIN_ID) || null;
-  rows.push({
-    id: ADMIN_ID, role: 'admin', title: 'Admin desk', icon: 'vitals', depth: 0,
-    hasChildren: false, expanded: false, active: activeId === ADMIN_ID,
-    count: 0, kind: 'agent',
-    summary: (adminConv && adminConv.summary) ? adminConv.summary : null,
   });
 
   // 2) Apps + plain conversations, by recency. An expanded app is immediately followed by its sub-task rows.
@@ -121,7 +111,35 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
     }
   }
 
-  // 3) New app — always last.
+  // 3) Admin desk — the reserved vitals fixture (VT-2, DESIGN_vitals.md §8): PERMANENT in the Rail whether or
+  // not its conversation exists yet (the click get-or-creates it; "silence when green" governs its CONTENT,
+  // never its presence). v2.74.1582 — pinned as the LAST conversation (user directive: bottom of the rail —
+  // the operator console sits under the work, not above it), just above the New-app constructor entry.
+  // Excluded from the regular rows above so it never renders twice.
+  const adminConv = visible.find((c) => c.id === ADMIN_ID) || null;
+  // VT-2b (v2.74.1587) — incident CASES (children of the Admin desk) ride under the fixture. v2.74.1589 —
+  // APP-ROW PARITY (user directive): the fixture collapses/expands its cases via the SAME expanded-set the app
+  // rows use (chevron + count); silence-when-green = no children at all.
+  const adminSubs = subsByParent.get(ADMIN_ID) || [];
+  const adminOpen = expandedSet.has(ADMIN_ID);
+  rows.push({
+    id: ADMIN_ID, role: 'admin', title: 'Admin desk', icon: 'vitals', depth: 0,
+    hasChildren: adminSubs.length > 0, expanded: adminOpen, active: activeId === ADMIN_ID,
+    count: adminSubs.length, kind: 'agent',
+    summary: (adminConv && adminConv.summary) ? adminConv.summary : null,
+  });
+  if (adminOpen) {
+    for (const s of adminSubs) {
+      rows.push({
+        id: s.id, role: 'subtask', title: s.title, icon: s.icon || null, depth: 1,
+        hasChildren: false, expanded: false, active: activeId === s.id, count: 0,
+        kind: s.kind || 'agent', parentId: ADMIN_ID,
+        summary: s.summary || null,
+      });
+    }
+  }
+
+  // 4) New app — always last.
   rows.push({
     id: null, role: 'new-app', title: 'New app', icon: 'plus', depth: 0,
     hasChildren: false, expanded: false, active: false, count: 0, kind: null,
