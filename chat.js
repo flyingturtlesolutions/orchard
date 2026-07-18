@@ -27,6 +27,7 @@ import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
+import { buildDeskLanding } from './Core/deskLanding.js';   // DL-1 (v2.74.1600) — the desk LAUNCH page (pure assembly; proven sources only)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { renderCriteria, renderPlanLines } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt; renderPlanLines — the confirm-card plan renderer (CR-D7)
@@ -156,6 +157,7 @@ async function _openAdminDesk() {
     _currentConversationId = conv.id;     // …pinned to the Admin thread so the cards (and any chat) append to it
     _currentConversationSeed = conv.seed || _ADMIN_SEED;   // v2.74.1574 — the operator persona survives the clear (the empty-open path)
     _resetConversation();
+    void _renderDeskLanding(conv);        // DL-1 (v2.74.1600) — the EMPTY first open bypasses _rehydrateConversation (the landing's normal hook), and it IS the launch moment
   }
   void _maybeRenderAdminDesk();
   try { await _renderRailList(); } catch { /* */ }
@@ -10350,11 +10352,82 @@ async function _rehydrateConversation(conv) {
   // DK-8 (v2.74.1491) — opening a desk fires its DUE routine (the v1 fire model: the alarm marked due in the SW;
   // the ask runs here where the full pipeline lives). Non-blocking; a non-desk conversation no-ops inside.
   void _maybeFireDueRoutine();
+  // DL-1 (v2.74.1600) — the desk LAUNCH page: a fresh desk (no operator asks yet) opens to a welcome head +
+  // PROVEN quick-action cards. PREPENDED, so on the Admin desk the order is head → actions → the (rehydrated /
+  // upserted) vitals card — the required "vitals after the workflows".
+  void _renderDeskLanding(conv);
   // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — vitals authority lives in the ADMIN DESK: it renders the full
   // vitals card + incident cards; the Front desk shows at most ONE attention chip; other desks a pointer.
   void _maybeRenderConnCard();        // Front desk → the attention CHIP (the card moved to the Admin desk)
   void _maybeRenderAdminDesk();       // Admin desk → the vitals card + open-incident cards
   void _maybeWarnDeskConnections();   // any other desk → a dependency POINTER (no duplicate report surface)
+}
+
+// ── DL-1 (v2.74.1600) — the desk LAUNCH page ──────────────────────────────────────────────────────────────────────
+// Renders on a FRESH desk open (an app conversation or the Admin desk with no user-role messages yet): the welcome
+// head (name + role message + description) and quick-action cards from PROVEN sources only — this desk's saved
+// workflows (replayed through the SAME chain runner as the `workflows` view's ▶ Run) and the alias ledger's tested
+// asks (fill-and-send through the normal front door — invariant #4 claims at entry). The Admin desk appends its
+// three operator commands and keeps the vitals card BELOW (prepend + vitalsAfter). Transient DOM — the next
+// rehydrate clears #messages, and the first operator ask retires the launch state naturally.
+async function _renderDeskLanding(conv) {
+  try {
+    const isAdmin = !!conv && conv.id === ADMIN_ID;
+    if (!conv || conv.kind === 'dev') return;
+    if (!isAdmin && !(conv.appId && !conv.parentId)) return;
+    if ((conv.messages || []).some((m) => m && m.role === 'user')) return;   // launch state only
+    let workflows = [];
+    if (!isAdmin) { try { workflows = (await _loadWorkflowsMerged()) || []; } catch { workflows = []; } }
+    let aliases = [];
+    try { const got = await chrome.storage.local.get('connector:aliases'); aliases = Array.isArray(got['connector:aliases']) ? got['connector:aliases'] : []; } catch { /* */ }
+    const def = (() => { try { return builtinApp(conv.presetId || conv.appId) || null; } catch { return null; } })();
+    const spec = buildDeskLanding({
+      title: conv.title || (def && def.name) || '',
+      description: (def && def.description) || '',
+      isAdmin, workflows, aliases,
+      deskHosts: _boundConnections().map((c) => c && c.origin).filter(Boolean),
+    });
+    if (String(_currentConversationId || '') !== String(conv.id)) return;   // the user moved on while we read
+    const wrap = document.createElement('div');
+    wrap.className = 'desk-landing';
+    wrap.innerHTML = `<div class="desk-landing-title">${escHtml(spec.heading)}</div>`
+      + `<div class="desk-landing-msg">${escHtml(spec.message)}</div>`
+      + (spec.sub ? `<div class="desk-landing-sub">${escHtml(spec.sub)}</div>` : '');
+    if (spec.cards.length) {
+      const grid = document.createElement('div');
+      grid.className = 'desk-landing-cards';
+      for (const c of spec.cards) {
+        const b = document.createElement('button');
+        b.className = 'suggestion-card';
+        b.innerHTML = `<div class="suggestion-card-name">${c.kind === 'workflow' ? '▶ ' : ''}${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
+        b.addEventListener('click', async () => {
+          if (c.kind === 'workflow') {
+            const wf = c.wf || {};
+            const tab = await _orchActiveTab();
+            bumpWorkflowRun(wf.appId || _memoryId(), wf.id).catch(() => {});
+            _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: (wf.subAsks || []).map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });
+          } else if (c.kind === 'command' && c.command === 'check-now') {
+            const mm = appendMessage({ role: 'assistant', body: '' });
+            _setMessageBody(mm, 'Checking… (probing sessions + running due canaries — this can take a minute)');
+            try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
+            _setMessageBody(mm, 'Check finished — the vitals card below is current.');
+            _orchFinalize(mm);
+            void _maybeRenderAdminDesk();
+          } else {
+            const inp = $('chat-input');
+            if (inp) { inp.value = c.kind === 'command' ? c.command : c.ask; void sendChatMessage(); }
+          }
+        });
+        grid.appendChild(b);
+      }
+      wrap.appendChild(grid);
+    }
+    const cont = $('messages');
+    if (cont) {
+      try { cont.querySelectorAll('.desk-landing').forEach((el) => el.remove()); } catch { /* re-render replaces, never stacks */ }
+      cont.prepend(wrap);
+    }
+  } catch { /* the landing is an enhancement — never break the open */ }
 }
 
 // ── CP-3/4 (v2.74.1506) — connection presence in the panel ─────────────────────────────────────────────────────────
