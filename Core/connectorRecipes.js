@@ -529,6 +529,10 @@ export const CONNECTOR_RECIPES = [
   // address → the task's full details.
   { ...VS, id: 'vs_warranty_tasks', name: 'Warranty tasks by status', listUrl: '/#warranty',
     resolve: { divisionId: VS_DIVISION },
+    // CX-9k (v2.74.1617) — the row's HUMAN display id, preference-ordered (the generic first-…Number scan landed on
+    // the per-home claim sequence — every bullet read "#01"). TicketId is the number users quote ("ticket 4867009");
+    // TaskNumber the site's own task number.
+    displayId: ['TicketId', 'TaskNumber'],
     // v2.74.1519 — TicketId/TaskId join the drill match (the live miss: "ticket 4867009" bound cleanly but the
     // match fields were address-shaped only, so a warranty-ticket ask could never find its row).
     // v2.74.1559 — `also`: catalog-owned SIDECAR reads the case dossier pulls alongside the drill (same join id) —
@@ -543,6 +547,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'address', type: 'string', hint: 'a STREET address or task number — set ONLY when the user names one specific property/task to drill into' },   // NOT in the endpoint — the drill join's filter
     ] },
   { ...VS, id: 'vs_warranty_task', name: 'Warranty task details', itemUrl: '/#warranty',
+    displayId: ['TicketId', 'TaskNumber'],   // CX-9k — the detail head's "#id" shows the human number too
     does: 'read a warranty task\'s full details by its INTERNAL task id (from a task list row — for a human task number or an address, use the task LIST with that as the address filter)',
     endpoint: '/api/Vendor/Warranty/Task/{taskId}',
     params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id from a list row — for a human task number or address, use the task LIST' }] },

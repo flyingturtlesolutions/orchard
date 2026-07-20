@@ -420,3 +420,38 @@ describe('DK-8g (v2.74.1498) — the dossier carries the record NARRATIVE (vendo
     assert.ok(lines.length <= 24);
   });
 });
+
+describe('CX-9k (v2.74.1617) — recipe-declared displayId: the HUMAN row id wins over the generic scans', () => {
+  // The live shape class: a VS warranty row whose FIRST …Number field is the per-home claim sequence ("01") —
+  // every list bullet read "#01" (22 of 24 identical). The recipe now declares which key IS the human id.
+  const ROW = { ClaimNumber: '01', TaskNumber: '4090740', TicketId: 4867009, AddressLine1: '953 Misty Creek Drive', TaskId: 'abc-123' };
+  it('summarizeItem: declared keys tried in order — first PRESENT scalar wins; absent candidates skip on', () => {
+    assert.equal(summarizeItem(ROW, { displayId: ['TicketId', 'TaskNumber'] }).id, 4867009);
+    assert.equal(summarizeItem(ROW, { displayId: ['NopeKey', 'TaskNumber'] }).id, '4090740');
+  });
+  it('no declaration / none present → the CX-9c fallbacks exactly as before (exact ID_KEYS, then first …Number)', () => {
+    assert.equal(summarizeItem(ROW).id, '01', 'ClaimNumber is first in record order — the very miss the declaration fixes');
+    assert.equal(summarizeItem(ROW, { displayId: ['Missing'] }).id, '01', 'a declaration that matches nothing degrades to the old behavior');
+    assert.equal(summarizeItem({ id: 7, TaskNumber: '9' }, { displayId: ['Missing'] }).id, 7, 'exact ID_KEYS still precede the suffix scan');
+  });
+  it('renderConnectorLines threads displayId into list rows AND the single-record head', () => {
+    const lines = renderConnectorLines({ results: [{ ...ROW }, { ...ROW, TicketId: 555 }] }, { name: 'Tasks', displayId: ['TicketId'] });
+    assert.ok(lines[1].startsWith('• #4867009 '), lines[1]);
+    assert.ok(lines[2].startsWith('• #555 '), lines[2]);
+    const single = renderConnectorLines({ results: [{ ...ROW }] }, { name: 'Task', displayId: ['TicketId'] });
+    assert.ok(single[0].startsWith('#4867009'), single[0]);
+  });
+});
+
+describe('CX-9k — displayId reaches the case surfaces (dossierLines + fanoutItems)', () => {
+  const ROW = { TaskNumber: '01', TicketId: 4867009, AddressLine1: '607 Pine Dune Lane' };
+  it('dossierLines "Id:" line shows the declared human id (live 194814: every case read "Id: 01")', () => {
+    assert.equal(dossierLines(ROW, { displayId: ['TicketId'] })[0], 'Id: 4867009');
+    assert.equal(dossierLines(ROW)[0], 'Id: 01', 'undeclared stays the old first-…Number pick');
+  });
+  it('fanoutItems threads displayId into each item detail', () => {
+    const { items } = fanoutItems({ results: [ROW, { ...ROW, TicketId: 555 }] }, 20, { displayId: ['TicketId'] });
+    assert.ok(items[0].detail.startsWith('Id: 4867009'), items[0].detail.split('\n')[0]);
+    assert.ok(items[1].detail.startsWith('Id: 555'));
+  });
+});

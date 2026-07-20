@@ -182,6 +182,9 @@ async function _ensureConversation() {
 
 /** Clear the in-memory "current" pointer without deleting anything. */
 function _clearCurrentConversation() {
+  // v2.74.1623 — a surface change PARKS the wizard (state intact; it revives on its desk's reopen). The one thing
+  // that must not survive the park is the v1622 composer LOCK — the surface now belongs elsewhere.
+  try { if (_wfWizard) { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } } catch { /* */ }
   _currentConversationId = null;
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
@@ -1848,12 +1851,13 @@ async function _spawnSubTasks(listText) {
 // `msg` to the outcome and returns {ok, summary}; ok:false → the chain stops with the message already shown.
 // UNTRUSTED: each label becomes a sub-task title/seed (escaped on render), never an instruction.
 async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', lifecycle = 'persistent', leg = null } = {}) {
+  const _rp = total > 1 ? `Ran ${i} of ${total}. ` : '';   // v2.74.1618 — a single-clause chain (a wizard step) drops the scaffolding
   const { app, error } = await _fanoutParentApp();
-  if (error) { const s = `Ran ${i} of ${total}. ${error}`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  if (error) { const s = `${_rp}${error}`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
   // DK-8e (v2.74.1496) — STRUCTURED items (label + record detail), not display labels: each case is born holding
   // its record + join ids (the live gap: cases were empty shells that re-fetched from a mangled label).
-  const { items: foItems, total: n, capped } = fanoutItems(value, cap);
-  if (!foItems.length) { const s = `Ran ${i} of ${total}. Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  const { items: foItems, total: n, capped } = fanoutItems(value, cap, { displayId: _legDisplayId(leg) });
+  if (!foItems.length) { const s = `${_rp}Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
   // DK-8f (v2.74.1497) — the dossier DRILLS: a LIST row is a summary (the live gap round 2 — no vendor explanation,
   // no issued date); the item's FULL record lives behind the source leg's declared `drill` (vs_warranty_task by
   // TaskId). Pull it per case at spawn — the case is born with the DETAIL record. Best-effort per item (a failed
@@ -1861,6 +1865,9 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
   if (leg && leg.tool && leg.tool.drill && leg.tool.drill.via && leg.tool.drill.from) {
     const dj = leg.tool.drill;
     const viaLeg = await _rideDrillLeg(leg, dj.via, leg.tool.groundId || null);
+    // v1620 (LESSON[silent-best-effort], 194814) — a best-effort pass that skips EVERY item owes one honest line:
+    // 20 row-only cases read as "working" until someone asked where the vendor explanation went.
+    if (!viaLeg) { try { _orchLog(`RIDE_DRILL ▸ SKIPPED whole fan-out — "${dj.via}" leg unavailable for ${(leg.tool && leg.tool.origin) || '?'} (cases get ROW dossiers only)`); } catch { /* */ } }
     // v2.74.1559 — SIDECAR reads (drill.also, catalog-owned): pulled per case with the SAME join id and merged
     // into the dossier — a case is born knowing its homeowner CONTACTS, not just the address. Read-only belt.
     const alsoLegs = [];
@@ -1872,7 +1879,7 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
         const row = foItems[k].row || {};
         const joinId = row[dj.from];
         if (joinId == null || joinId === '') continue;
-        _setMessageBody(msg, `Step ${i + 1} of ${total}: pulling the full record ${k + 1}/${foItems.length} (${foItems[k].label})…`);
+        _setMessageBody(msg, `${total > 1 ? `Step ${i + 1} of ${total}: ` : ''}Pulling the full record ${k + 1}/${foItems.length} (${foItems[k].label})…`);
         const dr = await _rideExecOnce(viaLeg, { [dj.param || 'id']: joinId }, { groundId: leg.tool.groundId || null });
         if (dr.ok) {
           const detailObj0 = primaryObject(dr.value) || dr.value;
@@ -1884,7 +1891,7 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
               if (adr.ok) Object.assign(mergedObj, _sidecarFields(adr.value, al));
             } catch { /* a failed sidecar keeps the dossier */ }
           }
-          const lines = dossierLines(mergedObj, { max: 24 });   // the full record earns a bigger budget than a row
+          const lines = dossierLines(mergedObj, { max: 24, displayId: _legDisplayId(viaLeg) || _legDisplayId(leg) });   // the full record earns a bigger budget than a row
           // FC-0 (v2.74.1552) — keep the STRUCTURE too: the drilled object merged over the row (the row carries
           // the each-tag division + join ids the detail may lack). This was where the code plane died — the
           // object flattened to prose one line down and every reference-ask consumer had to re-parse text.
@@ -1969,7 +1976,7 @@ async function _childReadItem(conns, task, tabId) {
     if (!cleg) return '';
     const run = await _runConnectorLeg(cleg, coerceParams(d.params || {}, cleg.paramSchema), { tabId });
     if (!run || !run.ok) return '';
-    const lines = renderConnectorLines(run.value, { name: cleg.name || 'Record' });
+    const lines = renderConnectorLines(run.value, { name: cleg.name || 'Record', displayId: _legDisplayId(cleg) });
     return lines ? lines.join('\n') : '';
   } catch { return ''; }
 }
@@ -2002,7 +2009,7 @@ async function _runChildTask(child, task) {
   if (cleg) {
     // a session-ride READ — safe to run unattended.
     const run = await _runConnectorLeg(cleg, coerceParams(d.params || {}, cleg.paramSchema), { tabId });
-    if (run.ok) { const lines = renderConnectorLines(run.value, { name: cleg.name || 'Results' }); body = lines ? lines.join('\n') : 'Done.'; status = 'done'; }
+    if (run.ok) { const lines = renderConnectorLines(run.value, { name: cleg.name || 'Results', displayId: _legDisplayId(cleg) }); body = lines ? lines.join('\n') : 'Done.'; status = 'done'; }
     else { body = `Needs you — couldn’t ${_legFailName(cleg, 'run that')}${run.error ? ` — ${_errWord(run.error)}` : ''}.${run.hint ? `  ${run.hint}.` : ''}`; }
   } else if (d && d.intent === 'act' && d.capabilityId) {
     // a page action / write capability — NOT run unattended (the safety pause).
@@ -3613,6 +3620,10 @@ async function _orchStatsFlow() {
 
 // ORCH-X — confirm a COMPOUND ask as an ordered chain, then run it. One confirmation covers the whole chain.
 function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
+  // v2.74.1621 (live 201423) — a ONE-clause "compound" is not a compound: the plan preview + a "Run all 1" button
+  // was pure friction (the decompose hedged; the clause ≈ the ask). Run it directly — the §9 write gates live
+  // per-step at both belts regardless; this card is a multi-step PREVIEW, not the safety gate.
+  if (clauses.length === 1) { _orchRunChain(msg, { tabId, clauses, firstMatch, ask }); return; }
   const list = clauses.map((c, i) => `${i + 1}. ${c.text}`).join('\n');
   _setMessageBody(msg, `That’s a few steps — I’ll do them in order:\n${list}`);
   const bar = _orchActionBar(msg);
@@ -3766,6 +3777,10 @@ function _sidecarFields(value, alsoLeg) {
 }
 // v2.74.1559 — failure lines lead with the leg NAME (short), never `does` first (harvested does are full
 // sentences — live 195557: "Couldn't Returns the warranty task contacts associated with a specific…").
+// CX-9k (v2.74.1617) — the leg's recipe-declared HUMAN display-id keys (normalized to an array at recipeToLeg),
+// forwarded into renderConnectorLines so a row's "#id" shows the number users recognize, not the first …Number field.
+const _legDisplayId = (leg) => (leg && leg.tool && Array.isArray(leg.tool.displayId)) ? leg.tool.displayId : null;
+
 function _legFailName(leg, fallback = 'do that') {
   // v2.74.1591 — read as a SENTENCE after "couldn’t": catalog names are third-person ("Returns the warranty
   // task contacts"), so the naive lowercase produced "Couldn’t returns …" (the broken-verb class).
@@ -3832,7 +3847,7 @@ async function _refreshFocusHead(head) {
     if (!fresh) { _setMessageBody(m, 'Re-pull returned nothing readable — the record on file is unchanged.'); _orchFinalize(m); return; }
     fresh.provenance = prov;   // the rebuilt entry keeps its ORIGINAL provenance (focusRecordEntry had no leg here)
     _pushFocusEntry(fresh, _askConvId);   // FC-6
-    const lines = dossierLines(detailObj, { max: 24 });
+    const lines = dossierLines(detailObj, { max: 24, displayId: _legDisplayId(viaLeg) });
     if (lines.length && _currentConversationId) {
       try { await ConversationStore.updateMessage(_currentConversationId, 'case_record', { role: 'assistant', body: `${head.label}\n\n${lines.join('\n')}\n\n— Refreshed just now — ask for any field.` }, { upsert: true }); } catch { /* card is best-effort */ }
     }
@@ -4172,6 +4187,34 @@ function _wfFreshChainState() {
 }
 const _wfActive = () => !!_wfWizard;
 const _wfAwaitingInput = () => !!(_wfWizard && (_wfWizard.phase === 'await-step' || _wfWizard.phase === 'await-name'));
+// v2.74.1618 — the wizard is PINNED to its birth desk (live: delete-all / a Rail hop nulled or switched the
+// current conversation mid-wizard; the input intercept + v1615's surface re-assert then resurrected the page over
+// the NEW surface, and step 2's case fan-out ran with no desk under it — "Open a desk first" inside a desk's own
+// wizard). v2.74.1623 — foreign = PARKED, not dead (live: reviewing the open-case step MEANS opening a spawned
+// case; the v1622 abandon-on-rehydrate killed the wizard for doing exactly what the review asks). While foreign:
+// never consume input, never re-assert the page, composer unlocked — the wizard REVIVES when its own desk is
+// reopened (_rehydrateConversation), and dies only on Cancel / Save / replacement (draft-kept).
+const _wfForeign = () => !!(_wfWizard && _wfWizard.convId && String(_currentConversationId || '') !== String(_wfWizard.convId));
+function _wfAbandon() {
+  const w = _wfWizard;
+  _wfWizard = null;
+  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
+  // no repaint — the surface on screen belongs to the conversation the user moved to.
+  // WW-1b (v2.74.1620) — PROVEN steps survive the abandon as a DRAFT on the PINNED desk's key (≥2 steps, the
+  // workflow floor; a single proven step is honestly lost — a workflow IS ≥2). Drafts never reach the launch
+  // page; ＋ Workflow on that desk resumes them. Fire-and-forget — the abandon path must never block a send.
+  try {
+    if (w && w.appId && Array.isArray(w.steps) && w.steps.length >= 2) {
+      const payload = buildWorkflowSave({ ask: w.name || w.steps[0].text, name: w.name || null, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
+      if (payload) {
+        const draft = { ...payload, status: 'draft', qualifiedAt: 0 };
+        if (w.draftId) updateWorkflow(w.appId, w.draftId, draft).catch(() => {});
+        else saveWorkflow(w.appId, draft).catch(() => {});
+        try { _orchLog(`WORKFLOW ▸ wizard-draft kept "${String(draft.ask).slice(0, 40)}" (${draft.subAsks.length} steps)`); } catch { /* */ }
+      }
+    }
+  } catch { /* the draft keep is best-effort */ }
+}
 
 function _wfEnterPage() {
   try { $('messages').classList.add('hidden'); } catch { /* */ }
@@ -4179,19 +4222,44 @@ function _wfEnterPage() {
 }
 function _wfExitPage() {
   _wfWizard = null;
-  try { $('chat-input').placeholder = 'Message'; } catch { /* */ }
-  // restore the surface: an active desk conversation shows its thread; otherwise the front/launch page.
+  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
+  // restore the surface (v1620 — the v1611 exit fell to the FRONT page on a fresh desk): a desk shows its thread
+  // (if any) and its LAUNCH page comes back when still in launch state — the landing self-gates on no-user-messages,
+  // self-replaces, asserts its own visibility (v1608), and now shows the just-saved workflow card. No conversation
+  // at all → the front page.
   try {
-    if (_currentConversationId && ($('messages').childElementCount > 0)) { $('empty-state').classList.add('hidden'); $('messages').classList.remove('hidden'); }
-    else { void renderSuggestionCards(); }
+    if (_currentConversationId) {
+      if ($('messages').childElementCount > 0) { $('empty-state').classList.add('hidden'); $('messages').classList.remove('hidden'); }
+      (async () => { try { const c = await ConversationStore.load(_currentConversationId); if (c) void _renderDeskLanding(c); } catch { /* the exit surface stays as-is */ } })();
+    } else { void renderSuggestionCards(); }
   } catch { /* */ }
 }
 
 async function _startWorkflowWizard() {
-  if (!_memoryId()) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a desk first — workflows are saved per desk.'); _orchFinalize(m); return; }
+  if (!_memoryId() || !_currentConversationId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a desk first — workflows are saved per desk.'); _orchFinalize(m); return; }
+  if (_wfWizard) _wfAbandon();   // v1623 — a NEW wizard replaces a parked one; the outgoing one's ≥2 proven steps draft-keep
   _dismissDeskLanding();
+  const convId = String(_currentConversationId);   // v1620 — pin BEFORE the awaits (a switch mid-await must not mis-pin)
+  const appId = _memoryId();
   const tab = await _orchActiveTab();
-  _wfWizard = { steps: [], name: '', st: _wfFreshChainState(), tabId: (tab && typeof tab.id === 'number') ? tab.id : null, phase: 'await-step', current: null, runMsg: null };
+  // WW-1b (v2.74.1620) — RESUME the newest DRAFT: an abandoned wizard's proven steps come back instead of dying
+  // with the page (the 194814 risk: two proven steps at 'banked', never named — a close lost them). Honest limit:
+  // the chain PIPE does not resume (fresh st) — a foreach next-step re-reads via its self-contained branch.
+  let draft = null;
+  try {
+    const wfs = (await _loadWorkflowsMerged()) || [];
+    draft = wfs.filter((x) => x && x.status === 'draft' && Array.isArray(x.steps) && x.steps.length >= 2)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
+  } catch { /* fresh start */ }
+  if (String(_currentConversationId || '') !== convId) return;   // the user moved on mid-await
+  _wfWizard = {
+    convId, appId,
+    draftId: draft ? draft.id : null,
+    steps: draft ? draft.steps.map((s) => ({ text: s.text, provenance: { text: s.text, via: (s.via && typeof s.via === 'object') ? s.via : { kind: null, host: null, name: null }, bankedAt: s.bankedAt || 0 } })) : [],
+    name: (draft && draft.name) || '',
+    st: _wfFreshChainState(), tabId: (tab && typeof tab.id === 'number') ? tab.id : null,
+    phase: draft ? 'banked' : 'await-step', current: null, runMsg: null,
+  };
   _wfEnterPage();
   _wfRenderPage();
 }
@@ -4199,6 +4267,18 @@ async function _startWorkflowWizard() {
 // The page renderer — one surface, re-rendered per phase. The message input carries all free text (§ user rule 3).
 function _wfRenderPage() {
   const w = _wfWizard; if (!w) return;
+  if (_wfForeign()) return;   // v1623 — a foreign render attempt just SKIPS (parked; the revive re-renders on the desk's reopen)
+  // v2.74.1622 (user directive) — the composer belongs to the wizard's TYPING phases only: while a step runs /
+  // awaits review / sits banked, the input LOCKS (a message typed there fell through to the organic door, ran as
+  // a desk ask, flipped the surface, and stranded the wizard). The buttons are the only doors; every exit path
+  // (_wfExitPage / _wfAbandon / show-me's thread borrow) unlocks.
+  const _lock = (w.phase === 'running' || w.phase === 'ran' || w.phase === 'banked');
+  try {
+    const inp = $('chat-input');
+    inp.disabled = _lock;
+    if (_lock) inp.placeholder = w.phase === 'running' ? 'Step running…' : (w.phase === 'ran' ? 'Review the result — use the buttons above' : 'Add the next step, save, or cancel — buttons above');
+  } catch { /* */ }
+  try { if (_lock) $('btn-chat-send').disabled = true; } catch { /* pre-typed text could otherwise leave send live */ }
   // v2.74.1615 — the renderer ASSERTS its surface (the v1608 landing lesson): every appendMessage on the current
   // conversation calls _enterConversation(), which hides #empty-state — so a run's appendMessage flipped the user
   // to the thread and the 'ran' render then pulled the run message OUT of it into the hidden page → a blank thread
@@ -4225,23 +4305,34 @@ function _wfRenderPage() {
     try { $('chat-input').placeholder = n ? 'Type the next step…' : 'Type the first step…'; $('chat-input').focus(); } catch { /* */ }
     mkPageBtn('Cancel', () => _wfCancel());
   } else if (w.phase === 'running' || w.phase === 'ran') {
+    const _missed = (w.phase === 'ran' && w.current && w.current.engaged === false);   // v1616 — no ranStep = never ran
     status.innerHTML = (w.phase === 'running')
       ? `<div class="wf-page-sub">Running “${escHtml((w.current && w.current.text) || '')}”…</div>`
-      : `<div class="wf-page-sub">Ran “${escHtml((w.current && w.current.text) || '')}”. Does the result below look right?</div>`;
+      : _missed
+        ? '<div class="wf-page-sub">That step couldn’t run — the note below says why. Teach it with a quick demo, run it again, or change the step.</div>'
+        : `<div class="wf-page-sub">Ran “${escHtml((w.current && w.current.text) || '')}”. Does the result below look right?</div>`;
     page.appendChild(status);
     // v1615 — the run message re-parents into the page at 'running' ALREADY (not just 'ran'), so the live stream
     // renders IN the page and the end-of-run render never yanks it out of a visible thread.
     if (w.runMsg) { const slot = document.createElement('div'); slot.className = 'wf-result'; try { slot.appendChild(w.runMsg); } catch { /* */ } page.appendChild(slot); }
     if (w.phase === 'ran') {
-      mkPageBtn('✓ Looks right', () => _wfBank(), true);
-      mkPageBtn('✗ Not right — show me', () => _wfShowMe());
-      mkPageBtn('↻ Retry', () => { w.phase = 'await-step'; w.current = null; w.runMsg = null; _wfRenderPage(); });
+      if (_missed) {
+        // §3 — an unengaged step has no result to judge: the wizard's OWN teach door (the chain's inline offer is
+        // off under offers:false — its resume seam would continue in the thread and strand this page).
+        mkPageBtn('● Show me this step', () => _wfShowMe(), true);
+        mkPageBtn('↻ Run it again', () => { void _wfRunStep(w.current.text); });
+        mkPageBtn('✎ Change the step', () => { w.phase = 'await-step'; w.current = null; w.runMsg = null; _wfRenderPage(); });
+      } else {
+        mkPageBtn('✓ Looks right', () => _wfBank(), true);
+        mkPageBtn('✗ Not right — show me', () => _wfShowMe());
+        mkPageBtn('↻ Retry', () => { w.phase = 'await-step'; w.current = null; w.runMsg = null; _wfRenderPage(); });
+      }
     }
     page.appendChild(bar);
     host.appendChild(page);
     return;   // this branch appends status + result + bar itself (the result slot goes between)
   } else if (w.phase === 'banked') {
-    status.innerHTML = `<div class="wf-page-sub">${n} step${n === 1 ? '' : 's'} banked. Add another, or save the workflow.</div>`;
+    status.innerHTML = `<div class="wf-page-sub">${n} step${n === 1 ? '' : 's'} banked${w.draftId ? ' — resumed from your unfinished draft' : ''}. Add another, or save the workflow.</div>`;
     mkPageBtn('＋ Add next step', () => { w.phase = 'await-step'; _wfRenderPage(); }, true);
     mkPageBtn('Save workflow', () => _wfSaveStart());
     mkPageBtn('Cancel', () => _wfCancel());
@@ -4259,6 +4350,7 @@ function _wfRenderPage() {
 // The message-input intercept target: a typed message while the wizard is awaiting is a STEP or the NAME.
 async function _wfConsumeInput(text) {
   const w = _wfWizard; if (!w) return;
+  if (_wfForeign()) return;   // v1623 belt — a parked wizard never consumes another desk's input (and never dies for it)
   const t = String(text || '').trim();
   if (w.phase === 'await-name') { if (t) { w.name = t; } await _wfDoSave(); return; }
   if (w.phase === 'await-step') { if (!t) { _wfRenderPage(); return; } await _wfRunStep(t); return; }
@@ -4277,10 +4369,27 @@ async function _wfRunStep(stepText) {
   try { delete runMsg.dataset.messageId; } catch { /* transient — a wizard run isn't desk conversation */ }
   w.runMsg = runMsg;
   w.phase = 'running'; _wfRenderPage();
-  try { await _orchRunChain(runMsg, { tabId: w.tabId, clauses: [{ text: stepText }], firstMatch: null, ask: stepText, state: w.st }); }
+  // v1616 — the OUTCOME signal: every success path in the chain pushes a ranStep (connector/nav/fanout/
+  // observation/capability); a miss / failed run / auth stop pushes nothing. That boolean picks the page's bar —
+  // an unengaged step has no result to approve (§3: teach / retry / rephrase, never ✓).
+  const _ranBefore = (w.st.ranSteps || []).length;
+  const _outsBefore = (w.st.readouts || []).length;
+  try { await _orchRunChain(runMsg, { tabId: w.tabId, clauses: [{ text: stepText }], firstMatch: null, ask: stepText, state: w.st, offers: false }); }
   catch (e) { try { _setMessageBody(runMsg, `That step couldn’t run — ${_errWord(e && e.message)}.`); } catch { /* */ } }
-  const ran = (w.st.ranSteps || [])[(w.st.ranSteps || []).length - 1] || null;   // §11 — provenance is DISPLAY only
+  const _engaged = ((w.st.ranSteps || []).length > _ranBefore);
+  // §11 — provenance is DISPLAY only; v1616 — and only THIS step's entry (a miss must not inherit the prior
+  // step's leg: pre-1616 the last-entry read attributed step 1's method to a missed step 2).
+  const ran = _engaged ? ((w.st.ranSteps || [])[(w.st.ranSteps || []).length - 1] || null) : null;
   w.current.provenance = stepProvenance(ran, stepText, '', Date.now());
+  w.current.engaged = _engaged;
+  // v1616 — the page shows THIS step's output: the chain's completion render joins the WHOLE shared st.readouts
+  // (right for an organic one-message chain; wrong here — earlier steps already showed on their own pages).
+  if (_engaged) {
+    try {
+      const _new = (w.st.readouts || []).slice(_outsBefore).filter((x) => x != null && x !== '');
+      if (_new.length) _setMessageBody(runMsg, _new.join('\n'));
+    } catch { /* the joined render stands */ }
+  }
   w.phase = 'ran'; _wfRenderPage();
 }
 
@@ -4294,17 +4403,20 @@ function _wfBank() {
 function _wfShowMe() {
   const w = _wfWizard; if (!w || !w.current) return;
   const gid = w.st.chainGroundId || null;
-  if (!gid) { const status = $('empty-state').querySelector('.wf-page-sub'); if (status) status.textContent = 'To teach this step I need to be on its site — open it in a tab, then ↻ Retry.'; return; }
+  if (!gid) { const status = $('empty-state').querySelector('.wf-page-sub'); if (status) status.textContent = 'To teach this step I need to be on its site — open it in a tab, then run the step again.'; return; }
   // Demonstrate on the ground (drive + ride capture); on bank, retry the same step for a fresh result.
   const demoMsg = appendMessage({ role: 'assistant', body: '' });
   _setMessageBody(demoMsg, `Show me how “${w.current.text}” should work — I’ll capture it, then you can re-run the step.`, { markdown: true });
   _wfEnterPageShowDemo(demoMsg);
-  _orchOfferRecord(demoMsg, { groundId: gid, tabId: w.tabId, ask: w.current.text, label: '● Show me this step', onAuthored: () => { const ww = _wfWizard; if (ww) { ww.phase = 'await-step'; ww.current = null; ww.runMsg = null; _wfEnterPage(); _wfRenderPage(); } } });
+  // v1618 — onAuthored calls _wfRenderPage ONLY (it asserts the page itself since v1615, and its foreign guard
+  // must run BEFORE any surface flip — a demo can span a conversation switch).
+  _orchOfferRecord(demoMsg, { groundId: gid, tabId: w.tabId, ask: w.current.text, label: '● Show me this step', onAuthored: () => { const ww = _wfWizard; if (ww) { ww.phase = 'await-step'; ww.current = null; ww.runMsg = null; _wfRenderPage(); } } });
 }
 // The demo needs the conversation surface (the recorder renders there); show it, keep the wizard state to resume.
 function _wfEnterPageShowDemo(demoMsg) {
   try { $('empty-state').classList.add('hidden'); $('messages').classList.remove('hidden'); } catch { /* */ }
   try { const c = $('thread'); if (c) c.scrollTop = c.scrollHeight; } catch { /* */ }
+  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* v1622 — the demo borrows the thread; a locked composer must not ride along */ }
 }
 
 function _wfSaveStart() {
@@ -4318,12 +4430,24 @@ async function _wfDoSave() {
   const payload = buildWorkflowSave({ ask: w.name, name: w.name, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
   if (!payload) { w.phase = 'banked'; _wfRenderPage(); return; }
   let ok = false;
-  try { const list = await saveWorkflow(_memoryId(), payload); ok = Array.isArray(list) && list.some((x) => x && x.contentId === workflowId(payload.ask, payload.subAsks)); } catch { /* */ }
+  const _appId = w.appId || _memoryId();   // v1620 — the PINNED desk's key (w.appId captured at birth)
+  try {
+    if (w.draftId) {   // WW-1b — a RESUMED draft saves IN PLACE (the surrogate id survives — a future routine binding holds)
+      const list = await updateWorkflow(_appId, w.draftId, { ask: payload.ask, name: payload.name, subAsks: payload.subAsks, steps: payload.steps, status: payload.status, qualifiedAt: payload.qualifiedAt });
+      ok = Array.isArray(list) && list.some((x) => x && x.id === w.draftId && x.status === payload.status);
+    } else {
+      const list = await saveWorkflow(_appId, payload);
+      ok = Array.isArray(list) && list.some((x) => x && x.contentId === workflowId(payload.ask, payload.subAsks));
+    }
+  } catch { /* */ }
   // append the confirmation FIRST (so #messages is non-empty), THEN exit — else _wfExitPage would render the front
   // page over an empty thread and the confirmation would land in a hidden surface.
   const done = appendMessage({ role: 'assistant', body: '' });
   _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now, click it to run.` : 'Couldn’t save the workflow — try again.', { markdown: true });
   _orchFinalize(done);
+  // v2.74.1619 — the wizard's save is TRACE-VISIBLE (gl 194814: the whole wizard arc left zero log evidence — steps
+  // never echo, runs are transient; the durable record deserves one line. WORKFLOW ▸ is already in _DECISION_RE.)
+  try { _orchLog(`WORKFLOW ▸ wizard-saved "${String(payload.name || payload.ask).slice(0, 40)}" (${payload.subAsks.length} steps, ${payload.status})`); } catch { /* */ }
   _wfExitPage();
 }
 
@@ -4331,6 +4455,8 @@ function _wfCancel() {
   const w = _wfWizard; if (!w) return;
   const built = w.steps.length > 0 || (w.current && w.current.text);
   if (built && !confirm('Discard this workflow? The steps you’ve built won’t be saved.')) return;
+  // WW-1b (v1620) — cancel MEANS discard: a resumed draft dies with it (else it would resurrect on the next ＋ Workflow).
+  if (w.draftId && w.appId) deleteWorkflow(w.appId, w.draftId).catch(() => {});
   _wfExitPage();
 }
 
@@ -5139,7 +5265,7 @@ async function _fieldFollowup(text) {
   const msgFor = (body) => { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };   // v2.74.1554 — the user echo happens at sendChatMessage ENTRY (invariant #4)
   // "details / everything / all fields / full record" → the full deterministic record render
   if (/^(details|everything|all(\s+fields)?|full\s+record)$/.test(q)) {
-    const lines = renderConnectorLines(obj, { name: (g.leg && g.leg.name) || 'Record' });
+    const lines = renderConnectorLines(obj, { name: (g.leg && g.leg.name) || 'Record', displayId: _legDisplayId(g.leg) });
     if (!lines) return false;
     msgFor(lines.join('\n'));
     try { _orchLog(`FIELD_FOLLOWUP ▸ "details" → full record (${(g.leg && (g.leg.tool && g.leg.tool.recipeId)) || ''})`); } catch { /* */ }
@@ -5297,8 +5423,16 @@ async function _resolveNavUrl(text) {
   return null;
 }
 
-async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null }) {
+async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null, offers = true }) {
+  // v2.74.1616 — `offers:false` = a WIZARD-owned run: the chain still runs + renders into msg identically, but its
+  // conversational chrome stays off — no teach offers (the wizard renders its OWN show-me door; the chain's
+  // _resumeAfterDemo seam would continue in the thread behind the page and strand the wizard's phase machine) and
+  // no end-of-run save offers (the wizard IS the save flow; by wizard step 2 the shared st carries ≥2 ranSteps and
+  // "Remember these steps" would render inside the wizard page).
   const total = clauses.length;
+  // v1616 — a single-clause chain (a wizard step run / a lone decompose) drops the "Step 1 of 1" scaffolding.
+  const _pfx = (i2) => (total > 1 ? `Step ${i2 + 1} of ${total}: ` : '');
+  const _ranPfx = (i2) => (total > 1 ? `Ran ${i2} of ${total}. ` : '');
   // v2.74.1338 (review B/E) — the chain snapshots its ORIGIN policy config once (a mid-run conversation switch
   // must not re-gate the steps under a different app's writePolicy), and registers with the CR-S1 liveness
   // refcount so "stop" reaches a runaway chain (it was invisible to _stopLongRunning before).
@@ -5316,12 +5450,12 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
   try {
   for (let i = startIndex; i < total; i++) {
     if (_walkAbortFlag.requested) {   // v1338 — "stop" lands at the next clause boundary
-      _setMessageBody(msg, `Stopped at step ${i + 1} of ${total}.`);
+      _setMessageBody(msg, total > 1 ? `Stopped at step ${i + 1} of ${total}.` : 'Stopped.');
       _orchFinalize(msg);
       return;
     }
     const clause = clauses[i];
-    _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}”…`);
+    _setMessageBody(msg, `${_pfx(i)}“${clause.text}”…`);
     // NAV clause (a decompose may emit "go to youtube" / "navigate to youtube.com" as a step) — it's a PRIMITIVE, not
     // a page capability. OPEN_URL it, switch the chain to the new tab + GROUND it (so the next clause can match/teach
     // there), then continue. Without this a cross-site chain dead-ends trying to MATCH the navigation (the "Ran 0 of N
@@ -5331,7 +5465,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       const navUrl = await _resolveNavUrl(clause.text);
       if (navUrl) {
         let host = navUrl; try { host = new URL(navUrl).host.replace(/^www\./, ''); } catch { /* */ }
-        _setMessageBody(msg, `Step ${i + 1} of ${total}: opening ${host}…`);
+        _setMessageBody(msg, `${_pfx(i)}Opening ${host}…`);
         await _orchReq('OPEN_URL_NEW_TAB', { url: navUrl, active: true });
         const nt = await _orchActiveTab(); if (nt && typeof nt.id === 'number') tabId = nt.id;   // the chain follows to the new tab
         try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: navUrl }); if (g && g.groundId) st.chainGroundId = g.groundId; } catch { /* */ }
@@ -5361,9 +5495,20 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         // ("foreach division, open new warranty tasks in a new case" → "foreach division, list new warranty
         // tasks") so the picker sees collection + quantifier + filters only.
         const _readAsk = fanoutReadAsk(clause.text) || clause.text;
-        const cr = await _chainConnectorRun(_readAsk, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
-        if (cr && cr.ok) { st.lastValue = cr.value; st.lastLeg = cr.leg; }
-        else if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg ? _legFailName(cr.leg) : 'read the list to fan out over'}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
+        const cr = await _chainConnectorRun(_readAsk, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        if (cr && cr.ok) {
+          st.lastValue = cr.value; st.lastLeg = cr.leg;
+          // v1621 (live 201423) — the pre-read RAN and found 0 items (the interpret GUESSED an unbound filter:
+          // "list task instructions…" named no status; the read ran status=new → 0 rows while the user meant
+          // open → 24). "The previous step returned no list" would be a lie here — there was no previous step.
+          // Say what happened and how to steer the filter.
+          if (!itemLabels(cr.value, 1).labels.length) {
+            _setMessageBody(msg, `${_ranPfx(i)}Nothing to fan out over — the list read ran but found 0 items${cr.leg && cr.leg.name ? ` (“${cr.leg.name}”)` : ''}. If a filter got guessed wrong, name it — e.g. “foreach open warranty task, …”.`);
+            _orchFinalize(msg);
+            return;
+          }
+        }
+        else if (cr && !cr.ok) { _setMessageBody(msg, `${_ranPfx(i)}Couldn’t ${cr.leg ? _legFailName(cr.leg) : 'read the list to fan out over'}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
       }
       const _foCap = fanoutLimit(clause.text);   // DK-8g — "open the first as a case" / "open 3 cases" caps the spawn (the single-case test primitive)
       const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
@@ -5387,9 +5532,9 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       if (_boundConnections().length) {
         // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
         // run's whole first clause showed one static line while 121 reads ran.
-        const cr = await _chainConnectorRun(clause.text, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        const cr = await _chainConnectorRun(clause.text, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
         if (cr && cr.ok) {
-          const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results' });
+          const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results', displayId: _legDisplayId(cr.leg) });
           st.lastValue = cr.value;
           st.lastLeg = cr.leg;   // DK-8f — the SOURCE leg rides along (its `drill` marker lets a following fan-out pull each item's FULL record)
           st.readouts.push(lines ? lines.join('\n') : `Ran “${clause.text}”.`);
@@ -5403,19 +5548,19 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           const _authErr = /^(http-40[13]|session-expired|not-logged-in)$/.test(String(cr.error || ''));
           const _authOrigin = _authErr ? String((cr.leg.tool && (cr.leg.tool.sessionHost || cr.leg.tool.origin)) || '') : '';
           if (_authErr && _authOrigin) {
-            _setMessageBody(msg, `Ran ${i} of ${total}. ${_authOrigin} looks signed out — sign in, then try again.`);   // v1591 — the sentence IS the cause; no raw slug
+            _setMessageBody(msg, `${_ranPfx(i)}${_authOrigin} looks signed out — sign in, then try again.`);   // v1591 — the sentence IS the cause; no raw slug
             _orchFinalize(msg);
             _connSignInBar(msg, [_authOrigin], { retryAsk: ask });
             return;
           }
-          _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${_legFailName(cr.leg, 'run that')}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
+          _setMessageBody(msg, `${_ranPfx(i)}Couldn’t ${_legFailName(cr.leg, 'run that')}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
         }
       }
       const gid = (m && m.groundId) || st.chainGroundId;
-      if (!gid) { _setMessageBody(msg, `Ran ${i} of ${total}. I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); _orchFinalize(msg); return; }
-      _setMessageBody(msg, `Step ${i + 1} of ${total}: I don’t know how to “${clause.text}” on this page yet — show me this step and I’ll keep going.`);
+      if (!gid) { _setMessageBody(msg, `${_ranPfx(i)}I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); _orchFinalize(msg); return; }
+      _setMessageBody(msg, `${_pfx(i)}I don’t know how to “${clause.text}” on this page yet${offers ? ' — show me this step and I’ll keep going' : ''}.`);
       _orchFinalize(msg);   // v1338 (review D)
-      _orchOfferRecord(msg, { groundId: gid, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, gid) });
+      if (offers) _orchOfferRecord(msg, { groundId: gid, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, gid) });   // v1616 — offers:false: the wizard renders its own teach door
       return;
     }
     // A READ clause (observation) returns a VALUE — run it through the observation read path, not REPLAY.
@@ -5423,28 +5568,30 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     // the chain's deltas (resume-after-demo, promotion bookkeeping via _record) stay here.
     if (m.candidate && m.candidate.kind === 'observation') {
       const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, isRead: true });
-      if (!r.ok) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchFinalize(msg); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
+      if (!r.ok) { _setMessageBody(msg, `${_pfx(i)}Couldn’t read “${clause.text}” here${offers ? ' — show me this step and I’ll keep going' : ''}.`); _orchFinalize(msg); if (offers) _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
       st.readouts.push(r.value); st.lastValue = r.value; st.lastReadoutIdx = st.readouts.length - 1; _record(m, clause, 'observation');   // CV-4-full — a grounded read also feeds a following "open each…" fan-out (Slice B); the slot drops if a spawn consumes it (DK-8i)
       continue;
     }
     const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, bindings: m.bindings, policyConfig: st.policyConfig });
-    if (r.blocked) { _setMessageBody(msg, `Stopped at step ${i + 1} — this desk is read-only, and “${clause.text}” would change something. Switch to a non-read-only desk to run it.`); _orchFinalize(msg); return; }
+    if (r.blocked) { _setMessageBody(msg, `${total > 1 ? `Stopped at step ${i + 1} — this` : 'This'} desk is read-only, and “${clause.text}” would change something. Switch to a non-read-only desk to run it.`); _orchFinalize(msg); return; }
     if (!r.ok) {
-      _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${r.why} — show me the right way and I’ll keep going.`);
+      _setMessageBody(msg, `${total > 1 ? `Step ${i + 1} (“${clause.text}”)` : `“${clause.text}”`} didn’t run${r.why}${offers ? ' — show me the right way and I’ll keep going' : ''}.`);
       _orchFinalize(msg);   // v1338 (review D)
-      _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way', onAuthored: _resumeAfterDemo(i, clause, m.groundId) });
+      if (offers) _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way', onAuthored: _resumeAfterDemo(i, clause, m.groundId) });
       return;
     }
     _record(m, clause);
   }
   const _outs = st.readouts.filter((x) => x != null && x !== '');   // DK-8i — spawn-consumed reads left null slots
-  _setMessageBody(msg, _outs.length ? _outs.join('\n') : `Done — ran all ${total} steps.`);
+  _setMessageBody(msg, _outs.length ? _outs.join('\n') : (total > 1 ? `Done — ran all ${total} steps.` : 'Done.'));
   _orchFinalize(msg);   // v1338 (review D) — the chain summary survives a reload
   // T2 — the whole compound ran cleanly → offer to promote it to a durable composite (cache hit next time).
-  _orchOfferSaveCompound(msg, { tabId, groundId: st.chainGroundId, ask, steps: st.ranSteps });
+  // v1616 — offers:false (a wizard-owned run) keeps BOTH save offers off: the wizard IS the save flow, and the
+  // shared st carries prior steps' ranSteps — "Remember these steps" would render inside the wizard page.
+  if (offers) _orchOfferSaveCompound(msg, { tabId, groundId: st.chainGroundId, ask, steps: st.ranSteps });
   // WF-1 — an AUTONOMOUS compound (a connector read / fan-out chain) has no Ground, so the composite saver above
   // bails; offer instead to bank it as a recallable WORKFLOW keyed to the ask (bank → recall → suggest-and-confirm).
-  _maybeOfferWorkflowSave(msg, { ask, clauses, steps: st.ranSteps });
+  if (offers) _maybeOfferWorkflowSave(msg, { ask, clauses, steps: st.ranSteps });
   } finally { _planLive = Math.max(0, _planLive - 1); _ilBusy(msg, false); }   // v1338 (review E, CR-S1 pattern); v1505 — the glyph settles on EVERY chain exit, thrown paths included
 }
 
@@ -7095,7 +7242,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   // group's full read would resurface the very rows the filter excluded.
   for (const it of nonEmpty) secs.push(headNote
     ? [`${it.label}:`, ...it.rows.slice(0, 6).map((h) => `- ${(dj.label || []).map((f) => h[f]).filter((v) => v != null && v !== '').join(' · ')}`)].join('\n')
-    : (renderConnectorLines(it.value, { name: it.label }) || [`${it.label} (0).`]).join('\n'));
+    : (renderConnectorLines(it.value, { name: it.label, displayId: _legDisplayId(leg) }) || [`${it.label} (0).`]).join('\n'));
   // v2.74.1524 — the RESULT is the message; a wall of empty group names isn't (live: "0 across all 121 divisions"
   // followed by every one of the 121 names — the user asked for "only the result"). Name empties only while the
   // list stays readable; past that, the COUNT carries all the information.
@@ -7123,8 +7270,15 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
 // Honors the §18 arm guard (a disabled/rejected details read is never drilled into). Null → the caller just renders
 // the list (drill is an enhancement, never a blocker).
 async function _rideDrillLeg(parentLeg, viaId, groundId) {
-  const gid = (parentLeg.tool && parentLeg.tool.groundId) || groundId || '';
+  let gid = (parentLeg.tool && parentLeg.tool.groundId) || groundId || '';
   const origin = (parentLeg.tool && parentLeg.tool.origin) || '';
+  // v2.74.1619 — a CONNECTION-projected parent (the interpret palette's curated legs, key `me.<app>.<id>`) carries
+  // no tool.groundId, so the drill SILENTLY skipped (live 194814: 20 warranty cases born with ROW dossiers — no
+  // vendor explanation/instructions, the very fields the step named; GET_RIDE_RECIPES hard-requires a groundId).
+  // Resolve the Ground BY ORIGIN through the G1-1 door (dedup-before-mint — the chain's nav step's own path).
+  if (!gid && origin && viaId) {
+    try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${origin}` }); if (g && g.groundId) gid = g.groundId; } catch { /* the drill stays best-effort */ }
+  }
   if (!gid || !viaId) return null;
   let rec = null;
   try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: gid, origin }); rec = ((rr && rr.recipes) || []).find((x) => x && x.id === viaId) || null; } catch { rec = null; }
@@ -7591,13 +7745,13 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // SINGLE record → the FULL FORMATTED RECORD, deterministically (live: the clause rode along as words and the shaper
     // digested anyway — but "details" means the fields, not a summary). Lists still digest (N records can't full-render).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
-      const flines = renderConnectorLines(rr.value, { name: leg.name || 'Record' });
+      const flines = renderConnectorLines(rr.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
       if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
     }
     let shaped = null;
     try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts, scope: _shapeScope(params, _resolvedLabels) }); } catch { /* best-effort */ }   // CX-9d — the applied filters ride along
     if (shaped && shaped.answer) { _setMessageBody(msg, `${shaped.answer}`); return true; }
-    const rlines = renderConnectorLines(rr.value, { name: leg.name || 'Results' });
+    const rlines = renderConnectorLines(rr.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) });
     _setMessageBody(msg, rlines ? `${rlines.join('\n')}` : 'Done.');
     return true;
   }
@@ -7685,7 +7839,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     const facts = readShapeFacts(res.value);
     // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
-      const flines = renderConnectorLines(res.value, { name: leg.name || 'Record' });
+      const flines = renderConnectorLines(res.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
       if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
     }
     let shaped = null;
@@ -7693,7 +7847,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     if (shaped && shaped.answer) { _setMessageBody(msg, `${shaped.answer}`); return true; }
     // CX-4c — GENERIC render: ANY app's read (tickets, comments, users, orders, messages…) → its salient fields, not
     // just tickets. PII stays in the user's own panel; the result is UNTRUSTED page data → rendered as escaped text only.
-    const lines = renderConnectorLines(res.value, { name: leg.name || 'Results' });
+    const lines = renderConnectorLines(res.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) });
     _setMessageBody(msg, lines ? `${lines.join('\n')}` : 'Done.');
     return true;
   }
@@ -8351,7 +8505,9 @@ async function sendChatMessage() {
   // WW-1 (v2.74.1611) — the ＋ Workflow wizard PAGE owns the input while awaiting a step / the name (the setup-flow
   // precedent). Consumed here, BEFORE the entry echo, so a step/name is NOT persisted as a conversation bubble
   // (the wizard is a page, not a timeline — user rule 1/3). The run it triggers renders inside the page.
-  if (_wfAwaitingInput()) { void _wfConsumeInput(text); return; }
+  // v1618/v1623 — the intercept consumes ONLY on the wizard's own desk; on any other surface the wizard is
+  // PARKED (state intact, revives on its desk's reopen) and the message flows normally to the current conversation.
+  if (_wfAwaitingInput() && !_wfForeign()) { void _wfConsumeInput(text); return; }
   _dismissDeskLanding();   // DL-1 (v2.74.1609, user directive) — the launch page is NOT part of the conversation: the first ask retires it
   appendMessage({ role: 'user', body: text });
 
@@ -10439,6 +10595,11 @@ async function _rehydrateConversation(conv) {
   // body) also get cancelled since the awaiter callback would still try to
   // update the now-detached thinkingMsg.
   _cancelOpenParamForms();
+  // v2.74.1623 — PARK-or-REVIVE (live 202445: the v1622 abandon killed the wizard when the user opened a spawned
+  // case to REVIEW the open-case step — inspecting the result IS the review). Opening another conversation PARKS
+  // the wizard (unlock the composer — the surface belongs to the conv being opened); opening the wizard's OWN
+  // desk revives it at the end of this rehydrate (the page re-asserts + the phase lock re-applies).
+  try { if (_wfWizard && _wfWizard.convId !== String(conv.id)) { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } } catch { /* */ }
   _currentConversationId = conv.id;
   // VT-2b (v2.74.1587) — opening an incident CASE refreshes its card + action bar from the live store (deferred
   // past this paint; the persisted incident_card renders first, then the pass upserts + re-arms the bar).
@@ -10535,6 +10696,10 @@ async function _rehydrateConversation(conv) {
   void _maybeRenderConnCard();        // Front desk → the attention CHIP (the card moved to the Admin desk)
   void _maybeRenderAdminDesk();       // Admin desk → the vitals card + open-incident cards
   void _maybeWarnDeskConnections();   // any other desk → a dependency POINTER (no duplicate report surface)
+  // v2.74.1623 — REVIVE a parked wizard on its OWN desk's reopen: the page re-asserts over the freshly painted
+  // thread (v1615) and the phase lock re-applies. Mid-run detours survive whole — a step that finished while the
+  // user was inspecting a case comes back at 'ran' with its result and the review bar.
+  try { if (_wfWizard && _wfWizard.convId === String(conv.id)) _wfRenderPage(); } catch { /* */ }
 }
 
 // DL-1 (v2.74.1609) — the launch page is a PAGE, not a message: it leaves the moment the conversation begins
@@ -10557,6 +10722,9 @@ async function _renderDeskLanding(conv) {
   try {
     const isAdmin = !!conv && conv.id === ADMIN_ID;
     if (!conv || conv.kind === 'dev') return;
+    // v2.74.1623 — the WIZARD owns its desk's surface while it lives: the landing YIELDS (its async render would
+    // otherwise _enterConversation() and steal the page right after a revive). The exit paths re-render it.
+    if (_wfWizard && _wfWizard.convId === String(conv.id)) return;
     if (!isAdmin && !(conv.appId && !conv.parentId)) return;
     if ((conv.messages || []).some((m) => m && m.role === 'user')) return;   // the launch state ends at the first operator ask
     let workflows = [];

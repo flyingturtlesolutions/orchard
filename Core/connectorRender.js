@@ -121,8 +121,11 @@ function _suffixId(o) {
   return null;
 }
 
-/** Pull one item's salient fields. PURE. `full` → a longer title + a separate body when there's a distinct name + content. */
-export function summarizeItem(o, { full = false } = {}) {
+/** Pull one item's salient fields. PURE. `full` → a longer title + a separate body when there's a distinct name +
+ *  content. `displayId` (CX-9k, v2.74.1617) — recipe-declared HUMAN id key(s), preference-ordered: tried EXACTLY and
+ *  FIRST, because the generic scans below can land on the wrong number (a VS warranty row's first `…Number` field is
+ *  the per-home claim sequence — every list bullet read "#01"). Shape knowledge belongs to the recipe, not a heuristic. */
+export function summarizeItem(o, { full = false, displayId = null } = {}) {
   if (o == null) return { title: '' };
   if (typeof o !== 'object') return { title: _trunc(o, full ? 400 : 90) };
   const name = _displayName(o);
@@ -130,7 +133,11 @@ export function summarizeItem(o, { full = false } = {}) {
   const title = name != null ? _trunc(name, 90) : _trunc(content, full ? 200 : 90);
   const body = (full && name != null && content != null) ? _trunc(content, 500) : '';   // only when name + content are distinct
   const url = _pick(o, URL_KEYS);
-  let id = _pick(o, ID_KEYS);
+  let id = null;
+  for (const k of (Array.isArray(displayId) ? displayId : [])) {   // CX-9k — declared keys win; first present scalar
+    const v = o[k]; if (v != null && v !== '' && typeof v !== 'object') { id = v; break; }
+  }
+  if (id == null) id = _pick(o, ID_KEYS);
   if (id == null) id = _suffixId(o);   // CX-9c — …Number/…Id suffix fallback (TaskNumber) when no exact id key exists
   if (typeof id === 'string' && /^gid:\/\/shopify\//i.test(id)) id = id.split('/').pop();   // CX-7 — gid → numeric tail for a readable id
   return { id, title, status: _pick(o, STATUS_KEYS), body, url: (url && !/\/api\//.test(url)) ? url : null };
@@ -340,12 +347,12 @@ export function recordDetails(o) {
  * extra fields (a Shopify customer's email/phone/orders/tags/location — the profile, not a bare bullet), + a url.
  * `name` is the leg label. CX-7 (v2.74.1392) — the single-record enrichment (a 1-result lookup showed just #id name).
  */
-export function renderConnectorLines(value, { name = 'Results' } = {}) {
+export function renderConnectorLines(value, { name = 'Results', displayId = null } = {}) {
   const list = primaryList(value);
   if (list && list.length > 1) {
     const head = `${name} (${list.length})`;
     const lines = list.slice(0, MAX_ROWS).map((o) => {
-      const it = summarizeItem(o);
+      const it = summarizeItem(o, { displayId });
       // CX-9c (v2.74.1436) — a row with NO recognized name/status (an app shape outside the key vocabulary, e.g. a
       // VendorSuite warranty row) falls back to its generic fields ("3955 Gallery Chase · Cumming, GA 30028 · …")
       // instead of a dead "(no title)" bullet — the list twin of the single-record enrichment.
@@ -358,7 +365,7 @@ export function renderConnectorLines(value, { name = 'Results' } = {}) {
   if (list && list.length === 0) return [`${name} (0).`];
   const obj = (list && list.length === 1) ? list[0] : primaryObject(value);   // a single result renders as the FULL record
   if (obj) {
-    const it = summarizeItem(obj, { full: true });
+    const it = summarizeItem(obj, { full: true, displayId });
     const out = [`${it.id != null ? `#${it.id} ` : ''}${it.title || ''}${it.status ? ` — ${it.status}` : ''}`.trim() || '(no details)'];
     if (it.body) out.push(it.body);
     const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));   // don't repeat the title/status/id as an extra
@@ -399,9 +406,9 @@ export function itemLabels(value, cap = 20) {
  * drilled DETAIL record: display id + status + the salient fields (recordDetails — bodies never included) + every
  * scalar `…Id` join key. `max` caps the line count (a drilled full record earns a bigger budget than a list row). PURE.
  */
-export function dossierLines(o, { max = 16 } = {}) {
+export function dossierLines(o, { max = 16, displayId = null } = {}) {
   if (!o || typeof o !== 'object') return [];
-  const it = summarizeItem(o, { full: true });
+  const it = summarizeItem(o, { full: true, displayId });   // CX-9k — the case dossier's "Id:" line shows the HUMAN number too (live 194814: every case read "Id: 01")
   const lines = [];
   if (it.id != null && it.id !== '') lines.push(`Id: ${it.id}`);
   if (it.status != null && it.status !== '') lines.push(`Status: ${it.status}`);
@@ -438,12 +445,12 @@ export function roleFlags(o, { max = 4 } = {}) {
   return out;
 }
 
-export function fanoutItems(value, cap = 20) {
+export function fanoutItems(value, cap = 20, { displayId = null } = {}) {
   const list = primaryList(value) || [];
   const items = list.slice(0, cap).map((o) => {
-    const it = summarizeItem(o);
+    const it = summarizeItem(o, { displayId });
     const label = (it.title || itemFields(o, { max: 2 }).map(([, v]) => v).join(' · ') || 'item').trim();
-    return { label, detail: dossierLines(o).join('\n'), row: o };   // DK-8f — the RAW row rides too (the drill's join key source)
+    return { label, detail: dossierLines(o, { displayId }).join('\n'), row: o };   // DK-8f — the RAW row rides too (the drill's join key source)
   }).filter((x) => x.label);
   return { items, total: list.length, capped: list.length > cap };
 }

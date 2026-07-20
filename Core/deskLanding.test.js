@@ -51,3 +51,20 @@ describe('deskLanding — buildDeskLanding (the v1602 page shape)', () => {
     assert.match(buildDeskLanding({ isAdmin: true }).sub, /^Admin desk — watches/, 'title defaults too');
   });
 });
+
+describe('WW-1b (v2.74.1620) — drafts never reach the launch page', () => {
+  it('a status:draft workflow is filtered out; ready/legacy (no status) show', () => {
+    const spec = buildDeskLanding({ title: 'Warranty', description: 'd', workflows: [
+      { ask: 'unfinished thing', status: 'draft', subAsks: ['a', 'b'] },
+      { ask: 'proven thing', status: 'ready', subAsks: ['a', 'b'], runs: 2 },
+      { ask: 'legacy thing', subAsks: ['a', 'b'] },
+    ] });
+    const titles = spec.cards.filter((c) => c.kind === 'workflow').map((c) => c.title);
+    assert.deepEqual(titles, ['proven thing', 'legacy thing']);
+  });
+  it('ALL drafts → the honest ＋ Workflow card, not an empty launch page', () => {
+    const spec = buildDeskLanding({ title: 'W', workflows: [{ ask: 'x', status: 'draft', subAsks: ['a', 'b'] }] });
+    assert.equal(spec.cards.length, 1);
+    assert.equal(spec.cards[0].kind, 'new-workflow');
+  });
+});

@@ -202,3 +202,12 @@ describe('rideRecipe — LEG-1 (v2.74.1593): lastUrlArgs is user-state (a catalo
     assert.equal(rec.lastOkAt, 5, 'proof-of-life untouched');
   });
 });
+
+describe('CX-9k (v2.74.1617) — displayId rides the SEEDED path (Invariant #3 hop 1)', () => {
+  it('recipeFromCatalogEntry carries displayId; an entry without one stays byte-identical (no empty key)', () => {
+    const rec = recipeFromCatalogEntry({ id: 'x', method: 'GET', endpoint: '/e', appHost: 'a.com', displayId: ['TicketId'] }, { origin: 'a.com' });
+    assert.deepEqual(rec.displayId, ['TicketId']);
+    const plain = recipeFromCatalogEntry({ id: 'y', method: 'GET', endpoint: '/e', appHost: 'a.com' }, { origin: 'a.com' });
+    assert.ok(!('displayId' in plain));
+  });
+});

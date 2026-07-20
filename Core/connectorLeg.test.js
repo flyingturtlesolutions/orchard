@@ -157,3 +157,14 @@ describe('mcpToolToLeg — MCP tool → cloud-broker connector leg (§5)', () =>
     assert.equal(mcpToolToLeg({ description: 'x' }, { server: 'z' }), null); // no name
   });
 });
+
+describe('CX-9k (v2.74.1617) — displayId threads recipe → leg.tool (Invariant #3 hop 3)', () => {
+  const BASE = { id: 'r1', app: 'vs', origin: 'vendorsuite.drhorton.com', endpoint: '/api/x', name: 'X' };
+  it('array form filtered + capped at 4; string form wraps; all-empty / absent → null', () => {
+    assert.deepEqual(recipeToLeg({ ...BASE, displayId: ['TicketId', '', 'TaskNumber'] }).tool.displayId, ['TicketId', 'TaskNumber']);
+    assert.deepEqual(recipeToLeg({ ...BASE, displayId: 'TicketId' }).tool.displayId, ['TicketId']);
+    assert.deepEqual(recipeToLeg({ ...BASE, displayId: ['a', 'b', 'c', 'd', 'e'] }).tool.displayId, ['a', 'b', 'c', 'd']);
+    assert.equal(recipeToLeg({ ...BASE, displayId: [''] }).tool.displayId, null);
+    assert.equal(recipeToLeg({ ...BASE }).tool.displayId, null);
+  });
+});

@@ -72,7 +72,7 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   if (e.drill && typeof e.drill === 'object') rec.drill = e.drill;
   if (e.resolve && typeof e.resolve === 'object') rec.resolve = e.resolve;   // CX-9b (v1434) — per-param resolve specs
   if (e.identityGql && typeof e.identityGql === 'object') rec.identityGql = e.identityGql;   // v1479 — {me} from a GraphQL identity read (endpoint/body/idPath) when the REST probe can't (agent-id vs user-id)
-  for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'probeAccept', 'persistedOp', 'csrf', 'autoRequires', 'capClass']) {   // DK-2 — capClass:'presence' survives the seeded path too; CP-1 — probeAccept (json-liveness) rides the seeded path (Invariant #3 hop 1)
+  for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'probeAccept', 'persistedOp', 'csrf', 'autoRequires', 'capClass', 'displayId']) {   // DK-2 — capClass:'presence' survives the seeded path too; CP-1 — probeAccept (json-liveness) rides the seeded path; CX-9k — displayId (the human row-id keys) rides too (Invariant #3 hop 1)
     if (e[k] != null && e[k] !== '') rec[k] = e[k];
   }
   if (e.requestHeaders && typeof e.requestHeaders === 'object') rec.requestHeaders = e.requestHeaders;

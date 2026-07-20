@@ -109,6 +109,9 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       origin: origin || null, appHost: appHost || null,
       itemUrl: _str(r.itemUrl) || null,   // FL-1c (v2.74.1347) — the object's HUMAN page template (ground-truth links)
       listUrl: _str(r.listUrl) || null,   // FL-1d (v2.74.1349) — the COLLECTION's human page ("show me" after a list read)
+      // CX-9k (v2.74.1617) — the row's HUMAN display-id key(s), preference-ordered; the renderer tries these before
+      // its generic first-…Number scan (VS warranty rows led with the per-home "01" claim sequence). String → [string].
+      displayId: (Array.isArray(r.displayId) && r.displayId.some((x) => _str(x))) ? r.displayId.filter((x) => _str(x)).slice(0, 4) : (_str(r.displayId) ? [_str(r.displayId)] : null),
       // FL-8d (v2.74.1359; object form v1375) — the read's generic digest semantics {kind, scope, status}; the
       // fleet digest keys on THIS, never a recipe id. A legacy string pulse normalizes to {kind}.
       pulse: (r.pulse && typeof r.pulse === 'object') ? r.pulse : (_str(r.pulse) ? { kind: _str(r.pulse) } : null),
