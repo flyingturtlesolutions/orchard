@@ -37,15 +37,38 @@ async function _write(appId, items) {
   await chrome.storage.local.set({ [KEY(appId)]: { items, updatedAt: Date.now() } });
 }
 
-/** Bank a workflow (normalize + dedup by content id; a re-bank of the same ask+steps is a no-op). Capped. */
+// WW-1 (v2.74.1610, §10.A) — a STABLE SURROGATE id minted once at creation. Routines bind it, so it must NOT be
+// recomputed from content (which changes on edit). Distinct from `contentId` (the dedup hash).
+function _wfUid() { return `wf-u${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`; }
+
+/** Bank a workflow (normalize + dedup by CONTENT id; a re-bank of the same ask+steps is a no-op). Capped. */
 export async function saveWorkflow(appId, raw) {
   if (!appId) return [];
   return _chained(appId, async () => {
     const items = await loadWorkflows(appId);
-    const wf = normalizeWorkflow({ ...raw, appId });
+    // WW-1 — mint a surrogate id for a NEW workflow (caller may pass one to re-key a migration); normalize honors it.
+    const wf = normalizeWorkflow({ ...raw, appId, id: raw && raw.id ? raw.id : _wfUid() });
     if (!wf) return items;
-    if (items.some((x) => x && x.id === wf.id)) return items;        // already saved — dedup
-    const next = [...items, { ...wf, createdAt: wf.createdAt || Date.now() }].slice(-CAP);
+    if (items.some((x) => x && x.contentId === wf.contentId)) return items;   // dedup by CONTENT (§10.A) — a re-bank of the same chain is a no-op
+    const now = Date.now();
+    const next = [...items, { ...wf, createdAt: wf.createdAt || now, updatedAt: now }].slice(-CAP);
+    await _write(appId, next);
+    return next;
+  });
+}
+
+/** WW-1 (§10.A) — edit a saved workflow IN PLACE: preserve the surrogate `id` (so a bound routine survives), replace
+ *  subAsks/steps/name/status; contentId + updatedAt recompute. No-op if the id isn't found. */
+export async function updateWorkflow(appId, id, patch) {
+  if (!appId || !id) return [];
+  return _chained(appId, async () => {
+    const items = await loadWorkflows(appId);
+    const idx = items.findIndex((x) => x && x.id === id);
+    if (idx < 0) return items;
+    const merged = normalizeWorkflow({ ...items[idx], ...(patch || {}), id, appId });   // id preserved — the routine binding is stable
+    if (!merged) return items;
+    const next = items.slice();
+    next[idx] = { ...merged, updatedAt: Date.now() };
     await _write(appId, next);
     return next;
   });

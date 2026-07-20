@@ -1,70 +1,67 @@
-// Core/deskLanding.js — DL-1 (v2.74.1600): the desk LAUNCH page, assembled PURE.
+// Core/deskLanding.js — DL-1 (v2.74.1600, page shape corrected v1602): the desk LAUNCH page, assembled PURE.
 //
-// What a desk shows when you open it fresh (no operator asks yet): a welcome head (name + role message +
-// description) and QUICK-ACTION cards. The v1577 no-inventions rule is STRUCTURAL here — every card comes from a
-// PROVEN source the caller passes in: this desk's saved workflows (run-verified chains) and the alias ledger
-// (tested asks, verbatim, desk-scoped by host). Nothing is composed or imagined; a desk with nothing proven gets
-// an honest "just ask" message and zero cards, never a fabricated menu. The Admin desk appends its three operator
-// commands (deterministic doors, always live) and flags `vitalsAfter` so the panel keeps its vitals card BELOW
-// the actions. The panel renders this verbatim; all selection/ordering/caps live here where they're testable.
+// The user's spec (v1602, verbatim-shaped): (1) the header is a WELCOME message ("What would you like to do?"),
+// not the desk name; (2) no "Connected to…" chatter — ONE subheader describes the desk INCLUDING its connections;
+// (3) the cards are WORKFLOWS — and when none is banked yet, exactly one "＋ Workflow" card; (4) the subheader is
+// a real subheader, not muted gray fine print (the panel styles it so); (5) the Front desk's "choose a desk" page
+// is the analogy. Launch STATE (v1601): a work desk at its +desk birth and reopens before its first operator ask;
+// Admin/Front at app first-launch or after history delete. The no-inventions rule stays structural: workflow
+// cards come only from the caller's saved-workflow records (run-verified); the Admin desk's cards are its three
+// deterministic operator commands, with the vitals card kept BELOW (`vitalsAfter`).
 
-export const LANDING_MAX_CARDS = 6;
-export const LANDING_MAX_WORKFLOWS = 4;
+export const LANDING_GREETING = 'What would you like to do?';
+export const LANDING_MAX_WORKFLOWS = 6;
 
-const _host = (s) => String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/[/?#].*$/, '').trim();
-const _hostMatches = (h, hosts) => { const n = _host(h); return !!n && hosts.some((d) => n === d || n.endsWith(`.${d}`) || d.endsWith(`.${n}`)); };
+// Does the description already NAME the connections? (The Warranty preset's description says "…across VendorSuite,
+// Zendesk, Shopify, and HubSpot…" — appending a connections line under it would read as duplication.) A label
+// counts as named when any of its words (>3 chars) appears in the description.
+export function descNamesConnections(description, labels) {
+  const d = String(description || '').toLowerCase();
+  if (!d) return false;
+  const ls = (Array.isArray(labels) ? labels : []).filter(Boolean);
+  if (!ls.length) return false;
+  return ls.some((l) => String(l).toLowerCase().split(/[^a-z0-9]+/).some((w) => w.length > 3 && d.includes(w)));
+}
 
 /**
  * @param {{ title?:string, description?:string, isAdmin?:boolean,
  *   workflows?:Array<{id?:string, appId?:string, name?:string, ask?:string, subAsks?:string[], runs?:number, at?:number}>,
- *   aliases?:Array<{ask?:string, host?:string, at?:number}>,
- *   deskHosts?:string[] }} p
- * @returns {{ heading:string, message:string, sub:string|null,
- *   cards:Array<{kind:'workflow'|'ask'|'command', title:string, sub:string, wf?:object, ask?:string, command?:string}>,
+ *   connections?:string[] }} p   connections = the desk's connection LABELS (or hosts)
+ * @returns {{ heading:string, sub:string|null, connections:string|null,
+ *   cards:Array<{kind:'workflow'|'new-workflow'|'command', title:string, sub:string, wf?:object, command?:string}>,
  *   vitalsAfter:boolean }}
  */
-export function buildDeskLanding({ title = '', description = '', isAdmin = false, workflows = [], aliases = [], deskHosts = [] } = {}) {
-  const heading = String(title || '').trim() || (isAdmin ? 'Admin desk' : 'This desk');
+export function buildDeskLanding({ title = '', description = '', isAdmin = false, workflows = [], connections = [] } = {}) {
+  const name = String(title || '').trim() || (isAdmin ? 'Admin desk' : '');
+  // v1603 (live: "sub header has no description") — the Admin desk is not a catalog desk, so it has no
+  // description SOURCE; it owns its operator description here.
+  const desc = String(description || '').trim()
+    || (isAdmin ? 'watches your connections, ride health, and open cases across every connected site.' : '');
+  const labels = (Array.isArray(connections) ? connections : []).map((c) => String(c || '').trim()).filter(Boolean);
+
+  // The SUBHEADER: "<Name> — <description>" (the desk, described); connections join it as a second line only
+  // when the description doesn't already name them (or there is no description at all).
+  const subBody = desc || (labels.length ? `Connected to ${labels.join(', ')}.` : '');
+  const sub = name && subBody ? `${name} — ${subBody}` : (subBody || name || null);
+  const connLine = (labels.length && desc && !descNamesConnections(desc, labels)) ? labels.join(' · ') : null;
+
   const cards = [];
-
-  // 1) Saved workflows — run-verified chains; most-used first, then newest. The card carries the RECORD (the
-  //    panel replays it through the existing chain runner — the same path as the `workflows` view's ▶ Run).
-  const wfs = (Array.isArray(workflows) ? workflows : [])
-    .filter((w) => w && (w.ask || w.name))
-    .sort((a, b) => ((b.runs || 0) - (a.runs || 0)) || ((b.at || 0) - (a.at || 0)))
-    .slice(0, LANDING_MAX_WORKFLOWS);
-  for (const w of wfs) {
-    const steps = Array.isArray(w.subAsks) ? w.subAsks.length : 0;
-    cards.push({ kind: 'workflow', title: String(w.name || w.ask).slice(0, 70), sub: `${steps || '?'} step${steps === 1 ? '' : 's'}${w.runs ? ` · run ${w.runs}×` : ''} · saved workflow`, wf: w });
-  }
-
-  // 2) Tested asks from the alias ledger — VERBATIM (never rephrased), newest first, scoped to the desk's own
-  //    hosts when it has connections (an unconfigured desk sees the newest regardless). Deduped against the
-  //    workflow asks and within.
-  const hosts = (Array.isArray(deskHosts) ? deskHosts : []).map(_host).filter(Boolean);
-  const seen = new Set(cards.map((c) => String((c.wf && c.wf.ask) || '').trim().toLowerCase()).filter(Boolean));
-  const askCap = isAdmin ? 3 : LANDING_MAX_CARDS;   // admin keeps room for its three commands
-  for (const a of (Array.isArray(aliases) ? aliases : []).filter((x) => x && x.ask).sort((x, y) => ((y.at || 0) - (x.at || 0)))) {
-    if (cards.length >= askCap) break;
-    if (hosts.length && !_hostMatches(a.host, hosts)) continue;
-    const k = String(a.ask).trim().toLowerCase();
-    if (!k || seen.has(k)) continue;
-    seen.add(k);
-    cards.push({ kind: 'ask', title: `“${String(a.ask).slice(0, 70)}”`, sub: `tested${a.host ? ` · ${_host(a.host)}` : ''}`, ask: String(a.ask) });
-  }
-
-  // 3) The Admin desk's operator commands — deterministic doors, always live (not capability claims).
   if (isAdmin) {
+    // The Admin desk's quick actions ARE its operator commands (deterministic doors, always live).
     cards.push({ kind: 'command', command: 'show dashboard', title: 'Open the vitals dashboard', sub: 'connections · rides · incidents, live' });
     cards.push({ kind: 'command', command: 'check-now', title: 'Check everything now', sub: 'probe sessions + run due canaries' });
     cards.push({ kind: 'command', command: 'keepalive', title: 'Keep-alive…', sub: 'per-site session pings while you work' });
+  } else {
+    const wfs = (Array.isArray(workflows) ? workflows : [])
+      .filter((w) => w && (w.ask || w.name))
+      .sort((a, b) => ((b.runs || 0) - (a.runs || 0)) || ((b.at || 0) - (a.at || 0)))
+      .slice(0, LANDING_MAX_WORKFLOWS);
+    for (const w of wfs) {
+      const steps = Array.isArray(w.subAsks) ? w.subAsks.length : 0;
+      cards.push({ kind: 'workflow', title: String(w.name || w.ask).slice(0, 70), sub: `${steps || '?'} step${steps === 1 ? '' : 's'}${w.runs ? ` · run ${w.runs}×` : ''}`, wf: w });
+    }
+    if (!cards.length) cards.push({ kind: 'new-workflow', title: '＋ Workflow', sub: 'save a multi-step task you run often' });
   }
 
-  const message = isAdmin
-    ? 'Your operations console — I watch your connections and rides on a clock, and open a case here when something needs you.'
-    : cards.length
-      ? 'Ready when you are — run a proven action below, or just ask.'
-      : 'Nothing proven here yet — just ask; I learn each task the first time and recall it when you ask again.';
-
-  return { heading, message, sub: String(description || '').trim() || null, cards, vitalsAfter: isAdmin === true };
+  return { heading: LANDING_GREETING, sub, connections: connLine, cards, vitalsAfter: isAdmin === true };
 }

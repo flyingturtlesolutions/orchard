@@ -31,6 +31,20 @@ export function workflowId(ask, subAsks) {
   return `wf-${_hash(`${_str(ask).toLowerCase()}::${steps}`)}`;
 }
 
+// WW-1 (v2.74.1610, §10.A) — per-step PROVENANCE, body-blind. The method a step USED at qualify time — for
+// DISPLAY/AUDIT only, NEVER a binding (§11: replay re-resolves through the router). A syncable record must carry
+// no page content, so this whitelists {text, via:{kind,host,name}, bankedAt} — a captured VALUE never enters.
+function _normSteps(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((s) => {
+    if (!s || typeof s !== 'object') return null;
+    const text = _str(s.text); if (!text) return null;
+    const v = (s.via && typeof s.via === 'object') ? s.via : {};
+    const via = { kind: _str(v.kind) || null, host: _str(v.host) || null, name: _str(v.name).slice(0, 80) || null };
+    return { text, via, bankedAt: Number.isFinite(s.bankedAt) ? s.bankedAt : 0 };
+  }).filter(Boolean);
+}
+
 /** Normalize a workflow record. PURE. Requires an ask + ≥2 sub-asks (a single step isn't a workflow). Null otherwise. */
 export function normalizeWorkflow(raw) {
   const r = (raw && typeof raw === 'object') ? raw : null;
@@ -38,15 +52,25 @@ export function normalizeWorkflow(raw) {
   const ask = _str(r.ask);
   const subAsks = (Array.isArray(r.subAsks) ? r.subAsks : []).map(_str).filter(Boolean);
   if (!ask || subAsks.length < 2) return null;
+  const contentId = workflowId(ask, subAsks);   // WW-1 (§10.A) — the CONTENT hash: dedup key + edit-detector (changes on edit)
+  const createdAt = Number.isFinite(r.createdAt) ? r.createdAt : 0;
   return {
-    id: _str(r.id) || workflowId(ask, subAsks),
+    // WW-1 (§10.A) — `id` is a STABLE SURROGATE: honored if the store minted one (routines bind it, so it must
+    // survive an edit); falls back to contentId only for legacy records that never had a surrogate. NEVER
+    // recompute a present id from content.
+    id: _str(r.id) || contentId,
+    contentId,
     ask,
     subAsks,
     name: _str(r.name) || null,                                       // WF-2 — an optional short alias ("standup")
     appId: _str(r.appId) || null,
-    createdAt: Number.isFinite(r.createdAt) ? r.createdAt : 0,
+    createdAt,
+    updatedAt: Number.isFinite(r.updatedAt) ? r.updatedAt : createdAt,
     runs: Number.isFinite(r.runs) ? r.runs : 0,
     dismissed: Number.isFinite(r.dismissed) ? r.dismissed : 0,        // WF-2 — "No, interpret it" count (suppression)
+    status: r.status === 'draft' ? 'draft' : 'ready',                // WW-1 (§10.A) — draft never reaches the launch page / a cadence
+    qualifiedAt: Number.isFinite(r.qualifiedAt) ? r.qualifiedAt : 0,  // WW-1 — when every step was approved (empirical proof stamp)
+    steps: _normSteps(r.steps),                                       // WW-1 — body-blind per-step provenance (display/audit)
   };
 }
 

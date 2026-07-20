@@ -650,7 +650,7 @@ textarea {
 }
 
 .suggestion-card {
-  background: var(--c-bg-elevated);
+  background: var(--c-rail-bg, var(--c-bg-elevated));
   border: 1px solid var(--c-border-soft);
   border-radius: var(--r-md);
   padding: var(--sp-3) var(--sp-4);
@@ -662,7 +662,7 @@ textarea {
   gap: var(--sp-1);
 }
 .suggestion-card:hover:not(:disabled) {
-  background: var(--c-bg-subtle);
+  background: color-mix(in srgb, var(--c-rail-bg) 80%, var(--c-bg-subtle));
   border-color: var(--c-border);
   transform: translateY(-1px);
 }
@@ -975,7 +975,7 @@ textarea {
   width: 30px;
   height: 30px;
   border-radius: var(--r-md);
-  background: var(--c-accent);
+  background: color-mix(in srgb, var(--c-accent) 84%, transparent);
   color: white;
   display: flex;
   align-items: center;
@@ -984,7 +984,7 @@ textarea {
   transition: background var(--t-fast), opacity var(--t-fast);
 }
 .send-btn:hover:not(:disabled) {
-  background: var(--c-accent-hover);
+  background: color-mix(in srgb, var(--c-accent-hover) 84%, transparent);
 }
 .send-btn:disabled {
   background: var(--c-bg-subtle);
@@ -1282,18 +1282,18 @@ textarea {
   transition: background var(--t-fast);
 }
 .btn-primary {
-  background: var(--c-accent);
+  background: color-mix(in srgb, var(--c-accent) 84%, transparent);
   color: white;
 }
-.btn-primary:hover { background: var(--c-accent-hover); }
+.btn-primary:hover { background: color-mix(in srgb, var(--c-accent-hover) 84%, transparent); }
 
 .btn-secondary {
-  background: var(--c-bg);
+  background: var(--c-rail-bg, var(--c-bg));
   color: var(--c-text-muted);
   border: 1px solid var(--c-border);
 }
 .btn-secondary:hover {
-  background: var(--c-bg-subtle);
+  background: color-mix(in srgb, var(--c-rail-bg) 80%, var(--c-bg-subtle));
   color: var(--c-text);
 }
 
@@ -2784,14 +2784,42 @@ div.suggestion-card { cursor: pointer; }
   .reveal-anim { animation: none; opacity: 1; transform: none; }
 }
 
-/* DL-1 (v2.74.1600) — the desk LAUNCH page: welcome head + proven quick-action cards, prepended in the thread. */
+/* DL-1 (v2.74.1602) — the desk LAUNCH page: the Front-desk “choose a desk” shape — centered welcome greeting,
+   a REAL subheader (desk + connections; no muted fine print), then the workflow cards. */
 .desk-landing {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
-  padding: var(--sp-4) var(--sp-2) var(--sp-3);
+  gap: var(--sp-2);
+  padding: var(--sp-5, 24px) var(--sp-2) var(--sp-3);
 }
-.desk-landing-title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
-.desk-landing-msg { font-size: 12.5px; color: var(--c-text-secondary, #8a857e); line-height: 1.45; }
-.desk-landing-sub { font-size: 11.5px; color: var(--c-text-secondary, #8a857e); opacity: 0.75; line-height: 1.4; }
-.desk-landing-cards { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-2); }
+.desk-landing-title { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; text-align: center; }
+.desk-landing-sub { font-size: 13px; color: var(--c-text-secondary, #6f6a63); line-height: 1.5; text-align: center; }
+.desk-landing-conn { font-size: 12px; color: var(--c-text-secondary, #6f6a63); text-align: center; }
+.desk-landing-cards { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-3); text-align: left; }
+
+/* WW-1 (v2.74.1611) — the ＋ Workflow wizard PAGE (on the empty-state surface, like launch / choose-desk). The
+   message input is the sole text-entry surface — no embedded fields here. */
+.wf-page { display: flex; flex-direction: column; gap: var(--sp-3); text-align: left; }
+.wf-page-title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; text-align: center; }
+.wf-page-steps { display: flex; flex-direction: column; gap: var(--sp-1); }
+.wf-page-step { font-size: 12.5px; color: var(--c-text-secondary, #6f6a63); padding: var(--sp-1) var(--sp-2); background: var(--c-bg-subtle); border-radius: var(--r-sm); }
+.wf-page-sub { font-size: 13px; color: var(--c-text-secondary, #6f6a63); line-height: 1.5; text-align: center; }
+.wf-page-bar { display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; gap: var(--sp-2); margin-top: var(--sp-2); }
+/* the wizard actions are BUTTONS, not full-width cards — size to content, wrap the row. */
+.wf-page-btn { width: auto; flex: 0 0 auto; padding: var(--sp-2) var(--sp-3); }
+.wf-page-btn .suggestion-card-name { white-space: normal; }
+.wf-page-btn.wf-primary { border-color: var(--c-accent, var(--c-border)); }
+.wf-page-btn.wf-primary .suggestion-card-name { font-weight: 620; }
+.wf-result { border: 1px solid var(--c-border-soft); border-radius: var(--r-md); padding: var(--sp-2); max-height: 300px; overflow-y: auto; }
+.wf-result .message { margin: 0; }
+
+/* v2.74.1613 (user directive) — EVERY button carries the Rail frost: a backdrop blur behind a
+   translucent background (backgrounds above were made translucent so the blur reads). Same values as the
+   Rail (blur 20 / saturate 1.4). Chrome-only runtime, so no @supports fallback is needed. */
+.suggestion-card, .btn-primary, .btn-secondary, .send-btn, .wf-page-btn {
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+}
+/* v2.74.1614 — a faint light top-edge so the glass reads even where the backdrop behind is a flat
+   colour (backdrop-filter can only blur textured content — e.g. the tab-tint gradient / the thread). */
+.suggestion-card, .btn-secondary { border-color: color-mix(in srgb, #ffffff 10%, var(--c-border-soft)); }

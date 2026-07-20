@@ -69,7 +69,8 @@ import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retire
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
-import { loadWorkflows, saveWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete)
+import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
+import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -2196,8 +2197,10 @@ async function _startSetupFlow({ auto = false } = {}) {
   // drives) and only NAME what couldn't resolve. The explicit `setup` command (and the Set-up card) still opens
   // the picker with pre-picks — that's the ADJUST path; auto is only the gallery's first-time flow.
   if (auto && seeded && seeded.picks.length && !_setupState.extend) {   // v1517 — an EXTEND never auto-connects: differentiation may change the sites (the picker shows with pre-picks)
-    _setMessageBody(msg, `Connecting **${conv.title || def.name}** — ${seeded.picks.map(([, v]) => v.label).join(' · ')}…`, { markdown: true });
-    _orchFinalize(msg);
+    // DL-1 (v2.74.1608, user directive) — NO "Connecting…" line: the launch page IS the start. The setup bubble
+    // is dropped outright; the auto-connect below is pure spec advancement (no network) — nothing to narrate.
+    try { delete msg.dataset.messageId; } catch { /* */ }
+    try { msg.remove(); } catch { /* */ }
     let autoSpec = _setupState.spec;
     for (const [, pick] of seeded.picks) {
       if (pick && pick.origin) { try { ({ spec: autoSpec } = advanceSetup(autoSpec, { origin: pick.origin, label: pick.label })); } catch { /* */ } }
@@ -2205,7 +2208,7 @@ async function _startSetupFlow({ auto = false } = {}) {
     const { spec: doneSpec, step } = advanceSetup(autoSpec, { done: true });
     _setupState.spec = doneSpec;
     _setupPick = null; _setupCatalog = null;
-    await _bankSetup(step);   // writes the "Connected to …" message + mints the configured def + pins
+    await _bankSetup(step);   // mints the configured def + pins + renders the LAUNCH PAGE (v1602/1608 — no chat chatter at all)
     if (seeded.unresolved.length) _orchFinalize(appendMessage({ role: 'assistant', body: `${seeded.unresolved.join(' / ')} still needs your address — type \`setup\` to add it.` }));
     return;
   }
@@ -2408,29 +2411,13 @@ async function _bankSetup(step) {
     });
     if (def) { await _loadUserCatalog(); _userCatalog = addUserDef(_userCatalog, def); await _saveUserCatalog(); }
   } catch (e) { try { console.warn('[chat] configured-app mint failed:', e?.message); } catch { /* */ } }
-  const where = (cfg.connections && cfg.connections.length)
-    ? cfg.connections.map((c) => `\`${c.label}\``).join(', ')
-    : (cfg.target ? `\`${cfg.target.label}\`` : 'your site');
-  // AS-4 — the "e.g." hint is the app's OWN curated starter (e.g. a support agent → "Show me my open tickets"), then
-  // its object-model noun, then NOTHING — never a misleading generic like "get my open emails" for a non-mail app.
-  const om = typeDef && typeDef.objectModel;
-  const eg = (typeDef && Array.isArray(typeDef.starters) && typeDef.starters.find(Boolean))
-    || (om && om.plural ? `get my ${om.plural}` : '');
-  const _connectMsg = (example) => `**Connected to ${where}.** Now just tell me what to do${example ? ` — e.g. “${example}”` : ''} — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`;
-  _setMessageBody(msg, _connectMsg(eg), { markdown: true });
-  _orchFinalize(msg);
-  // AS-5c (v2.74.1409) — upgrade the example to a DYNAMIC compound instruction grounded in the PICKED sites (async,
-  // non-blocking — the static eg showed instantly). Spans ≥2 of the chosen sites, so the first thing you see is a
-  // concrete cross-site task for THIS domain, not a generic starter. Fails safe to the static example.
-  (async () => {
-    try {
-      const siteLabels = (Array.isArray(cfg.connections) ? cfg.connections : []).map((c) => c && (c.label || c.origin)).filter(Boolean);
-      if (siteLabels.length) {
-        const r = await _orchReq('SUGGEST_SETUP_EXAMPLE', { appName: (conv && conv.title) || (typeDef && typeDef.name) || 'this app', role: (conv && conv.seed) || _currentConversationSeed || '', sites: siteLabels });
-        if (r && r.success !== false && r.example) _setMessageBody(msg, _connectMsg(r.example), { markdown: true });
-      }
-    } catch { /* keep the static example */ }
-  })();
+  // DL-1 (v2.74.1602) — the +desk birth speaks through the LAUNCH PAGE, not chat bubbles (user spec: no
+  // "Connected to …" chatter — the landing's subheader carries the desk + its connections). The setup bubble goes
+  // ephemeral and is dropped; the AS-5c dynamic-example upgrade retired WITH the message it decorated (the
+  // launch page's workflow cards are the quick actions now).
+  try { delete msg.dataset.messageId; } catch { /* */ }
+  try { msg.remove(); } catch { /* */ }
+  try { const _lconv = (await ConversationStore.load(state.convId)) || conv; if (_lconv) void _renderDeskLanding(_lconv); } catch { /* */ }
   // AS-5 (v2.74.1408) — NOW arm the seed (cadence / quota) — deferred from _createAppConversation to here so a
   // scheduled sweep runs over the CONFIRMED site domain, never an empty set (the "seed fired before setup" bug the
   // sites are a seed parameter). Visible: the "sweeping every …" note lands AFTER "Connected to …", in order.
@@ -4169,6 +4156,183 @@ async function _showKeepAlive() {
   _orchFinalize(m);
 }
 function ageWordMs(ms) { const mn = Math.floor(ms / 60e3); if (mn < 1) return 'just now'; if (mn < 60) return `${mn}m ago`; const h = Math.floor(mn / 60); return h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`; }
+
+// ── WW-1 (v2.74.1611, DESIGN_workflow_wizard.md §2) — the ＋ Workflow WIZARD, as a PAGE ─────────────────────────
+// A PAGE on the empty-state surface (like the launch / choose-desk pages — NOT a timeline conversation). The
+// MESSAGE INPUT is the sole text-entry surface (no embedded fields — the setup-flow intercept precedent): a typed
+// message is consumed as the current STEP (or, at the end, the NAME). Per-step loop (§0 ruling 1, empirical):
+// type the step → it RUNS (a real front-door dispatch, sharing ONE chain `st` so step i's read feeds i+1 — §10.B;
+// the result renders IN the page) → the human ✓banks / ✗show-me / ↻retry → then [+ next step] · [Save] · [Cancel].
+// NAMING comes LAST (Save → the input awaits a name). Cancel is guarded. Cadence is WW-2.
+let _wfWizard = null;   // { steps:[{text,provenance}], name, st, tabId, phase, current, runMsg }
+// phase: 'await-step' (input awaits the step) | 'running' | 'ran' (result up, approve/decline) | 'banked' (choices) | 'await-name'
+
+function _wfFreshChainState() {
+  return { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, lastLeg: null, lastReadoutIdx: null, policyConfig: _currentConversationConfig };
+}
+const _wfActive = () => !!_wfWizard;
+const _wfAwaitingInput = () => !!(_wfWizard && (_wfWizard.phase === 'await-step' || _wfWizard.phase === 'await-name'));
+
+function _wfEnterPage() {
+  try { $('messages').classList.add('hidden'); } catch { /* */ }
+  try { $('empty-state').classList.remove('hidden'); } catch { /* */ }
+}
+function _wfExitPage() {
+  _wfWizard = null;
+  try { $('chat-input').placeholder = 'Message'; } catch { /* */ }
+  // restore the surface: an active desk conversation shows its thread; otherwise the front/launch page.
+  try {
+    if (_currentConversationId && ($('messages').childElementCount > 0)) { $('empty-state').classList.add('hidden'); $('messages').classList.remove('hidden'); }
+    else { void renderSuggestionCards(); }
+  } catch { /* */ }
+}
+
+async function _startWorkflowWizard() {
+  if (!_memoryId()) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a desk first — workflows are saved per desk.'); _orchFinalize(m); return; }
+  _dismissDeskLanding();
+  const tab = await _orchActiveTab();
+  _wfWizard = { steps: [], name: '', st: _wfFreshChainState(), tabId: (tab && typeof tab.id === 'number') ? tab.id : null, phase: 'await-step', current: null, runMsg: null };
+  _wfEnterPage();
+  _wfRenderPage();
+}
+
+// The page renderer — one surface, re-rendered per phase. The message input carries all free text (§ user rule 3).
+function _wfRenderPage() {
+  const w = _wfWizard; if (!w) return;
+  // v2.74.1615 — the renderer ASSERTS its surface (the v1608 landing lesson): every appendMessage on the current
+  // conversation calls _enterConversation(), which hides #empty-state — so a run's appendMessage flipped the user
+  // to the thread and the 'ran' render then pulled the run message OUT of it into the hidden page → a blank thread
+  // (the live "step 1 runs, then blank page"). Rendering the page MEANS the page is the surface.
+  _wfEnterPage();
+  const host = $('empty-state') && $('empty-state').querySelector('.empty-state-content'); if (!host) return;
+  host.innerHTML = '';
+  const page = document.createElement('div'); page.className = 'wf-page';
+  const n = w.steps.length;
+  const title = document.createElement('div'); title.className = 'wf-page-title'; title.textContent = 'Workflow builder';
+  page.appendChild(title);
+  // the banked-steps ledger (what's proven so far)
+  if (n) {
+    const list = document.createElement('div'); list.className = 'wf-page-steps';
+    w.steps.forEach((s, i) => { const row = document.createElement('div'); row.className = 'wf-page-step'; row.textContent = `✓ ${i + 1}. ${s.text}`; list.appendChild(row); });
+    page.appendChild(list);
+  }
+  const status = document.createElement('div'); status.className = 'wf-page-status';
+  const bar = document.createElement('div'); bar.className = 'wf-page-bar';
+  const mkPageBtn = (label, on, primary) => { const b = document.createElement('button'); b.className = `suggestion-card wf-page-btn${primary ? ' wf-primary' : ''}`; b.innerHTML = `<div class="suggestion-card-name">${escHtml(label)}</div>`; b.addEventListener('click', on); bar.appendChild(b); };
+
+  if (w.phase === 'await-step') {
+    status.innerHTML = `<div class="wf-page-sub">${n ? `Step ${n + 1}` : 'First step'} — type what this step should do in the message box below, then send. One step = one result you can look at and approve.</div>`;
+    try { $('chat-input').placeholder = n ? 'Type the next step…' : 'Type the first step…'; $('chat-input').focus(); } catch { /* */ }
+    mkPageBtn('Cancel', () => _wfCancel());
+  } else if (w.phase === 'running' || w.phase === 'ran') {
+    status.innerHTML = (w.phase === 'running')
+      ? `<div class="wf-page-sub">Running “${escHtml((w.current && w.current.text) || '')}”…</div>`
+      : `<div class="wf-page-sub">Ran “${escHtml((w.current && w.current.text) || '')}”. Does the result below look right?</div>`;
+    page.appendChild(status);
+    // v1615 — the run message re-parents into the page at 'running' ALREADY (not just 'ran'), so the live stream
+    // renders IN the page and the end-of-run render never yanks it out of a visible thread.
+    if (w.runMsg) { const slot = document.createElement('div'); slot.className = 'wf-result'; try { slot.appendChild(w.runMsg); } catch { /* */ } page.appendChild(slot); }
+    if (w.phase === 'ran') {
+      mkPageBtn('✓ Looks right', () => _wfBank(), true);
+      mkPageBtn('✗ Not right — show me', () => _wfShowMe());
+      mkPageBtn('↻ Retry', () => { w.phase = 'await-step'; w.current = null; w.runMsg = null; _wfRenderPage(); });
+    }
+    page.appendChild(bar);
+    host.appendChild(page);
+    return;   // this branch appends status + result + bar itself (the result slot goes between)
+  } else if (w.phase === 'banked') {
+    status.innerHTML = `<div class="wf-page-sub">${n} step${n === 1 ? '' : 's'} banked. Add another, or save the workflow.</div>`;
+    mkPageBtn('＋ Add next step', () => { w.phase = 'await-step'; _wfRenderPage(); }, true);
+    mkPageBtn('Save workflow', () => _wfSaveStart());
+    mkPageBtn('Cancel', () => _wfCancel());
+  } else if (w.phase === 'await-name') {
+    status.innerHTML = `<div class="wf-page-sub">Name this workflow — type a short name in the message box, then send. It’ll appear as a card on your launch page.</div>`;
+    try { $('chat-input').placeholder = 'Name this workflow…'; $('chat-input').focus(); } catch { /* */ }
+    mkPageBtn('← Back', () => { w.phase = 'banked'; _wfRenderPage(); });
+    mkPageBtn('Cancel', () => _wfCancel());
+  }
+  page.appendChild(status);
+  page.appendChild(bar);
+  host.appendChild(page);
+}
+
+// The message-input intercept target: a typed message while the wizard is awaiting is a STEP or the NAME.
+async function _wfConsumeInput(text) {
+  const w = _wfWizard; if (!w) return;
+  const t = String(text || '').trim();
+  if (w.phase === 'await-name') { if (t) { w.name = t; } await _wfDoSave(); return; }
+  if (w.phase === 'await-step') { if (!t) { _wfRenderPage(); return; } await _wfRunStep(t); return; }
+  _wfRenderPage();
+}
+
+// Run the current step through the NORMAL front door, sharing the chain st; re-parent the result into the page.
+async function _wfRunStep(stepText) {
+  const w = _wfWizard; if (!w) return;
+  w.current = { text: stepText, provenance: null };
+  // v1615 order matters: appendMessage FIRST (its _enterConversation() flips the surface to the thread), THEN the
+  // 'running' render — which re-asserts the page AND re-parents the run message into it, so the user watches the
+  // step stream inside the page instead of the thread (the pre-1615 flow left them in the thread and the 'ran'
+  // render emptied it — the "blank page" live bug).
+  const runMsg = appendMessage({ role: 'assistant', body: '' });
+  try { delete runMsg.dataset.messageId; } catch { /* transient — a wizard run isn't desk conversation */ }
+  w.runMsg = runMsg;
+  w.phase = 'running'; _wfRenderPage();
+  try { await _orchRunChain(runMsg, { tabId: w.tabId, clauses: [{ text: stepText }], firstMatch: null, ask: stepText, state: w.st }); }
+  catch (e) { try { _setMessageBody(runMsg, `That step couldn’t run — ${_errWord(e && e.message)}.`); } catch { /* */ } }
+  const ran = (w.st.ranSteps || [])[(w.st.ranSteps || []).length - 1] || null;   // §11 — provenance is DISPLAY only
+  w.current.provenance = stepProvenance(ran, stepText, '', Date.now());
+  w.phase = 'ran'; _wfRenderPage();
+}
+
+function _wfBank() {
+  const w = _wfWizard; if (!w || !w.current) return;
+  w.steps.push({ text: w.current.text, provenance: w.current.provenance });
+  w.current = null; w.runMsg = null;
+  w.phase = 'banked'; _wfRenderPage();
+}
+
+function _wfShowMe() {
+  const w = _wfWizard; if (!w || !w.current) return;
+  const gid = w.st.chainGroundId || null;
+  if (!gid) { const status = $('empty-state').querySelector('.wf-page-sub'); if (status) status.textContent = 'To teach this step I need to be on its site — open it in a tab, then ↻ Retry.'; return; }
+  // Demonstrate on the ground (drive + ride capture); on bank, retry the same step for a fresh result.
+  const demoMsg = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(demoMsg, `Show me how “${w.current.text}” should work — I’ll capture it, then you can re-run the step.`, { markdown: true });
+  _wfEnterPageShowDemo(demoMsg);
+  _orchOfferRecord(demoMsg, { groundId: gid, tabId: w.tabId, ask: w.current.text, label: '● Show me this step', onAuthored: () => { const ww = _wfWizard; if (ww) { ww.phase = 'await-step'; ww.current = null; ww.runMsg = null; _wfEnterPage(); _wfRenderPage(); } } });
+}
+// The demo needs the conversation surface (the recorder renders there); show it, keep the wizard state to resume.
+function _wfEnterPageShowDemo(demoMsg) {
+  try { $('empty-state').classList.add('hidden'); $('messages').classList.remove('hidden'); } catch { /* */ }
+  try { const c = $('thread'); if (c) c.scrollTop = c.scrollHeight; } catch { /* */ }
+}
+
+function _wfSaveStart() {
+  const w = _wfWizard; if (!w) return;
+  if (w.steps.length < 2) { const status = $('empty-state').querySelector('.wf-page-sub'); if (status) status.textContent = 'A workflow needs at least 2 steps — add another before saving.'; return; }
+  w.phase = 'await-name'; _wfRenderPage();
+}
+
+async function _wfDoSave() {
+  const w = _wfWizard; if (!w) return;
+  const payload = buildWorkflowSave({ ask: w.name, name: w.name, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
+  if (!payload) { w.phase = 'banked'; _wfRenderPage(); return; }
+  let ok = false;
+  try { const list = await saveWorkflow(_memoryId(), payload); ok = Array.isArray(list) && list.some((x) => x && x.contentId === workflowId(payload.ask, payload.subAsks)); } catch { /* */ }
+  // append the confirmation FIRST (so #messages is non-empty), THEN exit — else _wfExitPage would render the front
+  // page over an empty thread and the confirmation would land in a hidden surface.
+  const done = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now, click it to run.` : 'Couldn’t save the workflow — try again.', { markdown: true });
+  _orchFinalize(done);
+  _wfExitPage();
+}
+
+function _wfCancel() {
+  const w = _wfWizard; if (!w) return;
+  const built = w.steps.length > 0 || (w.current && w.current.text);
+  if (built && !confirm('Discard this workflow? The steps you’ve built won’t be saved.')) return;
+  _wfExitPage();
+}
 
 // admin tab (T4 verification). A session-ride write replays only once its per-store hash is banked — so this is how
 // you confirm "do it once by hand" worked before trying the write.
@@ -8184,6 +8348,11 @@ async function sendChatMessage() {
   // sent. Intercepts add REPLIES — never the echo, never the clear. (The `seed:` flow deliberately REFILLS the
   // composer after this; the default door still owns its dataset/placeholder/button bookkeeping.)
   input.value = ''; _autosizeInput();
+  // WW-1 (v2.74.1611) — the ＋ Workflow wizard PAGE owns the input while awaiting a step / the name (the setup-flow
+  // precedent). Consumed here, BEFORE the entry echo, so a step/name is NOT persisted as a conversation bubble
+  // (the wizard is a page, not a timeline — user rule 1/3). The run it triggers renders inside the page.
+  if (_wfAwaitingInput()) { void _wfConsumeInput(text); return; }
+  _dismissDeskLanding();   // DL-1 (v2.74.1609, user directive) — the launch page is NOT part of the conversation: the first ask retires it
   appendMessage({ role: 'user', body: text });
 
   // v2.74.1029 — DEV CONVERSATION: every typed message routes straight to the Claude Code bridge (no `dev:`
@@ -8586,6 +8755,11 @@ async function sendChatMessage() {
     // KA-1 (v2.74.1599) — the keep-alive picker: per-connection opt-in, learned windows shown honestly.
     if (/^keep[-\s]?alives?\s*$/i.test(text)) {
       await _showKeepAlive();
+      return;
+    }
+    // WW-1 (v2.74.1610) — the ＋ Workflow wizard (also on the launch page's ＋ Workflow card).
+    if (/^(?:new|add|create|build)\s+workflow\s*$/i.test(text)) {
+      await _startWorkflowWizard();
       return;
     }
     if (/^show(\s+(me|the|it|tickets?|items?|sources?|profile|customer|order|orders|record|page))*\s*$/i.test(text) && _memoryId()) {
@@ -10352,9 +10526,9 @@ async function _rehydrateConversation(conv) {
   // DK-8 (v2.74.1491) — opening a desk fires its DUE routine (the v1 fire model: the alarm marked due in the SW;
   // the ask runs here where the full pipeline lives). Non-blocking; a non-desk conversation no-ops inside.
   void _maybeFireDueRoutine();
-  // DL-1 (v2.74.1600) — the desk LAUNCH page: a fresh desk (no operator asks yet) opens to a welcome head +
-  // PROVEN quick-action cards. PREPENDED, so on the Admin desk the order is head → actions → the (rehydrated /
-  // upserted) vitals card — the required "vitals after the workflows".
+  // DL-1 (v2.74.1601) — the desk LAUNCH page on the reopen-while-fresh path (a desk not yet asked anything;
+  // Admin after first launch / history delete). Appended at the BOTTOM — where the open lands — with the Admin
+  // vitals card moved below it (the required "vitals after the workflows").
   void _renderDeskLanding(conv);
   // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — vitals authority lives in the ADMIN DESK: it renders the full
   // vitals card + incident cards; the Front desk shows at most ONE attention chip; other desks a pointer.
@@ -10363,36 +10537,45 @@ async function _rehydrateConversation(conv) {
   void _maybeWarnDeskConnections();   // any other desk → a dependency POINTER (no duplicate report surface)
 }
 
-// ── DL-1 (v2.74.1600) — the desk LAUNCH page ──────────────────────────────────────────────────────────────────────
-// Renders on a FRESH desk open (an app conversation or the Admin desk with no user-role messages yet): the welcome
-// head (name + role message + description) and quick-action cards from PROVEN sources only — this desk's saved
-// workflows (replayed through the SAME chain runner as the `workflows` view's ▶ Run) and the alias ledger's tested
-// asks (fill-and-send through the normal front door — invariant #4 claims at entry). The Admin desk appends its
-// three operator commands and keeps the vitals card BELOW (prepend + vitalsAfter). Transient DOM — the next
-// rehydrate clears #messages, and the first operator ask retires the launch state naturally.
+// DL-1 (v2.74.1609) — the launch page is a PAGE, not a message: it leaves the moment the conversation begins
+// (the send entry + the page's own action cards call this; the Admin vitals card is part of the page's own
+// composition and never dismisses it).
+function _dismissDeskLanding() {
+  try { document.querySelectorAll('#messages .desk-landing').forEach((el) => el.remove()); } catch { /* */ }
+}
+
+// ── DL-1 (v2.74.1600, corrected v1601) — the desk LAUNCH page ─────────────────────────────────────────────────────
+// The LAUNCH state (user-specified): a work desk shows it when INITIALLY opened — the +desk birth moment and any
+// reopen before its first operator ask; Admin (and Front, which has its own empty state) show it when the app is
+// first launched or after history is deleted — which IS the same condition: no user-role messages yet. Renders the
+// welcome head (name + role message + description) and quick-action cards from PROVEN sources only — this desk's
+// saved workflows (replayed through the SAME chain runner as the `workflows` view's ▶ Run) and the alias ledger's
+// tested asks (fill-and-send through the normal front door — invariant #4 claims at entry). The Admin desk appends
+// its three operator commands and keeps the vitals card BELOW. APPENDED at the bottom, where the open lands
+// (v1600 prepended — hidden under the scroll-to-bottom). Transient DOM; the first operator ask retires it.
 async function _renderDeskLanding(conv) {
   try {
     const isAdmin = !!conv && conv.id === ADMIN_ID;
     if (!conv || conv.kind === 'dev') return;
     if (!isAdmin && !(conv.appId && !conv.parentId)) return;
-    if ((conv.messages || []).some((m) => m && m.role === 'user')) return;   // launch state only
+    if ((conv.messages || []).some((m) => m && m.role === 'user')) return;   // the launch state ends at the first operator ask
     let workflows = [];
     if (!isAdmin) { try { workflows = (await _loadWorkflowsMerged()) || []; } catch { workflows = []; } }
-    let aliases = [];
-    try { const got = await chrome.storage.local.get('connector:aliases'); aliases = Array.isArray(got['connector:aliases']) ? got['connector:aliases'] : []; } catch { /* */ }
     const def = (() => { try { return builtinApp(conv.presetId || conv.appId) || null; } catch { return null; } })();
     const spec = buildDeskLanding({
       title: conv.title || (def && def.name) || '',
       description: (def && def.description) || '',
-      isAdmin, workflows, aliases,
-      deskHosts: _boundConnections().map((c) => c && c.origin).filter(Boolean),
+      isAdmin, workflows,
+      connections: _boundConnections().map((c) => (c && (c.label || c.origin)) || '').filter(Boolean),
     });
     if (String(_currentConversationId || '') !== String(conv.id)) return;   // the user moved on while we read
     const wrap = document.createElement('div');
     wrap.className = 'desk-landing';
+    // v1602 — the page shape (user spec): a WELCOME greeting header, then ONE real subheader describing the desk
+    // including its connections (no "Connected to…" chat bubbles, no muted fine print).
     wrap.innerHTML = `<div class="desk-landing-title">${escHtml(spec.heading)}</div>`
-      + `<div class="desk-landing-msg">${escHtml(spec.message)}</div>`
-      + (spec.sub ? `<div class="desk-landing-sub">${escHtml(spec.sub)}</div>` : '');
+      + (spec.sub ? `<div class="desk-landing-sub">${escHtml(spec.sub)}</div>` : '')
+      + (spec.connections ? `<div class="desk-landing-conn">${escHtml(spec.connections)}</div>` : '');
     if (spec.cards.length) {
       const grid = document.createElement('div');
       grid.className = 'desk-landing-cards';
@@ -10401,11 +10584,14 @@ async function _renderDeskLanding(conv) {
         b.className = 'suggestion-card';
         b.innerHTML = `<div class="suggestion-card-name">${c.kind === 'workflow' ? '▶ ' : ''}${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
         b.addEventListener('click', async () => {
+          _dismissDeskLanding();   // v1609 — acting from the page BEGINS the conversation; the page leaves (fill+send kinds also hit the send-entry dismiss)
           if (c.kind === 'workflow') {
             const wf = c.wf || {};
             const tab = await _orchActiveTab();
             bumpWorkflowRun(wf.appId || _memoryId(), wf.id).catch(() => {});
             _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: (wf.subAsks || []).map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });
+          } else if (c.kind === 'new-workflow') {
+            void _startWorkflowWizard();   // WW-1 (v2.74.1610) — the ＋ Workflow card opens the wizard (capture → qualify → save)
           } else if (c.kind === 'command' && c.command === 'check-now') {
             const mm = appendMessage({ role: 'assistant', body: '' });
             _setMessageBody(mm, 'Checking… (probing sessions + running due canaries — this can take a minute)');
@@ -10415,7 +10601,7 @@ async function _renderDeskLanding(conv) {
             void _maybeRenderAdminDesk();
           } else {
             const inp = $('chat-input');
-            if (inp) { inp.value = c.kind === 'command' ? c.command : c.ask; void sendChatMessage(); }
+            if (inp) { inp.value = c.command; void sendChatMessage(); }
           }
         });
         grid.appendChild(b);
@@ -10425,7 +10611,16 @@ async function _renderDeskLanding(conv) {
     const cont = $('messages');
     if (cont) {
       try { cont.querySelectorAll('.desk-landing').forEach((el) => el.remove()); } catch { /* re-render replaces, never stacks */ }
-      cont.prepend(wrap);
+      cont.appendChild(wrap);   // v1601 — the BOTTOM is where the open lands (sticky-follow keeps it in view)
+      // v1608 — the landing IS the surface: with the setup chatter gone, nothing else flips the view on the
+      // +desk birth path — ensure it shows. (Unlike the v1607 status-chip rule: this is the page, not a decoration.)
+      if (cont.classList.contains('hidden')) _enterConversation();
+      // v1601 — the Admin ordering: the vitals card sits BELOW the action cards. The card may already exist
+      // (rehydrated above) or get appended by _maybeRenderAdminDesk in either async order — moving it after the
+      // landing converges every ordering (an update-in-place keeps the moved position).
+      if (isAdmin) {
+        try { const vc = cont.querySelector('.message[data-message-id="vitals_card"]'); if (vc) cont.appendChild(vc); } catch { /* */ }
+      }
     }
   } catch { /* the landing is an enhancement — never break the open */ }
 }
@@ -10552,7 +10747,12 @@ async function _maybeRenderConnCard() {
   if (!open) { try { if (existing) existing.remove(); } catch { /* */ } return; }
   const body = `⚠ ${open} thing${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention (sign-ins / drifted reads) — see the Admin desk.`;
   if (existing) { _setMessageBody(existing, body); return; }
-  if ($('messages') && $('messages').classList.contains('hidden')) _enterConversation();
+  // DL-1 (v2.74.1607, user directive) — the LAUNCH PAGE carries no attention chip: while the empty state is
+  // showing (Front page / gallery / dev hint), the chip WAITS — the Rail's Admin ⚠ badge is the ambient signal.
+  // It joins the THREAD once the conversation has begun. Never _enterConversation() for a status line (the
+  // v1604 lesson: one ⚠ chip ejected the whole launch page); the v1604-06 render-into-the-page experiment is
+  // retired outright.
+  if ($('messages') && $('messages').classList.contains('hidden')) return;
   const msg = appendMessage({ role: 'assistant', body });
   try { delete msg.dataset.messageId; } catch { /* */ }   // ephemeral — the incident store is the durable record
   msg.dataset.vtChip = '1';
