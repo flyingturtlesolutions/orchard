@@ -24,6 +24,13 @@ const SYSTEM = [
   '- "act": run a saved capability (set "capabilityId" to a catalog ref) or a primitive (set "op", e.g. CLICK/TYPE).',
   '- "navigate": go to a site by world knowledge (set params.url to a full https:// URL).',
   '- "decompose": the ask is several distinct steps (set "subAsks": [..], two or more).',
+  '- "map": a PER-ITEM CROSS-SYSTEM lookup — "for each <item> of a list, look it up / read it on ANOTHER system using',
+  '  a FIELD of the item" (e.g. "for each open warranty task, look up its homeowner in Shopify"). Set "map":',
+  '  {"collection":"<the read that produces the list, e.g. get all open warranty tasks>","itemField":"<the field to',
+  '  pull per row, e.g. homeowner email>","target":{"system":"<the other system, e.g. shopify>","readAsk":"<the',
+  '  per-item read templated on the value, e.g. search Shopify for {value}>"},"join":"table"}. Use {value} as the',
+  '  placeholder for the pulled field. Choose "map" ONLY for a cross-system per-item lookup; a per-item action on the',
+  '  SAME system, or spawning a case per item, is "decompose". A map is READS only — never a per-item write.',
   '- "clarify": you genuinely cannot tell what ACTION is wanted — a malformed/garbled command or an unclear target.',
   '  ASK instead of guessing (set "question"). NOT for a question you could simply answer.',
   '- "teach": the ask needs a capability not in the catalog and not a primitive — offer to be shown.',
@@ -80,8 +87,8 @@ const SYSTEM = [
   '- A param typed (date-time) MUST be a CONCRETE ISO 8601 timestamp (e.g. 2026-07-02T15:00:00) in the user\'s',
   '  timezone — resolve relative times ("tomorrow 3pm") against the NOW line; NEVER emit relative text as a value.',
   '- Reply with ONLY a JSON object:',
-  '  {"intent":"act|navigate|decompose|clarify|teach|answer","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
-  '   "params":{..},"subAsks":[..],"question":"..","confidence":0..1,"why":"short"}',
+  '  {"intent":"act|navigate|decompose|clarify|teach|answer|map","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
+  '   "params":{..},"subAsks":[..],"map":{..?},"question":"..","confidence":0..1,"why":"short"}',
 ].join('\n');
 
 /**
@@ -189,6 +196,7 @@ export function parseInterpretOutput(raw) {
     op: typeof obj.op === 'string' ? obj.op.trim() : '',
     params: (obj.params && typeof obj.params === 'object') ? obj.params : {},
     subAsks: Array.isArray(obj.subAsks) ? obj.subAsks.map(String).filter(Boolean) : [],
+    map: (obj.map && typeof obj.map === 'object') ? obj.map : null,   // PM-1 — the per-item cross-system MAP clause (interpret.js normalizes it)
     question: typeof obj.question === 'string' ? obj.question.trim() : '',
     confidence: _clamp01(obj.confidence),
     why: typeof obj.why === 'string' ? obj.why.slice(0, 200) : (typeof obj.reason === 'string' ? obj.reason.slice(0, 200) : ''),

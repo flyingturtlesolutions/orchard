@@ -52,7 +52,7 @@ import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 �
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags } from './Core/connectorRender.js';   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
@@ -71,6 +71,7 @@ import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowShares
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
+import { pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults } from './Core/peritemMap.js';   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -3634,6 +3635,114 @@ function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
   cancel.addEventListener('click', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); });
 }
 
+// ── PM-2/PM-3 (v2.74.1625, DESIGN_peritem_map.md) — the per-item CROSS-SYSTEM MAP executor (#2) ────────────────
+// "for each row of a list, pull a FIELD, run a read on ANOTHER system keyed on it, join back." The RIDE_EACH shape
+// generalized: N values from a PIPED FIELD (not a param domain), a leg on ANOTHER ground. Interpret ONCE (the leg +
+// which param takes the value), then N DETERMINISTIC invokes (no per-item LLM — the cost + privacy property).
+const _MAP_WINDOW = 24;   // the per-map cap (RIDE_EACH-class); user-overridable via map.cap. Honest when it bites.
+const _MAP_SENTINEL = 'MAPQ7VALUEZ';   // a findable probe value → identifies WHICH target param takes the piped field
+
+// Interpret the target read ONCE → { leg, valueParam, baseParams, groundId } or { leg:null, why }. The `{value}`
+// placeholder (PM-1 templates it) becomes a sentinel so we learn which param carries the piped field; no `{value}`
+// → the sentinel is appended and the value-param falls back to the first string param the leg bound.
+async function _mapResolveTarget(readAsk, tabId) {
+  const probe = /\{value\}/i.test(readAsk) ? readAsk.replace(/\{value\}/gi, _MAP_SENTINEL) : `${readAsk} ${_MAP_SENTINEL}`;
+  let raw = null; let retrieved = []; let groundId = null;
+  try {
+    const r = await _orchReq('INTERPRET_ASK', { ask: probe, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
+    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
+  } catch { return { leg: null, why: 'interpret-failed' }; }
+  const d = raw ? applyConfidenceGate(normalizeInterpretDecision(raw, { retrieved }), { minConfidence: 0.6 }) : null;
+  if (!d || d.intent !== 'act' || !d.capabilityId) return { leg: null, why: (d && d.why) || 'no-target-leg' };
+  const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
+  if (!leg) return { leg: null, why: 'no-target-leg' };
+  if (leg.mode !== 'ask' || (leg.tool && leg.tool.write)) return { leg: null, why: 'target-is-write', write: true };   // §6 — v1 map is READS ONLY
+  const params = coerceParams(d.params || {}, leg.paramSchema);
+  let valueParam = Object.keys(params).find((k) => String(params[k] ?? '').includes(_MAP_SENTINEL))
+    || Object.keys(params).find((k) => typeof params[k] === 'string');   // fallback: the first string param
+  if (!valueParam) return { leg: null, why: 'no-value-param' };
+  const baseParams = { ...params }; delete baseParams[valueParam];
+  return { leg, valueParam, baseParams, groundId };
+}
+
+// The executor. `priorValue` (a chain's st.lastValue) is the collection when map.collection==='prior'; else the
+// self-contained collection.readAsk is read here. Returns { ok, joined } (joined → st.lastValue for composition).
+async function _runMapClause(msg, map, { tabId, priorValue = null, goal = '' } = {}) {
+  const system = map.target.system;
+  _walkAbortFlag.requested = false;   // v1625 — a FRESH top-level run clears a stale stop (the _orchRunChain rule); PM-5 chain entry will pass state instead
+  _ilBusy(msg, true);   // the glyph thinks through the read + the N lookups
+  // 1) the COLLECTION — the piped prior read, or a self-contained read (the v1545 pattern).
+  let rows = [];
+  if (map.collection === 'prior' && priorValue != null) rows = primaryList(priorValue) || [];
+  else {
+    const readAsk = (map.collection && map.collection.readAsk) || goal;
+    _setMessageBody(msg, `Reading the list to map…`);
+    const cr = await _chainConnectorRun(readAsk, { tabId, onEach: (n, t, label) => { try { _setMessageBody(msg, `Reading the list… ${n}/${t} (${label})`); } catch { /* */ } } });
+    if (!cr || !cr.ok) { _setMessageBody(msg, `Couldn’t read the list to map over${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr && cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return { ok: false }; }
+    rows = primaryList(cr.value) || [];
+  }
+  if (!rows.length) { _setMessageBody(msg, 'Nothing to map over — the list came back empty. If a filter got guessed wrong, name it.'); _orchFinalize(msg); return { ok: false }; }
+  // 2) the FIELD — deterministic path resolution; a miss asks honestly (never a per-row guess).
+  const fp = pickFieldPath(rows, map.itemField);
+  if (!fp) {
+    const fields = Object.keys(rows.find((r) => r && typeof r === 'object') || {}).slice(0, 10).join(', ');
+    _setMessageBody(msg, `I read ${rows.length} row${rows.length === 1 ? '' : 's'}, but couldn’t find a “${map.itemField}” field to look up.${fields ? `  The fields I see: ${fields}.` : ''}  Name the exact field and I’ll map it.`);
+    _orchFinalize(msg); return { ok: false };
+  }
+  // 3) the TARGET LEG — interpret ONCE.
+  _setMessageBody(msg, `Finding the ${escHtml(system)} lookup…`);
+  const tgt = await _mapResolveTarget(map.target.readAsk, tabId);
+  if (!tgt.leg) {
+    // PM-3 (§7.1) — the honest GAP: the front door already knows it can't; SAY so (was buried in the trace).
+    const body = tgt.write
+      ? `That would write to ${escHtml(system)} once per item — I don’t run bulk writes unattended. Do the first by hand and I’ll capture it, or run it per record with a confirm.`
+      : `I can list them, but I don’t have a ${escHtml(system)} lookup wired yet. Connect ${escHtml(system)}, or show me the lookup once and I’ll map the rest.`;
+    _setMessageBody(msg, body); _orchFinalize(msg);
+    try { _orchLog(`MAP ▸ gap — no target leg for "${String(map.target.readAsk).slice(0, 40)}" on ${system} (${tgt.why || 'absent'})`); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+  // 4) per-row INVOKE — deterministic, capped, abort-aware. No LLM per row (the value threads into a param).
+  const cap = Math.max(1, Math.min(map.cap || _MAP_WINDOW, rows.length));
+  const capped = rows.length > cap;
+  const use = rows.slice(0, cap);
+  const results = [];
+  for (let i = 0; i < use.length; i++) {
+    if (_walkAbortFlag.requested) break;
+    const value = extractValue(use[i], fp.path);
+    if (value == null) { results.push({ value: null }); continue; }
+    _setMessageBody(msg, `Looking up in ${escHtml(system)}… ${i + 1}/${use.length}`);
+    let r = null;
+    try { r = await _runConnectorLeg(tgt.leg, { ...tgt.baseParams, [tgt.valueParam]: value }, { tabId, groundId: tgt.groundId }); } catch (e) { r = { ok: false, error: e && e.message }; }
+    const match = (r && r.ok) ? (primaryObject(r.value) || (primaryList(r.value) || [])[0] || null) : null;
+    results.push({ value, ok: !!(r && r.ok), match, error: r && r.error });
+  }
+  // 5) JOIN + render + set lastValue (compose).
+  const identify = (row) => { const it = summarizeItem(row, { displayId: null }); return { id: it.id, label: it.title || itemFields(row, { max: 2 }).map(([, v]) => v).join(' · ') || 'item' }; };
+  const joined = buildJoinRows(use, results, { join: map.join, identify, system });
+  const counts = tallyResults(results);
+  const tally = mapTally({ ...counts, capped }, { system });
+  try { _orchLog(`MAP ▸ ${counts.total} × ${system} lookup keyed on "${fp.path}" (${fp.matchedBy}) → ${counts.matched} matched, ${counts.noMatch} no-match, ${counts.noField} no-field, ${counts.failed} failed${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
+  if (map.join === 'table') {
+    const lines = [tally, ...joined.map((j) => {
+      const src = `${j.source.id != null ? `#${j.source.id} ` : ''}${j.source.label}`.trim();
+      const m = j.matched ? `→ ${_mapMatchLabel(j.match)}` : (j.value == null ? '— no value' : (j.via.error ? `— ${_errWord(j.via.error)}` : '— no match'));
+      return `• ${src} ${m}`;
+    })];
+    _setMessageBody(msg, lines.join('\n'));
+  } else {
+    _setMessageBody(msg, `${tally}  (attached to each row — ask to open or summarize them.)`);
+  }
+  _orchFinalize(msg);
+  return { ok: true, joined };
+}
+
+// A matched record's short label for the join line (the other system's identity). PURE-ish (uses summarizeItem).
+function _mapMatchLabel(match) {
+  if (!match || typeof match !== 'object') return 'match';
+  const it = summarizeItem(match);
+  return `${it.title || it.id || 'match'}${it.status ? ` (${it.status})` : ''}`.trim();
+}
+
 // CX-4d — run a session-ride connector leg → {ok, value, error, hint}. The lean primitive shared by the chain
 // runner's connector-clause path, the sub-task (case) workers, and any caller that needs the STRUCTURED result.
 // DK-8b (v2.74.1493) — the ID LAYER runs on THIS path too (the live http-400: a chain clause dispatched
@@ -4305,18 +4414,26 @@ function _wfRenderPage() {
     try { $('chat-input').placeholder = n ? 'Type the next step…' : 'Type the first step…'; $('chat-input').focus(); } catch { /* */ }
     mkPageBtn('Cancel', () => _wfCancel());
   } else if (w.phase === 'running' || w.phase === 'ran') {
-    const _missed = (w.phase === 'ran' && w.current && w.current.engaged === false);   // v1616 — no ranStep = never ran
+    const _transient = (w.phase === 'ran' && w.current && w.current.transient === true);   // v1624 — a signed-out (auth) stop: sign in + retry, never teach
+    const _missed = (w.phase === 'ran' && w.current && w.current.engaged === false && !_transient);   // v1616 — no ranStep = never ran (excluding the transient case)
     status.innerHTML = (w.phase === 'running')
       ? `<div class="wf-page-sub">Running “${escHtml((w.current && w.current.text) || '')}”…</div>`
-      : _missed
-        ? '<div class="wf-page-sub">That step couldn’t run — the note below says why. Teach it with a quick demo, run it again, or change the step.</div>'
-        : `<div class="wf-page-sub">Ran “${escHtml((w.current && w.current.text) || '')}”. Does the result below look right?</div>`;
+      : _transient
+        ? '<div class="wf-page-sub">This step needs you signed in — use the sign-in button below, then run it again.</div>'
+        : _missed
+          ? '<div class="wf-page-sub">That step couldn’t run — the note below says why. Teach it with a quick demo, run it again, or change the step.</div>'
+          : `<div class="wf-page-sub">Ran “${escHtml((w.current && w.current.text) || '')}”. Does the result below look right?</div>`;
     page.appendChild(status);
     // v1615 — the run message re-parents into the page at 'running' ALREADY (not just 'ran'), so the live stream
     // renders IN the page and the end-of-run render never yanks it out of a visible thread.
     if (w.runMsg) { const slot = document.createElement('div'); slot.className = 'wf-result'; try { slot.appendChild(w.runMsg); } catch { /* */ } page.appendChild(slot); }
     if (w.phase === 'ran') {
-      if (_missed) {
+      if (_transient) {
+        // v1624 — a transient auth stop: the chain's Sign-in + ↻ Try again bar rides IN the result above (its retry
+        // re-runs THIS step now, v1624). The wizard adds only a change-the-step escape — never a "show me" (nothing
+        // to teach; the session is the blocker).
+        mkPageBtn('✎ Change the step', () => { w.phase = 'await-step'; w.current = null; w.runMsg = null; _wfRenderPage(); });
+      } else if (_missed) {
         // §3 — an unengaged step has no result to judge: the wizard's OWN teach door (the chain's inline offer is
         // off under offers:false — its resume seam would continue in the thread and strand this page).
         mkPageBtn('● Show me this step', () => _wfShowMe(), true);
@@ -4374,7 +4491,10 @@ async function _wfRunStep(stepText) {
   // an unengaged step has no result to approve (§3: teach / retry / rephrase, never ✓).
   const _ranBefore = (w.st.ranSteps || []).length;
   const _outsBefore = (w.st.readouts || []).length;
-  try { await _orchRunChain(runMsg, { tabId: w.tabId, clauses: [{ text: stepText }], firstMatch: null, ask: stepText, state: w.st, offers: false }); }
+  w.st.lastAuthStop = null;   // v1624 — clear the transient marker; only THIS run's signed-out branch re-sets it
+  // v1624 — a signed-out step's "↻ Try again" (the chain's sign-in bar, which rides into this page) re-runs the
+  // STEP through the wizard instead of firing a fresh front-door ask (the "retries out of the wizard" bug).
+  try { await _orchRunChain(runMsg, { tabId: w.tabId, clauses: [{ text: stepText }], firstMatch: null, ask: stepText, state: w.st, offers: false, onRetry: () => { void _wfRunStep(stepText); } }); }
   catch (e) { try { _setMessageBody(runMsg, `That step couldn’t run — ${_errWord(e && e.message)}.`); } catch { /* */ } }
   const _engaged = ((w.st.ranSteps || []).length > _ranBefore);
   // §11 — provenance is DISPLAY only; v1616 — and only THIS step's entry (a miss must not inherit the prior
@@ -4382,6 +4502,7 @@ async function _wfRunStep(stepText) {
   const ran = _engaged ? ((w.st.ranSteps || [])[(w.st.ranSteps || []).length - 1] || null) : null;
   w.current.provenance = stepProvenance(ran, stepText, '', Date.now());
   w.current.engaged = _engaged;
+  w.current.transient = !_engaged && !!w.st.lastAuthStop;   // v1624 — signed-out ≠ can't-engage: a transient auth stop wants Sign-in + Retry, never "show me"
   // v1616 — the page shows THIS step's output: the chain's completion render joins the WHOLE shared st.readouts
   // (right for an organic one-message chain; wrong here — earlier steps already showed on their own pages).
   if (_engaged) {
@@ -5423,7 +5544,7 @@ async function _resolveNavUrl(text) {
   return null;
 }
 
-async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null, offers = true }) {
+async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null, offers = true, onRetry = null }) {
   // v2.74.1616 — `offers:false` = a WIZARD-owned run: the chain still runs + renders into msg identically, but its
   // conversational chrome stays off — no teach offers (the wizard renders its OWN show-me door; the chain's
   // _resumeAfterDemo seam would continue in the thread behind the page and strand the wizard's phase machine) and
@@ -5550,7 +5671,8 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           if (_authErr && _authOrigin) {
             _setMessageBody(msg, `${_ranPfx(i)}${_authOrigin} looks signed out — sign in, then try again.`);   // v1591 — the sentence IS the cause; no raw slug
             _orchFinalize(msg);
-            _connSignInBar(msg, [_authOrigin], { retryAsk: ask });
+            st.lastAuthStop = { origin: _authOrigin };   // v1624 — the TRANSIENT signal for a wizard-owned run (read by _wfRunStep; harmless for organic chains)
+            _connSignInBar(msg, [_authOrigin], { retryAsk: ask, onRetry });   // v1624 — a wizard run passes onRetry → "Try again" re-runs the STEP, not a fresh front-door ask (the "retries out of the wizard" bug)
             return;
           }
           _setMessageBody(msg, `${_ranPfx(i)}Couldn’t ${_legFailName(cr.leg, 'run that')}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
@@ -8051,6 +8173,13 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     // terse") → OFFER to remember it as a rule, so capture doesn't need the `remember:` prefix. Offer, never auto-store.
     if (looksLikeStandingRule(goal)) _offerRememberRule(msg, goal);
     _orchFinalize(msg);
+    return true;
+  }
+  // PM-2 (DESIGN_peritem_map.md) — the per-item CROSS-SYSTEM MAP (#2): read a list, pull a field per row, look each
+  // up on ANOTHER system, join back. The whole ask maps here (its collection is the self-contained readAsk); a
+  // gated-down / underspecified map already became clarify/decompose upstream (interpret.js PM-1).
+  if (d.intent === 'map' && d.map) {
+    await _runMapClause(msg, d.map, { tabId, goal });
     return true;
   }
 
@@ -10798,18 +10927,21 @@ async function _renderDeskLanding(conv) {
 // a desk = its OWN dependencies (a transient warning line when one of its sites is signed out). Sign in NEVER
 // touches credentials — CONN_FOCUS focuses/opens the origin's tab and the HUMAN signs in (§16); the next
 // probe/ride flips the registry fresh and the card follows.
-function _connSignInBar(msg, origins, { retryAsk = null } = {}) {
+function _connSignInBar(msg, origins, { retryAsk = null, onRetry = null } = {}) {
   const list = (Array.isArray(origins) ? origins : []).filter(Boolean).slice(0, 4);
-  if (!list.length && !retryAsk) return;
+  if (!list.length && !retryAsk && !onRetry) return;
   const bar = _orchActionBar(msg);
   for (const o of list) {
     bar.appendChild(_mkBtn(`Sign in ${o}`, async () => {
       try { await _orchReq('CONN_FOCUS', { origin: o }); } catch { /* */ }
     }));
   }
-  if (retryAsk) {
+  if (retryAsk || onRetry) {
     bar.appendChild(_mkBtn('↻ Try again', () => {
       bar.remove();
+      // v2.74.1624 — a caller-supplied onRetry OWNS the retry (a wizard step re-runs itself, staying in the
+      // wizard); otherwise the routine-starter path re-dispatches the ask through the front door.
+      if (onRetry) { try { onRetry(); } catch { /* */ } return; }
       const input = $('chat-input');
       if (input) { input.value = retryAsk; sendChatMessage(); }   // the routine-starter path — every gate identical to typing it
     }));

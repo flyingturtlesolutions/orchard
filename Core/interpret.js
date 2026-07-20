@@ -12,8 +12,9 @@
 // is what stops the "if go to youtube" eager-nav). The live LLM call + prompt + dispatch are F-2.
 
 import { legRef } from './legRef.js';
+import { normalizeMapVerdict } from './peritemMap.js';   // PM-1 (v2.74.1625) — the per-item cross-system MAP verdict
 
-export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer'];
+export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map'];   // PM-1 — `map` = the #2 primitive
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
@@ -54,6 +55,16 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     if (subAsks.length < 2) return { ...base, intent: 'clarify', question: 'I can break that into steps — can you say it a bit more concretely?', why: why || 'thin-decompose' };
     return { ...base, subAsks };
   }
+  if (intent === 'map') {
+    // PM-1 (DESIGN_peritem_map.md §2) — a per-item cross-system MAP. The LLM extracts {collection, itemField,
+    // target} ONCE; normalizeMapVerdict validates the three load-bearing fields. A malformed map DEGRADES to
+    // decompose when subAsks were also offered, else to clarify — never a silent half-map.
+    const map = normalizeMapVerdict(d.map || d);
+    if (map) return { ...base, map };
+    const subAsks = (Array.isArray(d.subAsks) ? d.subAsks : []).map(_str).filter(Boolean);
+    if (subAsks.length >= 2) return { ...base, intent: 'decompose', subAsks, why: why || 'map-underspecified→decompose' };
+    return { ...base, intent: 'clarify', question: 'What field of each item should I look up, and on which system?', why: why || 'map-underspecified' };
+  }
   if (intent === 'clarify') {
     return { ...base, question: _str(d.question) || 'Can you say that a different way?' };
   }
@@ -77,6 +88,11 @@ export function applyConfidenceGate(decision, { minConfidence = 0.6 } = {}) {
     return { ...d, intent: 'clarify',
       question: d.question || (d.intent === 'navigate' ? 'Did you mean to navigate there? I wasn’t sure.' : 'Did you want me to run that? I wasn’t sure.'),
       why: `low-confidence ${d.confidence} < ${minConfidence}` };
+  }
+  // PM-1 — a MAP fans N cross-system reads off one interpretation, so a shaky one asks first (worse to mis-fire N
+  // than one). Below the gate → clarify with the map's own question.
+  if (d.intent === 'map' && d.confidence < minConfidence) {
+    return { ...d, intent: 'clarify', question: d.question || 'I can look each one up on another system — which field, and where?', why: `low-confidence ${d.confidence} < ${minConfidence}` };
   }
   return d;
 }

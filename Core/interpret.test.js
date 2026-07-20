@@ -97,3 +97,35 @@ describe('interpret — orchestration over an injected think', () => {
     assert.equal(d.params.url, 'https://youtube.com');
   });
 });
+
+describe('interpret — the map intent (PM-1, DESIGN_peritem_map.md)', () => {
+  const MAP = { itemField: 'homeowner email', target: { system: 'shopify', readAsk: 'search Shopify for {value}' } };
+  it('a valid map verdict normalizes + carries the clause', () => {
+    const d = normalizeInterpretDecision({ intent: 'map', map: MAP, confidence: 0.9 });
+    assert.equal(d.intent, 'map');
+    assert.equal(d.map.kind, 'map');
+    assert.equal(d.map.itemField, 'homeowner email');
+    assert.equal(d.map.target.system, 'shopify');
+    assert.equal(d.map.join, 'table');
+  });
+  it('map fields at the top level (no nested .map) are also accepted', () => {
+    const d = normalizeInterpretDecision({ intent: 'map', ...MAP, confidence: 0.9 });
+    assert.equal(d.intent, 'map');
+    assert.equal(d.map.itemField, 'homeowner email');
+  });
+  it('an underspecified map with subAsks DEGRADES to decompose', () => {
+    const d = normalizeInterpretDecision({ intent: 'map', map: { itemField: 'x' }, subAsks: ['get tasks', 'look each up'], confidence: 0.9 });
+    assert.equal(d.intent, 'decompose');
+    assert.deepEqual(d.subAsks, ['get tasks', 'look each up']);
+  });
+  it('an underspecified map with no subAsks becomes clarify', () => {
+    const d = normalizeInterpretDecision({ intent: 'map', map: {}, confidence: 0.9 });
+    assert.equal(d.intent, 'clarify');
+    assert.ok(d.question);
+  });
+  it('a low-confidence map becomes clarify (never fires N reads on a shaky read)', () => {
+    const d = applyConfidenceGate(normalizeInterpretDecision({ intent: 'map', map: MAP, confidence: 0.3 }), { minConfidence: 0.6 });
+    assert.equal(d.intent, 'clarify');
+  });
+  it('map is in the INTENTS vocabulary', () => { assert.ok(INTENTS.includes('map')); });
+});
