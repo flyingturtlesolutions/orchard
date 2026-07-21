@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  normalizeMapVerdict, pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults,
+  normalizeMapVerdict, pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch,
 } from './peritemMap.js';
 
 describe('peritemMap — normalizeMapVerdict (the clause contract, §1)', () => {
@@ -99,5 +99,34 @@ describe('peritemMap — buildJoinRows + tally (§5/§7)', () => {
     assert.equal(mapTally({ total: 24, matched: 18, noMatch: 3, noField: 3 }, { system: 'Shopify' }), '24 rows: 18 matched, 3 with no Shopify match, 3 with no value to look up.');
     assert.equal(mapTally({ total: 1, matched: 1 }), '1 row: 1 matched.');
     assert.ok(mapTally({ total: 20, matched: 20, capped: true }).includes('(capped)'));
+  });
+});
+
+describe('peritemMap — v1626: ambiguity is HONEST, containers are not keys, shapes are checked', () => {
+  const BOTH = [
+    { TaskNumber: '01', HomeownerEmail: 'a@b.com', HomeownerPhone: '219-798-9326' },
+    { TaskNumber: '02', HomeownerEmail: 'c@d.com', HomeownerPhone: '336-555-1212' },
+  ];
+  it('a tie between equally-named fields ASKS instead of taking whichever key came first', () => {
+    const r = pickFieldPath(BOTH, 'homeowner');
+    assert.equal(r.ambiguous, true);
+    assert.deepEqual(r.candidates.map((c) => c.path).sort(), ['HomeownerEmail', 'HomeownerPhone']);
+  });
+  it('naming the contact method resolves cleanly (no ambiguity)', () => {
+    assert.deepEqual(pickFieldPath(BOTH, "its homeowner's email"), { path: 'HomeownerEmail', matchedBy: 'name' });
+    assert.deepEqual(pickFieldPath(BOTH, 'homeowner phone'), { path: 'HomeownerPhone', matchedBy: 'name' });
+  });
+  it('a CONTAINER path is never a lookup key (it would extract nothing on every row)', () => {
+    const nested = [{ TaskNumber: '01', Contacts: [{ Name: 'Erick', Email: 'e@x.com', Phone: '219-555-0100' }] }];
+    const r = pickFieldPath(nested, 'contact');
+    assert.notEqual(r && r.path, 'Contacts', 'the array container must not win');
+    assert.deepEqual(pickFieldPath(nested, 'contact email'), { path: 'Contacts.Email', matchedBy: 'name' });
+  });
+  it('valueShapeMismatch catches a typed target fed the wrong column', () => {
+    assert.equal(valueShapeMismatch(['219-798-9326', '336-555-1212'], 'email Find a Shopify customer by email'), 'phone-for-email');
+    assert.equal(valueShapeMismatch(['a@b.com', 'c@d.com'], 'phone shopify_customer_by_phone'), 'email-for-phone');
+    assert.equal(valueShapeMismatch(['a@b.com'], 'email shopify_customer_by_email'), null, 'consistent → no complaint');
+    assert.equal(valueShapeMismatch(['anything'], 'query Search Shopify customers by name'), null, 'an untyped search accepts anything');
+    assert.equal(valueShapeMismatch([], 'email by email'), null, 'no values → nothing to judge');
   });
 });

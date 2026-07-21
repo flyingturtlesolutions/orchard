@@ -67,8 +67,13 @@ function _shapeMatches(typeTok, val) {
 }
 
 // PM-0 — resolve the field PHRASE → a dotted PATH over the row shape. PURE. Deterministic name-match first; a TYPE
-// token (email/phone/…) falls back to matching the VALUE shape. Returns { path, matchedBy } or null (→ the caller's
-// one LLM assist, or an honest "which field?"). Operates on a SAMPLE of the rows (first object rows).
+// token (email/phone/…) falls back to matching the VALUE shape.
+// Returns { path, matchedBy } | { ambiguous:true, candidates:[{path}] } | null.
+// v2.74.1626 — AMBIGUITY IS HONEST (the resolveRideParam discipline: "never silently pick; the caller asks"): when
+// two fields tie at the top score ("homeowner" over HomeownerEmail + HomeownerPhone), the caller ASKS which — a
+// silent tie-break picked whichever key the API happened to list first, so the same ask could look up phones
+// tomorrow. Candidates that never yielded a SCALAR in the sample (a container like `Contacts`, an always-null
+// field) are excluded — they can't be a lookup key, and picking one dead-ends every row at "no value".
 export function pickFieldPath(rows, fieldPhrase) {
   const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === 'object');
   if (!list.length) return null;
@@ -97,9 +102,19 @@ export function pickFieldPath(rows, fieldPhrase) {
     s -= Math.max(0, kt.length - ptoks.length);                                 // prefer keys that aren't much longer than the phrase
     return s;
   };
-  let best = null, bestScore = 0;
-  for (const c of cands.values()) { const sc = score(c); if (sc > bestScore) { best = c; bestScore = sc; } }
-  if (best && bestScore >= 40) return { path: best.path, matchedBy: 'name' };
+  const scored = [];
+  for (const c of cands.values()) {
+    if (!c.vals.length) continue;   // v1626 — never yielded a scalar (a container / always-null field) → not a lookup key
+    const sc = score(c);
+    if (sc > 0) scored.push({ c, sc });
+  }
+  scored.sort((a, b) => b.sc - a.sc);
+  const top = scored[0];
+  if (top && top.sc >= 40) {
+    const tied = scored.filter((x) => x.sc === top.sc);
+    if (tied.length > 1) return { ambiguous: true, candidates: tied.slice(0, 4).map((x) => ({ path: x.c.path })) };   // v1626 — ask, never guess
+    return { path: top.c.path, matchedBy: 'name' };
+  }
   // Value-shape fallback: no confident name match, but a TYPE token → the key whose sampled values match the shape.
   if (typeTok) {
     let vb = null, vn = 0;
@@ -109,6 +124,26 @@ export function pickFieldPath(rows, fieldPhrase) {
     }
     if (vb) return { path: vb.path, matchedBy: 'shape' };
   }
+  return null;
+}
+
+// PM-0 (v2.74.1626) — does the piped VALUE SHAPE contradict what the TARGET read expects? PURE. The Shopify legs
+// are TYPED (by_email / by_phone / search-by-name), so feeding phones to the by-email lookup is 24 guaranteed
+// misses. `hint` = the target's value-param name + leg name/id; values = a sample of the extracted field.
+// Returns a code ('phone-for-email' | 'email-for-phone' | 'not-email' | 'not-phone') or null when consistent
+// (including when the target names no shape at all — a free-text search accepts anything).
+export function valueShapeMismatch(values, hint) {
+  const h = _norm(hint);
+  const vals = (Array.isArray(values) ? values : []).filter((v) => v != null && v !== '').slice(0, 5).map(String);
+  if (!vals.length) return null;
+  const wantsEmail = h.includes('email');
+  const wantsPhone = h.includes('phone');
+  if (!wantsEmail && !wantsPhone) return null;                                  // an untyped search — nothing to contradict
+  const half = Math.ceil(vals.length / 2);
+  const looksEmail = vals.filter((v) => _EMAIL_RE.test(v)).length >= half;
+  const looksPhone = vals.filter((v) => _PHONE_RE.test(v)).length >= half;
+  if (wantsEmail && !looksEmail) return looksPhone ? 'phone-for-email' : 'not-email';
+  if (wantsPhone && !looksPhone) return looksEmail ? 'email-for-phone' : 'not-phone';
   return null;
 }
 

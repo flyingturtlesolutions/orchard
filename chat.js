@@ -71,7 +71,7 @@ import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowShares
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
-import { pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults } from './Core/peritemMap.js';   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally
+import { pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -3684,6 +3684,16 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, goal = '' } =
   if (!rows.length) { _setMessageBody(msg, 'Nothing to map over — the list came back empty. If a filter got guessed wrong, name it.'); _orchFinalize(msg); return { ok: false }; }
   // 2) the FIELD — deterministic path resolution; a miss asks honestly (never a per-row guess).
   const fp = pickFieldPath(rows, map.itemField);
+  // v1626 — AMBIGUOUS ("homeowner" over HomeownerEmail + HomeownerPhone): ASK which, never silently take whichever
+  // key the API listed first (the resolveRideParam discipline). The target legs are TYPED, so the wrong column is
+  // 24 guaranteed misses, not a near-miss.
+  if (fp && fp.ambiguous) {
+    const opts = fp.candidates.map((c) => c.path).join(' or ');
+    _setMessageBody(msg, `“${escHtml(map.itemField)}” could be ${escHtml(opts)} on these ${rows.length} rows — which should I look up? Name it in the ask, e.g. “look up its homeowner’s email in ${escHtml(system)}”.`);
+    _orchFinalize(msg);
+    try { _orchLog(`MAP ▸ ambiguous field "${map.itemField}" → ${fp.candidates.map((c) => c.path).join('|')} (asked)`); } catch { /* */ }
+    return { ok: false, ambiguous: true };
+  }
   if (!fp) {
     const fields = Object.keys(rows.find((r) => r && typeof r === 'object') || {}).slice(0, 10).join(', ');
     _setMessageBody(msg, `I read ${rows.length} row${rows.length === 1 ? '' : 's'}, but couldn’t find a “${map.itemField}” field to look up.${fields ? `  The fields I see: ${fields}.` : ''}  Name the exact field and I’ll map it.`);
@@ -3705,6 +3715,19 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, goal = '' } =
   const cap = Math.max(1, Math.min(map.cap || _MAP_WINDOW, rows.length));
   const capped = rows.length > cap;
   const use = rows.slice(0, cap);
+  // v1626 — SHAPE CHECK before spending N reads: the target legs are typed (by_email / by_phone), so emails into a
+  // by-phone lookup is 24 guaranteed misses. Say it instead of running it.
+  const _sample = use.map((r) => extractValue(r, fp.path)).filter((v) => v != null).slice(0, 5);
+  const _mism = valueShapeMismatch(_sample, `${tgt.valueParam} ${tgt.leg.name || ''} ${(tgt.leg.tool && tgt.leg.tool.recipeId) || ''}`);
+  if (_mism) {
+    const isSwap = _mism === 'phone-for-email' || _mism === 'email-for-phone';
+    const got = _mism === 'phone-for-email' ? 'phone numbers' : _mism === 'email-for-phone' ? 'email addresses' : `not ${_mism === 'not-email' ? 'email addresses' : 'phone numbers'}`;
+    const wants = /email/i.test(`${tgt.valueParam} ${tgt.leg.name || ''}`) ? 'email' : 'phone';
+    _setMessageBody(msg, `The “${escHtml(map.itemField)}” values look like ${escHtml(isSwap ? got : got)}, but the ${escHtml(system)} lookup I found (“${escHtml(tgt.leg.name || tgt.valueParam)}”) searches by ${wants}. Name the matching field, or ask for the ${wants === 'email' ? 'phone' : 'email'} lookup.`);
+    _orchFinalize(msg);
+    try { _orchLog(`MAP ▸ shape mismatch (${_mism}) — field "${fp.path}" vs ${tgt.leg.name || tgt.valueParam}; not run`); } catch { /* */ }
+    return { ok: false, mismatch: _mism };
+  }
   const results = [];
   for (let i = 0; i < use.length; i++) {
     if (_walkAbortFlag.requested) break;
