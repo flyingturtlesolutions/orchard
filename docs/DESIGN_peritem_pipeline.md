@@ -122,7 +122,67 @@ not re-guess**.
 
 ---
 
-## §2 The actual work: THE REACH
+## §2 The reach — **RESOLVED by PP-0**
+
+> **PP-0 is ANSWERED. The A/B dilemma below dissolved on reading; it is kept for the record because the reasoning
+> that produced it was wrong in an instructive way.** Read §2.0 first; §2.1 is history.
+
+### §2.0 What PP-0 found
+
+The condition system is **three deliberate layers**, unified at v2.70.0 — not the two divergent evaluators the
+first draft feared:
+
+| module | role |
+|---|---|
+| `Services/ConditionVocabulary.js` | the SCHEMA — single source of truth, every type tagged `family: 'page' \| 'scope' \| 'reference'` |
+| `Services/Assertion.js` | the **page-side** evaluator (DOM / URL / cookies — needs a tab) |
+| `Services/DataAssertion.js` | the **scope-side** evaluator — `evaluateDataCondition(cond, scope)`, engine-side |
+
+`DataAssertion.js`'s own header states the design: *"Where Assertion.js handles page-side conditions, this module
+is the engine-side evaluator for scope conditions… The unified evaluator (used by call-sites that mix families,
+like strategy DETECT/LOOP) lives elsewhere; this module remains scope-side-only by design."*
+
+**Q1 — does a branch need a live tab?** No, not for data predicates. `evaluateDataCondition(cond, scope)` takes
+**scope only, no tabId**. Only page-family arms would need one, and a per-item branch over record data uses none.
+
+**Q2 — does `SieveExecutor` duplicate the vocabulary?** No — the concern was misplaced. `SieveExecutor` imports
+`evaluateDataAssertionEnvelope` / `flattenScopeAssertionRefs` from `DataAssertion.js` for envelope evaluation; its
+inline `#evalSieveAssertion` switch is a *fourth, different thing* — a row filter over sieve items, which merely
+shares verb names. Nothing to unify.
+
+### §2.0.1 The consequence: the reach is an ADAPTER, not a lowering layer
+
+Neither §2.1 option is needed. The per-item pipeline calls the **existing canonical scope-side evaluator**
+directly, and `Core/branchClause.js` already has the right shape because `evalBranch` injects its evaluator:
+
+```js
+import { evaluateDataCondition } from '../Services/DataAssertion.js';
+evalBranch(item, verdict, (assertion, it) => evaluateDataCondition(assertion, scopeFor(it)));
+```
+
+The injection chosen to DEFER the A/B decision turned out to BE the design. PP-1's reach is one adapter function.
+
+**The one unknown left is bounded and is not architectural:** what `Scope` shape `evaluateDataCondition` expects.
+`Services/Scope.js` exports `Scope, scalar, list, record, document`; the open question is only whether a per-item
+record wraps as `record(...)` and under what binding name the `field` of a condition resolves. Read
+`evaluateDataCondition`'s field-resolution path and `Scope.js` before writing `scopeFor`.
+
+**A correctness note for that adapter, carried from §1.2:** `evaluateDataCondition` returns a boolean. The
+three-outcome contract needs UNKNOWN distinguishable from FALSE, so `scopeFor`/the adapter must return
+`undefined` when the condition names a field the record does not carry — do NOT let "absent field" collapse into
+"false". If `evaluateDataCondition` cannot express that distinction, the adapter must pre-check field presence
+(`field_present` semantics) before delegating.
+
+### §2.1 The original A/B framing *(history — superseded by §2.0)*
+
+Kept deliberately. The draft posed "lower the pipeline into strategy nodes" vs "call the assertion evaluator from
+the clause path" and called it the central open question. Both were wrong-shaped: the first over-built (a lowering
+layer for something already reachable), the second under-read (it assumed calling the evaluator meant duplicating
+semantics, when a scope-side evaluator is exactly the supported entry point). **The error was reasoning about the
+architecture from function names instead of reading the module headers** — the same failure that cost the most
+time in the session this spec was written from. It took two greps to dissolve.
+
+## §2.2 The original text of the reach section
 
 `detect` and `try` run inside a **strategy**, walked by `ExecutionEngine` over strategy nodes. The per-item field
 read and map run in **chat.js's clause path**. Two execution contexts. Joining them is the whole job.
@@ -298,8 +358,12 @@ are needed.
 
 ## §6 Build ladder
 
-- **PP-0** — answer §2's two open questions (`detect` without a tab? `SieveExecutor` delegate or duplicate?). One
-  careful read. **Nothing else starts until this is answered.**
+- **PP-0** — ~~answer §2's two open questions~~ **DONE.** Both answered by reading two module headers (§2.0): the
+  condition vocabulary is single-sourced with family-tagged evaluators; scope-side needs no tab; `SieveExecutor`
+  does not duplicate anything. The reach is an adapter, not a lowering layer.
+- **PP-0b** *(the residue, bounded)* — read `evaluateDataCondition`'s field resolution + `Services/Scope.js` to
+  write `scopeFor(item)`. Confirm how a per-item record wraps and how a condition's `field` resolves against it.
+  **This is the only thing PP-1's reach still waits on.**
 - **PP-1** — reach: BRANCH from the per-item pipeline, whichever of A/B §2 selects. Pure core + tests first.
 - **PP-2** — UPSERT with the three-outcome contract and the inline re-check.
 - **PP-3** — the `reversible`/`outward` axes + `gate = outward || !reversible`; thread per invariant #3 (three
@@ -339,6 +403,11 @@ Each cost real time this session; each has a one-line preventive.
 ---
 
 ## §8 What this spec deliberately does NOT decide
+
+**PP-0 removed two of these** (§2.0): the A/B reach choice, and whether `try` sits under the same evaluator
+question — both dissolved once the condition layering was read rather than inferred. What remains genuinely open:
+`scopeFor(item)` (PP-0b, bounded), whether `try`'s `recover` is reached on ANY failure or specific classes (§3),
+and PP-5 (deferred by design, with a threshold).
 
 *(Revised. The first draft ALSO left the BRANCH contract, predicate authorship, multi-arm semantics, gate
 defaults, observability, execution policy, case shape and re-run behaviour unstated. Those were not deliberate —
