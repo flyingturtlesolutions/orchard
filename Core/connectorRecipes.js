@@ -26,6 +26,12 @@ export function fillEndpoint(template, args = {}) {
 }
 
 const _SOLE_PLACEHOLDER = /^\{([a-zA-Z_][\w-]*)\}$/;
+// v2.74.1657 — a VALUE that is an unfilled blank. DISTINCT from _SOLE_PLACEHOLDER above, which defines the
+// {token} TEMPLATE syntax and must stay curly-only (fillEndpoint/fillBody parse with it — widening that would
+// break template substitution itself). People and models write blanks three ways — [id], <id>, {id} — and all
+// three are non-values. Live 125605/130630: "for [id]" bound `[id]` as a real param; it survived interpret,
+// survived decompose, and reached two different executors, because only the curly form was rejected here.
+const _PLACEHOLDER_VALUE = /^[[<{]\s*([a-zA-Z_][\w \-]*)\s*[\]>}]$/;
 const _has = (a, name) => a && Object.prototype.hasOwnProperty.call(a, name);
 
 // Recursively fill one body-template node. Returns {drop} when the node resolves to nothing (so an optional field /
@@ -566,7 +572,15 @@ export const CONNECTOR_RECIPES = [
     // v2.74.1559 — `also`: catalog-owned SIDECAR reads the case dossier pulls alongside the drill (same join id) —
     // a case is born knowing its homeowner CONTACTS, not just the address (the task page's contact dropdown fires
     // this lazy endpoint; the harvested capture proved it, this curates it).
-    drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName', 'TicketId', 'TaskId'], also: ['vs_task_contacts'] },
+    // v2.74.1655 — JobNumber + SearchField added to the match set. Live: "get warranty task instructions for
+    // 498840035" reported "No match" while the row plainly CONTAINS that number — it is the JobNumber, which was
+    // not in this list. The ids a person actually holds are the JobNumber (498840035) and the TicketId
+    // (4866871 / 4866871-04-01); TaskId (10834758) is internal and never shown, yet it is what the detail
+    // endpoint takes — so every human lookup needs this row-match hop to resolve one into the other.
+    // `SearchField` is VendorSuite's OWN pipe-delimited index of every id + address + community, built for
+    // exactly this ("498840035|7048 eclipse trail|…|4866871|…|4866871-04-01"); it goes last as the catch-all,
+    // after the precise fields, and it also absorbs the leading-whitespace quirk in the raw JobNumber value.
+    drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName', 'TicketId', 'TaskId', 'JobNumber', 'SearchField'], also: ['vs_task_contacts'] },
     does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount. The division can be a name ("Atlanta West"), a market number ("210"), blank for your current division, or "each" to list EVERY division you can access ("for each division…" / "across all divisions"); give a street address or a warranty ticket / task number to drill straight into that one task\'s details — or say "on the site" / "on vendorsuite" to open that record on the warranty page itself instead',
     endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
     params: [
@@ -816,7 +830,7 @@ export function coerceParams(params, paramSchema) {
   const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
   const out = {};
   for (const [k, v] of Object.entries((params && typeof params === 'object') ? params : {})) {
-    if (typeof v === 'string' && _SOLE_PLACEHOLDER.test(v.trim())) continue;   // v1405 — the LLM binder sometimes ECHOES a placeholder token ("{company}") as the value for a param it couldn't fill; drop it here so it's treated as unfilled everywhere (body + endpoint), never stored literally
+    if (typeof v === 'string' && _PLACEHOLDER_VALUE.test(v.trim())) continue;   // v1405 — the LLM binder sometimes ECHOES a placeholder token ("{company}") as the value for a param it couldn't fill; drop it here so it's treated as unfilled everywhere (body + endpoint), never stored literally. v1657 — ALSO [id]/<id>: the binding layer is the one choke point every executor passes through, so one drop here covers the filter path, the direct-param path, and anything added later
     const t = props[k] && props[k].type;
     const gidKind = props[k] && props[k].gid;
     if (gidKind && (typeof v === 'string' || typeof v === 'number')) {   // CX-7c — a customer/variant id → its gid form

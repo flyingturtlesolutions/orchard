@@ -72,10 +72,10 @@ import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresen
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
-import { readFieldSection, fieldReadTally } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
+import { readFieldSection, fieldReadTally, fieldPhraseCandidates } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
-import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
+import { normalizeInterpretDecision, applyConfidenceGate, INTENTS } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -3718,9 +3718,20 @@ function _sameGroundAsSource(target, srcLeg) {
 // result, read the Task instructions" had to masquerade as a cross-system `map` (which REQUIRES a target system),
 // and the model, forced to name one, once named the user's real Zendesk queue. Same collection + drill path as
 // the map — only the per-row step differs: extract, never look up.
+// v2.74.1660 — a throw inside a clause handler MUST reach the trace. Live: the panel showed "readouts is not
+// defined" while the trace showed nothing at all, so the UI knew something the log did not — which inverts the
+// point of having a log. Renders the same honest message it always did, and records it.
+function _clauseError(kind, e, msg) {
+  const m = (e && e.message) || String(e);
+  try { _orchLog(`CLAUSE_ERROR ▸ ${kind}: ${m}`); } catch { /* */ }
+  try { _setMessageBody(msg, `That step couldn’t run — ${escHtml(m)}.`); _orchFinalize(msg); } catch { /* */ }
+}
+
 async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
   _walkAbortFlag.requested = false;
   _ilBusy(msg, true);
+  // v1660 — ENTRY line: distinguishes "never ran" from "ran and found nothing" without inference.
+  try { _orchLog(`FIELD_READ ▸ start field="${fr.field}"${fr.term ? ` term="${fr.term}"` : ''} collection=${typeof fr.collection === 'object' ? 'self' : fr.collection} prior=${priorValue != null ? 'yes' : 'no'}`); } catch { /* */ }
   // 1) the COLLECTION — identical contract to the map clause (piped prior read, else self-contained).
   let rows = [];
   let srcLeg = null;
@@ -3749,7 +3760,26 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
 
   // 2) the FIELD. List rows carry a projection; the text usually lives in the DETAIL (VendorSuite `Instructions`
   // is on the task record, not the list row), so enrich through the source leg's declared drill when it's absent.
-  let fp = pickFieldPath(use, fr.field);
+  // v1652 — resolve through the CANDIDATE list: the model says "tasks instructions", the record says
+  // `Instructions`. Full phrase first (only it can disambiguate two similar fields), then looser forms.
+  const _cands = fieldPhraseCandidates(fr.field);
+  // v1653 — a hit is only a hit if it carries a PATH. Live 113347 second run: a truthy resolver result with no
+  // `.path` produced `FIELD_READ ▸ 1 × "undefined" → 1 empty` — reading a field literally named "undefined" and
+  // reporting it as a row outcome. An unusable hit must fail the same way as no hit: honestly, by name.
+  // A tie is a VERDICT, not a miss: pickFieldPath returns {ambiguous:true, candidates:[…]} with NO path (v1626,
+  // "ask, never guess"). v1653 guarded on `hit.path` so it stopped rendering a field named "undefined" — right
+  // reflex, wrong reading. A looser candidate may still resolve cleanly, so keep walking; if every candidate ties,
+  // ASK and name the tied fields, which is what the ambiguity verdict was built to enable.
+  let _tied = null;
+  const _resolve = () => {
+    for (const c of _cands) {
+      const hit = pickFieldPath(use, c);
+      if (hit && hit.path) return hit;
+      if (hit && hit.ambiguous && !_tied) _tied = hit.candidates || [];
+    }
+    return null;
+  };
+  let fp = _resolve();
   const _dj = (!fp && srcLeg && srcLeg.tool && srcLeg.tool.drill && srcLeg.tool.drill.via && srcLeg.tool.drill.from) ? srcLeg.tool.drill : null;
   if (_dj) {
     const viaLeg = await _rideDrillLeg(srcLeg, _dj.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
@@ -3766,9 +3796,16 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
         const detail = primaryObject(dr.value) || dr.value;
         if (detail && typeof detail === 'object' && !Array.isArray(detail)) { use[k] = { ...use[k], ...detail }; got++; }
       }
-      fp = pickFieldPath(use, fr.field);
+      fp = _resolve();
       try { _orchLog(`FIELD_READ ▸ enriched ${got}/${use.length} row(s) via ${_dj.via} → field ${fp ? `"${fp.path}"` : 'STILL absent'}`); } catch { /* */ }
     }
+  }
+  if (!fp && _tied && _tied.length) {
+    const _names = _tied.map((c) => c && c.path).filter(Boolean);
+    _setMessageBody(msg, `“${escHtml(fr.field)}” matches more than one field on these records — ${_names.map((n) => `**${escHtml(n)}**`).join(' or ')}. Which one?`, { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`FIELD_READ ▸ ambiguous — "${fr.field}" ties ${_names.join('|')}`); } catch { /* */ }
+    return { ok: false, gap: true };
   }
   if (!fp) {
     _setMessageBody(msg, `I couldn’t find a “${escHtml(fr.field)}” field on these records. Name it the way it appears on the record and I’ll read it.`, { markdown: true });
@@ -5844,8 +5881,8 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // D
   // PM-5 (v2.74.1627) — a MAP verdict rides back to the chain, which owns the executor. This is the door a PLAIN
   // ask actually takes (live 075620: `map` fired twice at conf 0.95 and was DISCARDED here — `_tryInterpret`'s
   // dispatch is only reached by the `i:` command, so the whole feature was unreachable through the front door).
-  if (d.intent === 'map' && d.map) return { map: d.map };
-  if (d.intent === 'fieldread' && d.fieldRead) return { fieldRead: d.fieldRead };   // PM-9 (v1649)
+  if (d.intent === 'map' && d.map) { try { _orchLog('DISPATCH ▸ map → chain'); } catch { /* */ } return { map: d.map }; }
+  if (d.intent === 'fieldread' && d.fieldRead) { try { _orchLog('DISPATCH ▸ fieldread → chain'); } catch { /* */ } return { fieldRead: d.fieldRead }; }   // PM-9 (v1649)
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
@@ -5990,7 +6027,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         // rendered its own honest message (gap / ambiguous / shape-mismatch / empty) — leave it and stop.
         if (cr && cr.fieldRead) {   // PM-9 (v1649) — the per-item OWN-RECORD read
           const frr = await _runFieldReadClause(msg, cr.fieldRead, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
-          if (frr && frr.text) readouts.push(frr.text);
+          if (frr && frr.text) { st.readouts.push(frr.text); st.lastReadoutIdx = st.readouts.length - 1; }   // v1655 — st.readouts, as every sibling in this loop uses; bare `readouts` is a DIFFERENT function's local (ReferenceError, live-reported)
           continue;
         }
         if (cr && cr.map) {
@@ -7681,6 +7718,16 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   const dval = (dj && dj.param && dj.from && dj.matchOn) ? params[dj.matchOn] : null;
   let view = items;
   let headNote = '';
+  // v2.74.1656 — an UNFILLED TEMPLATE is not a value. Live 125605: the ask "…for [id]" bound "[id]" as the
+  // address, and v1655's SearchField catch-all made that literal MATCH a row — drilling with `taskId=[id]`.
+  // Before v1655 the same ask honestly said "No match"; widening the match set turned an honest miss into a
+  // confident wrong answer, which is strictly worse. A bracketed/braced placeholder means the user (or the
+  // model) left a blank, and the only correct response is to ask for the real one.
+  if (dval != null && /^\s*[[<{(][^\]>})]*[\]>})]\s*$/.test(String(dval))) {
+    _setMessageBody(msg, `“${escHtml(String(dval))}” looks like a placeholder, not a real value — give me the job number, ticket id, or address and I’ll look it up.`, { markdown: true });
+    try { _orchLog(`RIDE_DRILL ▸ refused placeholder value "${String(dval).slice(0, 20)}"`); } catch { /* */ }
+    return true;
+  }
   if (dval != null && String(dval).trim() !== '') {
     const matched = items.map((it) => ({ ...it, rows: filterRowsByText(it.rows, dj.label || [], dval) })).filter((it) => it.rows.length);
     const nHits = matched.reduce((n, it) => n + it.rows.length, 0);
@@ -8502,7 +8549,16 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     normalizeInterpretDecision(raw, { retrieved, primitives: ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'] }),
     { minConfidence: 0.6 },
   );
-  try { _orchLog(`INTERPRET ▸ "${goal.slice(0, 50)}" → ${d.intent} (conf ${d.confidence}${d.why ? `; ${d.why}` : ''})`); } catch { /* */ }
+  // v2.74.1660 — log the DISPOSITION, not just the decision. A verdict that is classified and then vanishes
+  // was the single most expensive failure shape today (4 passes for a camelCase intent token, 2 more for a
+  // payload dropped by parseInterpretOutput's whitelist): the trace said "→ fieldread (conf 0.95)" and
+  // nothing else, so "never ran" and "ran and found nothing" were indistinguishable. Now the line says whether
+  // the clause PAYLOAD arrived and whether the intent is one the registry KNOWS.
+  try {
+    const _clauseKey = ['map', 'fieldRead'].find((k) => d && d[k]) || null;
+    const _known = INTENTS.includes(d.intent);
+    _orchLog(`INTERPRET ▸ "${goal.slice(0, 50)}" → ${d.intent} (conf ${d.confidence}${d.why ? `; ${d.why}` : ''}) payload:${_clauseKey || 'none'} registry:${_known ? 'ok' : 'UNKNOWN'}`);
+  } catch { /* */ }
 
   // clarify / teach / answer — rendered here (no engine dispatch).
   if (d.intent === 'clarify') { _setMessageBody(msg, `${d.question || 'Can you say that a different way?'}`); _orchFinalize(msg); return true; }
@@ -8526,7 +8582,33 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // up on ANOTHER system, join back. The whole ask maps here (its collection is the self-contained readAsk); a
   // gated-down / underspecified map already became clarify/decompose upstream (interpret.js PM-1).
   if (d.intent === 'map' && d.map) {
-    await _runMapClause(msg, d.map, { tabId, goal });
+    try { _orchLog('DISPATCH ▸ map → _runMapClause @interpret-door'); } catch { /* */ }
+    try { await _runMapClause(msg, d.map, { tabId, goal }); } catch (e) { _clauseError('map', e, msg); }
+    return true;
+  }
+  // PM-9 (v2.74.1658) — the per-item OWN-RECORD field read, at THIS door too.
+  // There are TWO interpreter front doors and v1649 wired only the chain one (_chainConnectorRun). An ask
+  // arriving here was classified `fieldread` at conf 0.95 — with a correct rationale — and then silently
+  // dropped, because this dispatcher had a `map` branch and no sibling. Counted across the traces: the read
+  // executed in 5 of 17 passes, and the 3 most recent consecutive failures were all this. Exactly the v1627
+  // finding ("map dispatch wired to the wrong front door") repeating for the next clause type.
+  // RULE: every `d.intent === 'map'` dispatch site is a site a new clause intent must also be added to — grep
+  // for all of them before adding the next one, because two doors today does not mean two doors tomorrow.
+  if (d.intent === 'fieldread' && d.fieldRead) {
+    // v2.74.1659 — this door must SUPPLY THE PRIOR READ. "for each result" means collection:'prior', and the
+    // chain door hands over st.lastValue/st.lastLeg; here there is no chain state, so v1658 reached the clause
+    // and immediately reported "no collection" — it fell through to re-reading a list from the literal phrase
+    // "for each result", which resolves to nothing. `_lastGroundedRead` is this door's equivalent memory: the
+    // last grounded read the panel performed, kept precisely so a follow-up can answer from THAT record.
+    try { _orchLog('DISPATCH ▸ fieldread → _runFieldReadClause @interpret-door'); } catch { /* */ }
+    try {
+      await _runFieldReadClause(msg, d.fieldRead, {
+        tabId,
+        goal,
+        priorValue: (_lastGroundedRead && _lastGroundedRead.value) || null,
+        priorLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null,
+      });
+    } catch (e) { _clauseError('fieldread', e, msg); }
     return true;
   }
 

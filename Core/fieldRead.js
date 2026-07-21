@@ -102,3 +102,27 @@ export function fieldReadTally({ rows = 0, found = 0, whole = 0, missing = 0, fi
   if (missing) bits.push(`${missing} with no ${field}`);
   return bits.join(' · ');
 }
+
+/**
+ * PM-9b (v2.74.1652) — ordered field-name candidates for one spoken phrase. PURE.
+ *
+ * Live 112524: the model returned field "tasks instructions" for a key actually named `Instructions`, and the
+ * whole run died at the last step — the phrase is a SUPERSET of the key, and exact-name matching only handles the
+ * subset direction. People name fields loosely ("the tasks instructions", "task instructions"); the record does
+ * not. So try the full phrase first (most specific, and the only one that can disambiguate two similar fields),
+ * then progressively drop LEADING words, then individual tokens longest-first.
+ *
+ * Tokens shorter than 4 chars are dropped: "the", "of", "id" would match half a record by substring, and a wrong
+ * field read confidently is worse than an honest "I couldn't find that field".
+ */
+export function fieldPhraseCandidates(phrase) {
+  const t = _s(phrase).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!t) return [];
+  const words = t.split(' ').filter(Boolean);
+  const out = [];
+  const push = (x) => { if (x && !out.includes(x)) out.push(x); };
+  push(words.join(' '));
+  for (let i = 1; i < words.length; i++) push(words.slice(i).join(' '));   // drop leading words: "tasks instructions" → "instructions"
+  [...words].sort((a, b) => b.length - a.length).forEach((w) => { if (w.length >= 4) push(w); });
+  return out;
+}

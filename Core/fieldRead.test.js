@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally } from './fieldRead.js';
+import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates } from './fieldRead.js';
 
 // Shaped after the real VendorSuite `Instructions` (HAR-verified): a date header, a numbered item with a
 // label ending in a colon, a lettered sub-item. Tabs are real in the source.
@@ -127,4 +127,24 @@ describe('fieldRead — fieldReadTally', () => {
     assert.match(s, /3 showing the whole Instructions \(no match\)/);
     assert.match(s, /1 with no Instructions/);
   });
+});
+
+describe('fieldRead — fieldPhraseCandidates (v2.74.1652: spoken phrase → real key)', () => {
+  it('full phrase FIRST, then leading words dropped — the live "tasks instructions" → Instructions case', () => {
+    const c = fieldPhraseCandidates('tasks instructions');
+    assert.equal(c[0], 'tasks instructions');       // most specific wins when it resolves
+    assert.equal(c.includes('instructions'), true); // the fallback that would have saved the live run
+    assert.ok(c.indexOf('tasks instructions') < c.indexOf('instructions'));
+  });
+  it('handles the article-y phrasings people actually type', () => {
+    assert.equal(fieldPhraseCandidates('the task instructions').includes('instructions'), true);
+    assert.equal(fieldPhraseCandidates('vendor explanation')[0], 'vendor explanation');
+  });
+  it('drops tokens under 4 chars — a wrong field read beats no field read only in the demo', () => {
+    const c = fieldPhraseCandidates('id of the note');
+    assert.equal(c.includes('id'), false);
+    assert.equal(c.includes('the'), false);
+    assert.equal(c.includes('note'), true);
+  });
+  it('empty in, empty out', () => { assert.deepEqual(fieldPhraseCandidates('  '), []); });
 });
