@@ -1,6 +1,7 @@
 // Core/interpret.test.js — F-1 (DESIGN_llm_front_door.md §9): the interpret decision core.
 
 import { describe, it } from 'node:test';
+import { parseInterpretOutput } from './interpretPrompt.js';
 import assert from 'node:assert/strict';
 
 import { normalizeInterpretDecision, applyConfidenceGate, interpret, INTENTS } from './interpret.js';
@@ -128,4 +129,28 @@ describe('interpret — the map intent (PM-1, DESIGN_peritem_map.md)', () => {
     assert.equal(d.intent, 'clarify');
   });
   it('map is in the INTENTS vocabulary', () => { assert.ok(INTENTS.includes('map')); });
+});
+
+describe('interpret — INTENTS tokens (v2.74.1650 regression)', () => {
+  it('every intent token is LOWERCASE', () => {
+    // parseInterpretOutput lowercases the model's intent before matching, so a camelCase entry here can NEVER
+    // match and the intent degrades to clarify — silently. PM-9 shipped as 'fieldRead' and died exactly this way
+    // on its first live run: the model returned the right intent, the registry could not recognize it.
+    for (const t of INTENTS) assert.equal(t, t.toLowerCase(), `intent "${t}" must be lowercase`);
+  });
+});
+
+describe('parseInterpretOutput — clause payloads survive the parse (v2.74.1651 regression)', () => {
+  it('carries BOTH clause payloads; the return is a whitelist, so an omitted one is dropped in transit', () => {
+    // PM-9 shipped without `fieldRead` here. The intent survived (logs showed "→ fieldread" at conf 0.95) and the
+    // payload did not, so normalizeFieldReadVerdict saw nothing and the verdict degraded to clarify — silently,
+    // twice, across two live sessions that looked like "the runtime never ran".
+    const d = parseInterpretOutput(JSON.stringify({
+      intent: 'fieldRead', fieldRead: { field: 'Task instructions', term: 'DEAKO' }, confidence: 0.9,
+    }));
+    assert.equal(d.intent, 'fieldread');
+    assert.deepEqual(d.fieldRead, { field: 'Task instructions', term: 'DEAKO' });
+    const m = parseInterpretOutput(JSON.stringify({ intent: 'map', map: { itemField: 'email' }, confidence: 0.9 }));
+    assert.deepEqual(m.map, { itemField: 'email' });
+  });
 });

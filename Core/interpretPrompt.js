@@ -24,6 +24,13 @@ const SYSTEM = [
   '- "act": run a saved capability (set "capabilityId" to a catalog ref) or a primitive (set "op", e.g. CLICK/TYPE).',
   '- "navigate": go to a site by world knowledge (set params.url to a full https:// URL).',
   '- "decompose": the ask is several distinct steps (set "subAsks": [..], two or more).',
+  '- "fieldread": a PER-ITEM read of a field on the record the item ALREADY has — "for each result, read the Task',
+  '  instructions", "for each ticket show the vendor explanation". NOTHING is looked up elsewhere. Set',
+  '  "fieldRead": {"field":"<the field named, verbatim>", "term":"<the part wanted, if the ask names one>"}.',
+  '  Use this WHENEVER the thing being read belongs to the item already. If a word in the ask looks like a',
+  '  system name but is really a section/heading INSIDE the field ("read the DEAKO step of the instructions"),',
+  '  that word is the "term", NOT a target — choose fieldRead and put it there. Never invent a target system to',
+  '  satisfy "map"; if nothing is being looked up somewhere else, it is not a map.',
   '- "map": a PER-ITEM CROSS-SYSTEM lookup — "for each <item> of a list, look it up / read it on ANOTHER system using',
   '  a FIELD of the item" (e.g. "for each open warranty task, look up its homeowner in Shopify"). Set "map":',
   '  OMIT "itemField" UNLESS the ask NAMES the field to look up by ("by email", "using the phone number").',
@@ -98,8 +105,8 @@ const SYSTEM = [
   '- A param typed (date-time) MUST be a CONCRETE ISO 8601 timestamp (e.g. 2026-07-02T15:00:00) in the user\'s',
   '  timezone — resolve relative times ("tomorrow 3pm") against the NOW line; NEVER emit relative text as a value.',
   '- Reply with ONLY a JSON object:',
-  '  {"intent":"act|navigate|decompose|clarify|teach|answer|map","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
-  '   "params":{..},"subAsks":[..],"map":{..?},"question":"..","confidence":0..1,"why":"short"}',
+  '  {"intent":"act|navigate|decompose|clarify|teach|answer|map|fieldread","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
+  '   "params":{..},"subAsks":[..],"map":{..?},"fieldRead":{..?},"question":"..","confidence":0..1,"why":"short"}',
 ].join('\n');
 
 /**
@@ -208,6 +215,7 @@ export function parseInterpretOutput(raw) {
     params: (obj.params && typeof obj.params === 'object') ? obj.params : {},
     subAsks: Array.isArray(obj.subAsks) ? obj.subAsks.map(String).filter(Boolean) : [],
     map: (obj.map && typeof obj.map === 'object') ? obj.map : null,   // PM-1 — the per-item cross-system MAP clause (interpret.js normalizes it)
+    fieldRead: (obj.fieldRead && typeof obj.fieldRead === 'object') ? obj.fieldRead : null,   // PM-9 (v1651) — the per-item OWN-RECORD read clause. This return is a WHITELIST: a payload absent here is dropped in transit, the intent survives, and the verdict silently degrades to clarify — which is exactly how v1649/1650 read as 'the runtime never ran'.
     question: typeof obj.question === 'string' ? obj.question.trim() : '',
     confidence: _clamp01(obj.confidence),
     why: typeof obj.why === 'string' ? obj.why.slice(0, 200) : (typeof obj.reason === 'string' ? obj.reason.slice(0, 200) : ''),

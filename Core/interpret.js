@@ -12,9 +12,10 @@
 // is what stops the "if go to youtube" eager-nav). The live LLM call + prompt + dispatch are F-2.
 
 import { legRef } from './legRef.js';
-import { normalizeMapVerdict } from './peritemMap.js';   // PM-1 (v2.74.1625) — the per-item cross-system MAP verdict
+import { normalizeMapVerdict } from './peritemMap.js';
+import { normalizeFieldReadVerdict } from './fieldRead.js';   // PM-9 — the per-item own-record read   // PM-1 (v2.74.1625) — the per-item cross-system MAP verdict
 
-export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map'];   // PM-1 — `map` = the #2 primitive
+export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
@@ -54,6 +55,15 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     const subAsks = (Array.isArray(d.subAsks) ? d.subAsks : []).map(_str).filter(Boolean);
     if (subAsks.length < 2) return { ...base, intent: 'clarify', question: 'I can break that into steps — can you say it a bit more concretely?', why: why || 'thin-decompose' };
     return { ...base, subAsks };
+  }
+  if (intent === 'fieldread') {   // v1650 — LOWERCASE: parseInterpretOutput lowercases every intent, so a camelCase token could never match
+    // PM-9 (v2.74.1649) — a per-item read of a field on the row's OWN record. This shape exists BECAUSE `map`
+    // requires a target system: seven live attempts at "for each result, read the Task instructions" had to
+    // masquerade as cross-system lookups, and the model, forced to name a system, once named the user's real
+    // Zendesk queue. No target is required here — that absence IS the shape.
+    const fr = normalizeFieldReadVerdict(d.fieldRead || d);
+    if (fr) return { ...base, fieldRead: fr };
+    return { ...base, intent: 'clarify', question: 'Which field of each item should I read?', why: why || 'fieldRead-underspecified' };
   }
   if (intent === 'map') {
     // PM-1 (DESIGN_peritem_map.md §2) — a per-item cross-system MAP. The LLM extracts {collection, itemField,

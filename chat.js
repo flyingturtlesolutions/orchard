@@ -71,7 +71,8 @@ import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowShares
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
-import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
+import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
+import { readFieldSection, fieldReadTally } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -993,7 +994,16 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
     // finds them through the LIVE conversation's instance id, so they became unreachable the moment the desk went.
     // This is the last instant the name still exists; afterwards there is nothing left to look it up from. The
     // workflows then remain listable in Studio, where they can be re-run or removed deliberately.
-    try { await markWorkflowsOrphaned(conv.instanceId || conv.appId || conv.id, conv.title); } catch { /* a stamp must never block the delete */ }
+    // v1643 — stamp the SAME key set the readers use (_workflowKeys reads instanceId AND appId), but NEVER a
+    // preset key another desk still lives under: `appId` is the app TYPE, so for legacy desks with no
+    // instanceId the old `instanceId || appId` fallback would mark every SIBLING instance's workflows
+    // "desk deleted" while those desks are alive and well. Stamping is cheap; corrupting a live desk is not.
+    try {
+      const _all = await ConversationStore.list().catch(() => []);
+      const _keys = [conv.instanceId, conv.appId].filter(Boolean).filter((k, i, a) => a.indexOf(k) === i)
+        .filter((k) => !(_all || []).some((c) => c && c.id !== conv.id && (c.instanceId === k || c.appId === k)));
+      for (const k of _keys) await markWorkflowsOrphaned(k, conv.title);
+    } catch { /* a stamp must never block the delete */ }
     await ConversationStore.delete(conv.id);
     _expandedApps.delete(conv.id);
     // AP-3 fix (v2.74.1220) — the cascade also removed this app's sub-conversations, so reset the panel if the ACTIVE
@@ -3676,6 +3686,117 @@ async function _mapResolveTarget(readAsk, tabId) {
 
 // The executor. `priorValue` (a chain's st.lastValue) is the collection when map.collection==='prior'; else the
 // self-contained collection.readAsk is read here. Returns { ok, joined } (joined → st.lastValue for composition).
+// v1646 — is the map's resolved TARGET the same ground/host the rows came FROM? A self-map is always a
+// per-item field read wearing a map's clothes. Compares resolved identity, never wording.
+// v2.74.1648 — the DECLARED-name half of the self-map test. Live 101132: the verdict named target system
+// "vendorsuite" (the SOURCE), but no vendorsuite "customer by phone" leg exists, so the router resolved to the
+// nearest thing it could find — shopify_customer_by_phone — and searched Shopify with a TaskId, reporting the
+// tally as a "vendorsuite lookup". Comparing only the RESOLVED leg (below) misses this entirely: the invention
+// lives in the NAME, and resolution then wanders off it. Test both ends.
+function _declaresSourceSystem(declared, srcLeg) {
+  const d = String(declared || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (!d) return false;
+  const host = String((srcLeg && srcLeg.tool && (srcLeg.tool.appHost || srcLeg.tool.origin)) || '').toLowerCase();
+  if (!host) return false;
+  const labels = host.replace(/^https?:\/\//, '').split('.').filter((x) => x && !/^(com|net|org|io|co|www)$/.test(x));
+  return labels.some((l) => l === d || (l.length > 3 && d.length > 3 && (l.includes(d) || d.includes(l))));
+}
+
+function _sameGroundAsSource(target, srcLeg) {
+  const th = (target && target.leg && target.leg.tool) || {};
+  const sh = (srcLeg && srcLeg.tool) || {};
+  const a = String(th.appHost || th.origin || '').toLowerCase().replace(/^https?:\/\//, '');
+  const b = String(sh.appHost || sh.origin || '').toLowerCase().replace(/^https?:\/\//, '');
+  if (a && b && a === b) return true;
+  const ga = String((target && target.groundId) || '');
+  const gb = String((srcLeg && srcLeg.tool && srcLeg.tool.groundId) || '');
+  return !!(ga && gb && ga === gb);
+}
+
+// ── PM-9 (v2.74.1649) — the PER-ITEM FIELD READ ────────────────────────────────────────────────────────────────
+// Reads a field off each row's OWN record. This is the shape that was missing: seven live attempts at "for each
+// result, read the Task instructions" had to masquerade as a cross-system `map` (which REQUIRES a target system),
+// and the model, forced to name one, once named the user's real Zendesk queue. Same collection + drill path as
+// the map — only the per-row step differs: extract, never look up.
+async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
+  _walkAbortFlag.requested = false;
+  _ilBusy(msg, true);
+  // 1) the COLLECTION — identical contract to the map clause (piped prior read, else self-contained).
+  let rows = [];
+  let srcLeg = null;
+  if (fr.collection === 'prior' && priorValue != null) { rows = primaryList(priorValue) || []; srcLeg = priorLeg || null; }
+  else {
+    const readAsk = (fr.collection && fr.collection.readAsk) || goal;
+    _setMessageBody(msg, 'Reading the list…');
+    let cr = null;
+    try { cr = await _chainConnectorRun(readAsk, { tabId }); } catch { cr = null; }
+    if (!cr || !cr.ok) {
+      const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
+      if (_prior.length) { rows = _prior; srcLeg = priorLeg || null; }
+      else {
+        _setMessageBody(msg, `Couldn’t read the list${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}. Name it explicitly (e.g. “for each open warranty task…”).`);
+        _orchFinalize(msg);
+        try { _orchLog(`FIELD_READ ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve`); } catch { /* */ }
+        return { ok: false };
+      }
+    } else { rows = primaryList(cr.value) || []; srcLeg = cr.leg || null; }
+  }
+  if (!rows.length) { _setMessageBody(msg, 'Nothing to read — the list came back empty.'); _orchFinalize(msg); return { ok: false }; }
+
+  const cap = Math.max(1, Math.min(fr.cap || _MAP_WINDOW, rows.length));
+  const capped = rows.length > cap;
+  const use = rows.slice(0, cap);
+
+  // 2) the FIELD. List rows carry a projection; the text usually lives in the DETAIL (VendorSuite `Instructions`
+  // is on the task record, not the list row), so enrich through the source leg's declared drill when it's absent.
+  let fp = pickFieldPath(use, fr.field);
+  const _dj = (!fp && srcLeg && srcLeg.tool && srcLeg.tool.drill && srcLeg.tool.drill.via && srcLeg.tool.drill.from) ? srcLeg.tool.drill : null;
+  if (_dj) {
+    const viaLeg = await _rideDrillLeg(srcLeg, _dj.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
+    if (viaLeg) {
+      let got = 0;
+      for (let k = 0; k < use.length; k++) {
+        if (_walkAbortFlag.requested) break;
+        const joinId = use[k] && use[k][_dj.from];
+        if (joinId == null || joinId === '') continue;
+        _setMessageBody(msg, `Opening each record for “${escHtml(fr.field)}”… ${k + 1}/${use.length}`);
+        let dr = null;
+        try { dr = await _rideExecOnce(viaLeg, { [_dj.param || 'id']: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null }); } catch { dr = null; }
+        if (!dr || !dr.ok) continue;
+        const detail = primaryObject(dr.value) || dr.value;
+        if (detail && typeof detail === 'object' && !Array.isArray(detail)) { use[k] = { ...use[k], ...detail }; got++; }
+      }
+      fp = pickFieldPath(use, fr.field);
+      try { _orchLog(`FIELD_READ ▸ enriched ${got}/${use.length} row(s) via ${_dj.via} → field ${fp ? `"${fp.path}"` : 'STILL absent'}`); } catch { /* */ }
+    }
+  }
+  if (!fp) {
+    _setMessageBody(msg, `I couldn’t find a “${escHtml(fr.field)}” field on these records. Name it the way it appears on the record and I’ll read it.`, { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`FIELD_READ ▸ no field — "${fr.field}" absent on ${use.length} row(s)`); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+
+  // 3) per row: extract. Deterministic, local, no network and NO per-item LLM — the value never leaves the panel.
+  let found = 0; let whole = 0; let missing = 0;
+  const lines = [];
+  for (const row of use) {
+    const label = summarizeItem(row) || '(row)';
+    const raw = extractValue(row, fp.path);
+    const sec = readFieldSection(raw, fr.term);
+    if (sec.mode === 'empty') { missing++; lines.push(`• **${escHtml(label)}** — no ${escHtml(fr.field)} on this record`); continue; }
+    if (sec.mode === 'whole' && fr.term) whole++; else found++;
+    const note = (sec.mode === 'whole' && fr.term) ? `  _(no “${escHtml(fr.term)}” part — showing the whole field)_` : '';
+    lines.push(`• **${escHtml(label)}**${note}\n${String(sec.text).split('\n').map((l) => `    ${escHtml(l)}`).join('\n')}`);
+  }
+  const tally = fieldReadTally({ rows: use.length, found, whole, missing, field: fr.field, term: fr.term });
+  const head = `Read **${escHtml(fr.field)}**${fr.term ? ` — the “${escHtml(fr.term)}” part` : ''} on each record.${capped ? `  (first ${cap} of ${rows.length})` : ''}`;
+  _setMessageBody(msg, [head, tally, ...lines].join('\n'), { markdown: true });
+  _orchFinalize(msg);
+  try { _orchLog(`FIELD_READ ▸ ${use.length} × "${fp.path}"${fr.term ? ` term "${fr.term}"` : ''} → ${found} found, ${whole} whole-field, ${missing} empty`); } catch { /* */ }
+  return { ok: true, text: lines.join('\n') };
+}
+
 async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
   const system = map.target.system;
   _walkAbortFlag.requested = false;   // v1625 — a FRESH top-level run clears a stale stop (the _orchRunChain rule); PM-5 chain entry will pass state instead
@@ -3788,8 +3909,14 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   const _legCache = new Map();
   const _legFor = async (type) => {
     if (_legCache.has(type)) return _legCache.get(type);
-    const ask = (fp.matchedBy === 'named' && map.target.readAsk) ? map.target.readAsk
-      : (type === 'email' || type === 'phone') ? `find ${system} customer by ${type} {value}`
+    // v1643 — the user's own readAsk carries the ENTITY ("find its ORDER in Shopify"). It was previously used
+    // ONLY when a field was named, and v1636 made the unnamed/declared path the COMMON one — so the ask was
+    // routinely thrown away and replaced with a hardcoded CUSTOMER search, silently looking up the wrong thing
+    // and reporting an honest-looking no-match. Contact rungs still synthesize (the by-email/by-phone legs are
+    // type-routed), but the primary rung now honors what was actually asked for.
+    const _isContactRung = (type === 'email' || type === 'phone');
+    const ask = (map.target.readAsk && !_isContactRung) ? map.target.readAsk
+      : _isContactRung ? `find ${system} customer by ${type} {value}`
       : `search ${system} customers for {value}`;
     _setMessageBody(msg, `Finding the ${escHtml(system)} ${escHtml(type)} lookup...`);
     const t = await _mapResolveTarget(ask, tabId);
@@ -3805,6 +3932,27 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       : `I can list them, but I don't have a ${escHtml(system)} lookup wired yet. Connect ${escHtml(system)}, or show me the lookup once and I'll map the rest.`;
     _setMessageBody(msg, body); _orchFinalize(msg);
     try { _orchLog(`MAP ▸ gap - no ${_firstType} lookup on ${system} (${tgt0.why || 'absent'})`); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+  // v2.74.1646 — the SELF-MAP gate. STRUCTURAL, not a phrase test: if the target system resolves to the
+  // SOURCE ground, this is not a cross-system map at all — it is a per-item read of the row's own record, and
+  // the model only named a system because `target.system` is REQUIRED by the clause contract.
+  //
+  // Live 100348, five phrasings deep: "For each result, read the Task instructions" (a TEXT FIELD on the very
+  // ticket already in hand) produced target "vendorsuite" — the source itself. Declining that cannot cost a
+  // legitimate lookup, because a legitimate lookup by definition targets somewhere else. Contrast the two
+  // guards removed at v1645: both were phrase tests, and the first would have declined "for each result, find
+  // shopify profile" — an ask that had just matched 21 of 22 rows. Structure separates these cases cleanly
+  // where grammar could not.
+  //
+  // STILL OPEN and NOT covered by this: a target that names a DIFFERENT real system inferred from content
+  // (live 094448's "DEAKO", a section heading inside the instructions text, which resolved to the user's real
+  // Zendesk queue). Only making `target.system` optional with an explicit per-item-field-read branch fixes
+  // that, because the invention happens before there is any phrasing or target to test.
+  if (_sameGroundAsSource(tgt0, srcLeg) || _declaresSourceSystem(system, srcLeg)) {
+    _setMessageBody(msg, `Those live on the record itself — that’s a per-item field read, not a lookup somewhere else, and I can’t do that one yet. Ask for the field on a single record and I’ll read it off that one.`, { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`MAP ▸ declined - target resolves to the SOURCE ground (self-map; "${system}")`); } catch { /* */ }
     return { ok: false, gap: true };
   }
   // 4) per-row: walk the ladder, stop at the first MATCH. Deterministic (no LLM per row), capped, abort-aware.
@@ -5697,6 +5845,7 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // D
   // ask actually takes (live 075620: `map` fired twice at conf 0.95 and was DISCARDED here — `_tryInterpret`'s
   // dispatch is only reached by the `i:` command, so the whole feature was unreachable through the front door).
   if (d.intent === 'map' && d.map) return { map: d.map };
+  if (d.intent === 'fieldread' && d.fieldRead) return { fieldRead: d.fieldRead };   // PM-9 (v1649)
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
@@ -5839,6 +5988,11 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         // plain ask takes). Its joined rows become st.lastValue so a following clause composes; its rendered text
         // rides into the readouts so the chain tail doesn't overwrite the table with "Done.". A non-ok map already
         // rendered its own honest message (gap / ambiguous / shape-mismatch / empty) — leave it and stop.
+        if (cr && cr.fieldRead) {   // PM-9 (v1649) — the per-item OWN-RECORD read
+          const frr = await _runFieldReadClause(msg, cr.fieldRead, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+          if (frr && frr.text) readouts.push(frr.text);
+          continue;
+        }
         if (cr && cr.map) {
           const mr = await _runMapClause(msg, cr.map, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
           if (!mr || !mr.ok) return;
