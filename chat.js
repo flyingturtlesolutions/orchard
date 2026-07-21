@@ -69,9 +69,9 @@ import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retire
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
-import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
+import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
-import { pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
+import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -988,6 +988,12 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
         : `Delete "${conv.title}"?`;
     if (!confirm(prompt)) return;
     if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
+    // WF-3 (v2.74.1640) — stamp this desk's saved workflows with its NAME before the record dies. Deleting a desk
+    // has never deleted its workflows (ConversationStore.delete touches conversation keys only) — but every reader
+    // finds them through the LIVE conversation's instance id, so they became unreachable the moment the desk went.
+    // This is the last instant the name still exists; afterwards there is nothing left to look it up from. The
+    // workflows then remain listable in Studio, where they can be re-run or removed deliberately.
+    try { await markWorkflowsOrphaned(conv.instanceId || conv.appId || conv.id, conv.title); } catch { /* a stamp must never block the delete */ }
     await ConversationStore.delete(conv.id);
     _expandedApps.delete(conv.id);
     // AP-3 fix (v2.74.1220) — the cascade also removed this app's sub-conversations, so reset the panel if the ACTIVE
@@ -3641,6 +3647,9 @@ function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
 // which param takes the value), then N DETERMINISTIC invokes (no per-item LLM — the cost + privacy property).
 const _MAP_WINDOW = 24;   // the per-map cap (RIDE_EACH-class); user-overridable via map.cap. Honest when it bites.
 const _MAP_SENTINEL = 'MAPQ7VALUEZ';   // a findable probe value → identifies WHICH target param takes the piped field
+// v2.74.1637 — the COLD-START error class. A session-ride's first POST to a new origin routinely 403s while the
+// CSRF/session warms (four consecutive live traces). These are TRANSPORT artifacts, never verdicts.
+const _MAP_AUTHY = /^(http-40[13]|session-expired|not-logged-in|timeout|network)/i;
 
 // Interpret the target read ONCE → { leg, valueParam, baseParams, groundId } or { leg:null, why }. The `{value}`
 // placeholder (PM-1 templates it) becomes a sentinel so we learn which param carries the piped field; no `{value}`
@@ -3667,23 +3676,92 @@ async function _mapResolveTarget(readAsk, tabId) {
 
 // The executor. `priorValue` (a chain's st.lastValue) is the collection when map.collection==='prior'; else the
 // self-contained collection.readAsk is read here. Returns { ok, joined } (joined → st.lastValue for composition).
-async function _runMapClause(msg, map, { tabId, priorValue = null, goal = '' } = {}) {
+async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
   const system = map.target.system;
   _walkAbortFlag.requested = false;   // v1625 — a FRESH top-level run clears a stale stop (the _orchRunChain rule); PM-5 chain entry will pass state instead
   _ilBusy(msg, true);   // the glyph thinks through the read + the N lookups
   // 1) the COLLECTION — the piped prior read, or a self-contained read (the v1545 pattern).
   let rows = [];
-  if (map.collection === 'prior' && priorValue != null) rows = primaryList(priorValue) || [];
+  // v1628 — the source leg rides so its declared `drill` can ENRICH rows whose field lives in the detail.
+  // v2.74.1632 (live 082614) — on the PIPED path it comes from the chain's `st.lastLeg` (DK-8f keeps it for
+  // exactly this: "the SOURCE leg rides along — its drill marker lets a following step pull each item's FULL
+  // record"). Without this the v1630 'prior' path bypassed the v1628 enrich entirely: two fixes, one dead seam.
+  let srcLeg = null;
+  if (map.collection === 'prior' && priorValue != null) { rows = primaryList(priorValue) || []; srcLeg = priorLeg || null; }
   else {
     const readAsk = (map.collection && map.collection.readAsk) || goal;
     _setMessageBody(msg, `Reading the list to map…`);
     const cr = await _chainConnectorRun(readAsk, { tabId, onEach: (n, t, label) => { try { _setMessageBody(msg, `Reading the list… ${n}/${t} (${label})`); } catch { /* */ } } });
-    if (!cr || !cr.ok) { _setMessageBody(msg, `Couldn’t read the list to map over${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr && cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return { ok: false }; }
-    rows = primaryList(cr.value) || [];
+    if (!cr || !cr.ok) {
+      // v2.74.1630 (live 081843) — the collection read failed (or the LLM invented an unresolvable one: "for each
+      // RESULT" → "get all results" → clarify). If a PRIOR read is piped in, USE IT — that's what the ask meant.
+      const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
+      if (_prior.length) {
+        rows = _prior; srcLeg = priorLeg || null;   // v1632 — the fallback keeps the enrich door open too
+        try { _orchLog(`MAP ▸ collection "${String(readAsk).slice(0, 40)}" unresolved → fell back to the prior read (${rows.length} row(s))`); } catch { /* */ } }
+      else {
+        _setMessageBody(msg, `Couldn’t read the list to map over${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr && cr.hint ? `  ${cr.hint}.` : ''}  Name the list explicitly (e.g. “for each open warranty task…”).`);
+        _orchFinalize(msg);
+        try { _orchLog(`MAP ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve to a read and no prior list was piped`); } catch { /* */ }
+        return { ok: false };
+      }
+    } else { rows = primaryList(cr.value) || []; srcLeg = cr.leg || null; }
   }
   if (!rows.length) { _setMessageBody(msg, 'Nothing to map over — the list came back empty. If a filter got guessed wrong, name it.'); _orchFinalize(msg); return { ok: false }; }
   // 2) the FIELD — deterministic path resolution; a miss asks honestly (never a per-row guess).
-  const fp = pickFieldPath(rows, map.itemField);
+  const _declared = (srcLeg && srcLeg.tool && Array.isArray(srcLeg.tool.joinKey)) ? srcLeg.tool.joinKey : null;
+  let fp = resolveJoinField(rows, map.itemField, _declared);
+  // v2.74.1628 (live 080343) — the field often lives BEHIND THE DRILL: a vs_warranty_tasks LIST row carries
+  // address/project/claim, while the homeowner EMAIL lives in the task DETAIL + its contacts sidecar (the same
+  // drill the case fan-out runs at spawn). When the row can't answer and the source leg DECLARES a drill, enrich
+  // the capped rows first, then re-resolve. N extra reads — announced, capped, abort-aware, best-effort per row.
+  // v2.74.1635 (live 084833) — enrich when the field is UNRESOLVED **or** when the declared ladder has CONTACT
+  // rungs whose values only exist behind the drill. The address resolves off the list row, so the old gate skipped
+  // the drill and rungs 2-7 silently had nothing to try — a 7-rung ladder that ran 1 rung.
+  const _wantsContacts = normalizeRungs(_declared).some((r) => r && r.contact);
+  const _haveContacts = rows.some((r) => r && Array.isArray(r.__contacts) && r.__contacts.length);
+  const _needEnrich = (!fp || (_wantsContacts && !_haveContacts && fp.matchedBy !== 'named'));
+  const _dj = (_needEnrich && srcLeg && srcLeg.tool && srcLeg.tool.drill && srcLeg.tool.drill.via && srcLeg.tool.drill.from) ? srcLeg.tool.drill : null;
+  if (_dj) {
+    const preCap = Math.max(1, Math.min(map.cap || _MAP_WINDOW, rows.length));
+    const viaLeg = await _rideDrillLeg(srcLeg, _dj.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
+    const alsoLegs = [];
+    for (const aid of (Array.isArray(_dj.also) ? _dj.also : [])) {
+      try { const al = await _rideDrillLeg(srcLeg, aid, (srcLeg.tool && srcLeg.tool.groundId) || null); if (al && !(al.tool && al.tool.write)) alsoLegs.push(al); } catch { /* sidecars are best-effort */ }
+    }
+    if (!viaLeg) { try { _orchLog(`MAP ▸ enrich SKIPPED — "${_dj.via}" leg unavailable; the list rows must carry "${map.itemField}"`); } catch { /* */ } }
+    else {
+      const enriched = rows.slice();
+      let got = 0;
+      for (let k = 0; k < preCap; k++) {
+        if (_walkAbortFlag.requested) break;
+        const joinId = enriched[k] && enriched[k][_dj.from];
+        if (joinId == null || joinId === '') continue;
+        _setMessageBody(msg, `Pulling each record for “${escHtml(map.itemField)}”… ${k + 1}/${preCap}`);
+        let dr = null;
+        try { dr = await _rideExecOnce(viaLeg, { [_dj.param || 'id']: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null }); } catch { dr = null; }
+        if (!dr || !dr.ok) continue;
+        const detail = primaryObject(dr.value) || dr.value;
+        const merged = { ...enriched[k], ...((detail && typeof detail === 'object' && !Array.isArray(detail)) ? detail : {}) };
+        for (const al of alsoLegs) {
+          try {
+            const pn = (((al.params || (al.tool && al.tool.params)) || []).find((p) => p && p.required) || {}).name || _dj.param || 'id';
+            const adr = await _rideExecOnce(al, { [pn]: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null });
+            if (adr && adr.ok) {
+              Object.assign(merged, _sidecarFields(adr.value, al));
+              const _cl = primaryList(adr.value);   // PM-7 (v1634) — keep the FULL contact list; _sidecarFields flattens to contact[0], the ladder needs each contact's roles
+              if (Array.isArray(_cl) && _cl.length) merged.__contacts = [...(merged.__contacts || []), ..._cl];
+            }
+          } catch { /* a sidecar miss keeps the detail */ }
+        }
+        enriched[k] = merged; got++;
+      }
+      if (got) {
+        rows = enriched;
+        fp = resolveJoinField(rows, map.itemField, _declared) || fp;   // v1635 — an enrich for the LADDER keeps the already-resolved first rung
+        try { _orchLog(`MAP ▸ enriched ${got}/${preCap} row(s) via ${_dj.via}${alsoLegs.length ? ` +${alsoLegs.length} sidecar` : ''} → field ${fp ? (fp.ambiguous ? 'AMBIGUOUS' : `"${fp.path}"`) : 'still not found'}`); } catch { /* */ } }
+    }
+  }
   // v1626 — AMBIGUOUS ("homeowner" over HomeownerEmail + HomeownerPhone): ASK which, never silently take whichever
   // key the API listed first (the resolveRideParam discipline). The target legs are TYPED, so the wrong column is
   // 24 guaranteed misses, not a near-miss.
@@ -3696,67 +3774,143 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, goal = '' } =
   }
   if (!fp) {
     const fields = Object.keys(rows.find((r) => r && typeof r === 'object') || {}).slice(0, 10).join(', ');
-    _setMessageBody(msg, `I read ${rows.length} row${rows.length === 1 ? '' : 's'}, but couldn’t find a “${map.itemField}” field to look up.${fields ? `  The fields I see: ${fields}.` : ''}  Name the exact field and I’ll map it.`);
-    _orchFinalize(msg); return { ok: false };
+    _setMessageBody(msg, `I read ${rows.length} row${rows.length === 1 ? '' : 's'}${_dj ? ' (and pulled each full record)' : ''}, but couldn’t find a “${map.itemField}” field to look up.${fields ? `  The fields I see: ${fields}.` : ''}  Name the exact field and I’ll map it.`);
+    _orchFinalize(msg);
+    try { _orchLog(`MAP ▸ no field — "${map.itemField}" absent from ${rows.length} row(s)${_dj ? ' after enrich' : ''}; asked`); } catch { /* */ }   // v1628 — this exit was SILENT in the 080343 trace (the lesson: every wholesale stop owes a line)
+    return { ok: false };
   }
-  // 3) the TARGET LEG — interpret ONCE.
-  _setMessageBody(msg, `Finding the ${escHtml(system)} lookup…`);
-  const tgt = await _mapResolveTarget(map.target.readAsk, tabId);
-  if (!tgt.leg) {
-    // PM-3 (§7.1) — the honest GAP: the front door already knows it can't; SAY so (was buried in the trace).
-    const body = tgt.write
-      ? `That would write to ${escHtml(system)} once per item — I don’t run bulk writes unattended. Do the first by hand and I’ll capture it, or run it per record with a confirm.`
-      : `I can list them, but I don’t have a ${escHtml(system)} lookup wired yet. Connect ${escHtml(system)}, or show me the lookup once and I’ll map the rest.`;
+  // 3) the LADDER + its target legs (PM-7, v2.74.1634). One key often isn't enough: try the ADDRESS, then the
+  // primary contact's email/phone/name, then the OTHER contact's - first HIT wins, the rest are skipped. A field
+  // the user NAMED is simply a one-rung ladder (explicit still wins). Each rung's TYPE picks its own target read;
+  // legs resolve lazily + cached, so a run costs one interpret per type ACTUALLY used, never one per row.
+  const _declaredRungs = normalizeRungs(_declared);
+  const _rungs = (fp.matchedBy === 'named' || !_declaredRungs.length) ? [{ field: fp.path }] : _declaredRungs;
+  const _legCache = new Map();
+  const _legFor = async (type) => {
+    if (_legCache.has(type)) return _legCache.get(type);
+    const ask = (fp.matchedBy === 'named' && map.target.readAsk) ? map.target.readAsk
+      : (type === 'email' || type === 'phone') ? `find ${system} customer by ${type} {value}`
+      : `search ${system} customers for {value}`;
+    _setMessageBody(msg, `Finding the ${escHtml(system)} ${escHtml(type)} lookup...`);
+    const t = await _mapResolveTarget(ask, tabId);
+    _legCache.set(type, t);
+    return t;
+  };
+  const _firstRow = rows.find((r) => ladderValues(r, _rungs).length) || rows[0] || {};
+  const _firstType = (ladderValues(_firstRow, _rungs)[0] || {}).type || 'text';
+  const tgt0 = await _legFor(_firstType);
+  if (!tgt0.leg) {
+    const body = tgt0.write
+      ? `That would write to ${escHtml(system)} once per item - I don't run bulk writes unattended. Do the first by hand and I'll capture it, or run it per record with a confirm.`
+      : `I can list them, but I don't have a ${escHtml(system)} lookup wired yet. Connect ${escHtml(system)}, or show me the lookup once and I'll map the rest.`;
     _setMessageBody(msg, body); _orchFinalize(msg);
-    try { _orchLog(`MAP ▸ gap — no target leg for "${String(map.target.readAsk).slice(0, 40)}" on ${system} (${tgt.why || 'absent'})`); } catch { /* */ }
+    try { _orchLog(`MAP ▸ gap - no ${_firstType} lookup on ${system} (${tgt0.why || 'absent'})`); } catch { /* */ }
     return { ok: false, gap: true };
   }
-  // 4) per-row INVOKE — deterministic, capped, abort-aware. No LLM per row (the value threads into a param).
+  // 4) per-row: walk the ladder, stop at the first MATCH. Deterministic (no LLM per row), capped, abort-aware.
   const cap = Math.max(1, Math.min(map.cap || _MAP_WINDOW, rows.length));
   const capped = rows.length > cap;
   const use = rows.slice(0, cap);
-  // v1626 — SHAPE CHECK before spending N reads: the target legs are typed (by_email / by_phone), so emails into a
-  // by-phone lookup is 24 guaranteed misses. Say it instead of running it.
-  const _sample = use.map((r) => extractValue(r, fp.path)).filter((v) => v != null).slice(0, 5);
-  const _mism = valueShapeMismatch(_sample, `${tgt.valueParam} ${tgt.leg.name || ''} ${(tgt.leg.tool && tgt.leg.tool.recipeId) || ''}`);
-  if (_mism) {
-    const isSwap = _mism === 'phone-for-email' || _mism === 'email-for-phone';
-    const got = _mism === 'phone-for-email' ? 'phone numbers' : _mism === 'email-for-phone' ? 'email addresses' : `not ${_mism === 'not-email' ? 'email addresses' : 'phone numbers'}`;
-    const wants = /email/i.test(`${tgt.valueParam} ${tgt.leg.name || ''}`) ? 'email' : 'phone';
-    _setMessageBody(msg, `The “${escHtml(map.itemField)}” values look like ${escHtml(isSwap ? got : got)}, but the ${escHtml(system)} lookup I found (“${escHtml(tgt.leg.name || tgt.valueParam)}”) searches by ${wants}. Name the matching field, or ask for the ${wants === 'email' ? 'phone' : 'email'} lookup.`);
-    _orchFinalize(msg);
-    try { _orchLog(`MAP ▸ shape mismatch (${_mism}) — field "${fp.path}" vs ${tgt.leg.name || tgt.valueParam}; not run`); } catch { /* */ }
-    return { ok: false, mismatch: _mism };
-  }
   const results = [];
+  const _rungHits = new Map();
+  const _rungErrs = new Set();   // v1637 — rungs that ERRORED (not missed); a match found BELOW one of these is suspect
   for (let i = 0; i < use.length; i++) {
     if (_walkAbortFlag.requested) break;
-    const value = extractValue(use[i], fp.path);
-    if (value == null) { results.push({ value: null }); continue; }
-    _setMessageBody(msg, `Looking up in ${escHtml(system)}… ${i + 1}/${use.length}`);
-    let r = null;
-    try { r = await _runConnectorLeg(tgt.leg, { ...tgt.baseParams, [tgt.valueParam]: value }, { tabId, groundId: tgt.groundId }); } catch (e) { r = { ok: false, error: e && e.message }; }
-    const match = (r && r.ok) ? (primaryObject(r.value) || (primaryList(r.value) || [])[0] || null) : null;
-    results.push({ value, ok: !!(r && r.ok), match, error: r && r.error });
+    const attempts = ladderValues(use[i], _rungs);
+    if (!attempts.length) { results.push({ value: null }); continue; }
+    let out = { value: attempts[0].value, ok: false, match: null, error: null, via: attempts[0].label };
+    for (const at of attempts) {
+      if (_walkAbortFlag.requested) break;
+      const t = await _legFor(at.type);
+      if (!t.leg) continue;   // no lookup of this type wired - skip the rung, never fail the row for it
+      _setMessageBody(msg, `Looking up in ${escHtml(system)}... ${i + 1}/${use.length}${attempts.length > 1 ? ` (by ${escHtml(at.label)})` : ''}`);
+      let r = null;
+      try { r = await _runConnectorLeg(t.leg, { ...t.baseParams, [t.valueParam]: at.value }, { tabId, groundId: t.groundId }); } catch (e) { r = { ok: false, error: e && e.message }; }
+      // v2.74.1637 — a rung that ERRORED is NOT a rung that missed. Live 085810: the ADDRESS rung (the most
+      // reliable key) ate the session's cold-start 403, the walk read that as "no match" and descended to a NAME
+      // match — a weak key the search leg itself warns about, while the strong one was never actually tried.
+      // Retry a cold-start-class failure ONCE inline (the first call is what warms the session) before descending.
+      if (r && !r.ok && _MAP_AUTHY.test(String(r.error || ''))) {
+        _setMessageBody(msg, `Retrying ${escHtml(system)} (session warming)… ${i + 1}/${use.length}`);
+        try { r = await _runConnectorLeg(t.leg, { ...t.baseParams, [t.valueParam]: at.value }, { tabId, groundId: t.groundId }); } catch (e) { r = { ok: false, error: e && e.message }; }
+      }
+      const match = (r && r.ok) ? (primaryObject(r.value) || (primaryList(r.value) || [])[0] || null) : null;
+      if (r && !r.ok) _rungErrs.add(at.label);   // remember which rungs never got a real answer
+      out = { value: at.value, ok: !!(r && r.ok), match, error: r && r.error, via: at.label };
+      if (match != null) { _rungHits.set(at.label, (_rungHits.get(at.label) || 0) + 1); break; }
+    }
+    results.push(out);
+  }
+  // 4b) RETRY the failures ONCE when the transport PROVED itself on other rows (v2.74.1629, live 081150: the first
+  // THREE Shopify calls 403'd while the session/CSRF warmed, then 19 straight succeeded at ~250ms — those three
+  // were recoverable, and a cold-start failure shouldn't cost a row its match). Only when ≥1 row succeeded (a
+  // blanket auth failure is NOT retried — that's the honest "signed out" tally, not a warm-up).
+  const _retryIdx = results.map((r, i) => ((r && r.value != null && !r.ok) ? i : -1)).filter((i) => i >= 0);
+  const _coldStart = _retryIdx.some((i) => _MAP_AUTHY.test(String((results[i] || {}).error || '')));
+  // v2.74.1636 — retry when the transport PROVED itself on another row, OR when the failures look like a COLD
+  // START (403/timeout on a session-ride's first calls — observed on three consecutive traces). Capped at 5 so a
+  // genuinely signed-out session costs a handful of reads and still reports honestly, never a doubled run.
+  if (_retryIdx.length && (results.some((r) => r && r.ok) || _coldStart)) {
+    _retryIdx.length = Math.min(_retryIdx.length, 5);
+    let _recovered = 0;
+    for (const ri of _retryIdx) {
+      if (_walkAbortFlag.requested) break;
+      _setMessageBody(msg, `Retrying ${escHtml(system)} lookups that failed while the session warmed…`);
+      let rr = null;
+      const _rt = await _legFor((ladderValues(use[ri], _rungs).find((a) => a.value === results[ri].value) || {}).type || _firstType);
+      try { rr = _rt.leg ? await _runConnectorLeg(_rt.leg, { ..._rt.baseParams, [_rt.valueParam]: results[ri].value }, { tabId, groundId: _rt.groundId }) : null; } catch { rr = null; }
+      if (rr && rr.ok) {
+        const _m = primaryObject(rr.value) || (primaryList(rr.value) || [])[0] || null;
+        // v1642 — keep `via`: a recovered row is a real match by a real rung, so it must carry the same rung
+        // label the first-pass matches do, and count toward "matched via". Rebuilding the result bare made a
+        // recovered match render with no rung and vanish from the tally — an audit line that under-reports itself.
+        results[ri] = { ...results[ri], ok: true, match: _m, error: undefined };
+        if (_m != null && results[ri].via) _rungHits.set(results[ri].via, (_rungHits.get(results[ri].via) || 0) + 1);
+        _recovered++;
+      }
+    }
+    if (_recovered) { try { _orchLog(`MAP ▸ retried ${_retryIdx.length} cold-start failure(s) → ${_recovered} recovered`); } catch { /* */ } }
   }
   // 5) JOIN + render + set lastValue (compose).
   const identify = (row) => { const it = summarizeItem(row, { displayId: null }); return { id: it.id, label: it.title || itemFields(row, { max: 2 }).map(([, v]) => v).join(' · ') || 'item' }; };
   const joined = buildJoinRows(use, results, { join: map.join, identify, system });
   const counts = tallyResults(results);
   const tally = mapTally({ ...counts, capped }, { system });
-  try { _orchLog(`MAP ▸ ${counts.total} × ${system} lookup keyed on "${fp.path}" (${fp.matchedBy}) → ${counts.matched} matched, ${counts.noMatch} no-match, ${counts.noField} no-field, ${counts.failed} failed${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
+  try { _orchLog(`MAP ▸ ${counts.total} × ${system} lookup ${_rungs.length > 1 ? `via a ${_rungs.length}-rung ladder${_rungHits.size ? ` (hits: ${[..._rungHits.entries()].map(([k, n]) => `${k} x${n}`).join(', ')})` : ' (no rung hit)'}` : `keyed on "${fp.path}" (${fp.matchedBy})`} → ${counts.matched} matched, ${counts.noMatch} no-match, ${counts.noField} no-field, ${counts.failed} failed${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
+  // v2.74.1631 (user: "search parameter 'homeowner email' is never displayed") — a "no match" you can't AUDIT is
+  // nearly useless: you can't tell a real miss from a wrong column or a junk value. Name the search parameter in
+  // the header (the field asked for → the field RESOLVED → the target leg) and show the VALUE searched on every
+  // row. Values are the user's own record data rendering in their own panel (the same place the case dossiers
+  // already show them) — the §privacy boundary is LLM EGRESS, not panel display, and no value ever rode to the model.
+  const _asked = String(map.itemField || '').trim();
+  const _resolved = fp.path;
+  const _why = (fp.matchedBy === 'declared')
+    ? ' (this desk’s standing join key — name a field to override)'
+    : (_asked && _asked.toLowerCase() !== _resolved.toLowerCase() ? ` (for “${_asked}”)` : '');
+  const _hits = [..._rungHits.entries()].map(([k, n]) => `${k} x${n}`).join(', ');
+  const _errNote = _rungErrs.size ? `  (couldn’t reach ${system} on: ${[..._rungErrs].join(', ')} — a match below those rungs is less certain)` : '';
+  const _header = (_rungs.length > 1)
+    ? `Searched ${system} by a ${_rungs.length}-rung ladder (address, then contacts)${_hits ? ` — matched via: ${_hits}` : ''}.${_errNote}`
+    : `Searched ${system} by ${_resolved}${_why}.`;
+  let text;
   if (map.join === 'table') {
-    const lines = [tally, ...joined.map((j) => {
+    text = [_header, tally, ...joined.map((j) => {
       const src = `${j.source.id != null ? `#${j.source.id} ` : ''}${j.source.label}`.trim();
-      const m = j.matched ? `→ ${_mapMatchLabel(j.match)}` : (j.value == null ? '— no value' : (j.via.error ? `— ${_errWord(j.via.error)}` : '— no match'));
-      return `• ${src} ${m}`;
-    })];
-    _setMessageBody(msg, lines.join('\n'));
+      const val = j.value != null ? String(j.value) : null;
+      const _via = (results[joined.indexOf(j)] || {}).via || '';
+      const m = j.matched ? `${val}${_via && _rungs.length > 1 ? ` (${_via})` : ''} → ${_mapMatchLabel(j.match)}`
+        : (val == null ? `no ${_resolved} on this row`
+          : (j.via.error ? `${val} · ${_errWord(j.via.error)}` : `${val} · no match`));
+      return `• ${src} — ${m}`;
+    })].join('\n');
   } else {
-    _setMessageBody(msg, `${tally}  (attached to each row — ask to open or summarize them.)`);
+    text = `${_header}\n${tally}  (attached to each row — ask to open or summarize them.)`;
   }
+  _setMessageBody(msg, text);
   _orchFinalize(msg);
-  return { ok: true, joined };
+  // v1627 — `text` rides back so the CHAIN can push it as a readout; without it the chain tail's readout join
+  // would overwrite the table with "Done." (the tail owns msg for the whole chain).
+  return { ok: true, joined, text };
 }
 
 // A matched record's short label for the join line (the other system's identity). PURE-ish (uses summarizeItem).
@@ -5539,6 +5693,10 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // D
   } catch { return null; }
   if (!raw) return null;
   const d = applyConfidenceGate(normalizeInterpretDecision(raw, { retrieved }), { minConfidence: 0.6 });
+  // PM-5 (v2.74.1627) — a MAP verdict rides back to the chain, which owns the executor. This is the door a PLAIN
+  // ask actually takes (live 075620: `map` fired twice at conf 0.95 and was DISCARDED here — `_tryInterpret`'s
+  // dispatch is only reached by the `i:` command, so the whole feature was unreachable through the front door).
+  if (d.intent === 'map' && d.map) return { map: d.map };
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
@@ -5677,6 +5835,18 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
         // run's whole first clause showed one static line while 121 reads ran.
         const cr = await _chainConnectorRun(clause.text, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        // PM-5 (v2.74.1627) — a MAP clause: run the per-item cross-system executor HERE (the chain is the door a
+        // plain ask takes). Its joined rows become st.lastValue so a following clause composes; its rendered text
+        // rides into the readouts so the chain tail doesn't overwrite the table with "Done.". A non-ok map already
+        // rendered its own honest message (gap / ambiguous / shape-mismatch / empty) — leave it and stop.
+        if (cr && cr.map) {
+          const mr = await _runMapClause(msg, cr.map, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+          if (!mr || !mr.ok) return;
+          st.lastValue = mr.joined; st.lastReadoutIdx = null;   // v1635 — KEEP st.lastLeg: the joined rows still descend from the source leg, and a follow-up map needs its joinKey declaration
+          if (mr.text) { st.readouts.push(mr.text); st.lastReadoutIdx = st.readouts.length - 1; }
+          st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'map', clause: clause.text, intent: clause.text });
+          continue;
+        }
         if (cr && cr.ok) {
           const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results', displayId: _legDisplayId(cr.leg) });
           st.lastValue = cr.value;

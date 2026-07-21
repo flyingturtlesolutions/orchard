@@ -11860,3 +11860,21 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .wfd-controls .btn-secondary {
   flex: 1;
 }
+
+/* WF-3 (v2.74.1640) — DESK workflows in Studio, grouped by the instance that owns them. Reuses the existing
+   .workflow-entity-row / -name / -status vocabulary; only the grouping wrapper and the per-row meta line are new. */
+.workflow-entity-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.workflow-entity-group > .workflow-entity-status {
+  align-self: flex-start;
+  margin-bottom: 2px;
+}
+.workflow-entity-meta {
+  font-size: 11px;
+  font-family: var(--mono, monospace);
+  color: var(--text-dim, #8a8a8a);
+}

@@ -35,6 +35,8 @@ import {
 import { BUILTIN_ANALYSES, isBuiltinAnalysisId, getBuiltinAnalysis } from './Services/BuiltinAnalyses.js';
 import { parseTemplate, collectTemplateReferences } from './Services/TemplateEngine.js';
 import { uid, $, qs, qsa, escHtml, escAttr, relTime, toast, broadcastStorageChanged, openSidepanelHere } from './shared.js';
+import { listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-3 (v2.74.1640) — DESK workflows across every instance, incl. deleted desks
+import { isBankedWorkflow } from './Core/workflowMemory.js';   // v1641 — the SAME predicate the launch page uses
 import { rideSection } from './Core/groundToolSurface.js';   // §18 — the Ride class's recipe rows + badges (the tri-class surface model)
 
 // §18 (v2.74.1268, DESIGN_connectors.md) — a Ground's tool surface is grouped by execution CLASS: Drive (the grounded
@@ -2216,6 +2218,7 @@ async function refreshWorkflows() {
   _workflowsState.strategies = strategies;
   _workflowsState.grounds = new Map(grounds.map(g => [g.id, g]));
   _workflowsState.workflows = workflows;
+  void renderDeskWorkflows();   // WF-3 — independent of the T3 store; never blocks this refresh
   // v2.74.74 — User analyses + builtins. Builtins prepend so they appear
   // at the top of every Analysis picker.
   _workflowsState.analyses = [
@@ -2323,6 +2326,59 @@ function renderWorkflows() {
 // Workflow-specific actions (edit / delete). Run isn't wired yet because
 // composition (steps[]) isn't implemented — once it is, the runner gates
 // on `steps.length > 0` and routes through a Workflow execution engine.
+// WF-3 (v2.74.1640) — the DESK workflows (WF-1 `il:workflows:*` ask-chains banked by the panel's wizard).
+// A DIFFERENT entity from the site journeys above: those compose Strategies over Grounds; these are saved
+// natural-language ask-chains with no Ground binding (DESIGN_workflow_wizard.md flags the vocabulary collision).
+//
+// Listing them here is what makes them SURVIVE a desk deletion. Nothing ever deleted them — but every other
+// reader looks them up through the live conversation's instance id, so a deleted desk's workflows became
+// unreachable. This view keys off storage itself, so it needs no desk to find them.
+async function renderDeskWorkflows() {
+  const list = $('desk-workflows-list');
+  if (!list) return;
+  let groups = [];
+  try { groups = await listAllWorkflows(); } catch { /* a read failure must not blank the tab */ }
+
+  // v1641 — show what the PRODUCT calls a workflow, not what the store happens to hold. The store also collects
+  // auto-banked `draft` records (any ask that decomposed into 2+ sub-asks), which the launch page has always
+  // hidden. Listing them here made one warranty desk read as "no workflows" in the panel and six in Studio.
+  groups = groups
+    .map((g) => ({ ...g, items: g.items.filter(isBankedWorkflow) }))
+    .filter((g) => g.items.length);   // a group with nothing banked isn't an empty row — it isn't a row
+
+  // Resolve instance ids to the desk's real name. A raw UUID identifies nothing to a human.
+  let byInstance = new Map();
+  try {
+    for (const c of (await ConversationStore.list()) || []) {
+      if (!c) continue;
+      for (const k of [c.instanceId, c.appId, c.id]) if (k) byInstance.set(String(k), c.title || '');
+    }
+  } catch { /* names are a nicety; the list still renders without them */ }
+
+  const total = groups.reduce((n, g) => n + g.items.length, 0);
+  if (!total) {
+    list.innerHTML = '<div class="workflows-empty">No saved workflows yet. Build one with <em>＋ Workflow</em> on a desk.</div>';
+    return;
+  }
+  list.innerHTML = groups.map((g) => {
+    const orphan = g.items.find((x) => x && x.orphanedFrom);
+    const live = byInstance.get(String(g.appId));
+    const head = orphan
+      ? `<span class="workflow-entity-status status-draft" title="the desk was deleted; its workflows were kept">${escHtml(orphan.orphanedFrom.deskName || 'a deleted desk')} · desk deleted</span>`
+      : `<span class="workflow-entity-status status-ready">${escHtml(live || g.appId)}</span>`;
+    const rows = g.items.map((w) => {
+      const steps = Array.isArray(w.steps) ? w.steps.length : (Array.isArray(w.subAsks) ? w.subAsks.length : 0);
+      const runs = Number(w.runs) || 0;
+      return '<div class="workflow-entity-row">'
+        + `<span class="workflow-entity-name">${escHtml(w.name || w.ask || w.id)}</span>`
+        + `<span class="workflow-entity-meta">${steps} step${steps === 1 ? '' : 's'}`
+        + `${runs ? ` · run ${runs}×` : ''}${w.updatedAt ? ` · ${escHtml(relTime(w.updatedAt))}` : ''}</span>`
+        + '</div>';
+    }).join('');
+    return `<div class="workflow-entity-group">${head}${rows}</div>`;
+  }).join('');
+}
+
 function renderWorkflowEntityList() {
   const list = $('workflows-entity-list');
   if (!list) return;

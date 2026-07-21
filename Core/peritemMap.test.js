@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  normalizeMapVerdict, pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch,
+  normalizeMapVerdict, pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, resolveJoinField, normalizeRungs, ladderValues,
 } from './peritemMap.js';
 
 describe('peritemMap — normalizeMapVerdict (the clause contract, §1)', () => {
@@ -23,7 +23,7 @@ describe('peritemMap — normalizeMapVerdict (the clause contract, §1)', () => 
     assert.equal(normalizeMapVerdict({ collection: 'prior', itemField: 'x', target: { system: 's', readAsk: 'r' } }).collection, 'prior');
   });
   it('a missing load-bearing field → null (degrades to decompose, never a half-map)', () => {
-    assert.equal(normalizeMapVerdict({ target: { system: 's', readAsk: 'r' } }), null, 'no itemField');
+    assert.equal(normalizeMapVerdict({ target: { system: 's', readAsk: 'r' } }).itemField, '', 'itemField is OPTIONAL (v1636) — absent means "use the declared ladder"');
     assert.equal(normalizeMapVerdict({ itemField: 'x', target: { system: 's' } }), null, 'no target.readAsk');
     assert.equal(normalizeMapVerdict({ itemField: 'x', target: { readAsk: 'r' } }), null, 'no target.system');
     assert.equal(normalizeMapVerdict(null), null);
@@ -128,5 +128,79 @@ describe('peritemMap — v1626: ambiguity is HONEST, containers are not keys, sh
     assert.equal(valueShapeMismatch(['a@b.com'], 'email shopify_customer_by_email'), null, 'consistent → no complaint');
     assert.equal(valueShapeMismatch(['anything'], 'query Search Shopify customers by name'), null, 'an untyped search accepts anything');
     assert.equal(valueShapeMismatch([], 'email by email'), null, 'no values → nothing to judge');
+  });
+});
+
+describe('peritemMap — resolveJoinField (v1633: the declared cross-system join key)', () => {
+  // The user's domain rule: email/phone/name can differ on the other system; the warranty SHIPPING ADDRESS is stable.
+  const DECL = ['AddressLine1', 'ContactEmail'];
+  const ROWS = [
+    { TaskNumber: '01', AddressLine1: '1008 Harb Drive', CityStateZip: 'ARCHDALE, NC 27263', HomeownerEmail: 'a@b.com', HomeownerPhone: '336-555-0100' },
+  ];
+  it('an UNSPECIFIED field uses the recipe’s declared join key (the address), not a guess', () => {
+    assert.deepEqual(resolveJoinField(ROWS, '', DECL), { path: 'AddressLine1', matchedBy: 'declared' });
+    assert.deepEqual(resolveJoinField(ROWS, null, DECL), { path: 'AddressLine1', matchedBy: 'declared' });
+  });
+  it('an AMBIGUOUS phrase defers to the declaration instead of asking', () => {
+    assert.deepEqual(resolveJoinField(ROWS, 'homeowner', DECL), { path: 'AddressLine1', matchedBy: 'declared' });
+  });
+  it('an EXPLICIT field always wins over the declaration', () => {
+    assert.deepEqual(resolveJoinField(ROWS, "homeowner's email", DECL), { path: 'HomeownerEmail', matchedBy: 'named' });
+    assert.deepEqual(resolveJoinField(ROWS, 'homeowner phone', DECL), { path: 'HomeownerPhone', matchedBy: 'named' });
+  });
+  it('the declaration falls THROUGH to the next key when the first is absent from the rows', () => {
+    const noAddr = [{ TaskNumber: '01', ContactEmail: 'c@d.com' }];
+    assert.deepEqual(resolveJoinField(noAddr, '', DECL), { path: 'ContactEmail', matchedBy: 'declared' });
+  });
+  it('with NO declaration the v1626 behavior is unchanged (ambiguous → ask; nothing → null)', () => {
+    const both = [{ HomeownerEmail: 'a@b.com', HomeownerPhone: '336-555-0100' }];
+    assert.equal(resolveJoinField(both, 'homeowner', null).ambiguous, true);
+    assert.equal(resolveJoinField(ROWS, '', null), null);
+  });
+});
+
+describe('peritemMap — PM-7 the LOOKUP LADDER (v1634)', () => {
+  const LADDER = [
+    'AddressLine1',
+    { contact: 'primary', type: 'email' }, { contact: 'primary', type: 'phone' }, { contact: 'primary', type: 'name' },
+    { contact: 'other', type: 'email' }, { contact: 'other', type: 'phone' }, { contact: 'other', type: 'name' },
+  ];
+  const ROW = {
+    AddressLine1: '1008 Harb Drive',
+    __contacts: [
+      { IsPrimary: true, FullName: 'Erick Acosta', Email: 'erick@x.com', Phone: '219-798-9326' },
+      { IsPrimary: false, FullName: 'Selena Ruiz', Email: 'selena@y.com', Phone: '336-555-0100' },
+    ],
+  };
+  it('normalizeRungs keeps field names AND {contact,type} selectors, capped', () => {
+    const r = normalizeRungs(LADDER);
+    assert.equal(r.length, 7);
+    assert.deepEqual(r[0], { field: 'AddressLine1' });
+    assert.deepEqual(r[1], { contact: 'primary', type: 'email' });
+    assert.deepEqual(r[4], { contact: 'other', type: 'email' });
+    assert.equal(normalizeRungs(null).length, 0);
+  });
+  it('ladderValues yields the rungs IN ORDER: address, then the primary contact, then the other', () => {
+    const v = ladderValues(ROW, normalizeRungs(LADDER));
+    assert.deepEqual(v.map((x) => x.value), ['1008 Harb Drive', 'erick@x.com', '219-798-9326', 'Erick Acosta', 'selena@y.com', '336-555-0100', 'Selena Ruiz']);
+    assert.deepEqual(v.map((x) => x.type), ['text', 'email', 'phone', 'name', 'email', 'phone', 'name']);
+    assert.ok(v[1].label.includes('primary'));
+    assert.ok(v[4].label.includes('other'));
+  });
+  it('rungs with no value are SKIPPED, and a duplicate value is one attempt', () => {
+    const thin = { AddressLine1: '1 Main St', __contacts: [{ IsPrimary: true, Email: 'a@b.com' }] };
+    const v = ladderValues(thin, normalizeRungs(LADDER));
+    assert.deepEqual(v.map((x) => x.value), ['1 Main St', 'a@b.com']);
+    const dupe = { __contacts: [{ IsPrimary: true, Email: 'same@x.com' }, { Email: 'same@x.com' }] };
+    assert.equal(ladderValues(dupe, normalizeRungs(LADDER)).length, 1);
+  });
+  it('no contacts preserved → only the field rungs resolve (never a crash)', () => {
+    assert.deepEqual(ladderValues({ AddressLine1: '5 Oak' }, normalizeRungs(LADDER)).map((x) => x.value), ['5 Oak']);
+    assert.deepEqual(ladderValues({}, normalizeRungs(LADDER)), []);
+  });
+  it('a role STRING (not a boolean flag) also marks the primary contact', () => {
+    const rowStr = { __contacts: [{ ContactType: 'Secondary', Email: 's@x.com' }, { ContactType: 'Primary Homeowner', Email: 'p@x.com' }] };
+    const v = ladderValues(rowStr, normalizeRungs([{ contact: 'primary', type: 'email' }, { contact: 'other', type: 'email' }]));
+    assert.deepEqual(v.map((x) => x.value), ['p@x.com', 's@x.com']);
   });
 });

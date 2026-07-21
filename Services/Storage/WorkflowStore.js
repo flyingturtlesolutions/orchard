@@ -106,3 +106,57 @@ export async function deleteWorkflow(appId, id) {
     return next;
   });
 }
+
+// ── WF-3 (v2.74.1640) — SURVIVAL ───────────────────────────────────────────────────────────────────────────
+// Workflows already outlived desk deletion; they were just UNREACHABLE. ConversationStore.delete removes only
+// conversation records, so `il:workflows:<instanceId>` persisted — but every reader keys off the LIVE
+// conversation's instance id, and that id dies with the desk. Data intact, permanently invisible: the same felt
+// outcome as deletion, plus a storage leak that nothing could ever collect.
+//
+// The fix is a reader that does not need a live desk to find them. That single primitive answers both halves —
+// it is what makes a deleted desk's workflows recoverable AND what lets Studio list every workflow at once.
+
+const _PREFIX = 'il:workflows:';
+
+/**
+ * Every saved workflow across every instance, live or deleted. @returns {Promise<Array<{appId,items,updatedAt,orphaned}>>}
+ * Sorted newest-touched first. Reads the whole local area once — the only way to reach a record whose owning
+ * desk no longer exists to name it.
+ */
+export async function listAllWorkflows() {
+  let all = null;
+  try { all = await chrome.storage.local.get(null); } catch { return []; }
+  const out = [];
+  for (const [k, rec] of Object.entries(all || {})) {
+    if (!k.startsWith(_PREFIX)) continue;
+    const items = (rec && Array.isArray(rec.items)) ? rec.items.filter(Boolean) : [];
+    if (!items.length) continue;
+    out.push({
+      appId: k.slice(_PREFIX.length),
+      items,
+      updatedAt: (rec && rec.updatedAt) || 0,
+      // A record is orphaned once its desk is gone. The stamp is written AT deletion (markWorkflowsOrphaned)
+      // because that is the only moment the desk's NAME still exists to record — afterwards there is nothing
+      // left to look it up from, and an unnamed orphan is barely more useful than an invisible one.
+      orphaned: items.some((x) => x && x.orphanedFrom),
+    });
+  }
+  return out.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+/**
+ * Stamp an instance's workflows with the desk that owned them, immediately BEFORE that desk is deleted.
+ * Deliberately not a delete: the user asked for these to survive, and a workflow is a taught capability whose
+ * cost was the teaching, not the record. Writes directly (no normalize) so a stamp cannot fail a record's
+ * schema check and silently drop the provenance it exists to preserve.
+ */
+export async function markWorkflowsOrphaned(appId, deskName) {
+  if (!appId) return 0;
+  return _chained(appId, async () => {
+    const items = await loadWorkflows(appId);
+    if (!items.length) return 0;
+    const from = { deskName: String(deskName || 'a deleted desk').slice(0, 120), at: Date.now() };
+    await _write(appId, items.map((x) => (x && !x.orphanedFrom) ? { ...x, orphanedFrom: from } : x));
+    return items.length;
+  });
+}

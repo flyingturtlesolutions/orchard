@@ -211,3 +211,11 @@ describe('CX-9k (v2.74.1617) — displayId rides the SEEDED path (Invariant #3 h
     assert.ok(!('displayId' in plain));
   });
 });
+
+describe('PM (v2.74.1633) — joinKey rides the SEEDED path (Invariant #3 hop 1)', () => {
+  it('recipeFromCatalogEntry carries joinKey; absent stays absent', () => {
+    const rec = recipeFromCatalogEntry({ id: 'x', method: 'GET', endpoint: '/e', appHost: 'a.com', joinKey: ['AddressLine1'] }, { origin: 'a.com' });
+    assert.deepEqual(rec.joinKey, ['AddressLine1']);
+    assert.ok(!('joinKey' in recipeFromCatalogEntry({ id: 'y', method: 'GET', endpoint: '/e', appHost: 'a.com' }, { origin: 'a.com' })));
+  });
+});

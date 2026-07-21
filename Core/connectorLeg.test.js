@@ -168,3 +168,12 @@ describe('CX-9k (v2.74.1617) — displayId threads recipe → leg.tool (Invarian
     assert.equal(recipeToLeg({ ...BASE }).tool.displayId, null);
   });
 });
+
+describe('PM (v2.74.1633) — joinKey threads recipe → leg.tool (Invariant #3 hop 3)', () => {
+  const BASE = { id: 'r1', app: 'vs', origin: 'vendorsuite.drhorton.com', endpoint: '/api/x', name: 'X' };
+  it('array filtered/capped; string wraps; absent → null', () => {
+    assert.deepEqual(recipeToLeg({ ...BASE, joinKey: ['AddressLine1', '', 'ContactEmail'] }).tool.joinKey, ['AddressLine1', 'ContactEmail']);
+    assert.deepEqual(recipeToLeg({ ...BASE, joinKey: 'AddressLine1' }).tool.joinKey, ['AddressLine1']);
+    assert.equal(recipeToLeg({ ...BASE }).tool.joinKey, null);
+  });
+});

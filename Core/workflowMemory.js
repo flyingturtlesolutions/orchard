@@ -69,6 +69,8 @@ export function normalizeWorkflow(raw) {
     runs: Number.isFinite(r.runs) ? r.runs : 0,
     dismissed: Number.isFinite(r.dismissed) ? r.dismissed : 0,        // WF-2 — "No, interpret it" count (suppression)
     status: r.status === 'draft' ? 'draft' : 'ready',                // WW-1 (§10.A) — draft never reaches the launch page / a cadence
+    // WF-3 (v1640) — provenance of a desk that no longer exists; whitelisted so an edit can't strip it.
+    orphanedFrom: (r.orphanedFrom && typeof r.orphanedFrom === 'object') ? r.orphanedFrom : undefined,
     qualifiedAt: Number.isFinite(r.qualifiedAt) ? r.qualifiedAt : 0,  // WW-1 — when every step was approved (empirical proof stamp)
     steps: _normSteps(r.steps),                                       // WW-1 — body-blind per-step provenance (display/audit)
   };
@@ -139,4 +141,17 @@ export function workflowSharesVocab(ask, candidates) {
   return (Array.isArray(candidates) ? candidates : []).some(
     (c) => c && _tokens(`${_str(c.ask)} ${_str(c.name)}`).some((t) => q.has(t)),
   );
+}
+
+/**
+ * WF-3 (v2.74.1641) — is this record a WORKFLOW, in the sense the product means?
+ *
+ * The store holds two populations. A `draft` is auto-banked whenever an ask happened to decompose into 2+
+ * sub-asks — it is a record of a decomposition, not something the user built. A banked workflow is one the user
+ * finished and saved (the wizard sets status 'ready' once every step is approved). The launch page has enforced
+ * exactly this since WW-1b — "unfinished != proven quick action" — and any other surface that lists workflows
+ * must agree, or the same store reads as six workflows in one place and none in another. PURE.
+ */
+export function isBankedWorkflow(w) {
+  return !!w && !!(w.ask || w.name) && w.status !== 'draft';
 }

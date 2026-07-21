@@ -34,7 +34,10 @@ export function normalizeMapVerdict(raw) {
   const t = (d.target && typeof d.target === 'object') ? d.target : {};
   const targetSystem = _str(t.system);
   const targetReadAsk = _str(t.readAsk);
-  if (!itemField || !targetSystem || !targetReadAsk) return null;   // the three load-bearing fields; without any, it's not a map
+  // v2.74.1636 — `itemField` is OPTIONAL: an unspecified ask ("find their Shopify profile") is exactly the case
+  // the recipe's declared LADDER exists for. Only the TARGET is load-bearing. An absent itemField is the signal
+  // "no field was named" — the executor then runs the ladder instead of treating an invented field as explicit.
+  if (!targetSystem || !targetReadAsk) return null;
   let collection = 'prior';
   if (d.collection && typeof d.collection === 'object' && _str(d.collection.readAsk)) collection = { readAsk: _str(d.collection.readAsk) };
   else if (_str(d.collection) && _str(d.collection) !== 'prior') collection = { readAsk: _str(d.collection) };   // a bare string collection = a self-contained read ask
@@ -125,6 +128,107 @@ export function pickFieldPath(rows, fieldPhrase) {
     if (vb) return { path: vb.path, matchedBy: 'shape' };
   }
   return null;
+}
+
+// PM-0 (v2.74.1633) — the JOIN-KEY LADDER: which field should key the cross-system lookup? PURE.
+//   1. the ask NAMED a field and it resolves cleanly → that (an explicit request always wins),
+//   2. else the RECIPE DECLARED a joinKey and one is present on the rows → that. Domain knowledge the data can't
+//      show: a homeowner's email/phone/NAME may differ on the other system (a spouse ordered, a work account),
+//      but the warranty SHIPPING ADDRESS is where the parts went — it's the stable key. The v1617 displayId
+//      lesson generalized: a declaration is consumed BEFORE the heuristic, never replaced by a smarter one.
+//   3. else the named phrase was AMBIGUOUS (and nothing declared) → ambiguous, ask (v1626),
+//   4. else null → the honest "which field?".
+// Returns { path, matchedBy:'named'|'declared' } | { ambiguous, candidates } | null.
+export function resolveJoinField(rows, fieldPhrase, declaredKeys) {
+  const named = _str(fieldPhrase) ? pickFieldPath(rows, fieldPhrase) : null;
+  if (named && named.path) return { path: named.path, matchedBy: 'named' };
+  const sample = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === 'object').slice(0, 5);
+  for (const k of (Array.isArray(declaredKeys) ? declaredKeys : [])) {
+    if (!_str(k)) continue;
+    if (sample.some((r) => extractValue(r, k) != null)) return { path: k, matchedBy: 'declared' };
+  }
+  if (named && named.ambiguous) return named;   // nothing declared to break the tie → ask
+  return null;
+}
+
+// ── PM-7 (v2.74.1634) — the LOOKUP LADDER ─────────────────────────────────────────────────────────────────────
+// One key often isn't enough: a warranty task should be matched on the ADDRESS first (stable), then the PRIMARY
+// HOMEOWNER's email → phone → name, then the OTHER homeowner contact's email → phone → name. Each rung is a
+// (value, type) attempt against the type's own target read; the first HIT wins and the rest are skipped.
+//
+// A rung is either a plain FIELD NAME (a row key/path) or a CONTACT SELECTOR:
+//   { contact: 'primary' | 'other', type: 'email' | 'phone' | 'name' }
+// Contact selectors resolve against the row's preserved contact LIST (`__contacts`, kept by the enrich pass) by
+// ROLE TOKEN + VALUE SHAPE — never by invented field names, because the payload's exact keys/flags vary by app.
+// 'primary' = a contact whose role flags/labels contain "primary"; 'other' = the first that does NOT (the user's
+// "primary homeowner" vs "homeowner" — two distinct contacts on the same task).
+const _CONTACTS_KEY = '__contacts';
+
+const _roleWords = (c) => {
+  const out = [];
+  for (const [k, v] of Object.entries((c && typeof c === 'object') ? c : {})) {
+    if (v === true && /^[Ii]s(?=[_A-Z])/.test(k)) out.push(_norm(k.replace(/^is[_-]?/i, '')));
+    else if (typeof v === 'string' && /(role|type|relation|contacttype)/i.test(k)) out.push(_norm(v));
+  }
+  return out.join(' ');
+};
+const _isPrimary = (c) => /\bprimary\b/.test(_roleWords(c));
+
+// The best value of `type` on one contact: prefer a key that NAMES the type, else a value whose SHAPE matches. PURE.
+function _contactValue(contact, type) {
+  if (!contact || typeof contact !== 'object') return null;
+  const ents = Object.entries(contact).filter(([, v]) => v != null && v !== '' && typeof v !== 'object');
+  const named = ents.find(([k]) => _norm(k).includes(type));
+  if (named) return String(named[1]);
+  if (type === 'name') {
+    const n = ents.find(([k]) => /(fullname|name)$/i.test(k.replace(/[^a-z]/gi, '')));
+    return n ? String(n[1]) : null;
+  }
+  const shaped = ents.find(([, v]) => _shapeMatches(type, v));
+  return shaped ? String(shaped[1]) : null;
+}
+
+/** Normalize a declared ladder: strings stay field names, objects become {contact,type} rungs. PURE. */
+export function normalizeRungs(declared) {
+  const out = [];
+  for (const r of (Array.isArray(declared) ? declared : [])) {
+    if (_str(r)) { out.push({ field: _str(r) }); continue; }
+    if (r && typeof r === 'object') {
+      const type = _norm(r.type);
+      const contact = _norm(r.contact) || 'primary';
+      if (type) out.push({ contact: contact === 'other' ? 'other' : 'primary', type });
+    }
+    if (out.length >= 12) break;   // a ladder, not a crawl
+  }
+  return out;
+}
+
+/**
+ * PM-7 — the concrete ATTEMPTS for one row, in ladder order, skipping rungs with no value. PURE.
+ * @returns {Array<{value:string, type:string, label:string}>}  type drives which target read the caller uses.
+ */
+export function ladderValues(row, rungs) {
+  const out = [];
+  const seen = new Set();
+  const contacts = (row && Array.isArray(row[_CONTACTS_KEY])) ? row[_CONTACTS_KEY].filter((c) => c && typeof c === 'object') : [];
+  for (const rung of (Array.isArray(rungs) ? rungs : [])) {
+    let value = null; let type = _str(rung.type); let label = '';
+    if (rung.field) {
+      value = extractValue(row, rung.field);
+      label = rung.field;
+      if (!type) type = _shapeMatches('email', value) ? 'email' : (_shapeMatches('phone', value) ? 'phone' : 'text');
+    } else if (rung.type) {
+      const pick = rung.contact === 'other' ? contacts.find((c) => !_isPrimary(c)) : (contacts.find(_isPrimary) || contacts[0]);
+      value = pick ? _contactValue(pick, rung.type) : null;
+      label = `${rung.contact === 'other' ? 'other contact' : 'primary contact'} ${rung.type}`;
+    }
+    if (value == null || value === '') continue;
+    const k = `${type}|${String(value).toLowerCase()}`;
+    if (seen.has(k)) continue;   // the same value under two rungs is one attempt, not two
+    seen.add(k);
+    out.push({ value: String(value), type: type || 'text', label });
+  }
+  return out;
 }
 
 // PM-0 (v2.74.1626) — does the piped VALUE SHAPE contradict what the TARGET read expects? PURE. The Shopify legs

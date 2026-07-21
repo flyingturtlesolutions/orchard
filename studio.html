@@ -147,10 +147,24 @@
       </div>
     </div>
 
-    <!-- Workflows section (the top-level orchestrating entity). -->
+    <!-- WF-3 (v2.74.1640) — the DESK workflows: saved ask-chains banked by the panel's workflow wizard, listed
+         across EVERY instance so a deleted desk's workflows are still reachable here. Distinct entity from the
+         site journeys below (DESIGN_workflow_wizard.md §naming: two "workflow" vocabularies; this resolves the
+         collision the doc asked to fix "when next touched" by naming each for what it actually is). -->
     <div class="workflows-section">
       <div class="workflows-section-head">
-        <span class="workflows-section-label">Workflows</span>
+        <span class="workflows-section-label">Desk workflows</span>
+        <span class="workflows-section-hint">Saved ask-chains from the panel. Workflows from a deleted desk stay here.</span>
+      </div>
+      <div class="workflows-entity-list" id="desk-workflows-list">
+        <div class="workflows-empty">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Site journeys (the top-level structural orchestrating entity — was labelled "Workflows"). -->
+    <div class="workflows-section">
+      <div class="workflows-section-head">
+        <span class="workflows-section-label">Site journeys</span>
         <span class="workflows-section-hint">Top-level orchestrations. Compose one or more Strategies (across any Grounds).</span>
       </div>
       <div class="workflows-entity-list" id="workflows-entity-list">

@@ -533,6 +533,34 @@ export const CONNECTOR_RECIPES = [
     // the per-home claim sequence — every bullet read "#01"). TicketId is the number users quote ("ticket 4867009");
     // TaskNumber the site's own task number.
     displayId: ['TicketId', 'TaskNumber'],
+    // PM (v2.74.1633, user's domain rule) — the CROSS-SYSTEM join key, preference-ordered. The homeowner's EMAIL,
+    // PHONE and even NAME can differ in the other system (a spouse ordered, a work address, a changed account) —
+    // but the SHIPPING ADDRESS of a warranty request is the same address the parts went to, so it's the stable
+    // key for matching this task to an order/customer elsewhere. Consumed BEFORE the name/shape heuristics when
+    // the ask doesn't name a field (the v1617 displayId lesson: a declaration beats a smarter guess). Bonus: it
+    // lives on the LIST row, so the default join needs no per-row drill.
+    // PM-6 (v2.74.1639) — how a warranty row fills a Shopify customer CREATE, for the reviewed write batch.
+    // Contact rungs match by TYPE SUBSTRING (not an exact key), so this survives field-name variation across
+    // divisions; anything that does not resolve is reported per-row as unproposable and never invented.
+    writeMap: {
+      shopify_create_customer: {
+        first_name: { contact: 'primary', type: 'first' },
+        last_name: { contact: 'primary', type: 'last' },
+        email: { contact: 'primary', type: 'email' },
+        phone: { contact: 'primary', type: 'phone' },
+        address1: 'AddressLine1',          // the join key itself — proven live (v1638 trace)
+        country: { literal: 'US' },        // VendorSuite is a US homebuilder feed; the code, not the name
+      },
+    },
+    joinKey: [
+      'AddressLine1',                          // 1. the warranty SHIPPING address - stable across systems
+      { contact: 'primary', type: 'email' },   // 2-4. the PRIMARY homeowner contact
+      { contact: 'primary', type: 'phone' },
+      { contact: 'primary', type: 'name' },
+      { contact: 'other', type: 'email' },     // 5-7. the OTHER homeowner contact (a different person on the task)
+      { contact: 'other', type: 'phone' },
+      { contact: 'other', type: 'name' },
+    ],
     // v2.74.1519 — TicketId/TaskId join the drill match (the live miss: "ticket 4867009" bound cleanly but the
     // match fields were address-shaped only, so a warranty-ticket ask could never find its row).
     // v2.74.1559 — `also`: catalog-owned SIDECAR reads the case dossier pulls alongside the drill (same join id) —
@@ -548,6 +576,28 @@ export const CONNECTOR_RECIPES = [
     ] },
   { ...VS, id: 'vs_warranty_task', name: 'Warranty task details', itemUrl: '/#warranty',
     displayId: ['TicketId', 'TaskNumber'],   // CX-9k — the detail head's "#id" shows the human number too
+    // PM-6 (v2.74.1639) — how a warranty row fills a Shopify customer CREATE, for the reviewed write batch.
+    // Contact rungs match by TYPE SUBSTRING (not an exact key), so this survives field-name variation across
+    // divisions; anything that does not resolve is reported per-row as unproposable and never invented.
+    writeMap: {
+      shopify_create_customer: {
+        first_name: { contact: 'primary', type: 'first' },
+        last_name: { contact: 'primary', type: 'last' },
+        email: { contact: 'primary', type: 'email' },
+        phone: { contact: 'primary', type: 'phone' },
+        address1: 'AddressLine1',          // the join key itself — proven live (v1638 trace)
+        country: { literal: 'US' },        // VendorSuite is a US homebuilder feed; the code, not the name
+      },
+    },
+    joinKey: [
+      'AddressLine1',                          // 1. the warranty SHIPPING address - stable across systems
+      { contact: 'primary', type: 'email' },   // 2-4. the PRIMARY homeowner contact
+      { contact: 'primary', type: 'phone' },
+      { contact: 'primary', type: 'name' },
+      { contact: 'other', type: 'email' },     // 5-7. the OTHER homeowner contact (a different person on the task)
+      { contact: 'other', type: 'phone' },
+      { contact: 'other', type: 'name' },
+    ],   // PM-7 (v1634) — same ladder on the detail read
     does: 'read a warranty task\'s full details by its INTERNAL task id (from a task list row — for a human task number or an address, use the task LIST with that as the address filter)',
     endpoint: '/api/Vendor/Warranty/Task/{taskId}',
     params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id from a list row — for a human task number or address, use the task LIST' }] },

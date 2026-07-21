@@ -31,6 +31,8 @@ export function descNamesConnections(description, labels) {
  *   cards:Array<{kind:'workflow'|'new-workflow'|'command', title:string, sub:string, wf?:object, command?:string}>,
  *   vitalsAfter:boolean }}
  */
+
+import { isBankedWorkflow } from './workflowMemory.js';   // v1641 — one definition of "a banked workflow"
 export function buildDeskLanding({ title = '', description = '', isAdmin = false, workflows = [], connections = [] } = {}) {
   const name = String(title || '').trim() || (isAdmin ? 'Admin desk' : '');
   // v1603 (live: "sub header has no description") — the Admin desk is not a catalog desk, so it has no
@@ -53,7 +55,7 @@ export function buildDeskLanding({ title = '', description = '', isAdmin = false
     cards.push({ kind: 'command', command: 'keepalive', title: 'Keep-alive…', sub: 'per-site session pings while you work' });
   } else {
     const wfs = (Array.isArray(workflows) ? workflows : [])
-      .filter((w) => w && (w.ask || w.name) && w.status !== 'draft')   // WW-1b (v2.74.1620, §10.A) — a DRAFT never reaches the launch page (unfinished ≠ proven quick action)
+      .filter(isBankedWorkflow)   // WW-1b (v1620) — a DRAFT never reaches the launch page (unfinished ≠ proven quick action); v1641 — the predicate moved to workflowMemory so Studio can't disagree with this page
       .sort((a, b) => ((b.runs || 0) - (a.runs || 0)) || ((b.at || 0) - (a.at || 0)))
       .slice(0, LANDING_MAX_WORKFLOWS);
     for (const w of wfs) {

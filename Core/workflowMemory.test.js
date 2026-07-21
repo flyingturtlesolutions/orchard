@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { workflowId, normalizeWorkflow, workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab } from './workflowMemory.js';
+import { workflowId, normalizeWorkflow, workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, isBankedWorkflow } from './workflowMemory.js';
 
 const WF = (ask, subAsks, over = {}) => ({ ask, subAsks, ...over });
 
@@ -100,5 +100,19 @@ describe('workflowMemory — semantic-match support (candidates + resolve)', () 
     assert.equal(workflowSharesVocab('what is the standup about', cand), true);           // "standup" (name) shared
     assert.equal(workflowSharesVocab('book me a flight to tokyo', cand), false);          // zero overlap → skip the call
     assert.equal(workflowSharesVocab('', cand), false);
+  });
+});
+
+describe('workflowMemory — isBankedWorkflow (one definition of "a workflow", v1641)', () => {
+  it('a finished, saved workflow counts', () => {
+    assert.equal(isBankedWorkflow({ ask: 'find shopify profile', status: 'ready' }), true);
+    assert.equal(isBankedWorkflow({ name: 'Shopify profile search', status: 'ready' }), true);
+  });
+  it('an auto-banked DRAFT does not — it records a decomposition, not something the user built', () => {
+    // The live bug: six drafts rendered in Studio while the same desk showed none in the panel.
+    assert.equal(isBankedWorkflow({ ask: 'list new warranty tasks and open the first', status: 'draft' }), false);
+  });
+  it('junk and unnamed records never count', () => {
+    for (const w of [null, undefined, {}, { status: 'ready' }]) assert.equal(isBankedWorkflow(w), false);
   });
 });
