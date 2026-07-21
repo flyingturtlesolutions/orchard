@@ -69,12 +69,43 @@ optimistic reading is tempting — and exactly why the two ❌ rows must be veri
 `family` tag (`'page' | 'scope' | 'reference'`); **page**-family route to the content script, **scope**-family
 evaluate engine-side against `scope` — i.e. against RECORDS, not the DOM.
 
-Available data predicates:
+> ## ⛔ THE PREDICATE LIST BELOW IS **WRONG**. DO NOT BUILD AGAINST IT. *(falsified by PP-0b, 2026-07-21)*
+>
+> An earlier draft listed `field_contains · field_equals · field_starts_with · field_ends_with · field_present ·
+> field_gt/gte/lt/lte · all_of · any_of` as the scope-family predicates a branch can use. **`evaluateDataCondition`
+> — the scope-side evaluator — supports NONE of them.** Its actual switch is:
+>
+> ```
+> binding_is_list · binding_is_scalar · binding_length_{min,max,range,exactly}
+> every_record_{has_field, field_non_empty, field_equals, field_starts_with, field_in_set}
+> binding_is_record · record_has_field · record_field_non_empty
+> scalar_{non_empty, is_number, equals, number_range, in_set}
+> binding_is_{section,image,document} · document_{min_length,contains} · orch_predicate
+> ```
+>
+> The `field_contains` family lives in `SieveExecutor.#evalSieveAssertion` — the SIEVE's row-filter language — and
+> in a `StrategyTree` comment. **Same names, different subsystem, not reachable from `detect`.**
+>
+> **How the error was made:** the list was assembled by grepping identifier names across the tree rather than
+> reading the evaluator's switch. That is the same mistake as the earlier "SieveExecutor duplicates the
+> vocabulary" worry — matching names inferred to mean a shared vocabulary — made twice, in opposite directions,
+> in one session.
+>
+> **What survives and is genuinely useful for per-item branching:** `binding_is_record` · `record_has_field` ·
+> `record_field_non_empty` (single-record tests — "does this task have instructions at all?"), `document_contains`
+> (the ONLY contains-style predicate, on a *document* binding), and `orch_predicate` (an escape hatch, unread).
+> `every_record_*` is collection-shaped and therefore the wrong shape for per-item.
+>
+> **NEXT READ (small, blocks PP-1):** `binding_is_document` / `document_contains` semantics — does a long
+> free-text field qualify as a document? — and what `orch_predicate` permits. Those decide whether
+> structured-field branching is expressible today or needs a new condition type.
+
+~~Available data predicates:~~ *(superseded — see the block above)*
 
 ```
-field_contains · field_equals · field_starts_with · field_ends_with · field_present
-field_gt · field_gte · field_lt · field_lte
-all_of · any_of                       (composition)
+field_contains · field_equals · field_starts_with · field_ends_with · field_present   ← NOT AVAILABLE
+field_gt · field_gte · field_lt · field_lte                                            ← NOT AVAILABLE
+all_of · any_of                                                                        ← unverified
 ```
 
 These are exact string/number tests over a record. **They are the right tool for STRUCTURED fields and the wrong
