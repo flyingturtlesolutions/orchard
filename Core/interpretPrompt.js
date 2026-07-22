@@ -42,7 +42,7 @@ const SYSTEM = [
   '  pull per row, e.g. homeowner email>","target":{"system":"<the other system, e.g. shopify>","readAsk":"<the',
   '  per-item read templated on the value, e.g. search Shopify for {value}>"},"join":"table"}. Use {value} as the',
   '  placeholder for the pulled field. Choose "map" ONLY for a cross-system per-item lookup; a per-item action on the',
-  '  SAME system, or spawning a case per item, is "decompose". A map is READS only — never a per-item write.',
+  '  SAME system is "decompose", and spawning a case per item is "case". A map is READS only — never a per-item write.',
   '- "branch": a PER-ITEM CLASSIFY-AND-ROUTE over a list — "sort each task by status", "which of these are still',
   '  open?", "group them by priority". Set "branch": {"collection":…, "arms":[{"label":"<short name>",',
   '  "when":<assertion>}], "mode":"first"|"all"}.',
@@ -84,6 +84,15 @@ const SYSTEM = [
   '  and every field comes from that declaration. Anything it cannot fill is reported, never invented.',
   '  Choose this ONLY after a step that looked things up — it acts on the unmatched rows from THAT step, so by',
   '  itself it has nothing to work with.',
+  '- "case": open a CASE — the local review record one of us reads later — over the items a previous step produced.',
+  '  "create a case for each of those", "open a case listing what needs replacing", "log these for review". Set',
+  '  "case": {"scope":"item"|"run","title":"<the user\'s own words>"} (an empty object is fine; scope defaults to',
+  '  per-item). Use "item" for "for EACH …", "run" for one case covering the whole set.',
+  '  ⚠ A case is OURS — it is stored locally and costs nothing to open or close. It is NOT a ticket, an issue, or',
+  '  a record on any connected site. If the ask means "file this in Zendesk/Jira/Shopify", that is "act" with the',
+  '  site\'s own capability, NOT this. When the ask just says "a case" with no system named, it means this one.',
+  '  You do NOT supply what the case CONTAINS: its contents are whatever the steps actually produced. If the ask',
+  '  wants detail no step has read (a count, a quantity, a type), the case says so — never fill it in.',
   '- "clarify": you genuinely cannot tell what ACTION is wanted — a malformed/garbled command or an unclear target.',
   '  ASK instead of guessing (set "question"). NOT for a question you could simply answer.',
   '- "teach": the ask needs a capability not in the catalog and not a primitive — offer to be shown.',
@@ -146,8 +155,8 @@ const SYSTEM = [
   '- A param typed (date-time) MUST be a CONCRETE ISO 8601 timestamp (e.g. 2026-07-02T15:00:00) in the user\'s',
   '  timezone — resolve relative times ("tomorrow 3pm") against the NOW line; NEVER emit relative text as a value.',
   '- Reply with ONLY a JSON object:',
-  '  {"intent":"act|navigate|decompose|clarify|teach|answer|map|fieldread|branch|write","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
-  '   "params":{..},"subAsks":[..],"map":{..?},"fieldRead":{..?},"branch":{..?},"write":{..?},"question":"..","confidence":0..1,"why":"short"}',
+  '  {"intent":"act|navigate|decompose|clarify|teach|answer|map|fieldread|branch|write|case","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
+  '   "params":{..},"subAsks":[..],"map":{..?},"fieldRead":{..?},"branch":{..?},"write":{..?},"case":{..?},"question":"..","confidence":0..1,"why":"short"}',
 ].join('\n');
 
 /**
@@ -258,7 +267,8 @@ export function parseInterpretOutput(raw) {
     map: (obj.map && typeof obj.map === 'object') ? obj.map : null,   // PM-1 — the per-item cross-system MAP clause (interpret.js normalizes it)
     fieldRead: (obj.fieldRead && typeof obj.fieldRead === 'object') ? obj.fieldRead : null,   // PM-9 (v1651) — the per-item OWN-RECORD read clause. This return is a WHITELIST: a payload absent here is dropped in transit, the intent survives, and the verdict silently degrades to clarify — which is exactly how v1649/1650 read as 'the runtime never ran'.
     branch: (obj.branch && typeof obj.branch === 'object') ? obj.branch : null,
-    write: (obj.write && typeof obj.write === 'object') ? obj.write : null,   // PP-2 (v1681) — added in the SAME edit as the intent (the v1651 rule)   // PP-1 (v1661) — the per-item CLASSIFY-AND-ROUTE clause. Added here in the SAME edit as the intent (see the v1651 note above): a clause whose intent is registered but whose payload is not whitelisted arrives empty and degrades to clarify, with a correct-looking rationale in the trace.
+    write: (obj.write && typeof obj.write === 'object') ? obj.write : null,
+    case: (obj.case && typeof obj.case === 'object') ? obj.case : null,   // PP-3 (v1686) — added in the SAME edit as the intent (the v1651 rule): a payload absent from this whitelist is stripped in transit, so the clause arrives empty and degrades to clarify   // PP-2 (v1681) — added in the SAME edit as the intent (the v1651 rule)   // PP-1 (v1661) — the per-item CLASSIFY-AND-ROUTE clause. Added here in the SAME edit as the intent (see the v1651 note above): a clause whose intent is registered but whose payload is not whitelisted arrives empty and degrades to clarify, with a correct-looking rationale in the trace.
     question: typeof obj.question === 'string' ? obj.question.trim() : '',
     confidence: _clamp01(obj.confidence),
     why: typeof obj.why === 'string' ? obj.why.slice(0, 200) : (typeof obj.reason === 'string' ? obj.reason.slice(0, 200) : ''),

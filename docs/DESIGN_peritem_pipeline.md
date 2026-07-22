@@ -628,6 +628,39 @@ are needed.
 
 ---
 
+## §5.8 REACHABILITY is part of the shape — *(added 2026-07-22, from a live misroute)*
+
+Every clause in §0's shape must be nameable by the front door. This is not a build-order note; it is a **safety
+property**, and it was learned the hard way.
+
+`Core/pipelineCase.js` was built, tested (19) and specified at §5.7 from v1665. It was not in `Core/interpret.js`'s
+`INTENTS` array. Live (2026-07-22, trace 070307) the ask *"create a new case listing the number and type of
+replacement"* therefore resolved to `act` on `me.zendesk.create_ticket@deako.zendesk.com` — a different ground, a
+real CS queue, an outward write, dispatched twice. The interpret prompt made it worse: it explicitly said
+*"spawning a case per item is `decompose`"*, steering the ask away from the clause built to serve it.
+
+**The rule.** A clause absent from the vocabulary does not degrade to "unavailable". The front door must choose
+*something*, so it substitutes the nearest expressible thing, **confidently**. An unreachable clause is therefore
+strictly worse than an unbuilt one: unbuilt fails visibly, unreachable succeeds at the wrong act. "Built" means
+reachable from the front door — the ten seams (§6's ladder note), not the pure module alone.
+
+**The corollary, and the second half of the same live bug.** §1's narrowing comment assumed *"an empty prior makes
+the next clause report 'nothing to work with'"*. That holds for a per-item clause, which consults the prior. It
+does **not** hold for `act`, which resolves a leg from the ask alone and never looks at the working set. So
+`BRANCH ▸ narrowed prior → 0 of 1` was followed by a dispatched write.
+
+A pipeline must therefore stop **at the step boundary**, not inside each clause: if a prior step produced a
+collection that came back EMPTY *and* the next step's own words point back at it ("each", "those", "them"), the
+step does not dispatch. Both conditions are required — a step that never depended on the prior ("open shopify.com")
+must still run. `Core/priorScope.js`.
+
+**And the gate must narrate itself.** The same trace could not answer *"did it write?"*: two `INVOKE_SESSION`
+dispatches, no result line, and zero gate lines in the whole file. The confirm bar logged only *after* a confirm,
+so a write **awaiting a human emitted nothing** — the most decision-worthy moment in the system was the one it did
+not record. A gate that holds must log the HOLD (`WRITE_GATE ▸ held`) and the DECLINE, not only the release.
+
+---
+
 ## §6 Build ladder
 
 - **PP-0** — ~~answer §2's two open questions~~ **DONE.** Both answered by reading two module headers (§2.0): the

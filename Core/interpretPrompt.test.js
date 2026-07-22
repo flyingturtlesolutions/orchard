@@ -210,3 +210,36 @@ describe('interpretPrompt — parseInterpretOutput', () => {
     assert.equal(d.capabilityId, 'cap-x');
   });
 });
+
+// PP-3 (v2.74.1686) — the PROMPT half of case reachability. Adding the intent to `INTENTS` makes the payload
+// survive validation; it does nothing at all unless the model is told the kind exists and when to choose it.
+describe('interpretPrompt — the CASE intent is offered, and bounded (v2.74.1686)', () => {
+  it('names "case" in the intent list AND in the reply shape', () => {
+    const s = buildInterpretMessages('open a case for each', {}).system || '';
+    assert.match(s, /- "case":/, 'the kind is described');
+    assert.match(s, /branch\|write\|case"/, 'and offered in the JSON shape line');
+    assert.match(s, /"case":\{\.\.\?\}/, 'and in the payload shape');
+  });
+
+  it('THE MISROUTE: the prompt no longer sends a per-item case to "decompose"', () => {
+    // The old line read `a per-item action on the SAME system, or spawning a case per item, is "decompose"` — the
+    // prompt actively steered case-asks away, which is half of why the live ask landed on a Zendesk write.
+    const s = buildInterpretMessages('x', {}).system || '';
+    assert.ok(!/spawning a case per item, is "decompose"/.test(s), 'the old steer is gone');
+    assert.match(s, /spawning a case per item is "case"/);
+  });
+
+  it('draws the line between OUR case and a ticket on a connected site', () => {
+    // Without this the model can read "case" as Zendesk/Jira vocabulary — which is exactly the substitution that
+    // produced an outward write. The distinction has to be stated, not inferred from the word.
+    const s = buildInterpretMessages('x', {}).system || '';
+    assert.match(s, /NOT a ticket, an issue, or/);
+    assert.match(s, /stored locally/);
+  });
+
+  it('forbids the model from supplying what the case CONTAINS', () => {
+    const s = buildInterpretMessages('x', {}).system || '';
+    assert.match(s, /do NOT supply what the case CONTAINS/i);
+    assert.match(s, /never fill it in/);
+  });
+});

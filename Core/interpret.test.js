@@ -154,3 +154,58 @@ describe('parseInterpretOutput — clause payloads survive the parse (v2.74.1651
     assert.deepEqual(m.map, { itemField: 'email' });
   });
 });
+
+// PP-3 (v2.74.1686) — `case` REACHABILITY. Every assertion here is a seam that was absent when the live trace
+// turned "create a new case listing the number and type of replacement" into an outward Zendesk write. The clause
+// itself (Core/pipelineCase.js) had been built, tested and specified for twenty versions; it was unreachable
+// because this vocabulary did not name it, and an unreachable clause does not fail — it gets SUBSTITUTED.
+describe('interpret — the CASE intent is reachable (v2.74.1686)', () => {
+  it('case is in the INTENTS vocabulary at all — the seam the whole bug hinged on', () => {
+    assert.ok(INTENTS.includes('case'));
+    for (const t of INTENTS) assert.equal(t, t.toLowerCase(), `intent "${t}" must be lowercase`);
+  });
+
+  it('a bare case decision is ACTIONABLE — an empty payload is not underspecified here', () => {
+    // Unlike map/branch, there is nothing a caller must supply: items come from prior, labels from the row and
+    // contents from the run. Demanding a slot would be the §7.1 mistake that cost three versions elsewhere.
+    const d = normalizeInterpretDecision({ intent: 'case', case: {}, confidence: 0.9 });
+    assert.equal(d.intent, 'case');
+    assert.equal(d.case.scope, 'item');
+    assert.equal(d.case.cap, 0);
+  });
+
+  it('carries scope + title and NOTHING that could name a system or a fact', () => {
+    const d = normalizeInterpretDecision({
+      intent: 'case', confidence: 0.9,
+      case: { scope: 'run', title: 'Replacement review', system: 'zendesk', note: 'two switches' },
+    });
+    assert.equal(d.case.scope, 'run');
+    assert.equal(d.case.title, 'Replacement review');
+    assert.equal(JSON.stringify(d.case).includes('zendesk'), false);
+    assert.equal(JSON.stringify(d.case).includes('two switches'), false);
+  });
+
+  it('reads the payload from a bare decision too, not only from decision.case', () => {
+    assert.equal(normalizeInterpretDecision({ intent: 'case', scope: 'run', confidence: 0.9 }).case.scope, 'run');
+  });
+
+  it('is deliberately NOT confidence-gated — the cheapest, most reversible clause in the pipeline', () => {
+    // A gate buys the right to ask before something outward or irreversible. A case writes to our own store and
+    // costs a click to close; gating it would spend a question on the one clause least able to do harm.
+    const d = applyConfidenceGate({ intent: 'case', case: { scope: 'item' }, params: {}, subAsks: [], question: '', confidence: 0.2, why: '' });
+    assert.equal(d.intent, 'case', 'a low-confidence case still runs');
+  });
+
+  it('a non-object payload degrades to clarify rather than a half-case', () => {
+    const d = normalizeInterpretDecision({ intent: 'case', case: 'open one', confidence: 0.9 });
+    assert.equal(d.intent, 'clarify');
+  });
+
+  it('survives parseInterpretOutput — the whitelist seam that silently dropped fieldRead at PM-9', () => {
+    const d = parseInterpretOutput(JSON.stringify({
+      intent: 'case', case: { scope: 'run', title: 'Replacements' }, confidence: 0.9,
+    }));
+    assert.equal(d.intent, 'case');
+    assert.deepEqual(d.case, { scope: 'run', title: 'Replacements' });
+  });
+});

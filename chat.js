@@ -79,7 +79,9 @@ import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } fr
 import { redact, restore, newRedactionMap } from './Core/redact.js';   // R-1 (v2.74.1662) — pseudonymize identity before the instruction text ever leaves (DESIGN_llm_privacy.md §5)
 import { openRun, recordStage, closeItem, closeRun, markAlreadyOpen, runStartLine, runEndLine, trialTag } from './Core/pipelineRun.js';
 import { resolveWriteValue, buildWriteProposals } from './Core/writeMap.js';
-import { writeTally, writePreflight } from './Core/writeClause.js';   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
+import { writeTally, writePreflight } from './Core/writeClause.js';
+import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
+import { emptyPriorStop } from './Core/priorScope.js';   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
@@ -2042,7 +2044,7 @@ async function _runChildTask(child, task) {
   } else if (d && d.intent === 'act' && d.capabilityId) {
     // a page action / write capability — NOT run unattended (the safety pause).
     body = `Needs you — “${task}” needs a page action or a write I won’t run unattended. Open this conversation to continue.`;
-  } else if (d && (d.map || d.fieldRead || d.branch || d.write)) {
+  } else if (d && (d.map || d.fieldRead || d.branch || d.write || d.case)) {
     // PP-1 (v2.74.1661) — THE THIRD DROP SITE, made honest rather than silently absent.
     //
     // The clause handlers (_runMapClause / _runFieldReadClause / _runBranchClause) all render into a `msg`
@@ -2054,7 +2056,7 @@ async function _runChildTask(child, task) {
     // Running clauses headless in the child lane is real work (a render-free handler contract). Until then the
     // drop is REPORTED at both the trace and the bubble, which is the difference between a known gap and a
     // silent wrong answer.
-    const _kind = d.write ? 'write' : d.branch ? 'branch' : (d.map ? 'map' : 'fieldread');
+    const _kind = d.case ? 'case' : d.write ? 'write' : d.branch ? 'branch' : (d.map ? 'map' : 'fieldread');
     try { _orchLog(`DISPATCH ▸ ${_kind} → NOT RUN @child-lane (per-item clauses need a render target; reported, not silently reasoned)`); } catch { /* */ }
     body = `Needs you — “${task}” resolves to a per-item **${_kind}** step, which I can’t run inside a sub-task yet. Open this conversation and ask it there.`;
   } else {
@@ -4411,6 +4413,105 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
   return { ok: true, text: lines.join('\n'), created, queued, blocked, unfillable, run };
 }
 
+/**
+ * PP-3 (v2.74.1686) — run a per-item CASE clause: open the local review record over the prior step's results.
+ *
+ * The cheapest clause in the pipeline, and the one that stayed unreachable longest. It writes only to our OWN
+ * store, so there is no leg to resolve, no target to disambiguate and no gate to clear — which is exactly what
+ * made the live misroute so bad: the safest thing a person could have asked for became an outward write to a real
+ * CS queue, because `case` was not in `INTENTS` and the router had to choose SOMETHING.
+ */
+async function _runCaseClause(msg, cs, { tabId, priorValue = null, priorLeg = null, goal = '', state = null } = {}) {
+  _walkAbortFlag.requested = false;
+  _ilBusy(msg, true);
+  const st = state || {};
+  const rows = (priorValue != null ? (primaryList(priorValue) || []) : []);
+  const srcLeg = priorLeg || null;
+  const scope = (cs && cs.scope === 'run') ? 'run' : 'item';
+  try { _orchLog(`CASE   ▸ start scope=${scope} rows=${rows.length} title="${_str0(cs && cs.title).slice(0, 40)}"`); } catch { /* */ }
+
+  // THE EMPTY-PRIOR STOP. A case is opened over what a previous step produced; with nothing produced there is
+  // nothing to review, and that is a clean answer rather than a failure. Live (trace 070307) the branch narrowed
+  // to `0 of 1` and the next step ran anyway, resolving an outward write — this is where that ends.
+  const pf = casePreflight({ items: rows, scope });
+  if (!pf.ok) {
+    _setMessageBody(msg, priorValue == null
+      ? 'I can open a case over a list, but I need the list first — ask for it, then say what to open a case about.'
+      : 'Nothing to open a case about — the last step came back with no items. Nothing was created.', { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`CASE   ▸ ${pf.reason} — ${priorValue == null ? 'no prior read' : '0 rows from the prior step'}`); } catch { /* */ }
+    return { ok: false, gap: true, empty: true };
+  }
+
+  const cap = Math.max(1, Math.min((cs && cs.cap) || CASE_WINDOW, rows.length));
+  const use = scope === 'run' ? rows : rows.slice(0, cap);
+  const capped = scope !== 'run' && rows.length > cap;
+  const pipeline = `case:${_str0(cs && cs.title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'review'}`;
+
+  const run = openRun({
+    pipeline,
+    items: (scope === 'run' ? [{ id: '0', label: _str0(cs && cs.title) || `${rows.length} items` }]
+      : use.map((r, i) => ({ id: String(i), label: _rowLabel(r, srcLeg) }))),
+    cap, now: Date.now(), stages: ['case'],
+  });
+  try { _orchLog(runStartLine(run)); } catch { /* */ }
+
+  // §5.7's re-run rule: an item already under review is skipped, not re-cased.
+  let alreadyOpen = [];
+  try {
+    const oi = await _orchReq('PIPELINE_OPEN_ITEMS', { pipeline });
+    alreadyOpen = (oi && oi.success && Array.isArray(oi.itemIds)) ? oi.itemIds : [];
+  } catch { alreadyOpen = []; }
+  markAlreadyOpen(run, alreadyOpen);
+
+  // What the chain has ACTUALLY produced is the only thing a case may record. Asked for detail no stage read,
+  // `caseRecord` NAMES the gap rather than leaving a silent omission that reads as "there were none".
+  //
+  // The trail is `st.ranSteps` — the chain's own record of what executed, keyed by `kind`. (The first draft read
+  // `st.lastStages`, which exists nowhere: `stages` would have been `[]` forever, so the gap note would have
+  // fired even after a fieldRead had run. Caught by grepping for the field instead of assuming it.)
+  const stages = (Array.isArray(st.ranSteps) ? st.ranSteps : [])
+    .map((r) => ({ name: String((r && r.kind) || '').toLowerCase(), verdict: 'ran', detail: _str0(r && r.clause).slice(0, 60) }))
+    .filter((r) => r.name);
+  const rec = caseRecord(use[0] || {}, { asked: goal, stages });
+
+  let opened = 0; let failed = 0;
+  const lines = [];
+  const n = (scope === 'run') ? 1 : use.length;
+  for (let i = 0; i < n; i++) {
+    if (_walkAbortFlag.requested) break;
+    const id = String(i);
+    const it = run.items.find((x) => x.id === id);
+    if (it && it.outcome === 'already-open') continue;
+    const label = (scope === 'run') ? (_str0(cs && cs.title) || `${rows.length} items`) : _rowLabel(use[i], srcLeg);
+    const line = rec.lines.length ? rec.lines.join(' · ') : 'opened for review';
+    recordStage(run, id, { name: 'case', verdict: 'open', detail: label });
+    try {
+      await _orchReq('PIPELINE_RECORD_ITEM', {
+        pipeline, itemId: id, label, runId: run.runId,
+        stages: [{ name: 'case', verdict: 'open', detail: line }],
+        line,
+      });
+      opened++;
+      lines.push(`- **${escHtml(label)}** — ${escHtml(line)}`);
+    } catch {
+      failed++;
+      closeItem(run, id, 'blocked', 'could not save the case');
+    }
+  }
+
+  closeRun(run, { now: Date.now(), aborted: _walkAbortFlag.requested });
+  try { _orchLog(runEndLine(run)); } catch { /* */ }
+
+  const head = caseTally({ opened, alreadyOpen: alreadyOpen.length, failed, capped, total: rows.length });
+  const body = [head, rec.gap ? `\n_${escHtml(rec.gap)}._` : '', '', ...lines].filter(Boolean).join('\n');
+  _setMessageBody(msg, body, { markdown: true });
+  _orchFinalize(msg);
+  try { _orchLog(`CASE   ▸ ${scope} × ${n} → ${opened} opened, ${alreadyOpen.length} already open, ${failed} failed${rec.gap ? ' (gap reported)' : ''}`); } catch { /* */ }
+  return { ok: true, opened, failed, run };
+}
+
+
 async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
   const system = map.target.system;
   _walkAbortFlag.requested = false;   // v1625 — a FRESH top-level run clears a stale stop (the _orchRunChain rule); PM-5 chain entry will pass state instead
@@ -6720,7 +6821,8 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // D
   if (d.intent === 'map' && d.map) { try { _orchLog('DISPATCH ▸ map → chain'); } catch { /* */ } return { map: d.map }; }
   if (d.intent === 'fieldread' && d.fieldRead) { try { _orchLog('DISPATCH ▸ fieldread → chain'); } catch { /* */ } return { fieldRead: d.fieldRead }; }   // PM-9 (v1649)
   if (d.intent === 'branch' && d.branch) { try { _orchLog('DISPATCH ▸ branch → chain'); } catch { /* */ } return { branch: d.branch }; }
-  if (d.intent === 'write' && d.write) { try { _orchLog('DISPATCH ▸ write → chain'); } catch { /* */ } return { write: d.write }; }   // PP-2 (v1681) — door A; its execution half is in _orchRunChain (door A is only half a door)   // PP-1 (v1661) — door A. Its execution half is in _orchRunChain below; this door only carries the payload up, so wiring one without the other returns a payload nobody reads.
+  if (d.intent === 'write' && d.write) { try { _orchLog('DISPATCH ▸ write → chain'); } catch { /* */ } return { write: d.write }; }
+  if (d.intent === 'case' && d.case) { try { _orchLog('DISPATCH ▸ case → chain'); } catch { /* */ } return { case: d.case }; }   // PP-3 (v1686)   // PP-2 (v1681) — door A; its execution half is in _orchRunChain (door A is only half a door)   // PP-1 (v1661) — door A. Its execution half is in _orchRunChain below; this door only carries the payload up, so wiring one without the other returns a payload nobody reads.
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
@@ -6781,6 +6883,25 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       return;
     }
     const clause = clauses[i];
+    // PP-4 (v2.74.1686) — THE EMPTY-PRIOR STOP, before ORCH_MATCH and INTERPRET_ASK rather than after.
+    //
+    // The narrowing code below already reasoned that "an empty prior makes the next clause report 'nothing to
+    // work with'". True for a per-item clause, which consults the prior; NOT true for an `act`, which resolves a
+    // leg from the ask alone. Live (trace 070307) `narrowed prior → 0 of 1` was followed by a step that resolved
+    // `zendesk_create_ticket` on another ground and dispatched it twice — the honest outcome existed and one
+    // dispatch path walked past it.
+    //
+    // Placed here so it also saves the two LLM calls the doomed step would have made. Narrow by construction: it
+    // fires only when a prior step PRODUCED an empty collection AND this step's own words point back at it.
+    {
+      const _stop = emptyPriorStop({ text: clause.text, priorValue: st.lastValue, narrowedFrom: st.lastNarrowedFrom || 0 });
+      if (_stop.stop) {
+        try { _orchLog(`PIPELINE ▸ stop ${_stop.why} — "${String(clause.text).slice(0, 50)}" refers to a set the last step left empty; nothing dispatched`); } catch { /* */ }
+        _setMessageBody(msg, _stop.message, { markdown: true });
+        _orchFinalize(msg);
+        return;
+      }
+    }
     _setMessageBody(msg, `${_pfx(i)}“${clause.text}”…`);
     // NAV clause (a decompose may emit "go to youtube" / "navigate to youtube.com" as a step) — it's a PRIMITIVE, not
     // a page capability. OPEN_URL it, switch the chain to the new tab + GROUND it (so the next clause can match/teach
@@ -6897,6 +7018,12 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'write', clause: clause.text, intent: clause.text });
           continue;   // st.lastValue unchanged: a write CREATES records, it does not replace the working set
         }
+        if (cr && cr.case) {   // PP-3 (v1686) — door A′. `state` carries the chain's stage trail: a case may record only what ran.
+          const csr = await _runCaseClause(msg, cr.case, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, state: st });
+          if (!csr || !csr.ok) return;
+          st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'case', clause: clause.text, intent: clause.text });
+          continue;   // st.lastValue unchanged: a case RECORDS the working set, it does not replace it
+        }
         if (cr && cr.branch) {   // PP-1 (v1661) — door A′, the execution half. Supplies the prior exactly as its siblings do.
           const brr = await _runBranchClause(msg, cr.branch, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
           if (!brr || !brr.ok) return;
@@ -6921,7 +7048,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
             // that matched nothing would hand the next step all 22 rows — the loudest possible wrong answer,
             // and the exact inverse of what the user asked for. An empty prior makes the next clause report
             // "nothing to work with", which is the honest outcome.
-            st.lastValue = _kept; st.lastReadoutIdx = null;   // KEEP st.lastLeg — the rows still descend from the source leg (the v1635 rule)
+            st.lastValue = _kept; st.lastReadoutIdx = null; st.lastNarrowedFrom = brr.results.length;   // KEEP st.lastLeg — the rows still descend from the source leg (the v1635 rule)
             try { _orchLog(`BRANCH ▸ narrowed prior → ${_kept.length} of ${brr.results.length} (single arm "${_arms[0].label}" — a following "each" means these)`); } catch { /* */ }
           }
           continue;
@@ -9167,8 +9294,15 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const preview = _hitlRequestPreview(bodyStr);
       _setMessageBody(msg, `This will send **${_method} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n${preview}`, { markdown: true });   // v1338 — render the review, not literal ** walls (escape-first path)
       // v1338 (review P1-2) bar-cancel registration + v1340 (review A) the REAL gated tier live in _hitlConfirmBar.
+      // v2.74.1686 — LOG THE HOLD, not just the release. Until now the only line here was `RIDE_WRITE ▸ confirm`
+      // AFTER a confirm, so a write awaiting a human emitted NOTHING: the gl 2026-07-22 trace showed two
+      // `INVOKE_SESSION` dispatches for `zendesk_create_ticket` and no outcome of any kind, and "did it write?"
+      // was unanswerable from a full trace, never mind a decisions download. The single most decision-worthy
+      // moment in the system was the one it did not record. `WRITE_GATE ▸` was already in `_DECISION_RE` — the
+      // marker existed and simply never fired.
+      try { _orchLog(`WRITE_GATE ▸ held ${leg.key || (leg.tool && leg.tool.recipeId) || 'write'} — ${_method} ${leg.tool.endpoint} awaiting confirm${leg.safety === 'gated' ? ' [gated]' : ''}`); } catch { /* */ }
       const confirmed = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated', confirmLabel: '✓ Confirm & send' });
-      if (!confirmed) { _setMessageBody(msg, 'Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C) — a user cancel is NOT a capability failure
+      if (!confirmed) { try { _orchLog(`WRITE_GATE ▸ declined ${leg.key || (leg.tool && leg.tool.recipeId) || 'write'} — nothing sent`); } catch { /* */ } _setMessageBody(msg, 'Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C) — a user cancel is NOT a capability failure
       try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
       let wr = null;
       try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, bodyTemplate: leg.tool.body || null, contentType: contentType || 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, identityGql: leg.tool.identityGql || null }); } catch { /* */ }   // v1479 — identityGql rides so the EXECUTOR fills {me} from the AGENT read   // v1340 arm-guard pair · v1464 routing headers · v1471 — TEMPLATE + probe ride so the EXECUTOR fills {me} (chat-side fill silently DROPPED ID:'{me}')
@@ -9560,6 +9694,20 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     try {
       await _runWriteClause(msg, d.write, { tabId, goal, state: { lastMisses: [], lastMapLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null } });
     } catch (e) { _clauseError('write', e, msg); }
+    return true;
+  }
+  if (d.intent === 'case' && d.case) {
+    // PP-3 (v1686) — door B, threaded in the SAME edit as the intent (the v1651 rule that cost `map` a whole
+    // release unreachable). `_lastGroundedRead` is this door's prior; with none, `_runCaseClause` stops by name.
+    try { _orchLog('DISPATCH ▸ case → _runCaseClause @interpret-door'); } catch { /* */ }
+    try {
+      await _runCaseClause(msg, d.case, {
+        tabId,
+        goal,
+        priorValue: (_lastGroundedRead && _lastGroundedRead.value) || null,
+        priorLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null,
+      });
+    } catch (e) { _clauseError('case', e, msg); }
     return true;
   }
   if (d.intent === 'branch' && d.branch) {

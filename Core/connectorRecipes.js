@@ -287,7 +287,7 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/v2/users/{id}.json', itemUrl: '/agent/users/{id}',
     params: [{ name: 'id', type: 'integer', required: true }] },
   // ── writes — gated HARD; fail-closed until the human confirms (CX-6/§9). Each carries a `body` template. ──────────
-  { ...ZD, id: 'create_ticket', name: 'Create a Zendesk ticket', write: true, method: 'POST',
+  { ...ZD, id: 'create_ticket', name: 'Create a Zendesk ticket', write: true, reversible: true, outward: false, method: 'POST',
     does: 'open a NEW Zendesk ticket with a subject + first comment (optionally a priority / requester id), riding your login',
     endpoint: '/api/v2/tickets.json',
     body: { ticket: { subject: '{subject}', comment: { body: '{comment}' }, priority: '{priority}', requester_id: '{requester_id}' } },
@@ -297,7 +297,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'priority', type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
       { name: 'requester_id', type: 'integer' },
     ] },
-  { ...ZD, id: 'add_comment', name: 'Comment on a Zendesk ticket', write: true, method: 'PUT',
+  { ...ZD, id: 'add_comment', name: 'Comment on a Zendesk ticket', write: true, reversible: false, outward: false, method: 'PUT',
     does: 'add a comment to a Zendesk ticket — public=true REPLIES to the customer, public=false adds an INTERNAL note — riding your login',
     endpoint: '/api/v2/tickets/{id}.json',
     body: { ticket: { comment: { body: '{comment}', public: '{public}' } } },
@@ -309,7 +309,7 @@ export const CONNECTOR_RECIPES = [
   // FL-10c (v2.74.1383) — `autoRequires: 'evidence'`: UNATTENDED execution of this class needs same-run
   // CODE-verified proof (a drill verdict: POSITIVE sentiment + no open commitment + mine, or an aged empty stub)
   // on top of the autonomy policy. A human approving from a card is never gated by this.
-  { ...ZD, id: 'update_ticket_status', name: 'Set a Zendesk ticket status', write: true, method: 'PUT', autoRequires: 'evidence',
+  { ...ZD, id: 'update_ticket_status', name: 'Set a Zendesk ticket status', write: true, reversible: true, outward: false, method: 'PUT', autoRequires: 'evidence',
     does: 'change a Zendesk ticket status (open / pending / hold / solved), riding your login',
     endpoint: '/api/v2/tickets/{id}.json',
     body: { ticket: { status: '{status}' } },
@@ -317,12 +317,12 @@ export const CONNECTOR_RECIPES = [
       { name: 'id', type: 'integer', required: true },
       { name: 'status', type: 'string', enum: ['open', 'pending', 'hold', 'solved'], required: true },   // 'closed' excluded — terminal
     ] },
-  { ...ZD, id: 'assign_ticket_to_me', name: 'Assign a Zendesk ticket to me', write: true, method: 'PUT',
+  { ...ZD, id: 'assign_ticket_to_me', name: 'Assign a Zendesk ticket to me', write: true, reversible: true, outward: false, method: 'PUT',
     does: 'assign a Zendesk ticket to YOURSELF (the logged-in agent), riding your login',
     endpoint: '/api/v2/tickets/{id}.json',
     body: { ticket: { assignee_id: '{me}' } },   // {me} fills from the identity probe — the assignee is NOT an ask param
     params: [{ name: 'id', type: 'integer', required: true }] },
-  { ...ZD, id: 'update_ticket_priority', name: 'Set a Zendesk ticket priority', write: true, method: 'PUT',
+  { ...ZD, id: 'update_ticket_priority', name: 'Set a Zendesk ticket priority', write: true, reversible: true, outward: false, method: 'PUT',
     does: 'change a Zendesk ticket priority (low / normal / high / urgent), riding your login',
     endpoint: '/api/v2/tickets/{id}.json',
     body: { ticket: { priority: '{priority}' } },
@@ -330,7 +330,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'id', type: 'integer', required: true },
       { name: 'priority', type: 'string', enum: ['low', 'normal', 'high', 'urgent'], required: true },
     ] },
-  { ...ZD, id: 'add_tags', name: 'Add tags to a Zendesk ticket', write: true, method: 'PUT',
+  { ...ZD, id: 'add_tags', name: 'Add tags to a Zendesk ticket', write: true, reversible: true, outward: false, method: 'PUT',
     does: 'add one or more tags to a Zendesk ticket (appends — does not replace), riding your login',
     endpoint: '/api/v2/tickets/{id}/tags.json',
     body: { tags: '{tags}' },                    // {tags} is a sole placeholder → the array passes through natively
@@ -338,7 +338,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'id', type: 'integer', required: true },
       { name: 'tags', type: 'array', required: true },
     ] },
-  { ...ZD, id: 'reassign_group', name: 'Move a Zendesk ticket to a group', write: true, method: 'PUT',
+  { ...ZD, id: 'reassign_group', name: 'Move a Zendesk ticket to a group', write: true, reversible: true, outward: false, method: 'PUT',
     does: 'reassign a Zendesk ticket to a different group by group id, riding your login',
     endpoint: '/api/v2/tickets/{id}.json',
     body: { ticket: { group_id: '{group_id}' } },
@@ -347,7 +347,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'group_id', type: 'integer', required: true },
     ] },
   // ── FL-8a (v2.74.1358) — the requester-fix pair: create the customer profile, then attach it to the ticket. ──
-  { ...ZD, id: 'create_user', name: 'Create a Zendesk user (customer profile)', write: true, method: 'POST',
+  { ...ZD, id: 'create_user', name: 'Create a Zendesk user (customer profile)', write: true, reversible: true, outward: false, method: 'POST',
     does: 'create a Zendesk END-USER (customer) profile with a name + email — e.g. to become the requester on a ticket that has none, riding your login',
     endpoint: '/api/v2/users.json', itemUrl: '/agent/users/{id}',
     body: { user: { name: '{name}', email: '{email}', role: 'end-user' } },   // role is a LITERAL — a sweep can never mint agents/admins
@@ -355,7 +355,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'name', type: 'string', required: true },
       { name: 'email', type: 'string', required: true },
     ] },
-  { ...ZD, id: 'set_ticket_requester', name: 'Set a Zendesk ticket requester', write: true, method: 'PUT',
+  { ...ZD, id: 'set_ticket_requester', name: 'Set a Zendesk ticket requester', write: true, reversible: true, outward: false, method: 'PUT',
     does: 'attach a requester (customer profile, by user id) to a Zendesk ticket — for tickets missing one, riding your login',
     endpoint: '/api/v2/tickets/{id}.json',
     body: { ticket: { requester_id: '{requester_id}' } },
@@ -364,7 +364,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'requester_id', type: 'integer', required: true },
     ] },
   // ── destructive / consolidating — gated (the human approves; still fail-closed until CX-6b). User may also pick DOM. ──
-  { ...ZD, id: 'merge_tickets', name: 'Merge Zendesk tickets', write: true, destructive: true, method: 'POST',
+  { ...ZD, id: 'merge_tickets', name: 'Merge Zendesk tickets', write: true, reversible: false, outward: false, destructive: true, method: 'POST',
     does: 'merge one or more SOURCE tickets INTO a target ticket (the sources are closed) — consolidating, riding your login',
     endpoint: '/api/v2/tickets/{id}/merge.json',
     // NOTE: merge returns a job_status (202 async) — the executor reports "queued"; the job-poll is a follow-up (CX-6c).
@@ -375,11 +375,11 @@ export const CONNECTOR_RECIPES = [
       { name: 'target_comment', type: 'string' },
       { name: 'source_comment', type: 'string' },
     ] },
-  { ...ZD, id: 'mark_as_spam', name: 'Mark a Zendesk ticket as spam', write: true, destructive: true, method: 'PUT',
+  { ...ZD, id: 'mark_as_spam', name: 'Mark a Zendesk ticket as spam', write: true, reversible: false, outward: false, destructive: true, method: 'PUT',
     does: 'mark a Zendesk ticket as spam AND suspend its requester (hard to undo), riding your login',
     endpoint: '/api/v2/tickets/{id}/mark_as_spam.json',     // no body
     params: [{ name: 'id', type: 'integer', required: true }] },
-  { ...ZD, id: 'delete_ticket', name: 'Delete a Zendesk ticket', write: true, destructive: true, method: 'DELETE',
+  { ...ZD, id: 'delete_ticket', name: 'Delete a Zendesk ticket', write: true, reversible: false, outward: false, destructive: true, method: 'DELETE',
     does: 'permanently delete a Zendesk ticket by number (irreversible), riding your login',
     endpoint: '/api/v2/tickets/{id}.json',                  // no body
     params: [{ name: 'id', type: 'integer', required: true }] },
@@ -495,7 +495,7 @@ export const CONNECTOR_RECIPES = [
   // CX-7c (v2.74.1388) — EDIT an existing customer (spec's ALLOWED EditCustomer op). Partial: only filled fields
   // ride the body (fillBody drops unfilled optionals). `customer_gid` gid-coerces (bare id → gid) — it's the `id`
   // a customer read returned.
-  { ...SH, id: 'shopify_update_customer', name: 'Edit a Shopify customer', write: true, gql: false, persistedOp: 'EditCustomer',
+  { ...SH, id: 'shopify_update_customer', name: 'Edit a Shopify customer', write: true, reversible: false, outward: false, gql: false, persistedOp: 'EditCustomer',
     does: 'update fields on an EXISTING Shopify customer (name, email, phone, note, tags) — only the fields you set change; identify them by the customer id from a lookup',
     endpoint: '/api/operations/{op_sha}/EditCustomer/shopify/{handle}', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after an edit opens the record
     body: { operationName: 'EditCustomer', variables: { input: { id: '{customer_gid}', firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}', tags: '{tags}' } } },
@@ -512,7 +512,7 @@ export const CONNECTOR_RECIPES = [
   // the money step and stays HUMAN-CLICK, never a recipe). The FOC/warranty-replacement path: pass a 100%
   // PERCENTAGE `applied_discount` + a zero `shipping_line`. Nested structures ride as WHOLE object params (sole
   // placeholders → native value; unfilled → dropped), so an ordinary paid draft omits them cleanly.
-  { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, gql: false, persistedOp: 'DraftOrderCreate',
+  { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, gql: false, persistedOp: 'DraftOrderCreate',
     does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
     endpoint: '/api/operations/{op_sha}/DraftOrderCreate/shopify/{handle}', itemUrl: '/store/{handle}/draft_orders/{id}',   // CX-7f — "show order" after a create opens the draft
     body: { operationName: 'DraftOrderCreate', variables: {
@@ -732,7 +732,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'lineId', type: 'string', required: true },
     ] },
   // ── writes (gated; self-only availability) ───────────────────────────────────────────────────────────────────
-  { ...AC, id: 'aw_set_availability', name: 'Set my Aircall availability', capClass: 'presence', write: true, method: 'POST', gql: true, contentType: 'application/json',
+  { ...AC, id: 'aw_set_availability', name: 'Set my Aircall availability', capClass: 'presence', write: true, reversible: true, outward: false, method: 'POST', gql: true, contentType: 'application/json',
     does: 'set YOUR availability preference — answers "set me to available / unavailable / do-not-disturb / busy / back-office"; does not place or answer calls',
     endpoint: acGqlEndpoint('UpdateAgent_Mutation'),
     // v2.74.1479 — {me} = the AGENT id (input.ID), NOT the REST user id: resolve it from the GraphQL agent read
@@ -741,7 +741,7 @@ export const CONNECTOR_RECIPES = [
     identityGql: { endpoint: acGqlEndpoint('GetCurrentAgentV2_Query'), body: acGqlBody('GetCurrentAgentV2_Query', {}), idPath: 'data.getAgentV2.ID' },
     body: acGqlBody('UpdateAgent_Mutation', { input: { ID: '{me}', availability: { preference: '{preference}' } } }),
     params: [{ name: 'preference', type: 'string', enum: ['ALWAYS_OPENED', 'ALWAYS_CLOSED', 'DOING_BACK_OFFICE', 'OTHER'], required: true, hint: 'ALWAYS_OPENED = available; ALWAYS_CLOSED = unavailable / do-not-disturb / busy; DOING_BACK_OFFICE = back-office; OTHER = custom' }] },   // v1470 — the opaque enum needs user-language mapping (live: "set me to unavailable" fell to teach)
-  { ...AC, id: 'aw_send_sms', name: 'Send an SMS from my line', write: true, destructive: true, outward: true, method: 'POST', gql: true, contentType: 'application/json',
+  { ...AC, id: 'aw_send_sms', name: 'Send an SMS from my line', write: true, reversible: false, destructive: true, outward: true, method: 'POST', gql: true, contentType: 'application/json',
     // v2.74.1459 (safety review) — destructive: an SMS is an OUTWARD-FACING message to a real external person (can't
     // unsend), so it rides the two-step confirm tier (safetyClass 'destructive'), same as Zendesk merge/mark-as-spam —
     // never the single-click write gate. The §9 outward-comms rule: a message a human receives is human-approved.
@@ -758,7 +758,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'phone', type: 'string', required: true },
       { name: 'text', type: 'string', required: true },
     ] },
-  { ...AC, id: 'aw_close_conversation', name: 'Close conversation after a call', write: true, method: 'POST', gql: true, contentType: 'application/json',
+  { ...AC, id: 'aw_close_conversation', name: 'Close conversation after a call', write: true, reversible: true, outward: false, method: 'POST', gql: true, contentType: 'application/json',
     does: 'close/wrap up an Aircall Workspace conversation by its call id (post-call housekeeping — the Zendesk CTI wrap-up step)',
     endpoint: acGqlEndpoint('closeConversationByCallID_Mutation'),
     body: acGqlBody('closeConversationByCallID_Mutation', { callID: '{callId}' }),

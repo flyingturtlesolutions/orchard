@@ -16,8 +16,9 @@ import { normalizeMapVerdict } from './peritemMap.js';
 import { normalizeFieldReadVerdict } from './fieldRead.js';   // PM-9 — the per-item own-record read   // PM-1 (v2.74.1625) — the per-item cross-system MAP verdict
 import { normalizeBranchVerdict } from './branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH
 import { normalizeWriteVerdict } from './writeClause.js';     // PP-2 (v2.74.1681) — the per-item WRITE
+import { normalizeCaseVerdict } from './caseClause.js';       // PP-3 (v2.74.1686) — the per-item CASE
 
-export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread', 'branch', 'write'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record; PP-1 (v1661) — `branch` = the per-item classify-and-route
+export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread', 'branch', 'write', 'case'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record; PP-1 (v1661) — `branch` = the per-item classify-and-route; PP-3 (v1686) — `case` = open the per-item review artifact (this array is the whole reachability surface: a clause absent here is not "unavailable", it is SILENTLY REROUTED to the nearest expressible thing — live, "create a new case" became an outward Zendesk write)
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
@@ -93,6 +94,17 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     if (w) return { ...base, write: w };
     return { ...base, intent: 'clarify', question: 'What should I create, and for which of those records?', why: why || 'write-underspecified' };
   }
+  if (intent === 'case') {
+    // PP-3 (v2.74.1686) — open the per-item REVIEW ARTIFACT over the prior step's results. Like `write`, nothing
+    // is required: the items come from prior, the label from the row, and the CONTENTS from the run's own stage
+    // record. `scope` and `title` are the only slots, and neither can name a system or a fact.
+    //
+    // There is deliberately no clarify fallback: `normalizeCaseVerdict` accepts `{}`, so a bare "open a case for
+    // each of those" is actionable as-is. Asking a question there would be asking about something already known.
+    const c = normalizeCaseVerdict(d.case || d);
+    if (c) return { ...base, case: c };
+    return { ...base, intent: 'clarify', question: 'What should I open a case about?', why: why || 'case-underspecified' };
+  }
   if (intent === 'clarify') {
     return { ...base, question: _str(d.question) || 'Can you say that a different way?' };
   }
@@ -133,6 +145,11 @@ export function applyConfidenceGate(decision, { minConfidence = 0.6 } = {}) {
   if (d.intent === 'branch' && d.confidence < minConfidence) {
     return { ...d, intent: 'clarify', question: d.question || 'I can sort them into groups — what should I sort on, and which groups?', why: `low-confidence ${d.confidence} < ${minConfidence}` };
   }
+  // PP-3 (v2.74.1686) — `case` is deliberately NOT gated, and the absence is a decision rather than an omission.
+  // The gate buys the right to ask before an irreversible or outward act: `map` fans N cross-system reads, `write`
+  // and `branch` can leave records behind. A case writes only to our OWN store, is closeable, and is the artifact
+  // a person reviews — a wrongly-opened one costs a click. Gating the cheapest, most reversible clause in the
+  // pipeline would spend a question on the thing least able to do harm.
   return d;
 }
 
