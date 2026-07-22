@@ -13096,6 +13096,30 @@ try {
     else if (_currentConversationId === OVERVIEW_ID) void _maybeRenderConnCard();
   });
 } catch { /* */ }
+// CD-7 (§8) — a scheduled run PARKED at a write while the panel is open: a transient nudge (the vitals status-nudge
+// precedent — never persisted) so the user learns a write is waiting without hunting for it. Review opens the
+// cross-desk parked list (Approve & continue / Cancel run). A closed panel misses this and finds it in the
+// manage-view parked banner. Guarded so it never appends into a dev conversation.
+try {
+  chrome.runtime.onMessage.addListener((m) => {
+    if (!m || m.type !== 'WORKFLOW_PARKED_CHANGED') return;
+    if (_currentConversationKind === 'dev' || !_currentConversationId) return;
+    // Never append over a non-thread surface (the wizard page / desk landing) — that flips the surface and is the
+    // §6.4 page-slot trap. If the thread isn't the active view, the manage-view parked banner is the fallback.
+    if (_wfActive() || _wfIntentPending) return;
+    try { if (!$('messages') || $('messages').classList.contains('hidden')) return; } catch { return; }
+    const nm = m.name ? `“${escHtml(String(m.name))}”` : 'A scheduled workflow';
+    const el = appendMessage({ role: 'assistant', body: '' });
+    try { delete el.dataset.messageId; } catch { /* transient — a status nudge, not transcript history */ }
+    _setMessageBody(el, `⚠ ${nm} ran on schedule and stopped at a write that needs your approval.`, { markdown: true });
+    const bar = _orchActionBar(el);
+    bar.appendChild(_mkBtn('Review', async () => {
+      try { bar.remove(); } catch { /* */ }
+      const n = await _renderParkedRuns(null);
+      if (!n) { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, 'No parked runs right now — it may have been handled already.'); _orchFinalize(mm); }
+    }));
+  });
+} catch { /* */ }
 // VT-2b — one reconcile at boot: incidents opened while the panel was closed still mint their cases.
 try { setTimeout(() => { void _syncIncidentCases(); }, 2500); } catch { /* */ }
 

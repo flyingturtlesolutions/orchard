@@ -115,6 +115,13 @@ workflows that calls `WORKFLOW_RUN_FIRE` — running the workflow through the SA
 useful on its own AND the on-demand way to live-verify the scanner's fire path without waiting for a tick (watch
 for `CADENCE ▸ … ran` in a gc download; a parked run appears in 📜 History and the manage view's parked banner).
 
+**Progress (v2.74.1700) — proactive parked-run nudge.** When the scanner parks an AUTO run and the panel is open,
+the SW broadcasts `WORKFLOW_PARKED_CHANGED`; the panel shows a TRANSIENT nudge (the vitals status-nudge precedent,
+never persisted) with a Review button → the cross-desk parked list. Page-slot-safe: it never appends over a wizard
+page / desk landing (skips unless the thread is the active surface + no wizard), and never into a dev conversation.
+A closed panel misses the nudge and finds the run in the manage-view parked banner (unchanged fallback). Chosen
+over a `wfp_` Rail case (below) as the low-risk way to make a silently-parked run discoverable.
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK

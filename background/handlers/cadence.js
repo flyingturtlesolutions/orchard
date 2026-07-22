@@ -201,6 +201,11 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
         stepIndex: out.parkedAt, at: now, preview: (snap.preview && typeof snap.preview === 'object') ? snap.preview : null,
       } });
     } catch { /* */ }
+    // Tell an OPEN panel a run is waiting on a human — a scheduled run that stopped silently is worse than useless
+    // (§8: "ran and is waiting on you" is the most important thing to say). Fire-and-forget; a closed panel misses
+    // it and finds the run in the manage-view parked banner instead. Only an AUTO fire nudges (a manual/⚡ run is
+    // already on-screen for the user who started it).
+    if (auto) { try { chrome.runtime.sendMessage({ type: 'WORKFLOW_PARKED_CHANGED', name: wf.name || wf.ask || wf.id }, () => { void chrome.runtime.lastError; }); } catch { /* */ } }
     Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" PARKED at step ${out.parkedAt + 1} — a write needs a human (run ${parkedRunId})`);
     if (auto) await _advance(appId, wf, now);
   } else if (verdict === 'failed') {
