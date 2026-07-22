@@ -3840,7 +3840,7 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
   let found = 0; let whole = 0; let missing = 0;
   const lines = [];
   for (const row of use) {
-    const label = _rowLabel(row);   // v2.74.1663 — was `summarizeItem(row) || '(row)'`, which renders the literal "[object Object]": summarizeItem returns a RECORD, and an object is always truthy so the fallback never fired. Pre-existing, found during the PP bug pass.
+    const label = _rowLabel(row, srcLeg);   // v2.74.1677 — the SOURCE LEG's declared displayId, or every bullet reads "01" (the CX-9k claim-sequence bug)   // v2.74.1663 — was `summarizeItem(row) || '(row)'`, which renders the literal "[object Object]": summarizeItem returns a RECORD, and an object is always truthy so the fallback never fired. Pre-existing, found during the PP bug pass.
     const raw = extractValue(row, fp.path);
     const sec = readFieldSection(raw, fr.term);
     if (sec.mode === 'empty') { missing++; lines.push(`• **${escHtml(label)}** — no ${escHtml(fr.field)} on this record`); continue; }
@@ -3876,14 +3876,29 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
 // because an object is always truthy. The correct idiom is already in this file at the fan-out identify()
 // helper: read `.title`, fall back to `.id`, then to a couple of fields. Centralized here so the next caller
 // cannot re-derive it a fourth way.
-function _rowLabel(row) {
+function _rowLabel(row, leg = null) {
   try {
-    const it = summarizeItem(row, { displayId: null }) || {};
-    const t = String(it.title ?? '').trim();
-    if (t) return t;
-    if (it.id != null && it.id !== '') return String(it.id);
-    const f = itemFields(row, { max: 2 }).map(([, v]) => v).filter(Boolean).join(' · ');
-    return f || '(row)';
+    // v2.74.1677 — PASS THE LEG'S DECLARED displayId. v1663 wrote `{ displayId: null }`, which disables the
+    // declaration and drops `summarizeItem` through to its generic id scan — and that scan lands on the
+    // per-home CLAIM SEQUENCE. The result, live: every row in a 22-item branch rendered as "01" or "03", and
+    // the classification was unreadable.
+    //
+    // This is CX-9k (v2.74.1617) re-introduced verbatim. That fix's own comment predicted this output word for
+    // word — *"the generic first-…Number scan landed on the per-home claim sequence — every bullet read #01"* —
+    // and declared `displayId: ['TicketId','TaskNumber']` to stop it. Passing null threw the declaration away.
+    // The v1617 lesson holds: a DECLARATION beats a smarter guess, and disabling one is never the cheap option.
+    const it = summarizeItem(row, { displayId: _legDisplayId(leg) }) || {};
+    const id = (it.id != null && it.id !== '') ? String(it.id) : '';
+    const title = String(it.title ?? '').trim();
+    // A bare number identifies a row to the SYSTEM; a human needs something they recognize alongside it, which
+    // for these records is the address. Show both when they differ.
+    const extra = title && title !== id
+      ? title
+      : itemFields(row, { max: 2 }).map(([, v]) => String(v ?? '').trim()).filter((v) => v && v !== id)[0] || '';
+    if (id && extra) return `#${id} · ${extra}`;
+    if (id) return `#${id}`;
+    if (extra) return extra;
+    return '(row)';
   } catch { return '(row)'; }
 }
 
@@ -3942,7 +3957,8 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   // 1) the COLLECTION — identical contract to fieldRead (v1659's lesson: a door that supplies no prior makes a
   // 'prior' clause fall through to re-reading a list from the literal phrase, and resolve nothing).
   let rows = [];
-  if (br.collection === 'prior' && priorValue != null) rows = primaryList(priorValue) || [];
+  let srcLeg = null;   // v2.74.1677 — the leg the rows came from; its declared displayId is what makes a row LABEL readable
+  if (br.collection === 'prior' && priorValue != null) { rows = primaryList(priorValue) || []; srcLeg = priorLeg || null; }
   else {
     // v2.74.1668 (live trace 212655) — REFUSE THE SELF-RE-READ when the only thing to re-read with is the
     // branch ask ITSELF.
@@ -3966,10 +3982,10 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     _setMessageBody(msg, 'Reading the list…');
     let cr = null;
     try { cr = await _chainConnectorRun(readAsk, { tabId }); } catch { cr = null; }
-    if (cr && cr.ok) rows = primaryList(cr.value) || [];
+    if (cr && cr.ok) { rows = primaryList(cr.value) || []; srcLeg = cr.leg || null; }
     else {
       const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
-      if (_prior.length) rows = _prior;
+      if (_prior.length) { rows = _prior; srcLeg = priorLeg || null; }
       else {
         _setMessageBody(msg, `Couldn’t read the list to sort${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}. Name it explicitly (e.g. “for each open warranty task…”).`);
         _orchFinalize(msg);
@@ -4071,7 +4087,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     const evaluator = classifyBy
       ? makeClassifyEvaluator({ byId: classifyBy, idOf: _idOf, fallback: (a) => deterministic(a) })
       : (a) => deterministic(a);
-    results.push({ item, ...evalBranch(item, br, (a, it) => evaluator(a, it)) });
+    results.push({ id: String(_i), item, ...evalBranch(item, br, (a, it) => evaluator(a, it)) });
   }
 
   // 3) render, grouped by arm, with `no arm` and `couldn’t tell` as FIRST-CLASS groups — never omitted, because a
@@ -4083,15 +4099,26 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     else if (r.outcome === 'none') none.push(r);
     else unknown.push(r);
   }
+  // v2.74.1677 — every row carries its REASON, not just the unknowns.
+  //
+  // A list of ids answers "how many" and not "is this right", which is the question the approve bar actually
+  // asks. The classifier already returns a reason per item and §1.1b names it as the point: *"a rule can never
+  // tell you WHY; this can"* — it was being computed, stored on the case, and then dropped from the one surface
+  // where a human decides whether to trust the run.
+  const _why = (r) => {
+    const v = (classifyBy && classifyBy.get && r && r.id != null) ? classifyBy.get(String(r.id)) : null;
+    const t = String((v && v.why) || r.why || '').trim();
+    return t ? `  — _${escHtml(t.slice(0, 110))}_` : '';
+  };
   const lines = [];
   for (const [label, list] of groups) {
     lines.push(`**${escHtml(label)}** — ${list.length}`);
-    for (const r of list) lines.push(`  • ${escHtml(_rowLabel(r.item))}${r.skipped && r.skipped.length ? `  _(also matched ${r.skipped.map((s) => escHtml(s.label)).join(', ')})_` : ''}`);
+    for (const r of list) lines.push(`  • ${escHtml(_rowLabel(r.item, srcLeg))}${_why(r)}${r.skipped && r.skipped.length ? `  _(also matched ${r.skipped.map((s) => escHtml(s.label)).join(', ')})_` : ''}`);
   }
-  if (none.length) { lines.push(`**no arm matched** — ${none.length}`); for (const r of none) lines.push(`  • ${escHtml(_rowLabel(r.item))}`); }
+  if (none.length) { lines.push(`**no arm matched** — ${none.length}`); for (const r of none) lines.push(`  • ${escHtml(_rowLabel(r.item, srcLeg))}${_why(r)}`); }
   if (unknown.length) {
     lines.push(`**couldn’t tell** — ${unknown.length}`);
-    for (const r of unknown) lines.push(`  • ${escHtml(_rowLabel(r.item))}${r.why ? ` — _${escHtml(String(r.why).slice(0, 90))}_` : ''}`);
+    for (const r of unknown) lines.push(`  • ${escHtml(_rowLabel(r.item, srcLeg))}${_why(r)}`);
   }
 
   const tally = branchTally(results, { arms: br.arms });
@@ -4112,7 +4139,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     const pipeline = `branch:${br.arms.map((a) => a.label).join('+')}`.slice(0, 60);
     const run = openRun({
       pipeline,
-      items: use.map((it, i) => ({ id: String(i), label: _rowLabel(it) })),
+      items: use.map((it, i) => ({ id: String(i), label: _rowLabel(it, srcLeg) })),
       cap, now: Date.now(), stages: ['branch'],
     });
     try { _orchLog(runStartLine(run)); } catch { /* */ }
@@ -4138,7 +4165,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
 
       try {
         await _orchReq('PIPELINE_RECORD_ITEM', {
-          pipeline, itemId: id, label: _rowLabel(r.item), runId: run.runId,
+          pipeline, itemId: id, label: _rowLabel(r.item, srcLeg), runId: run.runId,
           branch: { outcome: r.outcome, arm: armLabel, why: r.why, skipped: (r.skipped || []).map((s) => s.label) },
           stages: [{ name: 'branch', verdict: r.outcome, detail: armLabel || r.why }],
           line: `branch → ${r.outcome}${armLabel ? ` (${armLabel})` : ''}`,
