@@ -7520,15 +7520,20 @@ async function _renderWorkflows() {
   for (const wf of wfs) {
     const wfKey = wf.appId || appId;   // DK-8k — operate on the record's OWN store
     const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
-    // CD-1a/CD-4 — the honest cadence line: a tier-'sw' workflow RUNS on the clock, a tier-'panel' one is DUE on
-    // next desk-open (§7.3). Disabled/absent → nothing shown.
+    // CD-1a/CD-4 — the honest cadence line: a tier-'sw' workflow RUNS on the clock, a tier-'panel' one is DUE and
+    // runs in the panel (§7.3). A tier-'panel' workflow whose nextDue has passed is "⏰ due now" — the scanner
+    // can't run it, so the panel offers it here and advances the clock when it runs.
     const _sched = _wfScheduleLabel(wf);
-    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''}${_sched ? ` · ⏱ ${_sched}` : ''})` });
+    const _tier = (wf.trigger && wf.trigger.minutes) ? workflowTier(wf) : 'sw';
+    const _due = _tier !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
+    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''}${_sched ? ` · ⏱ ${_sched}` : ''}${_due ? ' · ⏰ due now' : ''})` });
     const bar = _orchActionBar(row);
-    bar.appendChild(_mkOnceBtn('▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
+    bar.appendChild(_mkOnceBtn(_due ? '▶ Run now (due)' : '▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
       const tab = await _orchActiveTab();
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
       bumpWorkflowRun(wfKey, wf.id).catch(() => {});
+      // CD-1a — a due tier-'panel' run fulfills the schedule: advance its clock (the scanner deliberately didn't).
+      if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }
       const _p2 = _wfReplayPlan(wf);
       const _m2 = appendMessage({ role: 'assistant', body: '' });
       if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }

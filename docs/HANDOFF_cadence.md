@@ -96,6 +96,13 @@ has no 'auto'); CD-7 makes that parked run visible and actionable:
 - NOTE: parked runs surface as bubbles in the manage view, not yet the §8 `wfp_<runId>` desk CASE — the case
   entity (VT-2b pattern) is a further step; the resumable record + approve/cancel loop is complete.
 
+**Progress (v2.74.1696) — tier-'panel' scheduling COMPLETED (a real gap fix).** The scanner was advancing a due
+tier-'panel' workflow's `nextDue` and moving on — so the panel never saw it as due and the workflow advanced its
+clock every tick but NEVER ran. Now the scanner LEAVES `nextDue` as the due signal (counts it in the summary,
+doesn't touch it); the manage view shows "⏰ due now" + "▶ Run now (due)" for a due tier-'panel' workflow and
+advances the clock via the new `WORKFLOW_MARK_RAN` handler when the panel runs it. A manual extra run of a
+tier-'sw' workflow does NOT reschedule its headless fire (only a due tier-'panel' run advances).
+
 **Still remaining (large, live-only):**
 - **CD-3** — intent-first `＋ Workflow` (repoint the card at an intent prompt). Left deliberately: it touches the
   composer intercept + a new wizard phase, high-risk to do blind; the `workflow: <intent>` command is the

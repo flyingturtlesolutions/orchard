@@ -122,10 +122,12 @@ async function _tick() {
 
       const coalesced = coalescedCount(trig, now);          // §7.2 — several due-times passed → run ONCE, record it
 
-      // ── tier gate (§11.3): tier-'panel' defers to next desk-open; only tier-'sw' fires headless here ──────────
+      // ── tier gate (§11.3): tier-'panel' defers to the PANEL; only tier-'sw' fires headless here ───────────────
       if (!runsHeadless(wf)) {
-        Logger.info('cadence', `CADENCE ▸ due "${wf.name || wf.id}" (panel-tier) — deferred to next desk-open${coalesced > 1 ? ` · ${coalesced} due-times collapsed` : ''}`);
-        await _advance(appId, wf, now);                     // advance so it doesn't re-log every tick (coalescing)
+        // The SW can't run these (a branch/map/case/write step needs the panel). LEAVE the trigger's nextDue as
+        // the due signal — the panel surfaces "due now" and runs it, then advances via WORKFLOW_MARK_RAN.
+        // Advancing HERE (the pre-1696 bug) pushed nextDue into the future, so the panel never saw it as due and
+        // the workflow advanced its clock every tick but NEVER ran. Don't touch it; just count it for the summary.
         deferred++;
         continue;
       }
@@ -330,6 +332,23 @@ export function createCadenceHandlers() {
           const res = await _fire(owner, wf, wf.trigger || normalizeTrigger({ minutes: 60 }), { now, coalesced: 1, trigger: 'manual' });
           sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'fire-failed' }); }
+      })();
+      return true;
+    },
+    // CD-1a (§11.3) — a tier-'panel' scheduled workflow RAN in the panel (the SW can't run it headless); advance
+    // its clock so it isn't perpetually "due". Only the panel calls this, and only for a due panel-tier run — a
+    // manual extra run of a tier-'sw' workflow must NOT reschedule its headless fire. payload: { appId, workflowId }.
+    WORKFLOW_MARK_RAN: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const { appId, workflowId } = (payload && typeof payload === 'object') ? payload : {};
+          if (!appId || !workflowId) { sendResponse({ success: false, error: 'appId + workflowId required' }); return; }
+          const { wf, appId: owner } = await _resolveWorkflow(workflowId);
+          if (!wf || !wf.trigger) { sendResponse({ success: true, advanced: false }); return; }
+          await _advance(owner || appId, wf, Date.now());
+          Logger.info('cadence', `TRIGGER ▸ "${wf.name || wf.id}" ran in panel — clock advanced`);
+          sendResponse({ success: true, advanced: true });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'mark-ran-failed' }); }
       })();
       return true;
     },
