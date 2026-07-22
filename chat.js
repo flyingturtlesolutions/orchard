@@ -7542,8 +7542,8 @@ async function _renderWorkflows() {
     // runs in the panel (§7.3). A tier-'panel' workflow whose nextDue has passed is "⏰ due now" — the scanner
     // can't run it, so the panel offers it here and advances the clock when it runs.
     const _sched = _wfScheduleLabel(wf);
-    const _tier = (wf.trigger && wf.trigger.minutes) ? workflowTier(wf) : 'sw';
-    const _due = _tier !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
+    const _t = workflowTier(wf);
+    const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
     const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''}${_sched ? ` · ⏱ ${_sched}` : ''}${_due ? ' · ⏰ due now' : ''})` });
     const bar = _orchActionBar(row);
     bar.appendChild(_mkOnceBtn(_due ? '▶ Run now (due)' : '▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
@@ -7556,6 +7556,19 @@ async function _renderWorkflows() {
       const _m2 = appendMessage({ role: 'assistant', body: '' });
       if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
       _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask });
+    }));
+    // CD-1a — a tier-'sw' workflow can run WITHOUT the panel (the same path the scheduler fires): run it now,
+    // headless, through the SW. Useful on its own, and the on-demand way to confirm the scanner's fire path
+    // (watch for the CADENCE ▸ line in a decisions download).
+    if (_t === 'sw') bar.appendChild(_mkOnceBtn('⚡ Headless', async () => {
+      const _mh = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(_mh, `Running “${escHtml(wf.name || wf.ask)}” in the background…`, { markdown: true });
+      let res = null;
+      try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
+      const v = res && res.verdict;
+      _setMessageBody(_mh, (res && res.success !== false)
+        ? (v === 'parked' ? '⚠ Stopped at a write — re-type `workflows` to approve it.' : `Ran headless → ${v === 'complete' ? 'completed' : (v || 'finished')}. Its run shows in 📜 History.`)
+        : `Couldn’t run headless — ${_errWord(res && res.error)}.`, { markdown: true });
     }));
     bar.appendChild(_mkBtn('⏱ Schedule', () => _wfScheduleBar(row, wf, wfKey)));   // CD-4 — arm / change / remove the cadence
     bar.appendChild(_mkBtn('📜 History', () => { void _renderWorkflowRuns(wf); }));   // CD-6 — the run-history view (auto + manual runs)

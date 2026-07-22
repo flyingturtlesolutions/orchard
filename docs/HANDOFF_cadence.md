@@ -110,6 +110,18 @@ step: `_promptWorkflowIntent()` asks what the workflow should DO and primes a co
 checked right after the standard echo, and `<2 steps` leaves the user in normal chat with guidance (no stranding).
 "Build step by step instead" on the prompt reaches the old blank wizard; Cancel clears the flag.
 
+**Progress (v2.74.1699) — on-demand headless run.** The manage view gains a **⚡ Headless** button for tier-'sw'
+workflows that calls `WORKFLOW_RUN_FIRE` — running the workflow through the SAME SW path the scheduler fires. It's
+useful on its own AND the on-demand way to live-verify the scanner's fire path without waiting for a tick (watch
+for `CADENCE ▸ … ran` in a gc download; a parked run appears in 📜 History and the manage view's parked banner).
+
+**Deliberately NOT built (blind-risk too high vs value):**
+- **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
+  (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK
+  desk like it does under Admin, broadcast/reconcile timing). Parked runs already surface as manage-view bubbles;
+  the Rail case is marginal discoverability for real blind risk (mis-parented conversations). Left for a session
+  that can eyeball the Rail.
+
 **Still remaining (large, live-only):**
 - **CD-6 overlay polish** — the `.rail`-style takeover from the card body + the explicit page-slot owner value
   (§6.2/§6.4). The history itself is readable now (bubble list); this is the motion.
