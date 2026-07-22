@@ -38,10 +38,11 @@
  */
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
+const _arr = (v) => (Array.isArray(v) ? v : []);
 
 /** Field names whose VALUES seed the per-item redaction set. Matched case-insensitively, substring. */
 export const IDENTITY_FIELD_HINTS = Object.freeze([
-  'address', 'addr', 'street', 'name', 'requester', 'customer', 'homeowner',
+  'address', 'addr', 'street', 'name', 'requester', 'customer',
   'contact', 'email', 'phone', 'recipient', 'shipto',
 ]);
 
@@ -66,9 +67,28 @@ export function classifyArms(verdict) {
  * Deliberately value-based rather than pattern-based: this is how an address gets redacted at all. Values under
  * 3 chars are dropped (a name like "Al" would otherwise pseudonymize half the prose).
  */
-export function identityValues(item, { hints = IDENTITY_FIELD_HINTS } = {}) {
+export function identityValues(item, { hints = IDENTITY_FIELD_HINTS, joinKey = null } = {}) {
   const rec = (item && typeof item === 'object') ? item : {};
   const out = [];
+
+  // v2.74.1684 — SEED FROM THE DECLARATION FIRST. A recipe's `joinKey` states, in the catalog's own words,
+  // which fields identify this subject on another system — that is precisely "the identity-bearing fields", and
+  // it is declared per ground rather than guessed from English.
+  //
+  // This is the generalization fix. `IDENTITY_FIELD_HINTS` still exists as a floor for a ground that declares
+  // nothing, but it carried `homeowner` — a construction-industry word sitting in a Core default, useful to one
+  // vertical and dead weight everywhere else. The declaration works for any ground; the word list only ever
+  // worked for the ground it was written next to.
+  for (const k of _arr(joinKey)) {
+    const name = typeof k === 'string' ? k : (k && typeof k === 'object' ? _str(k.type) : '');
+    if (!name) continue;
+    for (const [rk, rv] of Object.entries(rec)) {
+      if (!String(rk).toLowerCase().includes(String(name).toLowerCase())) continue;
+      const val = _str(rv);
+      if (val.length >= 3) out.push(val);
+    }
+  }
+
   for (const [k, v] of Object.entries(rec)) {
     const key = String(k).toLowerCase();
     if (!hints.some((h) => key.includes(h))) continue;

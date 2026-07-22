@@ -4065,7 +4065,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     use.forEach((it, i) => {
       const raw = cField ? String(extractValue(it, cField) ?? '') : '';
       if (!raw.trim()) return;   // no text to judge → no verdict → UNKNOWN downstream, which is the honest outcome
-      const { text } = redact(raw, { names: identityValues(it), map: redMap });
+      const { text } = redact(raw, { names: identityValues(it, { joinKey: (srcLeg && srcLeg.tool && srcLeg.tool.joinKey) || null }), map: redMap });
       payloadItems.push({ id: String(i), text: text.slice(0, 2000) });
     });
 

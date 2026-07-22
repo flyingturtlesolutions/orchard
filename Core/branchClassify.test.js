@@ -273,3 +273,33 @@ describe('branchClassify — banking (determinism without avoiding the model)', 
     assert.match(t, /couldn’t tell 0/);
   });
 });
+
+// ── v2.74.1684 — generalization: the DECLARATION seeds identity, not a word list ──────────────────────────────
+describe('branchClassify — identity comes from the ground\'s own joinKey declaration', () => {
+  it('a declared joinKey identifies fields the generic hints would MISS', () => {
+    // A ground with its own vocabulary — no "address", no "customer", nothing the English hints know.
+    const row = { CaseRef: 'C-99', SubscriberMSISDN: '447700900123', PolicyHolderSurname: 'Okonkwo', Notes: 'x' };
+    const joinKey = ['SubscriberMSISDN', { contact: 'primary', type: 'PolicyHolderSurname' }];
+    const vals = identityValues(row, { joinKey });
+    assert.ok(vals.includes('447700900123'), 'the declared key must be treated as identity');
+    assert.ok(vals.includes('Okonkwo'));
+    assert.ok(!vals.includes('x'), 'a non-identity field is still left alone — it is the content we need');
+  });
+
+  it('with NO declaration it still falls back to the generic hints', () => {
+    assert.ok(identityValues({ AddressLine1: '12 Elm St', Status: 'open' }).includes('12 Elm St'));
+  });
+
+  it('carries no vertical-specific vocabulary in the Core default', () => {
+    // `homeowner` sat here and helped exactly one industry. The declaration works for any ground.
+    for (const w of ['homeowner', 'warranty', 'ticket', 'patient', 'tenant']) {
+      assert.ok(!IDENTITY_FIELD_HINTS.includes(w), `${w} is vertical vocabulary, not a general identity hint`);
+    }
+  });
+
+  it('dedupes across both sources and does not throw on a malformed joinKey', () => {
+    const row = { Email: 'a@b.co' };
+    assert.deepEqual(identityValues(row, { joinKey: ['Email'] }), ['a@b.co']);
+    for (const bad of [null, 'nope', [null], [{}], [42]]) assert.doesNotThrow(() => identityValues(row, { joinKey: bad }));
+  });
+});
