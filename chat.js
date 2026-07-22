@@ -5469,6 +5469,7 @@ function ageWordMs(ms) { const mn = Math.floor(ms / 60e3); if (mn < 1) return 'j
 // the result renders IN the page) → the human ✓banks / ✗show-me / ↻retry → then [+ next step] · [Save] · [Cancel].
 // NAMING comes LAST (Save → the input awaits a name). Cancel is guarded. Cadence is WW-2.
 let _wfWizard = null;   // { steps:[{text,provenance}], name, st, tabId, phase, current, runMsg }
+let _wfIntentPending = null;   // CD-3 (§4) — the convId whose NEXT message is a workflow INTENT (＋ Workflow / `new workflow`), or null
 // phase: 'plan' | 'await-step' (input awaits the step) | 'running' | 'ran' (result up, approve/decline) | 'banked' (choices) | 'await-name' | 'cadence' (CD-6.6 — optional schedule pick, then save)
 
 function _wfFreshChainState() {
@@ -5522,6 +5523,23 @@ function _wfExitPage() {
       (async () => { try { const c = await ConversationStore.load(_currentConversationId); if (c) void _renderDeskLanding(c); } catch { /* the exit surface stays as-is */ } })();
     } else { void renderSuggestionCards(); }
   } catch { /* */ }
+}
+
+// CD-3 (DESIGN_cadence.md §4) — INTENT-FIRST ＋ Workflow. The card no longer opens a blank first step: it asks
+// what the workflow should DO, and the next typed message is decomposed into a proposed plan (the proven
+// `workflow: <intent>` path). The stepwise wizard is the DESTINATION, not demoted — "build step by step instead"
+// jumps straight to it. Conversation-scoped so a message in another desk is never captured as an intent.
+function _promptWorkflowIntent() {
+  if (!_memoryId() || !_currentConversationId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a desk first — workflows are saved per desk.'); _orchFinalize(m); return; }
+  _dismissDeskLanding();
+  _wfIntentPending = String(_currentConversationId);
+  const m = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(m, 'What should this workflow do? Describe it in the box below (e.g. “get my open tickets and research each in a new conversation”) and I’ll draft the steps for you to review.', { markdown: true });
+  const bar = _orchActionBar(m);
+  bar.appendChild(_mkBtn('Build step by step instead', () => { _wfIntentPending = null; try { bar.remove(); } catch { /* */ } void _startWorkflowWizard(); }));
+  bar.appendChild(_mkBtn('Cancel', () => { _wfIntentPending = null; try { bar.remove(); } catch { /* */ } _setMessageBody(m, 'Okay — no workflow started.'); }));
+  _orchFinalize(m);
+  try { const inp = $('chat-input'); if (inp) { inp.placeholder = 'Describe the workflow…'; inp.focus(); } } catch { /* */ }
 }
 
 async function _startWorkflowWizard() {
@@ -10465,6 +10483,15 @@ async function sendChatMessage() {
     return;
   }
 
+  // CD-3 (DESIGN_cadence.md §4) — intent-first ＋ Workflow: the card / `new workflow` primed _wfIntentPending, so
+  // THIS message is the workflow's intent. The entry echo (above) already showed it; route the reply to the proven
+  // step-drafter. One-shot + conversation-scoped — cleared here, or by Cancel / "build step by step".
+  if (_wfIntentPending && _wfIntentPending === String(_currentConversationId)) {
+    _wfIntentPending = null;
+    void _startWorkflowFromIntent(text);
+    return;
+  }
+
   // v2.74.1226 — mark the SELECTED app PROCESSING for the WHOLE turn (every send path below — IL/interpret/answer,
   // grounded, legacy matcher), so its drawer row shows "● working…". The finally clears it on EVERY exit (return,
   // throw), so it can never stick. Dev has its own run-status and returned above.
@@ -10855,8 +10882,10 @@ async function sendChatMessage() {
       return;
     }
     // WW-1 (v2.74.1610) — the ＋ Workflow wizard (also on the launch page's ＋ Workflow card).
+    // CD-3 (v2.74.1697) — bare `new workflow` now goes INTENT-FIRST (describe → draft → wizard); the intent prompt
+    // offers "build step by step instead" for the old blank-first-step path.
     if (/^(?:new|add|create|build)\s+workflow\s*$/i.test(text)) {
-      await _startWorkflowWizard();
+      _promptWorkflowIntent();
       return;
     }
     // PP-0c-gen (v2.74.1666) — INTENT-DRIVEN creation: `workflow: <what you want>` / `make a workflow that …`.
@@ -12715,7 +12744,7 @@ async function _renderDeskLanding(conv) {
             if (!_p3.runnable) { _wfReplayStopped(_m3, wf, _p3); return; }
             _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask });
           } else if (c.kind === 'new-workflow') {
-            void _startWorkflowWizard();   // WW-1 (v2.74.1610) — the ＋ Workflow card opens the wizard (capture → qualify → save)
+            _promptWorkflowIntent();   // CD-3 (v2.74.1697) — the ＋ Workflow card goes INTENT-FIRST (describe → draft → wizard); "build step by step instead" reaches the blank wizard
           } else if (c.kind === 'command' && c.command === 'check-now') {
             const mm = appendMessage({ role: 'assistant', body: '' });
             _setMessageBody(mm, 'Checking… (probing sessions + running due canaries — this can take a minute)');

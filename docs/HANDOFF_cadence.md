@@ -103,10 +103,14 @@ doesn't touch it); the manage view shows "⏰ due now" + "▶ Run now (due)" for
 advances the clock via the new `WORKFLOW_MARK_RAN` handler when the panel runs it. A manual extra run of a
 tier-'sw' workflow does NOT reschedule its headless fire (only a due tier-'panel' run advances).
 
+**Progress (v2.74.1697) — CD-3 intent-first ＋ Workflow.** The card / `new workflow` no longer opens a blank first
+step: `_promptWorkflowIntent()` asks what the workflow should DO and primes a conversation-scoped one-shot flag
+`_wfIntentPending`; the next message routes (after the entry echo — invariant #4 respected) to the proven
+`_startWorkflowFromIntent` step-drafter. Done WITHOUT a new wizard phase or a pre-echo intercept — the flag is
+checked right after the standard echo, and `<2 steps` leaves the user in normal chat with guidance (no stranding).
+"Build step by step instead" on the prompt reaches the old blank wizard; Cancel clears the flag.
+
 **Still remaining (large, live-only):**
-- **CD-3** — intent-first `＋ Workflow` (repoint the card at an intent prompt). Left deliberately: it touches the
-  composer intercept + a new wizard phase, high-risk to do blind; the `workflow: <intent>` command is the
-  intent-first door meanwhile.
 - **CD-6 overlay polish** — the `.rail`-style takeover from the card body + the explicit page-slot owner value
   (§6.2/§6.4). The history itself is readable now (bubble list); this is the motion.
 - **CD-7 as a desk CASE** — promote the parked bubble to a real `wfp_<runId>` case on the workflow's desk.
