@@ -99,7 +99,10 @@ as though it were a limit.** It is not. The evidence is already in the tree:
   chat.js `_runFleetSweep` … candidate for a shared Core sweep-driver with **injected IO** once both are proven."*
 
 So what actually blocks it is **coupling, not capability**: the chain runner and every clause runner take a `msg`
-DOM element and write into it (~723 `_setMessageBody` / `_orchFinalize` / `_ilBusy` call sites in chat.js).
+DOM element and write into it. The honest size is **78 reporter calls across the five clause runners** (1,142
+lines) — not the ~723 chat.js-wide figure an earlier draft quoted, which overstated it by an order of magnitude.
+`_orchLog` (52 more) is already host-agnostic, routing through `_orchReq('ORCH_LOG')`. Per-clause sizing and the
+full disposition table are in `docs/HANDOFF_cadence.md` §4.2.
 
 **The move:** lift the chain runner into a Core driver that takes an injected **reporter** instead of a DOM
 element. Two implementations of one interface:
@@ -222,8 +225,16 @@ Clicking the card body opens an **overlay on the timeline**:
 already hide `#messages`, show the page slot, and restore the thread or the launch page on exit. That is
 open/close, working.
 
-**New:** the motion. There is no height/transform transition in `chat.css`; the wizard's swap is a hard toggle.
-Expand-to-fill-then-contract is new CSS.
+**Also reusable — and this corrects an earlier draft of this section, which claimed the motion was new CSS.**
+`.rail` is ALREADY a full-surface overlay with exactly the transition wanted (`assets/chat.css:1519-1543`):
+`position:absolute; inset:0; z-index:20; transform:translateX(-100%); opacity:0; transition: transform
+var(--t-med), opacity var(--t-med)`, flipping to `translateX(0)` on `.rail.open`. Its containing block is
+`.app-body{position:relative}`, and the input row was deliberately moved OUT of `.app-body` to a body-level row
+(`chat.html:160-163`) so a full-width overlay never covers it. Copy that structure verbatim — the user's own
+phrasing for this surface was "similar to the rail effect", which turns out to be literal.
+
+`.walk-mode` (`chat.css:2336-2350`) is a second full-surface overlay with zero consumers, kept only as a reference
+shape. **Genuinely new:** only the workflow-specific content and the page-slot owner value below.
 
 **Structural note.** The page slot now has three consumers — empty state, wizard, workflow history. The Rail is
 the cautionary tale: no section registry, every fixture hand-coded in two coupled places, so adding a third means
@@ -349,6 +360,20 @@ record to strand.
 3. **`patchMeta` silently drops `summary` and `resolvedAt`** (closed allow-list, `ConversationStore.js:279`) while
    `chat.js` writes both — so `resolvedAt` is never set and every `VITALS_CHANGED` re-patches and re-logs every
    closed incident forever. **This one matters here**: §6.3 clones the vitals sidecar and would inherit it.
+4. **BLOCKER — `normalizeWorkflow` drops `steps[].clause` and `schema`, so PP-0c pinning is inert.**
+   `Core/workflowMemory.js` contains zero occurrences of either, while `buildWorkflowSave`
+   (`Core/workflowWizard.js:141-160`) emits both. `_normSteps` (`:37-46`) rebuilds each step as
+   `{text, via, bankedAt}`, and both `saveWorkflow` and `updateWorkflow` route through `normalizeWorkflow` — so no
+   pinned clause has ever reached storage. Consequences: `replayPlan` always takes the loose branch, `isPrePinned`
+   always returns true, the chain runner's warm path is unreachable, and **the drift check never fires** — of
+   which `workflowWizard.js:180-182` says *"A drift check that can be bypassed by a fallback is not a drift
+   check."*
+
+   **This blocks CD-0.** Without pinning, every triggered fire re-interprets each step from prose (ORCH_MATCH +
+   INTERPRET_ASK per step) and cannot detect that a step now resolves somewhere different from what the human
+   approved. A workflow that silently re-aims itself at 03:00 is the failure the gate architecture exists to
+   prevent — and an unattended run is the only caller that cannot notice. `trigger` is one of THREE fields going
+   into that whitelist.
 
 ---
 
@@ -467,8 +492,8 @@ it.
 (tier oracle) · the WorkflowStore surrogate id · `_orchRunChain`'s existing `startIndex` + `state` params
 (park/resume) · every `Core/` decision module.
 
-**Genuinely new:** the scanner · the driver + two reporters · the run store · the overlay motion (there is no
-height/transform transition in `chat.css` today) · the page-slot value.
+**Genuinely new:** the scanner · the driver + two reporters · the run store · the page-slot owner value. (The
+overlay MOTION is not new — `.rail` already carries it; see §6.2.)
 
 **Watch-items:**
 
@@ -478,8 +503,9 @@ height/transform transition in `chat.css` today) · the page-slot value.
    Same class as the `patchMeta` bug in §10.3, and the reason CD-0 is a two-line change in two places rather than
    one.
 2. `patchMeta` drops `resolvedAt` (§10.3) — CD-5's sidecar clone inherits it. Fix before CD-5, not after.
-3. The ~723 `_setMessageBody` / `_orchFinalize` / `_ilBusy` call sites are the true size of CD-1a. **Phase 1
-   touches only those on the `act`/`ride` path** — that is the whole reason for tiering.
+3. The true size of CD-1a is **78 reporter calls across the five clause runners**, not the ~723 chat.js-wide
+   figure (see `docs/HANDOFF_cadence.md` §4.2 for the per-clause table). **Phase 1 touches only those on the
+   `act`/`ride` path** — that is the whole reason for tiering.
 4. SW eviction: phase-1 runs are short (the fleet sweep does 121 invokes in ~17s). Long tier-`'sw'` runs need the
    CD-7 checkpoint — which is why parked writes and resumability are one primitive, built once.
 
