@@ -3876,6 +3876,35 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
 // because an object is always truthy. The correct idiom is already in this file at the fan-out identify()
 // helper: read `.title`, fall back to `.id`, then to a couple of fields. Centralized here so the next caller
 // cannot re-derive it a fourth way.
+/**
+ * v2.74.1679 — is this clause a PER-ITEM WRITE we cannot run yet? PURE-ish (reads chain state, no I/O).
+ *
+ * Deliberately narrow. It fires only when the ask reads as a write AND refers to a set ("them", "the ones",
+ * "each"), so a plain single write still takes the ordinary path and its ordinary teach offer. Getting this
+ * wrong in the permissive direction would suppress a teach door that WOULD have worked, which is worse than the
+ * message it replaces.
+ *
+ * Returns null when it does not apply, else `{ legName, missCount }` — the evidence the honest message quotes,
+ * so the message can say what exists rather than only what is missing.
+ */
+function _looksPerItemWrite(text, st) {
+  const t = String(text || '').toLowerCase();
+  const isWrite = /\b(create|add|make|draft|send|post|update|set|assign|open)\b/.test(t);
+  const isPerItem = /\b(them|those|each|every|the ones|all of them|for these|per row)\b/.test(t);
+  if (!isWrite || !isPerItem) return null;
+  const misses = (st && Array.isArray(st.lastMisses)) ? st.lastMisses : [];
+  // Name the write capability from the source leg's own `writeMap` DECLARATION. That declaration exists
+  // precisely to say "a row of mine fills THIS create" (`vs_warranty_task` → `shopify_create_customer`), so it
+  // identifies the capability for free — no palette scan, no probe, on a path that is already a failure.
+  let legName = '';
+  try {
+    const wm = (st && st.lastMapLeg && st.lastMapLeg.tool && st.lastMapLeg.tool.writeMap) || null;
+    const ids = wm && typeof wm === 'object' ? Object.keys(wm) : [];
+    if (ids.length) legName = String(ids[0]).replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+  } catch { legName = ''; }
+  return { legName, missCount: misses.length };
+}
+
 function _rowLabel(row, leg = null) {
   try {
     // v2.74.1677 — PASS THE LEG'S DECLARED displayId. v1663 wrote `{ displayId: null }`, which disables the
@@ -4465,7 +4494,12 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   _orchFinalize(msg);
   // v1627 — `text` rides back so the CHAIN can push it as a readout; without it the chain tail's readout join
   // would overwrite the table with "Done." (the tail owns msg for the whole chain).
-  return { ok: true, joined, text };
+  // v2.74.1679 — return the MISS entries and the context a per-item write would need. `Core/writeMap.js`
+  // (`buildWriteProposals`) already turns exactly this into reviewable proposals; the misses were being
+  // computed, rendered, and then dropped, so the step that acts on them had nothing to act on.
+  const _misses = joined.map((j, k) => ({ row: j.source.row, label: j.source.label, value: (results[k] || {}).value ?? null, matched: !!j.matched }))
+    .filter((x) => !x.matched);
+  return { ok: true, joined, text, misses: _misses, srcLeg, system };
 }
 
 // A matched record's short label for the join line (the other system's identity). PURE-ish (uses summarizeItem).
@@ -6688,6 +6722,11 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           const mr = await _runMapClause(msg, cr.map, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
           if (!mr || !mr.ok) return;
           st.lastValue = mr.joined; st.lastReadoutIdx = null;   // v1635 — KEEP st.lastLeg: the joined rows still descend from the source leg, and a follow-up map needs its joinKey declaration
+          // v2.74.1679 — carry the MISSES forward. A following "create one for the ones not found" needs the
+          // rows that missed, not the joined set; without this the next step has no candidates to name and the
+          // failure message cannot even say how many there were.
+          st.lastMisses = Array.isArray(mr.misses) ? mr.misses : [];
+          st.lastMapLeg = mr.srcLeg || st.lastLeg || null;
           if (mr.text) { st.readouts.push(mr.text); st.lastReadoutIdx = st.readouts.length - 1; }
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'map', clause: clause.text, intent: clause.text });
           continue;
@@ -6717,6 +6756,32 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         }
       }
       const gid = (m && m.groundId) || st.chainGroundId;
+      // v2.74.1679 — DON'T CLAIM IGNORANCE OF A CAPABILITY THAT EXISTS.
+      //
+      // Live: step 5 "create a Shopify profile for them" rendered *"I don't know how to … here, and I don't have
+      // this site mapped to learn it"*. Both halves were false. `shopify_create_customer` is in the catalog,
+      // Shopify was a connected ground with 43 legs in that very turn's palette, and `vs_warranty_task` declares
+      // the `writeMap` that fills the create from a warranty row. What is missing is not the capability or the
+      // mapping — it is a clause that runs a write ONCE PER ROW.
+      //
+      // Offering "teach me with a demo" for that is worse than unhelpful: a demo cannot teach a per-item loop,
+      // so the suggested remedy could not have worked. Naming the real gap is the difference between a user
+      // retrying forever and a user knowing to stop. (v1471's lesson — the honest cause beats the cascade.)
+      const _perItemWrite = _looksPerItemWrite(clause.text, st);
+      if (_perItemWrite) {
+        _setMessageBody(msg, [
+          `I can’t run “${escHtml(clause.text)}” as one step — it’s a **write, once per row**, and that’s the piece that isn’t built yet.`,
+          '',
+          _perItemWrite.legName
+            ? `The capability itself exists here (**${escHtml(_perItemWrite.legName)}**) and the field mapping is declared — what’s missing is the per-row runner and its review queue, not the know-how.`
+            : 'The capability exists here — what’s missing is the per-row runner and its review queue.',
+          '',
+          `_A demo won’t teach this one, so “show me” won’t help. ${_perItemWrite.missCount ? `The ${_perItemWrite.missCount} unmatched row${_perItemWrite.missCount === 1 ? '' : 's'} from the last step ${_perItemWrite.missCount === 1 ? 'is' : 'are'} what it would act on.` : ''}_`,
+        ].join('\n'), { markdown: true });
+        _orchFinalize(msg);
+        try { _orchLog(`WRITE_GATE ▸ per-item write not built — "${String(clause.text).slice(0, 50)}"${_perItemWrite.legName ? ` (leg exists: ${_perItemWrite.legName})` : ''}${_perItemWrite.missCount ? `, ${_perItemWrite.missCount} candidate row(s)` : ''}`); } catch { /* */ }
+        return;
+      }
       if (!gid) { _setMessageBody(msg, `${_ranPfx(i)}I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); _orchFinalize(msg); return; }
       _setMessageBody(msg, `${_pfx(i)}I don’t know how to “${clause.text}” on this page yet${offers ? ' — show me this step and I’ll keep going' : ''}.`);
       _orchFinalize(msg);   // v1338 (review D)
