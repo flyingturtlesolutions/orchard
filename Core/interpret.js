@@ -15,8 +15,9 @@ import { legRef } from './legRef.js';
 import { normalizeMapVerdict } from './peritemMap.js';
 import { normalizeFieldReadVerdict } from './fieldRead.js';   // PM-9 — the per-item own-record read   // PM-1 (v2.74.1625) — the per-item cross-system MAP verdict
 import { normalizeBranchVerdict } from './branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH
+import { normalizeWriteVerdict } from './writeClause.js';     // PP-2 (v2.74.1681) — the per-item WRITE
 
-export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread', 'branch'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record; PP-1 (v1661) — `branch` = the per-item classify-and-route
+export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread', 'branch', 'write'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record; PP-1 (v1661) — `branch` = the per-item classify-and-route
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
@@ -84,6 +85,14 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     if (br) return { ...base, branch: br };
     return { ...base, intent: 'clarify', question: 'What should I sort each item by, and into which groups?', why: why || 'branch-underspecified' };
   }
+  if (intent === 'write') {
+    // PP-2 (v2.74.1681) — a per-item WRITE over the rows a prior step left unmatched. Nothing is required: the
+    // TARGET comes from the source leg's `writeMap` declaration, never from the ask, so there is no slot here a
+    // model could fill with an invention (the §7.1 rule that cost three versions).
+    const w = normalizeWriteVerdict(d.write || d);
+    if (w) return { ...base, write: w };
+    return { ...base, intent: 'clarify', question: 'What should I create, and for which of those records?', why: why || 'write-underspecified' };
+  }
   if (intent === 'clarify') {
     return { ...base, question: _str(d.question) || 'Can you say that a different way?' };
   }
@@ -116,6 +125,11 @@ export function applyConfidenceGate(decision, { minConfidence = 0.6 } = {}) {
   // PP-1 (v2.74.1661) — a BRANCH earns the gate more than a map, not less. A map fans N READS off one shaky
   // interpretation; a branch fans N ROUTING decisions, and each arm can carry a write. Mis-sorting 22 items into
   // the replacements arm is a worse first move than asking one question.
+  // PP-2 (v2.74.1681) — a WRITE fans N record CREATIONS off one interpretation. It gets the gate for the same
+  // reason `map` does, only more so: a mis-fired read wastes a call, a mis-fired write leaves records behind.
+  if (d.intent === 'write' && d.confidence < minConfidence) {
+    return { ...d, intent: 'clarify', question: d.question || 'I can create the missing ones — say which records, and where.', why: `low-confidence ${d.confidence} < ${minConfidence}` };
+  }
   if (d.intent === 'branch' && d.confidence < minConfidence) {
     return { ...d, intent: 'clarify', question: d.question || 'I can sort them into groups — what should I sort on, and which groups?', why: `low-confidence ${d.confidence} < ${minConfidence}` };
   }

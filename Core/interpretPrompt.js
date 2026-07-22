@@ -78,6 +78,12 @@ const SYSTEM = [
   '  replacements arm and acts on it. Enumerated/structured fields (status, priority, dates, ids, counts,',
   '  presence-of-a-field) → the deterministic forms. Human-authored prose (instructions, notes, explanations,',
   '  descriptions) → "classify". Use the SAME "field" across the classify arms of one branch.',
+  '- "write": CREATE a record for each item a previous step could NOT match — "create a profile for the ones not',
+  '  found", "add the missing ones", "create them in Shopify". Set "write": {} (an empty object is fine).',
+  '  You do NOT name the target, the fields, or any values: the site DECLARES which create a row of its own fills,',
+  '  and every field comes from that declaration. Anything it cannot fill is reported, never invented.',
+  '  Choose this ONLY after a step that looked things up — it acts on the unmatched rows from THAT step, so by',
+  '  itself it has nothing to work with.',
   '- "clarify": you genuinely cannot tell what ACTION is wanted — a malformed/garbled command or an unclear target.',
   '  ASK instead of guessing (set "question"). NOT for a question you could simply answer.',
   '- "teach": the ask needs a capability not in the catalog and not a primitive — offer to be shown.',
@@ -140,8 +146,8 @@ const SYSTEM = [
   '- A param typed (date-time) MUST be a CONCRETE ISO 8601 timestamp (e.g. 2026-07-02T15:00:00) in the user\'s',
   '  timezone — resolve relative times ("tomorrow 3pm") against the NOW line; NEVER emit relative text as a value.',
   '- Reply with ONLY a JSON object:',
-  '  {"intent":"act|navigate|decompose|clarify|teach|answer|map|fieldread|branch","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
-  '   "params":{..},"subAsks":[..],"map":{..?},"fieldRead":{..?},"branch":{..?},"question":"..","confidence":0..1,"why":"short"}',
+  '  {"intent":"act|navigate|decompose|clarify|teach|answer|map|fieldread|branch|write","capabilityId":<ref?>,"op":<PRIMITIVE?>,',
+  '   "params":{..},"subAsks":[..],"map":{..?},"fieldRead":{..?},"branch":{..?},"write":{..?},"question":"..","confidence":0..1,"why":"short"}',
 ].join('\n');
 
 /**
@@ -251,7 +257,8 @@ export function parseInterpretOutput(raw) {
     subAsks: Array.isArray(obj.subAsks) ? obj.subAsks.map(String).filter(Boolean) : [],
     map: (obj.map && typeof obj.map === 'object') ? obj.map : null,   // PM-1 — the per-item cross-system MAP clause (interpret.js normalizes it)
     fieldRead: (obj.fieldRead && typeof obj.fieldRead === 'object') ? obj.fieldRead : null,   // PM-9 (v1651) — the per-item OWN-RECORD read clause. This return is a WHITELIST: a payload absent here is dropped in transit, the intent survives, and the verdict silently degrades to clarify — which is exactly how v1649/1650 read as 'the runtime never ran'.
-    branch: (obj.branch && typeof obj.branch === 'object') ? obj.branch : null,   // PP-1 (v1661) — the per-item CLASSIFY-AND-ROUTE clause. Added here in the SAME edit as the intent (see the v1651 note above): a clause whose intent is registered but whose payload is not whitelisted arrives empty and degrades to clarify, with a correct-looking rationale in the trace.
+    branch: (obj.branch && typeof obj.branch === 'object') ? obj.branch : null,
+    write: (obj.write && typeof obj.write === 'object') ? obj.write : null,   // PP-2 (v1681) — added in the SAME edit as the intent (the v1651 rule)   // PP-1 (v1661) — the per-item CLASSIFY-AND-ROUTE clause. Added here in the SAME edit as the intent (see the v1651 note above): a clause whose intent is registered but whose payload is not whitelisted arrives empty and degrades to clarify, with a correct-looking rationale in the trace.
     question: typeof obj.question === 'string' ? obj.question.trim() : '',
     confidence: _clamp01(obj.confidence),
     why: typeof obj.why === 'string' ? obj.why.slice(0, 200) : (typeof obj.reason === 'string' ? obj.reason.slice(0, 200) : ''),

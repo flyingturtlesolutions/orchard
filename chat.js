@@ -77,7 +77,10 @@ import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
 import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
 import { redact, restore, newRedactionMap } from './Core/redact.js';   // R-1 (v2.74.1662) — pseudonymize identity before the instruction text ever leaves (DESIGN_llm_privacy.md §5)
-import { openRun, recordStage, closeItem, closeRun, markAlreadyOpen, runStartLine, runEndLine } from './Core/pipelineRun.js';   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
+import { openRun, recordStage, closeItem, closeRun, markAlreadyOpen, runStartLine, runEndLine, trialTag } from './Core/pipelineRun.js';
+import { resolveWriteValue, buildWriteProposals, writeBatchSummary } from './Core/writeMap.js';   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
+import { runUpsert, upsertTally } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
+import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
 import { Scope, scalar, record as scopeRecord, document as scopeDocument } from './Services/Scope.js';
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
@@ -2038,7 +2041,7 @@ async function _runChildTask(child, task) {
   } else if (d && d.intent === 'act' && d.capabilityId) {
     // a page action / write capability — NOT run unattended (the safety pause).
     body = `Needs you — “${task}” needs a page action or a write I won’t run unattended. Open this conversation to continue.`;
-  } else if (d && (d.map || d.fieldRead || d.branch)) {
+  } else if (d && (d.map || d.fieldRead || d.branch || d.write)) {
     // PP-1 (v2.74.1661) — THE THIRD DROP SITE, made honest rather than silently absent.
     //
     // The clause handlers (_runMapClause / _runFieldReadClause / _runBranchClause) all render into a `msg`
@@ -2050,7 +2053,7 @@ async function _runChildTask(child, task) {
     // Running clauses headless in the child lane is real work (a render-free handler contract). Until then the
     // drop is REPORTED at both the trace and the bubble, which is the difference between a known gap and a
     // silent wrong answer.
-    const _kind = d.branch ? 'branch' : (d.map ? 'map' : 'fieldread');
+    const _kind = d.write ? 'write' : d.branch ? 'branch' : (d.map ? 'map' : 'fieldread');
     try { _orchLog(`DISPATCH ▸ ${_kind} → NOT RUN @child-lane (per-item clauses need a render target; reported, not silently reasoned)`); } catch { /* */ }
     body = `Needs you — “${task}” resolves to a per-item **${_kind}** step, which I can’t run inside a sub-task yet. Open this conversation and ask it there.`;
   } else {
@@ -4215,6 +4218,173 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   }
 }
 
+/**
+ * PP-2/PP-4 (v2.74.1681) — the PER-ITEM WRITE. The arc's last step: create the missing records.
+ *
+ * Spec: docs/DESIGN_peritem_pipeline.md §3 (UPSERT) · §4 (the gate) · §5.7 (cases) · §10.1 (adopt, don't undo).
+ *
+ * ── WHY THIS IS AN UPSERT PER ROW AND NOT A PROPOSAL BATCH ───────────────────────────────────────────────────
+ * `Core/writeMap.js` builds PROPOSALS for the existing approval spine, and that path is still used — for every
+ * row the gate does not clear. But a proposal's duplicate guard is a staleness CAS keyed on `basedOn.path`, and
+ * that path has to be verified against a real response or the check reads `undefined` and **fails OPEN** (the
+ * v1639 finding, recorded in writeMap's own header). I cannot verify a Shopify response shape from here, and
+ * guessing it would produce a guard that looks present and is not.
+ *
+ * `runUpsert`'s inline `recheck` needs no path: it re-runs the SAME lookup the map just ran and asks hit / miss /
+ * unreachable. The matcher that decided "no match" the first time decides again, immediately before the create.
+ * That is what PP-2 was built for, and it is why an auto-cleared row goes through it rather than the queue.
+ *
+ * ── THE THREE OUTCOMES ARE THE GATE'S, NOT MINE ──────────────────────────────────────────────────────────────
+ * Every row is classed by `gateActionForLeg`: `auto` runs (the user's declared `reversible:true, outward:false`),
+ * `queued` becomes a proposal for review, `refused` never runs at all. An UNDECLARED write lands in `queued`,
+ * so this clause cannot widen what the catalog permits — it can only act on what was explicitly allowed.
+ */
+async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = null, goal = '', state = null } = {}) {
+  _walkAbortFlag.requested = false;
+  _ilBusy(msg, true);
+  const st = state || {};
+  const misses = Array.isArray(st.lastMisses) ? st.lastMisses : [];
+  const srcLeg = st.lastMapLeg || priorLeg || null;
+  const lookup = st.lastMapLookup || null;
+  try { _orchLog(`WRITE ▸ start misses=${misses.length} src=${(srcLeg && srcLeg.tool && srcLeg.tool.recipeId) || '—'}`); } catch { /* */ }
+
+  if (!misses.length) {
+    _setMessageBody(msg, 'Nothing to create — every row from the last step already matched. (If you meant something else, say which records to create and where.)', { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog('WRITE ▸ no candidates — the prior step reported no misses'); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+
+  // 1) WHICH write. The source leg's `writeMap` declares it — "a row of mine fills THIS create" — so the target
+  // is read from the declaration rather than guessed from the ask (the v1617 rule: a declaration beats a guess).
+  const wmap = (srcLeg && srcLeg.tool && srcLeg.tool.writeMap) || null;
+  const targetId = wmap && typeof wmap === 'object' ? Object.keys(wmap)[0] : '';
+  if (!targetId) {
+    _setMessageBody(msg, 'I don’t have a declared way to turn these rows into new records — the source doesn’t say which create they fill, and I won’t invent one.', { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog('WRITE ▸ no writeMap on the source leg — refused to infer a target'); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+  const createLeg = await _rideDrillLeg(srcLeg, targetId, (srcLeg.tool && srcLeg.tool.groundId) || null);
+  if (!createLeg) {
+    _setMessageBody(msg, `The declared target (**${escHtml(targetId)}**) isn’t available on this ground — connect it, or enable that recipe in Studio.`, { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`WRITE ▸ target leg unavailable [${targetId}]`); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+
+  // 2) THE GATE, once for the leg. Reported before anything runs, so the decision is visible rather than implied.
+  const gate = gateActionForLeg(createLeg);
+  try { _orchLog(`GATE   ▸ ${createLeg.name} → ${gate.decision}(${gate.why})`); } catch { /* */ }
+  if (gate.decision === 'refused') {
+    _setMessageBody(msg, `**${escHtml(createLeg.name)}** stays a human click here — ${escHtml(gate.why)}. I won’t run it per row.`, { markdown: true });
+    _orchFinalize(msg);
+    return { ok: false, gap: true };
+  }
+
+  const declared = wmap[targetId] || null;
+  const cap = Math.max(1, Math.min(wr && wr.cap ? wr.cap : _MAP_WINDOW, misses.length));
+  const use = misses.slice(0, cap);
+  const capped = misses.length > cap;
+
+  const run = openRun({ pipeline: `write:${targetId}`, items: use.map((m, i) => ({ id: String(i), label: _rowLabel(m.row, srcLeg) })), cap, now: Date.now(), stages: ['write'] });
+  try { _orchLog(runStartLine(run)); } catch { /* */ }
+
+  // 3) Per row. Fill by DECLARATION; a required param that does not resolve makes the row UNPROPOSABLE and is
+  // reported — never invented (writeMap's first stated property).
+  const created = []; const queued = []; const blocked = []; const unfillable = [];
+  const _params = Array.isArray(createLeg.params) ? createLeg.params : [];
+  const _required = ((createLeg.paramSchema && createLeg.paramSchema.required) || []);
+
+  for (let i = 0; i < use.length; i++) {
+    if (_walkAbortFlag.requested) break;
+    const m = use[i]; const row = m.row; const id = String(i);
+    const label = _rowLabel(row, srcLeg);
+    _setMessageBody(msg, `Creating… ${i + 1}/${use.length}`);
+
+    const filled = {};
+    const missing = [];
+    for (const pname of _params) {
+      const v = resolveWriteValue(row, pname, declared);
+      if (v) filled[pname] = v;
+      else if (_required.includes(pname)) missing.push(pname);
+    }
+    if (missing.length) {
+      unfillable.push({ label, missing });
+      recordStage(run, id, { name: 'write', verdict: 'unfillable', detail: missing.join(', ') });
+      closeItem(run, id, 'blocked', `missing ${missing.join(', ')}`);
+      continue;
+    }
+
+    if (gate.decision === 'queued') {
+      queued.push({ row, label, value: m.value });
+      recordStage(run, id, { name: 'write', verdict: 'queued', detail: gate.why });
+      closeItem(run, id, 'blocked', 'queued for approval');
+      continue;
+    }
+
+    // AUTO — the upsert, with the inline re-check standing in for a path-based CAS.
+    // The duplicate guard: re-run the SAME lookup that decided "no match", immediately before creating.
+    //
+    // Fail-CLOSED when it cannot run. The map established the miss earlier; the re-check exists to catch a race
+    // in between. If there is nothing to look up by, or the lookup is unreachable, that race cannot be RULED
+    // OUT — so the row is blocked rather than created. §3's rule exactly: *miss* creates, *unreachable* must
+    // not, and conflating them means a duplicate record on every transport blip.
+    const _find = async () => {
+      if (!lookup || !lookup.leg || !lookup.valueParam || !m.value) {
+        return { outcome: 'unreachable', why: 'no way to re-check for a duplicate before creating' };
+      }
+      try {
+        const r = await _runConnectorLeg(lookup.leg, { ...lookup.baseParams, [lookup.valueParam]: m.value }, { tabId, groundId: lookup.groundId });
+        if (!r || !r.ok) return { outcome: 'unreachable', why: _errWord(r && r.error) || 'lookup failed' };
+        const hit = primaryObject(r.value) || (primaryList(r.value) || [])[0] || null;
+        return hit ? { outcome: 'hit', record: hit } : { outcome: 'miss' };
+      } catch (e) { return { outcome: 'unreachable', why: (e && e.message) || 'lookup threw' }; }
+    };
+    const res = await runUpsert(row, {
+      find: _find,
+      recheck: _find,
+      create: async () => {
+        const r = await _rideExecOnce(createLeg, filled, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null });
+        if (!r || !r.ok) throw new Error((r && r.error) || 'create failed');
+        return r.value ?? {};
+      },
+      trialTag: trialTag(run),
+      onDisposition: (line) => { try { _orchLog(`UPSERT ▸ item=${label} → ${line}`); } catch { /* */ } },
+    });
+
+    if (res.outcome === 'created') { created.push({ label, ref: createdRecordId(res.record) || '' }); recordStage(run, id, { name: 'write', verdict: 'created' }); closeItem(run, id, 'done'); }
+    else if (res.outcome === 'hit') { blocked.push({ label, why: 'already exists' }); recordStage(run, id, { name: 'write', verdict: 'already-exists' }); closeItem(run, id, 'skipped', 'already exists'); }
+    else { blocked.push({ label, why: res.why || res.outcome }); recordStage(run, id, { name: 'write', verdict: res.outcome, detail: res.why }); closeItem(run, id, res.outcome === 'blocked' ? 'blocked' : 'failed', res.why); }
+  }
+
+  // 4) Queue whatever the gate withheld, through the EXISTING approval spine.
+  let mintedN = 0;
+  if (queued.length) {
+    try {
+      const built = buildWriteProposals(queued, { leg: createLeg, declared, sourceName: 'record', why: `no match in ${wr && wr.system ? wr.system : 'the target system'}`, cap });
+      const inst = _memoryId();
+      if (inst && built.proposals.length) { const minted = await addProposals(inst, built.proposals); mintedN = Array.isArray(minted) ? minted.length : built.proposals.length; }
+    } catch { /* the tally still reports them as queued */ }
+  }
+
+  closeRun(run, { now: Date.now(), aborted: _walkAbortFlag.requested });
+  try { _orchLog(runEndLine(run)); } catch { /* */ }
+
+  // 5) Report. Every class named, including the zeroes (§5.5).
+  const lines = [];
+  if (created.length) { lines.push(`**created** — ${created.length}`); for (const c of created) lines.push(`  • ${escHtml(c.label)}${c.ref ? `  _(${escHtml(String(c.ref))})_` : ''}`); }
+  if (mintedN || queued.length) { lines.push(`**queued for your approval** — ${queued.length}`); for (const q of queued) lines.push(`  • ${escHtml(q.label)}`); }
+  if (blocked.length) { lines.push(`**not created** — ${blocked.length}`); for (const x of blocked) lines.push(`  • ${escHtml(x.label)} — _${escHtml(String(x.why).slice(0, 90))}_`); }
+  if (unfillable.length) { lines.push(`**can’t fill** — ${unfillable.length}`); for (const u of unfillable) lines.push(`  • ${escHtml(u.label)} — _missing ${escHtml(u.missing.join(', '))}_`); }
+
+  const head = `${createLeg.name} — ${use.length} row${use.length === 1 ? '' : 's'}${capped ? ` (first ${cap} of ${misses.length})` : ''}, ${gate.decision === 'auto' ? 'run directly' : 'held for review'}.`;
+  _setMessageBody(msg, [head, upsertTally([...created.map(() => ({ outcome: 'created' })), ...blocked.map(() => ({ outcome: 'blocked' }))]), ...lines].join('\n'), { markdown: true });
+  _orchFinalize(msg);
+  try { _orchLog(`WRITE ▸ ${use.length} × ${targetId} → ${created.length} created, ${queued.length} queued, ${blocked.length} blocked, ${unfillable.length} unfillable${capped ? ` (capped ${cap}/${misses.length})` : ''}`); } catch { /* */ }
+  return { ok: true, text: lines.join('\n'), created, queued, blocked, unfillable, run };
+}
+
 async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
   const system = map.target.system;
   _walkAbortFlag.requested = false;   // v1625 — a FRESH top-level run clears a stale stop (the _orchRunChain rule); PM-5 chain entry will pass state instead
@@ -4499,7 +4669,11 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // computed, rendered, and then dropped, so the step that acts on them had nothing to act on.
   const _misses = joined.map((j, k) => ({ row: j.source.row, label: j.source.label, value: (results[k] || {}).value ?? null, matched: !!j.matched }))
     .filter((x) => !x.matched);
-  return { ok: true, joined, text, misses: _misses, srcLeg, system };
+  // v2.74.1681 — the PRIMARY lookup context rides out too. A per-item write's duplicate guard has to re-run the
+  // SAME lookup that decided "no match"; without this it would have to guess a `basedOn.path`, and a wrong path
+  // makes the staleness CAS read `undefined` and fail OPEN (the v1639 finding).
+  const _lookup = tgt0 && tgt0.leg ? { leg: tgt0.leg, baseParams: tgt0.baseParams || {}, valueParam: tgt0.valueParam, groundId: tgt0.groundId || null } : null;
+  return { ok: true, joined, text, misses: _misses, srcLeg, system, lookup: _lookup };
 }
 
 // A matched record's short label for the join line (the other system's identity). PURE-ish (uses summarizeItem).
@@ -6519,7 +6693,8 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // D
   // dispatch is only reached by the `i:` command, so the whole feature was unreachable through the front door).
   if (d.intent === 'map' && d.map) { try { _orchLog('DISPATCH ▸ map → chain'); } catch { /* */ } return { map: d.map }; }
   if (d.intent === 'fieldread' && d.fieldRead) { try { _orchLog('DISPATCH ▸ fieldread → chain'); } catch { /* */ } return { fieldRead: d.fieldRead }; }   // PM-9 (v1649)
-  if (d.intent === 'branch' && d.branch) { try { _orchLog('DISPATCH ▸ branch → chain'); } catch { /* */ } return { branch: d.branch }; }   // PP-1 (v1661) — door A. Its execution half is in _orchRunChain below; this door only carries the payload up, so wiring one without the other returns a payload nobody reads.
+  if (d.intent === 'branch' && d.branch) { try { _orchLog('DISPATCH ▸ branch → chain'); } catch { /* */ } return { branch: d.branch }; }
+  if (d.intent === 'write' && d.write) { try { _orchLog('DISPATCH ▸ write → chain'); } catch { /* */ } return { write: d.write }; }   // PP-2 (v1681) — door A; its execution half is in _orchRunChain (door A is only half a door)   // PP-1 (v1661) — door A. Its execution half is in _orchRunChain below; this door only carries the payload up, so wiring one without the other returns a payload nobody reads.
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
@@ -6689,6 +6864,13 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           }
           continue;
         }
+        if (cr && cr.write) {   // PP-2 (v1681) — door A′. Passes `state`: the candidates are st.lastMisses, not st.lastValue.
+          const wrr = await _runWriteClause(msg, cr.write, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, state: st });
+          if (!wrr || !wrr.ok) return;
+          if (wrr.text) { st.readouts.push(wrr.text); st.lastReadoutIdx = st.readouts.length - 1; }
+          st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'write', clause: clause.text, intent: clause.text });
+          continue;   // st.lastValue unchanged: a write CREATES records, it does not replace the working set
+        }
         if (cr && cr.branch) {   // PP-1 (v1661) — door A′, the execution half. Supplies the prior exactly as its siblings do.
           const brr = await _runBranchClause(msg, cr.branch, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
           if (!brr || !brr.ok) return;
@@ -6727,6 +6909,8 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           // failure message cannot even say how many there were.
           st.lastMisses = Array.isArray(mr.misses) ? mr.misses : [];
           st.lastMapLeg = mr.srcLeg || st.lastLeg || null;
+          st.lastMapLookup = mr.lookup || null;   // v1681 — the write's re-check re-runs THIS, not a guessed path
+          st.lastMapSystem = mr.system || '';
           if (mr.text) { st.readouts.push(mr.text); st.lastReadoutIdx = st.readouts.length - 1; }
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'map', clause: clause.text, intent: clause.text });
           continue;
@@ -9284,7 +9468,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // nothing else, so "never ran" and "ran and found nothing" were indistinguishable. Now the line says whether
   // the clause PAYLOAD arrived and whether the intent is one the registry KNOWS.
   try {
-    const _clauseKey = ['map', 'fieldRead', 'branch'].find((k) => d && d[k]) || null;   // PP-1 (v1661) — this array is a THIRD whitelist (after INTENTS and parseInterpretOutput's); a clause missing here logs payload:none while working fine, which is worse than useless in a diagnosis.
+    const _clauseKey = ['map', 'fieldRead', 'branch', 'write'].find((k) => d && d[k]) || null;   // PP-1 (v1661) — this array is a THIRD whitelist (after INTENTS and parseInterpretOutput's); a clause missing here logs payload:none while working fine, which is worse than useless in a diagnosis.
     const _known = INTENTS.includes(d.intent);
     _orchLog(`INTERPRET ▸ "${goal.slice(0, 50)}" → ${d.intent} (conf ${d.confidence}${d.why ? `; ${d.why}` : ''}) payload:${_clauseKey || 'none'} registry:${_known ? 'ok' : 'UNKNOWN'}`);
   } catch { /* */ }
@@ -9343,6 +9527,15 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // PP-1 (v2.74.1661) — the per-item BRANCH, at THIS door too, in the SAME edit that added it to the chain door.
   // The rule above is written from the v1658 count (5 of 17), so it is followed here rather than re-learned: both
   // doors, both supplying a prior, in one change. `_lastGroundedRead` is this door's chain-state equivalent.
+  if (d.intent === 'write' && d.write) {
+    // PP-2 (v1681) — this door has NO chain state, so a write arriving here has no misses to act on. Say that
+    // rather than opening an empty run: the candidates come from a prior lookup IN THE SAME CHAIN.
+    try { _orchLog('DISPATCH ▸ write → _runWriteClause @interpret-door'); } catch { /* */ }
+    try {
+      await _runWriteClause(msg, d.write, { tabId, goal, state: { lastMisses: [], lastMapLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null } });
+    } catch (e) { _clauseError('write', e, msg); }
+    return true;
+  }
   if (d.intent === 'branch' && d.branch) {
     try { _orchLog('DISPATCH ▸ branch → _runBranchClause @interpret-door'); } catch { /* */ }
     try {
