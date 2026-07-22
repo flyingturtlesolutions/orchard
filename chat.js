@@ -77,6 +77,7 @@ import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
 import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
 import { redact, restore, newRedactionMap } from './Core/redact.js';   // R-1 (v2.74.1662) — pseudonymize identity before the instruction text ever leaves (DESIGN_llm_privacy.md §5)
+import { openRun, recordStage, closeItem, closeRun, markAlreadyOpen, runStartLine, runEndLine } from './Core/pipelineRun.js';   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
 import { Scope, scalar, record as scopeRecord, document as scopeDocument } from './Services/Scope.js';
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
@@ -4045,7 +4046,63 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   _orchFinalize(msg);
   try { _orchLog(`BRANCH ▸ ${results.length} × ${br.mode} → ${tally}${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
   if (unknownWhy.length) { try { _orchLog(`BRANCH ▸ unknown reasons: ${unknownWhy.join(' | ')}`); } catch { /* */ } }
-  return { ok: true, text: lines.join('\n'), results, groups };
+
+  // 4) MATERIALIZE EACH ITEM AS A CASE, under a run (§5.7). This is the step that turns a rendered table into
+  // something a human can come back to — and it is deliberately last, so a rendering or persistence failure can
+  // never change what the branch DECIDED.
+  //
+  // The run is closed with a real verdict rather than a count (§9.7): "a run that processed 3 of 22 and stopped
+  // needs a verdict, not just counts." The cases are the vitals-pattern sidecar, so a re-run over the same list
+  // grows one case per record instead of minting a second (§9.3).
+  try {
+    const pipeline = `branch:${br.arms.map((a) => a.label).join('+')}`.slice(0, 60);
+    const run = openRun({
+      pipeline,
+      items: use.map((it, i) => ({ id: String(i), label: _rowLabel(it) })),
+      cap, now: Date.now(), stages: ['branch'],
+    });
+    try { _orchLog(runStartLine(run)); } catch { /* */ }
+
+    // §5.7's re-run rule: an item already under review is skipped, not re-cased.
+    let alreadyOpen = [];
+    try {
+      const oi = await _orchReq('PIPELINE_OPEN_ITEMS', { pipeline });
+      alreadyOpen = (oi && oi.success && Array.isArray(oi.itemIds)) ? oi.itemIds : [];
+    } catch { alreadyOpen = []; }
+    markAlreadyOpen(run, alreadyOpen);
+
+    for (let i = 0; i < results.length; i++) {
+      if (_walkAbortFlag.requested) break;
+      const r = results[i];
+      const id = String(i);
+      const it = run.items.find((x) => x.id === id);
+      if (it && it.outcome === 'already-open') continue;
+
+      const armLabel = r.outcome === 'arm' ? r.arms.map((a) => a.label).join('+') : '';
+      recordStage(run, id, { name: 'branch', verdict: r.outcome, detail: armLabel || r.why });
+      closeItem(run, id, r.outcome === 'arm' ? 'done' : r.outcome === 'none' ? 'skipped' : 'blocked', r.why);
+
+      try {
+        await _orchReq('PIPELINE_RECORD_ITEM', {
+          pipeline, itemId: id, label: _rowLabel(r.item), runId: run.runId,
+          branch: { outcome: r.outcome, arm: armLabel, why: r.why, skipped: (r.skipped || []).map((s) => s.label) },
+          stages: [{ name: 'branch', verdict: r.outcome, detail: armLabel || r.why }],
+          line: `branch → ${r.outcome}${armLabel ? ` (${armLabel})` : ''}`,
+          // An item that reached an arm stays OPEN — the arm's work has not been done yet, and an open case is
+          // exactly the "someone still owes a decision" marker. A no-arm / unknown item closes: there is nothing
+          // further to do with it beyond a human reading the reason.
+          ...(r.outcome === 'arm' ? {} : { close: { state: r.outcome === 'none' ? 'done' : 'blocked', verdict: r.why || 'no arm matched' } }),
+        });
+      } catch { /* a case that fails to persist must not change the branch verdict */ }
+    }
+
+    closeRun(run, { now: Date.now(), aborted: _walkAbortFlag.requested });
+    try { _orchLog(runEndLine(run)); } catch { /* */ }
+    return { ok: true, text: lines.join('\n'), results, groups, run };
+  } catch (e) {
+    try { _orchLog(`PIPELINE ▸ case materialization failed: ${(e && e.message) || e} — the branch verdict stands`); } catch { /* */ }
+    return { ok: true, text: lines.join('\n'), results, groups };
+  }
 }
 
 async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {

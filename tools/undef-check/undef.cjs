@@ -328,11 +328,37 @@ function checkFile(file) {
   return { skipped: false, findings: bad };
 }
 
+/**
+ * Expand `dir/*.js` ourselves.
+ *
+ * npm on Windows runs scripts through cmd, which does NOT glob-expand — so `Core/*.js` arrived as a literal
+ * string, hit the not-found branch, printed one `skip (missing)` line and EXITED 0. The check looked clean while
+ * examining almost nothing: a silent pass, which is worse than a loud failure and is the exact class this tool
+ * exists to catch. Expanding here makes the behaviour identical on every shell.
+ */
+function expand(patterns) {
+  const out = [];
+  for (const p of patterns) {
+    const norm = p.replace(/\\/g, '/');
+    if (!norm.includes('*')) { out.push(p); continue; }
+    const dir = norm.slice(0, norm.lastIndexOf('/')) || '.';
+    const base = norm.slice(norm.lastIndexOf('/') + 1);
+    const re = new RegExp(`^${base.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+    let entries = [];
+    try { entries = fs.readdirSync(dir); } catch { entries = []; }
+    for (const e of entries.filter((x) => re.test(x)).sort()) {
+      const full = path.join(dir, e);
+      try { if (fs.statSync(full).isFile()) out.push(full); } catch { /* */ }
+    }
+  }
+  return [...new Set(out)];
+}
+
 function main() {
   const args = process.argv.slice(2).filter((a) => a !== '--quiet');
   const quiet = process.argv.includes('--quiet');
-  const files = args.length ? args : [];
-  if (!files.length) { console.error('usage: node tools/undef-check/undef.cjs <file.js> [more.js ...]'); process.exit(2); }
+  const files = expand(args).filter((f) => !/\.test\.[cm]?js$/.test(f));
+  if (!files.length) { console.error('usage: node tools/undef-check/undef.cjs <file.js|dir/*.js> [more ...]'); process.exit(2); }
 
   let total = 0;
   const skipped = [];

@@ -44,6 +44,7 @@ import { createConnectorHandlers } from './background/handlers/connector.js';  /
 import { createCanvasHandlers } from './background/handlers/canvas.js';  // v2.74.1205 (CA-4) — the canvas domain (RENDER_CANVAS → the presentation tab)
 import { createFleetHandlers, registerFleetAlarmListener } from './background/handlers/fleet.js';  // FL-6 (v2.74.1355) — the fleet clock trigger (scheduled headless sweeps)
 import { createConnectionsHandlers, registerConnTransitionListener, readConnRegistry, reportAuthSignal } from './background/handlers/connections.js';  // CP-1/2 (v2.74.1506) — the connections auth-presence registry; VT (v2.74.1570) — the heartbeat moved into the vitals scheduler; the transition listener feeds vitals incidents + the sign-in catch-up
+import { createPipelineHandlers } from './background/handlers/pipeline.js';   // PP (v2.74.1665, DESIGN_peritem_pipeline.md §5.7/§9.3) — the per-item CASE sidecar (vitals-pattern store; the Conversation record cannot hold case state)
 import { initVitals, onConnTransition, createVitalsHandlers } from './background/handlers/vitals.js';   // VT-0..4 (v2.74.1569-1572, DESIGN_vitals.md) — the outcome funnel + scheduler + daily visit + incident store
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
@@ -1759,6 +1760,7 @@ const _sgMessageHandlers = {
   }),
   ...createFleetHandlers({ invokeSgHandler: _invokeSgHandler }),   // FL-6 (v1355) — FLEET_SCHEDULE (set/off/status); the alarm listener registers below
   ...createConnectionsHandlers({ invokeSgHandler: _invokeSgHandler }),   // CP-1/2 (v1506) — CONN_LIST / CONN_CHECK / CONN_FOCUS (the auth-presence registry)
+  ...createPipelineHandlers(),   // PP (v2.74.1665) — PIPELINE_OPEN_ITEMS / PIPELINE_RECORD_ITEM / PIPELINE_CASES / PIPELINE_CLOSE_CASE
   ...createVitalsHandlers(),   // VT-2 (v2.74.1571) — VITALS_STATUS / VITALS_BADGE / VITALS_CHECK_NOW (the Admin desk's read surface)
 
   ...createDiscoveryHandlers({
