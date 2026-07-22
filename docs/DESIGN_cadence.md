@@ -80,6 +80,48 @@ In order, cheapest first — every one of these is a reason NOT to fire:
 A row that fails 1–3 is silent. A row that fails 4 or 5 writes history, because a person will later ask why it
 stopped.
 
+### 2.2 The run must not need the panel — extract the driver, inject the reporter
+
+**Rule: the side panel is the CONTROL and REPORTING surface. It is not the execution engine. Once a workflow is
+built it runs regardless of panel state.**
+
+An earlier draft of this document deferred headless execution, citing `DESIGN_workflow_wizard.md` §5 —
+*"Pretending one executor exists would make scheduled workflows silently fail with the panel closed."* **That
+quote describes how the code is currently arranged, not what the platform permits, and this document repeated it
+as though it were a limit.** It is not. The evidence is already in the tree:
+
+- **Every heavy stage already runs in the service worker.** `INTERPRET_ASK` (the routing LLM call,
+  `background/handlers/sg.js:1519`), `CLASSIFY_BRANCH_ITEMS` (sg.js), `DECOMPOSE_STEPS`
+  (`background/handlers/pipeline.js`), and ride execution `INVOKE_SESSION` (`background/handlers/connector.js`)
+  are all SW handlers. The panel is not doing that work — it asks the SW and renders the reply.
+- **The SW already orchestrates a multi-step run headlessly.** `runHeadlessSweep`
+  (`background/handlers/fleet.js:188`), whose own header states the destination: *"Headless orchestration mirrors
+  chat.js `_runFleetSweep` … candidate for a shared Core sweep-driver with **injected IO** once both are proven."*
+
+So what actually blocks it is **coupling, not capability**: the chain runner and every clause runner take a `msg`
+DOM element and write into it (~723 `_setMessageBody` / `_orchFinalize` / `_ilBusy` call sites in chat.js).
+
+**The move:** lift the chain runner into a Core driver that takes an injected **reporter** instead of a DOM
+element. Two implementations of one interface:
+
+| Host | Reporter | Behaviour |
+|---|---|---|
+| panel | DOM reporter | renders live into the thread, exactly as today |
+| service worker | history reporter | writes §6.3 entries; renders nothing |
+
+This is the treatment the whole `Core/` layer already received and the chain runner never did — every decision
+core takes injected dependencies by design (`makeBranchEvaluator({evaluate, scope, lookup})`,
+`runUpsert({find, create, act})`). The driver is the last piece still holding its own IO.
+
+**Two real constraints, neither a wall:**
+
+- **MV3 evicts the service worker** after idle. The fleet sweep already runs 121 invokes over ~17s in the SW, and
+  §8's parked-run model already persists `chainState` — so the checkpoint primitive a resumable long run needs is
+  the same one parked writes require. Build it once, both get it.
+- **Steps that need a human.** Not a blocker: §8 already rules that a non-interactive run reaching a write
+  **parks** rather than prompting. Teaching a step by demonstration stays panel-bound, but that is AUTHORING, not
+  running — a workflow is only schedulable once its steps are qualified.
+
 ---
 
 ## 3. Entry points — a workflow surface you can always reach
@@ -92,9 +134,14 @@ workflows" answerable from anywhere, which is most of what the "invisible schedu
 Every desk row in the Rail carries a workflow glyph; clicking it opens that desk's workflows page. The Rail row is
 the only always-visible per-desk affordance, so this is the load-bearing one.
 
-**Open question (§12):** does the Front desk take workflows? It takes no cases by rule (`DESIGN_desks.md`), but a
-general workflow not bound to a role is plausible. Decide before the icon ships, because the answer changes
-whether the glyph is conditional.
+**The Front desk takes workflows** (ruled 2026-07-22). It takes no CASES by rule (`DESIGN_desks.md`) and that
+stands — cases are opened *on* an item under a role, and Front has no role. Workflows are different: a saved
+ask-chain need not belong to a role, and excluding Front would mean a user with no desks yet cannot build one at
+all. Two consequences follow:
+
+- the glyph is **unconditional** — every row in the Rail carries it, with no special-casing for the fixtures
+- there is no such thing as a role-less workflow with nowhere to live, which is what would have quietly re-created
+  the cross-desk roster §12 rejects
 
 ### 3.2 "workflow" resolves through the front door — as a LEG, not an intercept
 
@@ -235,12 +282,25 @@ costs one field; retrofitting it costs the surface.
 | Policy | Ruling | Why |
 |---|---|---|
 | **Overlap** | skip if a run of this workflow is in flight | the live sweep took ~17s over 121 divisions; overlap is reachable, and two concurrent runs corrupt each other's DOM waits |
-| **Missed fire** (browser closed) | **skip**, and record *"missed 2 runs"* in history | catching up a batch of automated work the user did not see coming is worse than a gap |
+| **Coalescing** | several due-times passed before a run happened → run **once**, and record *"3 due-times collapsed"* | firing a backlog at once is work the user did not see coming; the point of a cadence is currency, not completeness of the series |
 | **Failure** | auto-disarm after N consecutive failures, with a history entry | a workflow whose route has drifted otherwise fails silently every day forever; connects to the RH drift/heal arm |
 | **Orphaned desk** | auto-disarm, history entry, workflow stays visible | matches how workflows already survive deletion (§9) |
 
 Auto-disarm is what makes history load-bearing rather than decorative: it is the only place a person learns their
 automation stopped.
+
+**On the coalescing wording.** An earlier draft called this row *"missed fire (browser closed) → skip"*, which was
+written while triggered runs were assumed panel-tier — where the panel being shut is the NORMAL case, so read
+literally the rule skipped almost everything. Under §2's scanner plus the headless driver (§11 CD-1a), a due-time
+passing is not a miss; a *backlog* of them is. The ruling is unchanged, the framing was wrong.
+
+### 7.3 The trigger surface must not claim more than it delivers
+
+Whatever the executor tier, the label a person sees has to match what actually happens. "Runs every 4h" is only
+honest once the run genuinely happens on the clock; while any deferral remains, the surface says so
+(*"due every 4h"*), and §6's history carries both stamps — `due 09:00 · ran 09:00` when it fired on time, `due
+09:00 · ran 14:32` when it did not. A schedule whose first lesson is that it does not keep its word is worse than
+no schedule.
 
 ---
 
@@ -298,6 +358,10 @@ record to strand.
   trigger each, bound to a 1-step workflow so everything is workflowId-keyed).
 - **CD-1** — **one clock owner**: the scanner (§2), replacing per-desk alarm registration. Retires the fleet
   routine alarm and its orphan class. *Ship before anything user-visible — it is the actual bug fix.*
+- **CD-1a** — **the driver extraction** (§2.2): lift the chain runner out of chat.js into a Core driver with an
+  injected reporter; the panel keeps a DOM reporter so nothing user-visible changes. Landing this BEFORE the
+  trigger surface is what lets §7.3 say "runs every 4h" without lying. It is the largest item on this ladder and
+  the one everything else quietly depends on — a triggered run that needs the panel is not really scheduled.
 - **CD-2** — entry points: the Rail desk-card icon (§3.1) + `OPEN_WORKFLOWS` as a `domain:'self'` leg (§3.2).
 - **CD-3** — intent-first composition (§4): `＋ workflow` prompts for intent, proposal, "use these N steps" into
   the existing wizard.
@@ -307,26 +371,38 @@ record to strand.
 - **CD-6** — the history overlay (§6.2), including the explicit page-slot value.
 - **CD-7** — parked writes as `wfp_` cases (§8). Until this ships, a triggered workflow containing a write must be
   refused at arm time with a stated reason, not armed and silently stuck.
-- **CD-8** — the §7.2 policies: overlap, missed-fire, failure auto-disarm.
+- **CD-8** — the §7.2 policies: overlap, coalescing, failure auto-disarm.
 
-Livability checkpoint: after CD-5 a person can see what their automation did; after CD-7 it can safely do
-something that writes.
+Livability checkpoints: after **CD-1a** a workflow runs with the panel shut, which is the difference between a
+schedule and a reminder; after **CD-5** a person can see what their automation did; after **CD-7** it can safely
+do something that writes.
+
+**Ordering note.** CD-1a is tempting to defer because nothing user-visible changes when it lands. Deferring it
+inverts the whole point: every surface built on top would have to be worded around an executor that only runs when
+someone is looking, and then reworded when it stops being true. Do the plumbing while there is nothing on top of
+it.
 
 ---
 
 ## 12. What this deliberately does NOT decide
 
-- **Does the Front desk take workflows?** (§3.1)
 - **Event triggers.** `kind` is polymorphic from day one; only `cadence` is specified. Nothing here should have to
-  change to add `kind:'event'` — if it does, this document got the shape wrong.
-- **Headless execution.** Triggered runs remain PANEL-TIER: the router and chain live in `chat.js`, so a due
-  workflow fires when the panel is available, exactly as the DK-8 routine model does today.
-  `DESIGN_workflow_wizard.md` §5 is explicit about why — *"Pretending one executor exists would make scheduled
-  workflows silently fail with the panel closed."* The SW-native graduation path for all-legs workflows stays
-  recorded and unbuilt.
+  change to add `kind:'event'` — if it does, this document got the shape wrong. Deliberately unspecified: what an
+  event CONDITION looks like and how it is evaluated. There is a fair chance it resolves to "check on a clock, run
+  only if X" — which is a cadence with a predicate rather than a second mechanism — and inventing the shape before
+  a real case would be guessing.
+- **What the reporter interface looks like in detail** (§2.2). The two implementations and the boundary are ruled;
+  the method set is a build-time decision, and pinning it here would be specifying an interface with no second
+  caller to check it against.
 - **A cross-desk roster.** Rejected: §3's entry points make every desk's workflows one click away, and §9 removes
   the orphaning that motivated a global list. Revisit only if a real user with many desks reports that per-desk is
   not enough.
+
+**Resolved since the first draft** (kept visible so the reversals are legible rather than silently edited away):
+
+- *Does the Front desk take workflows?* → **yes** (§3.1). The glyph is unconditional.
+- *Is headless execution possible?* → **yes, and it is CD-1a** (§2.2). The earlier deferral quoted a coupling
+  constraint as though it were a platform limit.
 
 ---
 
@@ -347,3 +423,15 @@ entity would not have collected the alarm either.
 **LESSON[an-audit-trail-cannot-live-in-a-deletable-container]:** run history was briefly proposed to live in the
 desk timeline for reuse. The desk conversation is deletable, which makes that the same failure the whole document
 exists to fix, one layer along. Durability requirements outrank render-path reuse.
+
+**LESSON[a-design-doc-is-evidence-about-the-code-not-a-law-of-physics]:** this document originally deferred
+headless execution by quoting `DESIGN_workflow_wizard.md` §5 — *"Pretending one executor exists would make
+scheduled workflows silently fail with the panel closed."* That sentence is true and was never a limit: it
+describes chat.js's coupling at the time it was written. Ten minutes of grep found `INTERPRET_ASK`,
+`CLASSIFY_BRANCH_ITEMS`, `DECOMPOSE_STEPS` and `INVOKE_SESSION` all already in the service worker, and a working
+headless orchestrator in `fleet.js` whose own comment names the fix. The constraint was inherited, not verified.
+
+The general form, and it recurred four times in the session that produced this document: **a stated constraint is
+a claim about a moment in the code, and it decays.** Quoting one into a new design carries its expiry date with
+it, invisibly. Cheap check, expensive miss — deferring headless would have shaped every surface above it around an
+executor that only runs when someone is watching.
