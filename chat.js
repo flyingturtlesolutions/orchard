@@ -72,6 +72,7 @@ import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresen
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
+import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
@@ -7533,12 +7534,44 @@ async function _renderWorkflows() {
       _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask });
     }));
     bar.appendChild(_mkBtn('⏱ Schedule', () => _wfScheduleBar(row, wf, wfKey)));   // CD-4 — arm / change / remove the cadence
+    bar.appendChild(_mkBtn('📜 History', () => { void _renderWorkflowRuns(wf); }));   // CD-6 — the run-history view (auto + manual runs)
     bar.appendChild(_mkBtn('🗑 Delete', async () => {
       bar.remove();
       try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
       _setMessageBody(row, `Deleted${wf.name ? ` “${wf.name}”` : ''}.`);
     }));
   }
+}
+
+// CD-6 (DESIGN_cadence.md §6) — the RUN HISTORY view. History is its OWN store (wfruns:<workflowId>), never the
+// desk timeline (§6.1: the timeline is deletable and would interleave triggered output with a live conversation).
+// Rendered as a bubble list here rather than the §6.2 overlay — the overlay MOTION is polish; §6's requirement is
+// that a person can READ the history, and the auto-vs-manual + parked stamps are what it exists to show.
+function _histClock(at) {
+  const t = Number(at) || 0;
+  if (!t) return '—';
+  try { const d = new Date(t); return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`; }
+  catch { return '—'; }
+}
+async function _renderWorkflowRuns(wf) {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(m, `Loading run history for “${wf.name || wf.ask}”…`);
+  let runs = null;
+  try { runs = await _orchReq('WORKFLOW_RUNS', { workflowId: wf.id }); } catch { /* */ }
+  if (!runs || runs.success === false) { _setMessageBody(m, 'Couldn’t load the run history — try again.'); return; }
+  const items = Array.isArray(runs.items) ? runs.items : [];
+  const sched = _wfScheduleLabel(wf);
+  if (!items.length) {
+    _setMessageBody(m, `No runs yet for “${escHtml(wf.name || wf.ask)}”.${sched ? ` It ${sched}${/^runs/.test(sched) ? '' : ' — a tier-panel workflow runs when you next open its desk'}.` : ' Give it a schedule (⏱ Schedule) or run it (▶ Run) and its history shows here.'}`, { markdown: true });
+    return;
+  }
+  // newest first; each row is RUN-level (§6.3) — time · auto/manual · counts · verdict (parked → "waiting on you").
+  // describeRun output is enum/number/time only (no free text), so it is safe raw; only the wf name/notice are
+  // user/system values → escHtml them (the established markdown-interp pattern; renderMarkdown parses the result).
+  const lines = items.slice().reverse().map((e) => `- ${describeRun(e, _histClock(e.ranAt || e.at))}`);
+  const head = `**Run history** — “${escHtml(wf.name || wf.ask)}”${sched ? ` _(${sched})_` : ''}`;
+  const notice = runs.notice ? `\n\n_${escHtml(runs.notice)}_` : '';
+  _setMessageBody(m, `${head}\n\n${lines.join('\n')}${notice}`, { markdown: true });
 }
 
 // CD-1a/CD-4 — the honest schedule label for a saved workflow (§7.3): "runs every 4h" (tier-'sw', fires headless)

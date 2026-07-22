@@ -76,12 +76,19 @@ can build a scheduled workflow, list workflows, and arm/change/remove a schedule
   `WORKFLOW_TRIGGER_SET`) · 🗑 Delete per row.
 - **CD-2 — launch cards show the cadence** ("⏱ runs every 4h" / "due every 4h") via the pure builder. Tested.
 
+**Progress (v2.74.1694) — CD-6 run history is READABLE.** Each workflow row in the manage view (`workflows` /
+`OPEN_WORKFLOWS`) gained a **📜 History** button reading the wired `WORKFLOW_RUNS` handler and rendering the
+RUN-level rows (time · auto/manual · counts · verdict, parked → "waiting on you") via the pure
+`runHistory.describeRun`, with the truncation notice. Delivered as a bubble list, NOT the §6.2 `.rail` overlay —
+the overlay motion + page-slot owner value is polish; §6's actual requirement (a person can READ the history) is
+met. The overlay-on-card-body (§6.2) remains as visual polish.
+
 **Still remaining (large, live-only):**
 - **CD-3** — intent-first `＋ Workflow` (repoint the card at an intent prompt). Left deliberately: it touches the
   composer intercept + a new wizard phase, high-risk to do blind; the `workflow: <intent>` command is the
   intent-first door meanwhile.
-- **CD-6** — the run-HISTORY overlay (the `WORKFLOW_RUNS` handler is wired, but no UI reads it yet); copy `.rail`,
-  add the page-slot owner value.
+- **CD-6 overlay polish** — the `.rail`-style takeover from the card body + the explicit page-slot owner value
+  (§6.2/§6.4). The history itself is readable now (bubble list); this is the motion.
 - **CD-7** — parked writes as real `wfp_` cases + `Approve & continue` resume. The scanner already parks + drops
   a `cadence:parked:<runId>` marker; promoting it to a case is the panel piece.
 - **CD-1a phase 2** — the panel DOM reporter (route the panel run through `Core/runDriver` too, so panel and SW
