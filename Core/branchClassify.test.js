@@ -82,6 +82,30 @@ describe('branchClassify — the request (batched, once per run)', () => {
     assert.match(req.system, /unknown/i);
     assert.match(req.system, /none/);
   });
+
+  // v2.74.1685 — the live under-match. These pin BOTH halves of the pair, because the failure mode is that one
+  // half gets tightened in isolation and silently re-opens the other. That is exactly how this bug arrived: the
+  // rules were written entirely against over-matching, and a warranty task reading "need two light switches
+  // delivered to the home" came back "not replacement of existing items".
+  it('states that a criterion may be met in the record’s OWN VOCABULARY — the word need not appear', () => {
+    const req = buildClassifyRequest({ items: [], arms: ARMS });
+    assert.match(req.system, /never has to appear|does not have to appear/i,
+      'without this, the model splits "delivered" from "replaced" on a warranty queue where they are the same act');
+    assert.match(req.system, /situation/i, 'the test is the situation described, not the wording used');
+  });
+
+  it('and states the OPPOSITE guard in the same breath — priors are not evidence', () => {
+    const req = buildClassifyRequest({ items: [], arms: ARMS });
+    assert.match(req.system, /EVIDENCE MUST BE IN THE TEXT/i,
+      'reading in the record’s vocabulary must not license "it is a warranty ticket so it is probably one"');
+    assert.match(req.system, /prior/i);
+  });
+
+  it('names the symmetry that is the actual argument for using a model here', () => {
+    // Absent-on-a-match (this bug) and present-on-a-non-match (the negation bug) are the same claim from two
+    // sides. A prompt carrying only one side will keep drifting toward the failure it does not mention.
+    assert.match(buildClassifyRequest({ items: [], arms: ARMS }).system, /ABSENT on a match[\s\S]{0,40}PRESENT on a non-match/i);
+  });
 });
 
 describe('branchClassify — parsing is strict in one direction', () => {

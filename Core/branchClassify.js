@@ -17,6 +17,32 @@
  *
  * So the rule is: enumerated/structured field → deterministic predicate; human-authored free text → this.
  *
+ * ── AND THE SAME FAILURE RUNS IN REVERSE (v2.74.1685, found live) ────────────────────────────────────────────
+ * The rules above were written entirely against OVER-matching, and they over-corrected. A real warranty task —
+ *
+ *     "1 Year Warranty Work Day … 5. Deako: a. Need two light switches delivered to the home"
+ *
+ * — was classified NOT a replacement request, with the reason *"Requests delivery of switches, not replacement
+ * of existing items"*. The model had every fact it needed (the warranty framing is in the same field, two lines
+ * up) and declined to use it, because rule 1 said `Judge ONLY by what the text says. Do not infer from the group
+ * names what the text "probably" means.` It obeyed: it looked for "replace", found "delivered", and split them.
+ *
+ * That distinction does not exist in this queue. Sending two switches to a homeowner on a 1-year warranty visit
+ * IS the replacement. The old rule 1 conflated two different things under "do not infer":
+ *
+ *     · reading a criterion in the record's OWN VOCABULARY  — required, and what a model is FOR
+ *     · matching on the queue's PRIORS instead of the text   — forbidden, and what rule 1 meant
+ *
+ * They are now rules 1 and 2, stated separately and in tension on purpose. The load-bearing symmetry is that the
+ * criterion's word can be ABSENT on a match (this case) and PRESENT on a non-match (the negation case above) —
+ * which is the sharpest one-sentence statement of why this is not a keyword match.
+ *
+ * COST OF EACH DIRECTION, since they are not symmetric: over-matching creates a draft order against a record
+ * nobody asked about (visible, wrong, recoverable). Under-matching silently drops a customer who IS owed a
+ * replacement — no row, no case, no trace, nothing for a human to review. The safety valve for BOTH is rule 4
+ * (`unknown`), which is why an ambiguous item must land there rather than being pushed to whichever side the
+ * prompt currently leans.
+ *
  * ── THE FOUR REQUIREMENTS PP-5 PUTS ON THIS FILE ─────────────────────────────────────────────────────────────
  * 1. ONE BATCHED CALL PER RUN, never per item. That is the property that makes cost a non-argument — the
  *    original "deterministic is cheaper" case rested on N items = N calls, which was simply wrong.
@@ -113,15 +139,23 @@ export function buildClassifyRequest({ items = [], arms = [], field = '' } = {})
   const system = [
     'You classify records into named groups by reading one free-text field.',
     '',
-    'RULES — the third is the one that matters most:',
-    '1. Judge ONLY by what the text says. Do not infer from the group names what the text "probably" means.',
-    '2. NEGATION AND CONTEXT DECIDE. "do NOT send a replacement", "a replacement was already sent", "declined a',
+    'RULES — 1 and 2 are a matched pair, and 4 is the safety valve:',
+    '1. JUDGE THE SITUATION THE TEXT DESCRIBES — not whether the criterion’s words appear in it. A criterion is a',
+    '   person’s shorthand for a real-world condition, not a phrase to search for, and records describe that',
+    '   condition in whatever vocabulary their queue uses. On a warranty or repair record, "need two new switches',
+    '   sent to the home" DOES ask for a replacement: that is what a replacement request looks like there, and the',
+    '   word "replace" never has to appear. Same situation = same group, however differently it is worded.',
+    '2. BUT THE EVIDENCE MUST BE IN THE TEXT. Do not match because the group name, the kind of record, or the queue',
+    '   it came from makes a match seem likely. "It is a warranty ticket, so it is probably a replacement" is a',
+    '   prior, not a reading. If the text does not describe the situation, it does not match, however probable.',
+    '3. NEGATION AND CONTEXT DECIDE. "do NOT send a replacement", "a replacement was already sent", "declined a',
     '   replacement" all mean the item does NOT belong to a replacements group, even though the word appears.',
-    '   This is the entire reason a model is doing this instead of a keyword match.',
-    '3. ANSWER "unknown" WHENEVER YOU CANNOT TELL. Ambiguous, contradictory, empty, or off-topic text is',
+    '   Rules 1 and 3 together are the whole reason a model is doing this instead of a keyword match: the word can',
+    '   be ABSENT on a match and PRESENT on a non-match. Wording never decides; the situation does.',
+    '4. ANSWER "unknown" WHENEVER YOU CANNOT TELL. Ambiguous, contradictory, empty, or off-topic text is',
     '   unknown — not a guess at the closest group. An unknown is reviewed by a human, which is the correct',
     '   outcome; a wrong group causes real work to happen against the wrong record.',
-    '4. An item may match no group. That is "none", and it is different from "unknown": "none" means the text is',
+    '5. An item may match no group. That is "none", and it is different from "unknown": "none" means the text is',
     '   clear and describes something else; "unknown" means you could not judge it.',
     '',
     'Reply with JSON only: {"verdicts":[{"id":"<item id>","group":"<label|none|unknown>","why":"<12 words max>"}]}',
