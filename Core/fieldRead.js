@@ -126,3 +126,63 @@ export function fieldPhraseCandidates(phrase) {
   [...words].sort((a, b) => b.length - a.length).forEach((w) => { if (w.length >= 4) push(w); });
   return out;
 }
+
+/**
+ * Resolve a human field PHRASE to the record's actual KEY. PURE. v2.74.1690.
+ *
+ * ── WHY THIS EXISTS ─────────────────────────────────────────────────────────────────────────────────────────
+ * Live (gl 2026-07-22, trace 081727), one run held both halves of the same disagreement four seconds apart:
+ *
+ *     FIELD_READ ▸ 22 × "VendorExplanation" → 16 found, 0 whole-field, 6 empty
+ *     BRANCH ▸ unknown reasons: record has no field "Vendor Explanation" | … ×22
+ *
+ * `fieldRead` resolved the user's phrase to the record's key and read it successfully on 16 of 22 rows. The
+ * BRANCH then declared the same field absent on all 22, because it matched with `hasOwnProperty` against the
+ * phrase verbatim. The data was there the whole time; two components simply disagreed about what a field name is.
+ *
+ * Every clause that accepts a field name from a person needs the SAME answer, so the matching lives here — beside
+ * `fieldPhraseCandidates`, which supplies the ladder — rather than being re-derived per clause.
+ *
+ * ── AMBIGUITY IS A VERDICT, NOT A MISS ──────────────────────────────────────────────────────────────────────
+ * "vendor" against a record carrying both `VendorExplanation` and `VendorName` must NOT silently pick one: the
+ * §1626 rule is ask, never guess, and a confidently-wrong field read is the failure this whole area keeps
+ * producing. Two matches return `{ambiguous:true, candidates}` with NO key, so the caller can name the tie.
+ *
+ * `pickFieldPath` was the obvious thing to reuse and is the WRONG tool here: it drops any field that never
+ * yielded a value, and "which of those have NO vendor explanation" is precisely a question about the empty ones.
+ *
+ * @param {string[]|object} keysOrRecord  the record's keys (array), or any object whose OWN keys are the space
+ * @param {string} phrase                 what a person called the field
+ * @returns {{key:string, ambiguous:boolean, candidates:string[]}}
+ */
+export function resolveFieldKey(keysOrRecord, phrase) {
+  const miss = { key: '', ambiguous: false, candidates: [] };
+  const keys = Array.isArray(keysOrRecord)
+    ? keysOrRecord.filter((k) => typeof k === 'string' && k)
+    : (keysOrRecord && typeof keysOrRecord === 'object' ? Object.keys(keysOrRecord) : []);
+  if (!keys.length) return miss;
+
+  const norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const want = norm(phrase);
+  if (!want) return miss;
+
+  // An exact key match short-circuits the whole ladder — a record that literally carries the phrase never needs
+  // to be guessed at, and this keeps the common case free of any tie risk.
+  const verbatim = keys.find((k) => k === phrase);
+  if (verbatim) return { key: verbatim, ambiguous: false, candidates: [] };
+
+  for (const cand of fieldPhraseCandidates(phrase)) {
+    const c = norm(cand);
+    if (!c) continue;
+    // Normalized EQUALITY first — "Vendor Explanation" ≡ `VendorExplanation` ≡ `vendor_explanation`. This is the
+    // live case, and it is exact enough that a tie here means genuinely duplicate keys.
+    const exact = keys.filter((k) => norm(k) === c);
+    if (exact.length === 1) return { key: exact[0], ambiguous: false, candidates: [] };
+    if (exact.length > 1) return { key: '', ambiguous: true, candidates: exact };
+    // Then CONTAINMENT, which is where ties actually happen and where refusing to guess earns its keep.
+    const subs = keys.filter((k) => norm(k).includes(c));
+    if (subs.length === 1) return { key: subs[0], ambiguous: false, candidates: [] };
+    if (subs.length > 1) return { key: '', ambiguous: true, candidates: subs };
+  }
+  return miss;
+}

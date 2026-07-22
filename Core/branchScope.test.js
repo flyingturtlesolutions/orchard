@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  planBindings, precheckCondition, makeBranchEvaluator,
+  planBindings, precheckCondition, makeBranchEvaluator, resolveConditionNames,
   RECORD_BINDING, DOC_MIN_LENGTH, ORCH_PREDICATE_OPS,
 } from './branchScope.js';
 import { normalizeBranchVerdict, evalBranch } from './branchClause.js';
@@ -247,5 +247,83 @@ describe('branchScope × branchClause — the composed reach', () => {
     });
     const r = evalBranch(ITEM, verdict, (a) => evaluator(a));
     assert.equal(r.outcome, 'none');
+  });
+});
+
+// v2.74.1690 — the live "couldn't tell ×22". The model wrote "Vendor Explanation"; the record carries
+// `VendorExplanation`; planBindings binds by the record's key. Both the binding lookup and the field-presence
+// test missed, so every row came back unknown while fieldRead had read that same field on 16 of 22 rows.
+describe('branchScope — a field name from a person meets the record’s real key', () => {
+  const REC = { TaskId: 'T1', VendorExplanation: 'they shipped late', Status: 'open' };
+  const lookupFor = (rec) => {
+    const { bindings } = planBindings(rec);
+    const byName = new Map(bindings.map((b) => [b.name, { kind: b.kind, fields: b.kind === 'record' ? b.value : undefined, value: b.value }]));
+    return (n) => byName.get(n);
+  };
+
+  it('THE LIVE BUG: a spaced fieldName resolves to the record’s key', () => {
+    const r = resolveConditionNames(
+      { type: 'record_field_non_empty', binding: 'item', fieldName: 'Vendor Explanation' }, lookupFor(REC));
+    assert.equal(r.why, '');
+    assert.equal(r.cond.fieldName, 'VendorExplanation');
+  });
+
+  it('and the precheck then stops answering "record has no field"', () => {
+    const lookup = lookupFor(REC);
+    const raw = { type: 'record_field_non_empty', binding: 'item', fieldName: 'Vendor Explanation' };
+    assert.match(precheckCondition(raw, lookup).why, /has no field/, 'unresolved: the old behaviour');
+    assert.equal(precheckCondition(resolveConditionNames(raw, lookup).cond, lookup).verdict, 'pass');
+  });
+
+  it('resolves a non-record BINDING too — every other form uses the field name as the binding', () => {
+    const r = resolveConditionNames(
+      { type: 'document_contains', binding: 'vendor explanation', value: 'late' }, lookupFor(REC));
+    assert.equal(r.cond.binding, 'VendorExplanation');
+  });
+
+  it('an EMPTY field still resolves — "which have none" is a question about the empty ones', () => {
+    const r = resolveConditionNames(
+      { type: 'record_has_field', binding: 'item', fieldName: 'vendor explanation' },
+      lookupFor({ TaskId: 'T2', VendorExplanation: '' }));
+    assert.equal(r.cond.fieldName, 'VendorExplanation');
+  });
+
+  it('AMBIGUOUS names the tie and resolves nothing', () => {
+    const r = resolveConditionNames(
+      { type: 'record_has_field', binding: 'item', fieldName: 'vendor' },
+      lookupFor({ VendorExplanation: 'a', VendorName: 'b' }));
+    assert.match(r.why, /matches 2 fields/);
+    assert.match(r.why, /name one/);
+    assert.equal(r.cond.fieldName, 'vendor', 'unresolved rather than guessed');
+  });
+
+  it('the EVALUATOR returns undefined (unknown) on an ambiguous field, never false', () => {
+    const seen = [];
+    const ev = makeBranchEvaluator({
+      evaluate: () => true, scope: {}, lookup: lookupFor({ VendorExplanation: 'a', VendorName: 'b' }),
+      onUnknown: (w) => seen.push(w),
+    });
+    assert.equal(ev({ type: 'record_has_field', binding: 'item', fieldName: 'vendor' }), undefined);
+    assert.match(seen[0] || '', /matches 2 fields/);
+  });
+
+  it('the evaluator receives the RESOLVED assertion, not the model’s phrasing', () => {
+    let got = null;
+    const ev = makeBranchEvaluator({
+      evaluate: (a) => { got = a; return true; }, scope: {}, lookup: lookupFor(REC),
+    });
+    assert.equal(ev({ type: 'record_field_non_empty', binding: 'item', fieldName: 'Vendor Explanation' }), true);
+    assert.equal(got.fieldName, 'VendorExplanation');
+  });
+
+  it('an exact name is left alone, and a miss is not invented', () => {
+    const lookup = lookupFor(REC);
+    assert.equal(resolveConditionNames({ type: 'record_has_field', binding: 'item', fieldName: 'Status' }, lookup).cond.fieldName, 'Status');
+    assert.equal(resolveConditionNames({ type: 'record_has_field', binding: 'item', fieldName: 'Shipping Address' }, lookup).cond.fieldName, 'Shipping Address');
+  });
+
+  it('degenerate input does not throw', () => {
+    for (const bad of [null, undefined, {}, 'x']) assert.doesNotThrow(() => resolveConditionNames(bad, lookupFor(REC)));
+    assert.doesNotThrow(() => resolveConditionNames({ type: 'record_has_field' }, null));
   });
 });

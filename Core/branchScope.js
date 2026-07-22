@@ -33,6 +33,8 @@
  *    `otherwise` exactly as an unreachable read once scored as a miss.
  */
 
+import { resolveFieldKey } from './fieldRead.js';   // v1690 — ONE answer to "what is this field called": the branch and fieldRead must not disagree
+
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
 
 /** The record binding's reserved name. A field literally called this collides — reported, never silently shadowed. */
@@ -136,6 +138,47 @@ export function planBindings(item, { fieldKinds = null, docMinLength = DOC_MIN_L
  *          'false'   → answerable here, and the answer is NO (kind tests, absent field on record_has_field)
  *          'unknown' → could not evaluate; the caller must NOT treat this as false
  */
+/**
+ * Rewrite a condition's `binding` / `fieldName` to the record's ACTUAL keys. PURE. v2.74.1690.
+ *
+ * The model writes what the USER called a field ("Vendor Explanation"); `planBindings` binds what the RECORD
+ * calls it (`VendorExplanation`, from `Object.entries(rec)`). Both the binding lookup and the field-presence test
+ * then miss, and the whole branch returns `couldn't tell` on every row while `fieldRead` — four seconds earlier
+ * in the same run, using the tolerant resolver — read that same field successfully on 16 of 22 rows.
+ *
+ * Resolving HERE fixes both halves at once, and resolving BEFORE the precheck means the delegated evaluator sees
+ * the real key too. An ambiguous phrase resolves to nothing and reports the tie: ask, never guess.
+ *
+ * @returns {{cond:object, why:string}}  `why` non-empty means the resolution failed and names why
+ */
+export function resolveConditionNames(cond, lookup) {
+  const c = (cond && typeof cond === 'object') ? cond : null;
+  if (!c) return { cond, why: '' };
+  const rec = (typeof lookup === 'function') ? lookup(RECORD_BINDING) : null;
+  const fields = (rec && rec.fields && typeof rec.fields === 'object') ? rec.fields : null;
+  if (!fields) return { cond, why: '' };   // no record in scope → nothing to resolve against; leave it alone
+  const keys = Object.keys(fields);
+  let out = c;
+
+  // `fieldName` — the `binding:'item'` forms (record_has_field / record_field_non_empty).
+  const fname = _str(c.fieldName);
+  if (fname && !Object.prototype.hasOwnProperty.call(fields, fname)) {
+    const r = resolveFieldKey(keys, fname);
+    if (r.ambiguous) return { cond: c, why: `field "${fname}" matches ${r.candidates.length} fields (${r.candidates.join(', ')}) — name one` };
+    if (r.key) out = { ...out, fieldName: r.key };
+  }
+
+  // `binding` — every non-record form uses the FIELD NAME as the binding, so it needs the same treatment.
+  const bname = _str(c.binding);
+  if (bname && bname !== RECORD_BINDING && (typeof lookup !== 'function' || lookup(bname) == null)) {
+    const r = resolveFieldKey(keys, bname);
+    if (r.ambiguous) return { cond: out, why: `"${bname}" matches ${r.candidates.length} fields (${r.candidates.join(', ')}) — name one` };
+    if (r.key) out = { ...out, binding: r.key };
+  }
+
+  return { cond: out, why: '' };
+}
+
 export function precheckCondition(cond, lookup) {
   const c = (cond && typeof cond === 'object') ? cond : null;
   if (!c) return { verdict: 'unknown', why: 'condition is not an object' };
@@ -212,7 +255,16 @@ export function precheckCondition(cond, lookup) {
  * @returns {(assertion:Object) => (boolean|undefined)}
  */
 export function makeBranchEvaluator({ evaluate, scope, lookup, onUnknown = null } = {}) {
-  return function evaluateAssertion(assertion) {
+  return function evaluateAssertion(rawAssertion) {
+    // v2.74.1690 — resolve the field NAMES first, so the precheck AND the delegated evaluator both see the key
+    // the record actually uses. Without this the model's phrasing ("Vendor Explanation") never meets the
+    // record's key (`VendorExplanation`) and every row comes back `couldn't tell`.
+    const res = resolveConditionNames(rawAssertion, lookup);
+    if (res.why) {
+      if (onUnknown) { try { onUnknown(res.why); } catch { /* a logging failure must never change a verdict */ } }
+      return undefined;   // an ambiguous field is UNKNOWN — a human names it, we do not pick
+    }
+    const assertion = res.cond;
     const pre = precheckCondition(assertion, lookup);
     if (pre.verdict === 'false') return false;
     if (pre.verdict === 'unknown') {

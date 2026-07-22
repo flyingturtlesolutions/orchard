@@ -72,7 +72,7 @@ import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresen
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
-import { readFieldSection, fieldReadTally, fieldPhraseCandidates } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
+import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
 import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
@@ -4064,15 +4064,29 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     // PRIVACY: an index carries no information. The obvious alternatives both leak — a row's title is often the
     // customer's name, and the JSON fallback was the whole record verbatim, in the payload of the one call whose
     // entire purpose is to not send that.
+    // v2.74.1690 — resolve the field name against the RECORD before reading it, the same way the deterministic
+    // arms now do. `cField` is the model echoing the user ("Vendor Explanation"); the record uses its own key
+    // (`VendorExplanation`). Unresolved, every row extracts '' and is dropped from the payload — which surfaces
+    // as "couldn't tell" on every item, indistinguishable from a model that genuinely could not judge the text.
+    const _cKey = (() => {
+      if (!cField) return '';
+      const probe = use.find((it) => it && typeof it === 'object');
+      if (!probe) return cField;
+      if (Object.prototype.hasOwnProperty.call(probe, cField)) return cField;
+      const r = resolveFieldKey(Object.keys(probe), cField);
+      return r.key || cField;   // unresolved → keep the original, so the miss is reported under the name asked for
+    })();
+    if (_cKey && _cKey !== cField) { try { _orchLog(`BRANCH ▸ field "${cField}" → "${_cKey}" (resolved against the record)`); } catch { /* */ } }
+
     const payloadItems = [];
     use.forEach((it, i) => {
-      const raw = cField ? String(extractValue(it, cField) ?? '') : '';
+      const raw = _cKey ? String(extractValue(it, _cKey) ?? '') : '';
       if (!raw.trim()) return;   // no text to judge → no verdict → UNKNOWN downstream, which is the honest outcome
       const { text } = redact(raw, { names: identityValues(it, { joinKey: (srcLeg && srcLeg.tool && srcLeg.tool.joinKey) || null }), map: redMap });
       payloadItems.push({ id: String(i), text: text.slice(0, 2000) });
     });
 
-    try { _orchLog(`BRANCH ▸ classify ${payloadItems.length} item(s) × ${_cArms.length} arm(s) on "${cField || '(record)'}" — redacted before egress`); } catch { /* */ }
+    try { _orchLog(`BRANCH ▸ classify ${payloadItems.length} item(s) × ${_cArms.length} arm(s) on "${_cKey || '(record)'}" — redacted before egress`); } catch { /* */ }
     let resp = null;
     try {
       resp = await _orchReq('CLASSIFY_BRANCH_ITEMS', {

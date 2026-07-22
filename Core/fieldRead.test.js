@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates } from './fieldRead.js';
+import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates, resolveFieldKey } from './fieldRead.js';
 
 // Shaped after the real VendorSuite `Instructions` (HAR-verified): a date header, a numbered item with a
 // label ending in a colon, a lettered sub-item. Tabs are real in the source.
@@ -147,4 +147,54 @@ describe('fieldRead — fieldPhraseCandidates (v2.74.1652: spoken phrase → rea
     assert.equal(c.includes('note'), true);
   });
   it('empty in, empty out', () => { assert.deepEqual(fieldPhraseCandidates('  '), []); });
+});
+
+// v2.74.1690 — resolveFieldKey. The live disagreement: fieldRead read "VendorExplanation" successfully on 16 of
+// 22 rows while the BRANCH declared the same field absent on all 22, because it matched the phrase verbatim.
+describe('fieldRead — resolveFieldKey: one answer to "what is this field called"', () => {
+  const REC = ['TaskId', 'VendorExplanation', 'Instructions', 'Status'];
+
+  it('THE LIVE BUG: a spaced phrase resolves to the record’s concatenated key', () => {
+    assert.equal(resolveFieldKey(REC, 'Vendor Explanation').key, 'VendorExplanation');
+    assert.equal(resolveFieldKey(REC, 'vendor explanation').key, 'VendorExplanation');
+  });
+
+  it('matches across the separator conventions a record might use', () => {
+    for (const keys of [['vendor_explanation'], ['Vendor-Explanation'], ['vendor explanation'], ['VENDOREXPLANATION']]) {
+      assert.equal(resolveFieldKey(keys, 'Vendor Explanation').key, keys[0], keys[0]);
+    }
+  });
+
+  it('takes a verbatim key without going near the ladder', () => {
+    assert.equal(resolveFieldKey(['Vendor Explanation', 'VendorExplanationNote'], 'Vendor Explanation').key, 'Vendor Explanation');
+  });
+
+  it('AMBIGUITY IS A VERDICT — never a silent pick', () => {
+    // "ask, never guess" (§1626). A confidently-wrong field read is the failure this area keeps producing.
+    const r = resolveFieldKey(['VendorExplanation', 'VendorName'], 'vendor');
+    assert.equal(r.key, '');
+    assert.equal(r.ambiguous, true);
+    assert.deepEqual(r.candidates.sort(), ['VendorExplanation', 'VendorName']);
+  });
+
+  it('a genuine miss is a miss, not a loose match', () => {
+    const r = resolveFieldKey(REC, 'shipping address');
+    assert.equal(r.key, '');
+    assert.equal(r.ambiguous, false);
+  });
+
+  it('drops sub-4-char tokens rather than matching half the record', () => {
+    assert.equal(resolveFieldKey(['TaskId', 'Instructions'], 'the id of it').key, '');
+  });
+
+  it('accepts a record object as well as a key list', () => {
+    assert.equal(resolveFieldKey({ VendorExplanation: '', Status: 'open' }, 'Vendor Explanation').key, 'VendorExplanation',
+      'an EMPTY value must still resolve — "which have none" is a question about the empty ones');
+  });
+
+  it('degenerate input does not throw', () => {
+    for (const k of [null, undefined, [], {}, 'nope', 7]) assert.doesNotThrow(() => resolveFieldKey(k, 'x'));
+    for (const p of [null, undefined, '', 7, {}]) assert.doesNotThrow(() => resolveFieldKey(REC, p));
+    assert.equal(resolveFieldKey(REC, '').key, '');
+  });
 });
