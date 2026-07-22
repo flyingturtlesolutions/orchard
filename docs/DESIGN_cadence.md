@@ -144,7 +144,7 @@ all. Two consequences follow:
 
 - the glyph is **unconditional** — every row in the Rail carries it, with no special-casing for the fixtures
 - there is no such thing as a role-less workflow with nowhere to live, which is what would have quietly re-created
-  the cross-desk roster §12 rejects
+  the cross-desk roster §13 rejects
 
 ### 3.2 "workflow" resolves through the front door — as a LEG, not an intercept
 
@@ -511,7 +511,91 @@ overlay MOTION is not new — `.rail` already carries it; see §6.2.)
 
 ---
 
-## 12. What this deliberately does NOT decide
+## 12. The vitals relationship — share the RUNNER, keep the OUTPUT
+
+Once a workflow is a saved step-chain with a trigger, a headless runner, and run history, the obvious question is
+whether vitals — the system's own clocked, headless, history-producing operation — is now just a workflow. It is a
+real question and it was anticipated: `DESIGN_workflow_wizard.md` §5 asked it directly, and named the precondition
+under which the answer flips to yes — *"a workflow whose every banked step resolved to a ride LEG is in principle
+SW-executable… the honest route to 'vitals checks are just another workflow' becoming literally true."* That
+precondition is **CD-1a phase 1** (the all-legs headless path). So this is decidable now, not hypothetical.
+
+**Ruling: share the runner, keep the output. One runner, two callers (user + system); incidents are the system
+caller's domain output, not a workflow's run history.** Vitals should RIDE the workflow runner rather than
+reimplement it, and the incident model stays. Do not collapse vitals *into* a workflow.
+
+### 12.1 Why the shapes have already converged
+
+Vitals is a scheduled workflow that predates the definition — point for point:
+
+- **the clock** — `DESIGN_cadence.md` §2's one-scanner model was *copied from vitals* (`vitals:tick`, VT-1).
+- **the execution** — the canary runs `recipeToLeg → planExec → INVOKE_SESSION`; `vitals.js:314` calls the sweep
+  *"JUST a caller"* of the normal executor. A params-free read leg is precisely a one-step `tier:'sw'` step.
+- **history** — incidents carry an `evidence[]` timeline; runs carry a verdict.
+- **auto vs manual** — `VITALS_CHECK_NOW` (the Admin card's "Check now") is the *manual trigger* of a *scheduled*
+  operation, which is exactly the `trigger:manual` / `trigger:cadence` distinction the run history is built to stamp.
+
+We are about to build a scanner (CD-1), a headless driver (CD-1a), and a run store (CD-5). **All three already
+exist as bespoke code in vitals.** The strongest argument is not conceptual, it is the recurring-bug one: every
+time this codebase has held two of something that should be one, a defect lived in the gap — fleet's
+alarm-per-desk versus vitals' one scanner *is the orphaned-alarm bug that opened this whole arc* (§1.1). Building
+the workflow runner and leaving the vitals machinery standing guarantees a third instance of that class.
+
+### 12.2 What folds, and what deliberately does not
+
+| Piece | Folds onto the runner? |
+|---|---|
+| the clock / scanner | **yes** — same model already |
+| execution (canary = ride leg) | **yes** — this is what `tier:'sw'` *is* |
+| a per-run history entry | yes |
+| **incident dedup** — open-or-append keyed `${cls}\|${subject}`, silence-when-green, the Admin case surface | **NO — a domain output** |
+| **the read-mostly, un-editable system-trust posture** | **NO — see 12.3** |
+
+The incident line is the crux, and it is why "vitals *is* a workflow" is the wrong framing. A run entry is
+per-execution (*"09:00 · auto · ran clean"*). An incident is per-SUBJECT-across-executions: a flapping connection
+is **one** incident with a growing timeline over **many** runs, by design, so it is not case-spam (`Core/vitals.js`
+`upsertIncident`). The workflow model has no native notion of "the same problem seen in twelve runs is one thing".
+So the run EMITS incidents as a side effect; the incident store does not go away. The clean framing is **vitals is
+a system workflow whose output is incidents** — not a workflow that incidents replace.
+
+### 12.3 Why not the full collapse
+
+Three more frictions, each a reason the entity stays distinct even as the mechanism merges:
+
+- **Heterogeneity.** Vitals is *three* sweeps (presence · keep-alive · daily visit), each on its own sub-cadence
+  with its own gate, inside one tick. A workflow is one linear step-chain. Vitals maps to three system workflows,
+  not one — or to one runner invoked three ways.
+- **Bootstrap.** Vitals runs from a cold SW boot before any desk or saved workflow exists; a workflow lives in
+  `il:workflows:${appId}`, keyed to a desk instance. A system workflow with no desk needs a storage tier that does
+  not depend on a desk existing — genuinely new structure, not a free reuse.
+- **Trust asymmetry — the mirror image of the uniformity benefit.** The gain from "just a workflow" is uniform
+  lifecycle control (pause / edit / delete). That is exactly what you must NOT hand a system operation: the edit
+  icon (§5) would let a user rewrite the presence canary into something that writes. A `source:'system'` workflow
+  has to be read-only, un-deletable, and un-editable — the inverse of the affordances §5 grants a user workflow.
+
+### 12.4 The concrete first step
+
+**"Check vitals" (`VITALS_CHECK_NOW`) is the cleanest single win, and it is post-CD-1a.** It is a manual run of a
+read-only, params-free operation with no incident-model entanglement — the ideal first proof that the runner
+generalizes beyond user workflows *before* it is asked to carry anything that writes. Retire the bespoke handler in
+favour of a manual-trigger run of a system workflow; leave the presence/keep-alive/daily sweeps on the vitals
+scanner until that one call has proven the shared runner.
+
+### 12.5 What this updates in the wizard spec
+
+`DESIGN_workflow_wizard.md` §5 ruled *"one CLASS, two EXECUTION TIERS — unify the model, not the runtime (yet)"*,
+and kept two executors **because headless did not exist**. CD-1a removes that reason. §5's ruling becomes: *one
+runner, two callers (user + system); the "two tiers" were two call sites of one driver all along, and incidents
+are the system caller's output.* This section supersedes the "not yet" in that ruling; it does not supersede the
+caution that vitals stays read-mostly and system-owned.
+
+**Not on the CD ladder.** This is a direction the ladder must leave room for, not a committed item — it becomes
+buildable only after CD-1a phase 1, and 12.4 is its first slice. Recorded so the runner is built as *a* runner
+(injected caller identity, injectable output sink) rather than as *the user's* runner with vitals bolted on later.
+
+---
+
+## 13. What this deliberately does NOT decide
 
 - **Event triggers.** `kind` is polymorphic from day one; only `cadence` is specified. Nothing here should have to
   change to add `kind:'event'` — if it does, this document got the shape wrong. Deliberately unspecified: what an
@@ -533,7 +617,7 @@ overlay MOTION is not new — `.rail` already carries it; see §6.2.)
 
 ---
 
-## 13. How this document was reached
+## 14. How this document was reached
 
 Recorded because the route matters more than the conclusion.
 

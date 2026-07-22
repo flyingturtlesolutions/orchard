@@ -4,7 +4,61 @@
 This document is the BUILD map: what exists, what is broken, where every insertion point is, and which patterns to
 copy. Everything below was read out of the tree, not inferred; file:line refs are as of v2.74.1690.
 
-**Nothing in this arc is built.** There is no cadence field, no scanner, no run history, no workflows page.
+**Progress (v2.74.1691) — the FOUNDATION is built + gated (2921/0).** The three prerequisite bugs (§2) are fixed
+and CD-0 (the trigger field) has landed. Still unbuilt: the scanner (CD-1), the driver + reporters (CD-1a), the
+run-history store (CD-5), and all panel surfaces (CD-2/3/4/6). Details:
+
+- **§2.1 BLOCKER fixed** — `_normSteps` now carries `steps[].clause`, and the `normalizeWorkflow` literal now
+  carries `schema`. `buildWorkflowSave`'s pinned clause + `schema:2` finally reach storage; `replayPlan`'s
+  drift branch is now reachable. Regression-guarded in `Core/workflowMemory.test.js`.
+- **§2.2 fixed** — `patchMeta`'s allow-list gains `summary` + `resolvedAt` (`ConversationStore.js:279`).
+  Guarded in `Services/ConversationStore.test.js`.
+- **§2.3 fixed** — `deleteAll` (`chat.js:584`) now stamps every desk's workflows via `markWorkflowsOrphaned`
+  before the wipe.
+- **CD-0 built** — `Core/trigger.js` (pure: normalize · arm · isDue · coalescing · advance · failure→disarm ·
+  setEnabled · honest label) + `Core/trigger.test.js`; the `trigger` field is whitelisted in
+  `normalizeWorkflow`, so `updateWorkflow(appId, id, {trigger})` already persists a cadence. The wizard cadence
+  STAGE (§6.6) and migration of `fleetRoutine` records are NOT yet done — that is the rest of CD-0/CD-8.
+
+**Progress (v2.74.1692) — the full §11 BACKBONE is built + gated (2953/0), import graph link-verified.** Every
+module in the §3.2 / §11.1 map now exists with real, tested logic; the scanner is wired into `background.js` and
+fires headless. What is NOT yet built: the panel SURFACES (the DOM reporter, Rail glyph, workflows page, card
+icons, history overlay, page-slot owner) and the fleet-routine RETIREMENT/migration — those are live-only and
+listed under "Remaining" below.
+
+Built this pass:
+- **`Core/workflowTier.js`** (+test) — the headless gate (§4.5/§11.3). FAIL CLOSED; phase 1 admits a nav or a
+  PINNED ride (needs §2.1's clause). One non-sw step demotes the whole workflow to 'panel'.
+- **`Core/runHistory.js`** (+test) — the §6.3 entry shape, per-workflow retention + the §6.4 truncation notice,
+  the `parked`/`disarmed` verdicts, the RUN-level row renderer.
+- **`Core/runDriver.js`** (+test) — the centrepiece (§2.2/§11.2): the chain loop over an injected REPORTER +
+  injected `runStep`. `gate()→'park'` when nobody's watching; `startIndex`/`state` are the park/resume seam.
+  Ships `makeAccumulatorReporter()` (the SW reporter's pure core).
+- **`Services/Storage/WorkflowRunStore.js`** (+test) — `wfruns:<workflowId>`, per-workflow cap, lifetime `total`
+  for the truncation notice. (Test uses the robust save/restore chrome-mock pattern — the fragile import-time
+  `globalThis.chrome` assign breaks sibling storage suites; see CanvasStore/ProposalStore.)
+- **`background/handlers/cadence.js`** (new) — the ONE `cadence:tick` scanner (copy of `vitals.js`): the §2.1
+  check order, tier gate (panel-tier defers to desk-open, sw-tier fires headless through the normal
+  INVOKE_SESSION executor), the in-flight marker (`priorRunVerdict`), coalescing, failure→auto-disarm,
+  orphan→auto-disarm, and history write. Handlers: `WORKFLOW_TRIGGER_SET` / `WORKFLOW_RUNS` /
+  `WORKFLOW_RUN_FIRE`. Wired at `background.js` (import + `initCadence` at module top + handler-map spread).
+- **`studio.js` `_DECISION_RE`** — `CADENCE ▸` + `TRIGGER ▸` added (invariant #1).
+
+**Caught in the build:** `priorRunVerdict` lives in `Core/fleetSchedule.js`, not `pipelineRun.js` — the wrong
+import would have thrown at SW module-link and broken the whole background. Fixed; the whole graph now link-checks.
+
+**Remaining (live-only — the panel surfaces + the fleet cutover):**
+- **CD-2/3/4/6** — the panel DOM reporter (the driver's panel side), the Rail glyph, the workflows PAGE (repoint
+  `chat.js:10917`), the card run/delete/edit icons, the history overlay (copy `.rail`), the page-slot owner value.
+- **CD-1 cutover** — retire the fleet routine branch (`fleet.js:559-570`) + migrate `fleetRoutine` records to
+  triggers. Deferred deliberately: it is a risky live cutover of a working feature. The new clock owner runs in
+  PARALLEL for now (workflow-keyed triggers); collapse fleet into it once the panel can arm a cadence.
+- **CD-6.6** — the wizard cadence STAGE (two edits, §6.6) so a workflow can be given a cadence at save time.
+- **CD-7** — parked writes as real `wfp_` cases + resume UI. The scanner already PARKS and drops a
+  `cadence:parked:<runId>` marker; promoting it to a case + `Approve & continue` is the panel piece.
+
+**None of the SW fire path is live-verified** — the scanner, INVOKE_SESSION fire, and chrome.storage/alarms seams
+can't be exercised headless. Reload the extension and watch for `CADENCE ▸` lines in a decisions download.
 
 ---
 
@@ -565,7 +619,7 @@ turns it on, and it is exactly the guard a scheduled run needs.
 
 ## 8. Decisions taken — do not re-litigate
 
-From `DESIGN_cadence.md` §1, §12, §13:
+From `DESIGN_cadence.md` §1, §13, §14:
 
 1. **Cadence is a FIELD on a workflow, not an entity.** A separate schedule entity with its own store and roster
    was drafted and rejected. The orphaning it was meant to fix is a leaked `chrome.alarms` reference, not a
