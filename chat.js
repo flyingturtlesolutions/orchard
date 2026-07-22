@@ -78,8 +78,9 @@ import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // 
 import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
 import { redact, restore, newRedactionMap } from './Core/redact.js';   // R-1 (v2.74.1662) — pseudonymize identity before the instruction text ever leaves (DESIGN_llm_privacy.md §5)
 import { openRun, recordStage, closeItem, closeRun, markAlreadyOpen, runStartLine, runEndLine, trialTag } from './Core/pipelineRun.js';
-import { resolveWriteValue, buildWriteProposals, writeBatchSummary } from './Core/writeMap.js';   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
-import { runUpsert, upsertTally } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
+import { resolveWriteValue, buildWriteProposals } from './Core/writeMap.js';
+import { writeTally, writePreflight } from './Core/writeClause.js';   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
+import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
 import { Scope, scalar, record as scopeRecord, document as scopeDocument } from './Services/Scope.js';
@@ -4257,8 +4258,10 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
 
   // 1) WHICH write. The source leg's `writeMap` declares it — "a row of mine fills THIS create" — so the target
   // is read from the declaration rather than guessed from the ask (the v1617 rule: a declaration beats a guess).
-  const wmap = (srcLeg && srcLeg.tool && srcLeg.tool.writeMap) || null;
-  const targetId = wmap && typeof wmap === 'object' ? Object.keys(wmap)[0] : '';
+  // v2.74.1682 — use the TESTED preflight rather than the inline duplicate that was here. It distinguishes
+  // no-candidates from no-declaration, which the two branches below already needed to tell apart.
+  const _pf = writePreflight({ misses, sourceLeg: srcLeg });
+  const targetId = _pf.ok ? _pf.targetId : '';
   if (!targetId) {
     _setMessageBody(msg, 'I don’t have a declared way to turn these rows into new records — the source doesn’t say which create they fill, and I won’t invent one.', { markdown: true });
     _orchFinalize(msg);
@@ -4282,7 +4285,7 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
     return { ok: false, gap: true };
   }
 
-  const declared = wmap[targetId] || null;
+  const declared = _pf.declared || null;
   const cap = Math.max(1, Math.min(wr && wr.cap ? wr.cap : _MAP_WINDOW, misses.length));
   const use = misses.slice(0, cap);
   const capped = misses.length > cap;
@@ -4293,8 +4296,11 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
   // 3) Per row. Fill by DECLARATION; a required param that does not resolve makes the row UNPROPOSABLE and is
   // reported — never invented (writeMap's first stated property).
   const created = []; const queued = []; const blocked = []; const unfillable = [];
-  const _params = Array.isArray(createLeg.params) ? createLeg.params : [];
-  const _required = ((createLeg.paramSchema && createLeg.paramSchema.required) || []);
+  // v2.74.1682 — read `tool.params` (the OBJECTS carrying `.required`), which is exactly what
+  // `buildWriteProposals` reads. Using `leg.params` (names) + `paramSchema.required` here was a SECOND source
+  // for the same question, and the two halves of this clause — the auto path and the queued path — would then
+  // disagree about which rows are fillable.
+  const _paramDefs = (createLeg.tool && Array.isArray(createLeg.tool.params)) ? createLeg.tool.params : [];
 
   for (let i = 0; i < use.length; i++) {
     if (_walkAbortFlag.requested) break;
@@ -4304,10 +4310,12 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
 
     const filled = {};
     const missing = [];
-    for (const pname of _params) {
+    for (const pd of _paramDefs) {
+      const pname = (pd && pd.name) || pd;
+      if (!pname) continue;
       const v = resolveWriteValue(row, pname, declared);
       if (v) filled[pname] = v;
-      else if (_required.includes(pname)) missing.push(pname);
+      else if (pd && pd.required) missing.push(pname);
     }
     if (missing.length) {
       unfillable.push({ label, missing });
@@ -4342,10 +4350,17 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
       } catch (e) { return { outcome: 'unreachable', why: (e && e.message) || 'lookup threw' }; }
     };
     const res = await runUpsert(row, {
-      find: _find,
+      find: async () => ({ outcome: 'miss', why: 'the lookup step found no match for this row' }),
       recheck: _find,
-      create: async () => {
-        const r = await _rideExecOnce(createLeg, filled, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null });
+      create: async (_item, ctx) => {
+        // §10.1 — stamp the trial tag ON THE RECORD when the target has somewhere to put it. The tag matters
+        // MORE than the returned id: it survives a lost response or a service-worker restart, so residue stays
+        // findable even when nothing was captured — and a human can spot it in the vendor's own UI. It was
+        // being passed to runUpsert and dropped here, which is the same as not having it.
+        const _tag = (ctx && ctx.trialTag) || '';
+        const _noteable = _paramDefs.some((pd) => ((pd && pd.name) || pd) === 'note');
+        const body = (_tag && _noteable && !filled.note) ? { ...filled, note: _tag } : filled;
+        const r = await _rideExecOnce(createLeg, body, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null });
         if (!r || !r.ok) throw new Error((r && r.error) || 'create failed');
         return r.value ?? {};
       },
@@ -4379,7 +4394,11 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
   if (unfillable.length) { lines.push(`**can’t fill** — ${unfillable.length}`); for (const u of unfillable) lines.push(`  • ${escHtml(u.label)} — _missing ${escHtml(u.missing.join(', '))}_`); }
 
   const head = `${createLeg.name} — ${use.length} row${use.length === 1 ? '' : 's'}${capped ? ` (first ${cap} of ${misses.length})` : ''}, ${gate.decision === 'auto' ? 'run directly' : 'held for review'}.`;
-  _setMessageBody(msg, [head, upsertTally([...created.map(() => ({ outcome: 'created' })), ...blocked.map(() => ({ outcome: 'blocked' }))]), ...lines].join('\n'), { markdown: true });
+  // v2.74.1682 — `writeTally`, not `upsertTally`. The upsert tally counts hit/created/blocked/failed and has no
+  // slot for QUEUED or UNFILLABLE, so a run that queued eight rows and could not fill two reported them nowhere
+  // in the summary line — they appeared only in the detail list below it. Those two are the classes a person
+  // most needs counted: one is work still owed them, the other is a declaration gap they can fix.
+  _setMessageBody(msg, [head, writeTally({ created: created.length, queued: queued.length, blocked: blocked.length, unfillable: unfillable.length, capped, total: misses.length }), ...lines].join('\n'), { markdown: true });
   _orchFinalize(msg);
   try { _orchLog(`WRITE ▸ ${use.length} × ${targetId} → ${created.length} created, ${queued.length} queued, ${blocked.length} blocked, ${unfillable.length} unfillable${capped ? ` (capped ${cap}/${misses.length})` : ''}`); } catch { /* */ }
   return { ok: true, text: lines.join('\n'), created, queued, blocked, unfillable, run };
