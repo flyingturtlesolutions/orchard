@@ -5558,7 +5558,11 @@ function _renderForgeResults(site, groundId, recipes) {
 // `add leg: <spec>` — author on the ACTIVE tab (the site you're looking at).
 async function _addLegActive(spec) {
   const m = appendMessage({ role: 'assistant', body: '' });
-  const t = await _activeTab();
+  // v2.74.1664 — was `_activeTab()`, which is defined NOWHERE in the repo: `add leg: <spec>` threw
+  // ReferenceError on every invocation. Found by tools/undef-check on its first clean run over chat.js — the
+  // exact bug class that tool exists for, and one that `node --check` and 2666 passing tests both miss because
+  // it only throws when this command is typed.
+  const t = await _orchActiveTab();
   let u = null; try { u = t && t.url ? new URL(t.url) : null; } catch { u = null; }
   if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) { _setMessageBody(m, 'The active tab isn’t a site — open the one you want, or run `add leg` to pick from your open tabs.', { markdown: true }); _orchFinalize(m); return; }
   await _addLegToSite(m, { host: u.host, origin: u.origin, url: t.url, title: t.title || u.host }, spec);
