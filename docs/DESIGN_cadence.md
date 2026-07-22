@@ -352,35 +352,136 @@ record to strand.
 
 ---
 
-## 11. Build ladder
+## 11. Build architecture
 
-- **CD-0** — the trigger field on the workflow record + migration (existing `fleetRoutine` records become one
-  trigger each, bound to a 1-step workflow so everything is workflowId-keyed).
-- **CD-1** — **one clock owner**: the scanner (§2), replacing per-desk alarm registration. Retires the fleet
-  routine alarm and its orphan class. *Ship before anything user-visible — it is the actual bug fix.*
-- **CD-1a** — **the driver extraction** (§2.2): lift the chain runner out of chat.js into a Core driver with an
-  injected reporter; the panel keeps a DOM reporter so nothing user-visible changes. Landing this BEFORE the
-  trigger surface is what lets §7.3 say "runs every 4h" without lying. It is the largest item on this ladder and
-  the one everything else quietly depends on — a triggered run that needs the panel is not really scheduled.
-- **CD-2** — entry points: the Rail desk-card icon (§3.1) + `OPEN_WORKFLOWS` as a `domain:'self'` leg (§3.2).
-- **CD-3** — intent-first composition (§4): `＋ workflow` prompts for intent, proposal, "use these N steps" into
-  the existing wizard.
+### 11.1 Module map
+
+Layer discipline is the codebase's existing one: pure `Core/` (no DOM, no chrome, no LLM) + injected IO + thin
+handlers. Nothing here departs from it.
+
+**New — `Core/`, pure and tested**
+
+| Module | Owns |
+|---|---|
+| `Core/trigger.js` | trigger normalize · due calculation · coalescing · failure→disarm · orphan→disarm (§7.2) |
+| `Core/workflowTier.js` | banked provenance → `'sw' \| 'panel'` — the headless gate (§11.3) |
+| `Core/runHistory.js` | entry shape · run tally · per-workflow retention + the truncation notice (§6.4) |
+| `Core/runDriver.js` | the extracted chain loop (§2.2) — the centrepiece |
+
+**Extended — `Core/`**
+
+| Module | Change |
+|---|---|
+| `workflowMemory.js` | `trigger` added to the field whitelist — **it is closed; an unlisted field is silently dropped** |
+| `palette.js` | `OPEN_WORKFLOWS` as a `domain:'self'` leg (§3.2) |
+| `workflowWizard.js` | the cadence stage in the pure state machine (§7) |
+| `branchScope` · `upsert` · `pipelineRun` · `caseClause` · … | **unchanged** — already pure with injected deps |
+
+**Storage** — `Services/Storage/WorkflowRunStore.js` (new: `wfruns:<workflowId>`, per-workflow cap) ·
+`WorkflowStore.js` extended for trigger read/write (the stable surrogate id already exists).
+
+**Background** — `background/handlers/cadence.js` (new: the one alarm, the scanner, the fire) ·
+`fleet.js` retires the routine alarm and its registration · handler ops `WORKFLOW_TRIGGER_SET`, `WORKFLOW_RUNS`,
+`WORKFLOW_RUN_FIRE`.
+
+**Panel (`chat.js`)** — the DOM reporter · Rail glyph · workflows page · intent-first `＋ workflow` · card icons ·
+history overlay · the explicit page-slot value.
+
+### 11.2 The reporter interface
+
+The only surface-shaped dependency the driver takes. Two implementations of five methods:
+
+| Method | Panel | Service worker |
+|---|---|---|
+| `step(i, total, text)` | renders "step 2 of 5" | no-op |
+| `progress(text)` | live status weaving | no-op |
+| `result(payload)` | renders the readout | accumulates for the history entry |
+| **`gate(preview)`** | **confirm bar → the user's decision** | **returns `'park'`** |
+| `done(verdict)` | finalizes the bubble | writes the `wfruns` entry |
+
+**`gate` is the load-bearing row.** §8's entire unattended-write policy becomes one method's return value rather
+than a special case threaded through the executor — park-versus-prompt is a property of *whether anyone is
+watching*, which is precisely what the reporter encodes. If that rule ever needs stating twice, the interface is
+wrong.
+
+### 11.3 CD-1a is TIERED, not a big bang
+
+`stepProvenance` already records `via.kind` as `'ride' | 'drive' | 'navigate' | 'fanout' | <capability>`, so
+`workflowTier()` is computable from data that exists today.
+
+| Phase | Scope | Effect |
+|---|---|---|
+| **1** | driver + SW reporter supporting `act`/`ride` steps only | all-legs workflows go headless; **the panel path is untouched** |
+| **2** | extract the clause runners one at a time — `fieldread` → `branch` → `map` → `case` → `write` | each extraction widens the tier-`'sw'` set |
+| — | tier-`'panel'` workflows | stay on the due-on-open model until their clauses land |
+
+The tier is also the honest label §7.3 demands: a tier-`'sw'` workflow says *"runs every 4h"*, a tier-`'panel'`
+one says *"due every 4h"*. The surface stops lying by construction rather than by wording.
+
+### 11.4 The ladder, as a dependency graph
+
+```
+CD-0  trigger field ──┬── CD-1   scanner (one clock owner)
+                      └── CD-1a  tier + driver + reporters   (phase 1: act/ride)
+                                    ↑
+CD-5  history store ────────────────┘
+
+CD-1 + CD-1a + CD-5   ⇒  a workflow actually runs on the clock
+        ↓
+CD-2 entry points · CD-3 intent-first · CD-4 card icons     (independent, any order)
+        ↓
+CD-6 overlay  →  CD-7 parked writes  →  CD-8 policies
+```
+
+- **CD-0** — the trigger field + migration (existing `fleetRoutine` records become one trigger each, bound to a
+  1-step workflow so everything is workflowId-keyed).
+- **CD-1** — one clock owner: the scanner (§2), replacing per-desk alarm registration. Retires the fleet routine
+  alarm and its orphan class. *Ship before anything user-visible — it is the actual bug fix.*
+- **CD-1a** — the driver extraction (§2.2, §11.2, §11.3), phase 1.
+- **CD-5** — the history store (§6.3), written by manual and triggered runs alike; `pipelineRun` verdict reused.
+- **CD-2** — entry points: the Rail glyph (§3.1) + `OPEN_WORKFLOWS` (§3.2).
+- **CD-3** — intent-first composition (§4).
 - **CD-4** — the card's run / delete / edit icons (§5).
-- **CD-5** — the history store (§6.3) + entries written by both manual and triggered runs, `pipelineRun` verdict
-  reused. **History before overlay** — a surface over an empty store proves nothing.
 - **CD-6** — the history overlay (§6.2), including the explicit page-slot value.
-- **CD-7** — parked writes as `wfp_` cases (§8). Until this ships, a triggered workflow containing a write must be
-  refused at arm time with a stated reason, not armed and silently stuck.
+- **CD-7** — parked writes as `wfp_` cases (§8). Until this ships, a triggered workflow containing a write is
+  refused at arm time with a stated reason — never armed and silently stuck.
 - **CD-8** — the §7.2 policies: overlap, coalescing, failure auto-disarm.
 
-Livability checkpoints: after **CD-1a** a workflow runs with the panel shut, which is the difference between a
-schedule and a reminder; after **CD-5** a person can see what their automation did; after **CD-7** it can safely
-do something that writes.
+**CD-5 moved ahead of CD-2.** The first draft of this ladder had the history store after the card icons, which is
+wrong: the SW reporter's `done()` writes a history entry, so the store is a **prerequisite of headless**, not a
+later surface. Without it a triggered run executes and reports into nothing — strictly worse than not running,
+because the work happened and left no trace.
+
+Livability checkpoints: after **CD-1a + CD-5** a workflow runs with the panel shut and says what it did — the
+difference between a schedule and a reminder; after **CD-6** a person can read that history; after **CD-7** it can
+safely do something that writes.
 
 **Ordering note.** CD-1a is tempting to defer because nothing user-visible changes when it lands. Deferring it
 inverts the whole point: every surface built on top would have to be worded around an executor that only runs when
 someone is looking, and then reworded when it stops being true. Do the plumbing while there is nothing on top of
 it.
+
+### 11.5 Reused vs new, and the watch-items
+
+**Reused as-is:** `pipelineRun` (verdict) · `_wfEnterPage`/`_wfExitPage` (overlay open/close) · `stepProvenance`
+(tier oracle) · the WorkflowStore surrogate id · `_orchRunChain`'s existing `startIndex` + `state` params
+(park/resume) · every `Core/` decision module.
+
+**Genuinely new:** the scanner · the driver + two reporters · the run store · the overlay motion (there is no
+height/transform transition in `chat.css` today) · the page-slot value.
+
+**Watch-items:**
+
+1. `normalizeWorkflow` (`Core/workflowMemory.js:49`) returns a **constructed object literal**, so the field set is
+   closed by construction — a `trigger` not added there is silently dropped on every normalize, including on
+   edit. `orphanedFrom` carries the precedent and says so in-comment: *"whitelisted so an edit can't strip it."*
+   Same class as the `patchMeta` bug in §10.3, and the reason CD-0 is a two-line change in two places rather than
+   one.
+2. `patchMeta` drops `resolvedAt` (§10.3) — CD-5's sidecar clone inherits it. Fix before CD-5, not after.
+3. The ~723 `_setMessageBody` / `_orchFinalize` / `_ilBusy` call sites are the true size of CD-1a. **Phase 1
+   touches only those on the `act`/`ride` path** — that is the whole reason for tiering.
+4. SW eviction: phase-1 runs are short (the fleet sweep does 121 invokes in ~17s). Long tier-`'sw'` runs need the
+   CD-7 checkpoint — which is why parked writes and resumability are one primitive, built once.
 
 ---
 
