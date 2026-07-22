@@ -4409,7 +4409,17 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
     if (_recovered) { try { _orchLog(`MAP ▸ retried ${_retryIdx.length} cold-start failure(s) → ${_recovered} recovered`); } catch { /* */ } }
   }
   // 5) JOIN + render + set lastValue (compose).
-  const identify = (row) => { const it = summarizeItem(row, { displayId: null }); return { id: it.id, label: it.title || itemFields(row, { max: 2 }).map(([, v]) => v).join(' · ') || 'item' }; };
+  // v2.74.1678 — the THIRD renderer with `displayId: null`, and the same live symptom: every map row read
+  // "#01 …" because the generic id scan lands on the per-home claim sequence (CX-9k, v2.74.1617). The branch and
+  // fieldRead labels were fixed at v1677; this one was missed because it computes its own label instead of
+  // calling the shared helper.
+  //
+  // So it now calls the shared helper. Three copies of "what is this row called" is why one fix did not fix it
+  // — the id half is `summarizeItem` with the DECLARED displayId, and the human half is `_rowLabel`.
+  const identify = (row) => {
+    const it = summarizeItem(row, { displayId: _legDisplayId(srcLeg) }) || {};
+    return { id: it.id, label: _rowLabel(row, srcLeg) };
+  };
   const joined = buildJoinRows(use, results, { join: map.join, identify, system });
   const counts = tallyResults(results);
   const tally = mapTally({ ...counts, capped }, { system });
@@ -4432,13 +4442,21 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   let text;
   if (map.join === 'table') {
     text = [_header, tally, ...joined.map((j) => {
-      const src = `${j.source.id != null ? `#${j.source.id} ` : ''}${j.source.label}`.trim();
+      // v2.74.1678 — the label ALREADY carries `#id` (it comes from `_rowLabel` now), so prepending the id here
+      // would print it twice.
+      const src = String(j.source.label || '').trim() || (j.source.id != null ? `#${j.source.id}` : 'row');
       const val = j.value != null ? String(j.value) : null;
       const _via = (results[joined.indexOf(j)] || {}).via || '';
-      const m = j.matched ? `${val}${_via && _rungs.length > 1 ? ` (${_via})` : ''} → ${_mapMatchLabel(j.match)}`
-        : (val == null ? `no ${_resolved} on this row`
-          : (j.via.error ? `${val} · ${_errWord(j.via.error)}` : `${val} · no match`));
-      return `• ${src} — ${m}`;
+      // THE ANSWER FIRST, the evidence after. The old order read
+      //   "<row> — <key we searched with> (<rung>) → <what we found>"
+      // which put two lookalike separators around three values and buried the one thing the approve bar is
+      // asking about. Live verdict: "another indecipherable result". Now: what this row matched, then quietly
+      // how — and on a miss, what was tried, because that is what makes a miss actionable.
+      const m = j.matched
+        ? `→ ${_mapMatchLabel(j.match)}${_via && _rungs.length > 1 ? `  _(matched on ${_via})_` : ''}`
+        : (val == null ? `— no ${_resolved} on this row`
+          : (j.via.error ? `— ${_errWord(j.via.error)}  _(tried ${val})_` : `— no match  _(tried ${val})_`));
+      return `• ${src} ${m}`;
     })].join('\n');
   } else {
     text = `${_header}\n${tally}  (attached to each row — ask to open or summarize them.)`;
