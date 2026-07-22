@@ -245,3 +245,39 @@ describe('PP-3 (v2.74.1661) — `outward` rides the SEEDED path (Invariant #3 ho
     assert.equal(recipeToLeg({ ...bare, app: 'aircall', origin: 'a.com' }, { trusted: true }).safety, 'confirm');
   });
 });
+
+describe('PP-4 (v2.74.1680) — the pipeline-gate axes ride the SEEDED path (Invariant #3 hop 1)', () => {
+  it('carries BOTH booleans, including `false` — half a declaration gates', () => {
+    // v1661 carried only `outward: true` (it was raise-only then). Once `pipelineGate` began treating UNDECLARED
+    // as "gate", dropping `outward: false` silently reduced {reversible:true, outward:false} to half a
+    // declaration, and the create the user had approved for unattended running still queued.
+    const rec = recipeFromCatalogEntry(
+      { id: 'w', method: 'POST', endpoint: '/e', appHost: 'a.com', write: true, reversible: true, outward: false },
+      { origin: 'a.com' },
+    );
+    assert.equal(rec.reversible, true);
+    assert.equal(rec.outward, false, 'a FALSE is a declaration, not an absence');
+  });
+
+  it('an explicit reversible:false survives too', () => {
+    const rec = recipeFromCatalogEntry({ id: 'w', method: 'POST', endpoint: '/e', appHost: 'a.com', reversible: false }, { origin: 'a.com' });
+    assert.equal(rec.reversible, false);
+  });
+
+  it('an UNDECLARED axis stays absent — the record must not invent a permissive default', () => {
+    const rec = recipeFromCatalogEntry({ id: 'w', method: 'POST', endpoint: '/e', appHost: 'a.com', write: true }, { origin: 'a.com' });
+    assert.ok(!('reversible' in rec));
+    assert.ok(!('outward' in rec));
+  });
+
+  it('END TO END: entry → record → leg keeps the axes, and the GLOBAL floor is unchanged', () => {
+    const rec = recipeFromCatalogEntry(
+      { id: 'w', name: 'Create a thing', app: 'x', method: 'POST', endpoint: '/e', appHost: 'a.com', write: true, reversible: true, outward: false },
+      { origin: 'a.com' },
+    );
+    const leg = recipeToLeg({ ...rec, app: 'x', origin: 'a.com' }, { trusted: true });
+    assert.equal(leg.tool.reversible, true);
+    assert.equal(leg.tool.outward, false);
+    assert.equal(leg.safety, 'confirm', 'the pipeline axes must NOT relax the ordinary write gate');
+  });
+});

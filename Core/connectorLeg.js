@@ -129,6 +129,13 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
     safety: hintToSafety({ readOnlyHint: !write, destructiveHint: r.destructive === true, outward: r.outward === true }, trusted),
     tool: {
       impl: 'session', account, app,
+      // PP-4 (v2.74.1680) — Invariant #3 hop 3 for the pipeline gate's axes. They ride onto the LEG (not into
+      // `hintToSafety`, which stays raise-only and keeps its global `confirm` floor) because the two gates have
+      // different scopes: `hintToSafety` decides what an ad-hoc write needs, `pipelineGate` decides what a
+      // reviewed per-item RUN may do unattended. `undefined` means UNDECLARED and gates — only an explicit
+      // boolean can relax anything.
+      reversible: (typeof r.reversible === 'boolean') ? r.reversible : undefined,
+      outward: (typeof r.outward === 'boolean') ? r.outward : (r.outward === true ? true : undefined),
       recipeId: id,   // v2.74.1340 (review A/§18) — the BARE stored id: the arm guard matches per-Ground records by THIS, never the prefixed leg.key
       origin: origin || null, appHost: appHost || null,
       itemUrl: _str(r.itemUrl) || null,   // FL-1c (v2.74.1347) — the object's HUMAN page template (ground-truth links)

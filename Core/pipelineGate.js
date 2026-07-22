@@ -84,6 +84,27 @@ export function gateComposite(members = [], { what = 'this step' } = {}) {
 }
 
 /**
+ * Read the two axes off a LEG, for the pipeline gate. PURE.
+ *
+ * Hop 3's consumer: the axes ride `leg.tool.reversible` / `leg.tool.outward`, and `undefined` there means the
+ * recipe did not declare them — which `gateAction` treats as undeclared and gates. A leg flagged `destructive`
+ * is forced into the never-unattended class regardless of what else it claims, so a mislabeled pair cannot talk
+ * its way past the one rule that has no exceptions.
+ */
+export function gateActionForLeg(leg, { what = '' } = {}) {
+  const tool = (leg && leg.tool) || {};
+  const name = _str(what) || _str(leg && leg.name) || 'this action';
+  if (leg && (leg.safety === 'gated' || tool.destructive === true)) {
+    return { decision: 'refused', why: `${name} is a destructive/gated capability — human click only` };
+  }
+  return gateAction({
+    what: name,
+    ...(typeof tool.reversible === 'boolean' ? { reversible: tool.reversible } : {}),
+    ...(typeof tool.outward === 'boolean' ? { outward: tool.outward } : {}),
+  });
+}
+
+/**
  * Apply the gate across one item's planned actions, in declaration order.
  * Returns each action's decision plus whether the ITEM as a whole can proceed unattended.
  */

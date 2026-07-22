@@ -455,7 +455,18 @@ export const CONNECTOR_RECIPES = [
   // the per-origin op bank the MAIN-world tee captures off the SPA's own traffic (create one customer by hand
   // once with the tab ridden → the op is banked; a stale hash after a deploy re-captures the same way).
   // Fail-closed like every write: confirmed:true at both belts + sniffed CSRF; 200-with-userErrors = failure.
+  // PP-4 (v2.74.1680, USER DECISION) — `reversible: true, outward: false`: this write may run unattended inside
+  // a reviewed pipeline run. Their stated policy: profile creation is "a system internal step, and it is
+  // reversible" — nothing leaves our boundary and we can delete what we made.
+  //
+  // It does NOT loosen the ordinary path. `hintToSafety` is raise-only and still floors this at `confirm`, and
+  // both executor belts still fail closed without `confirmed:true`. The axes are read only by
+  // `Core/pipelineGate.js`, which has the run, the trial and the case around it. Two gates, different scopes.
+  //
+  // The declaration is an OPT-IN by design: absence means undeclared, and `gateAction` fails an undeclared write
+  // CLOSED. That is why this sits on one recipe and not on a shared default.
   { ...SH, id: 'shopify_create_customer', name: 'Create a Shopify customer', write: true, gql: false, persistedOp: 'CustomerCreate',
+    reversible: true, outward: false,
     does: 'create a NEW Shopify customer profile (name + email and/or phone — at least one contact is required; optional mailing address), riding your admin login',
     endpoint: '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after a create opens the new record (id from the reply, handle from the ride tab)
     // CX-7 — the optional mailing address rides as customerInput.addresses[0]. With NO address field set, the inner

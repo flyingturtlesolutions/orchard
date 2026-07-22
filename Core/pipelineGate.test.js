@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { gateAction, gateComposite, gateItem, gateLine, gateTally, NEVER_UNATTENDED, GATE_DECISIONS } from './pipelineGate.js';
+import { gateAction, gateComposite, gateItem, gateLine, gateTally, gateActionForLeg, NEVER_UNATTENDED, GATE_DECISIONS } from './pipelineGate.js';
 
 const A = (over = {}) => ({ what: 'draft order', reversible: true, outward: false, ...over });
 
@@ -116,5 +116,37 @@ describe('pipelineGate — reporting (§5.5)', () => {
   it('the tally names every class including the zeroes', () => {
     const t = gateTally([{ decision: 'auto' }, { decision: 'queued' }]);
     assert.match(t, /1 auto/); assert.match(t, /1 queued/); assert.match(t, /0 refused/);
+  });
+});
+
+// ── PP-4 (v2.74.1680) — the axes ride the LEG, and the declaration is an opt-in ───────────────────────────────
+describe('pipelineGate — gateActionForLeg (hop 3\'s consumer)', () => {
+  const leg = (tool = {}, over = {}) => ({ name: 'Create a Shopify customer', safety: 'confirm', tool, ...over });
+
+  it('THE USER DECISION: a create declaring reversible:true, outward:false runs unattended in a pipeline', () => {
+    const r = gateActionForLeg(leg({ reversible: true, outward: false }));
+    assert.equal(r.decision, 'auto');
+  });
+
+  it('an UNDECLARED write still gates — absence is not permission', () => {
+    assert.equal(gateActionForLeg(leg({})).decision, 'queued');
+    assert.equal(gateActionForLeg(leg({ reversible: true })).decision, 'queued', 'half a declaration is not one');
+    assert.equal(gateActionForLeg(leg({ outward: false })).decision, 'queued');
+  });
+
+  it('an explicit reversible:false gates, and outward:true gates', () => {
+    assert.equal(gateActionForLeg(leg({ reversible: false, outward: false })).decision, 'queued');
+    assert.equal(gateActionForLeg(leg({ reversible: true, outward: true })).decision, 'queued');
+  });
+
+  it('a DESTRUCTIVE or already-gated leg is REFUSED whatever its axes claim', () => {
+    // The one rule with no exceptions: a mislabeled pair must not be able to talk past it.
+    assert.equal(gateActionForLeg(leg({ reversible: true, outward: false, destructive: true })).decision, 'refused');
+    assert.equal(gateActionForLeg(leg({ reversible: true, outward: false }, { safety: 'gated' })).decision, 'refused');
+  });
+
+  it('degrades without throwing', () => {
+    for (const bad of [null, undefined, {}, { tool: null }]) assert.doesNotThrow(() => gateActionForLeg(bad));
+    assert.equal(gateActionForLeg(null).decision, 'queued');
   });
 });

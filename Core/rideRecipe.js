@@ -64,7 +64,24 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   // record (no empty keys), so a plain Zendesk-read record is byte-identical to before.
   if (e.write === true) rec.write = true;
   if (e.destructive === true) rec.destructive = true;                 // kept explicit too (safetyClass already encodes it)
-  if (e.outward === true) rec.outward = true;                         // PP-3 (v1661) — Invariant #3 hop 1. Leaves our boundary (a message a real person receives); raise-only, read by recipeToLeg's hintToSafety. Hop 2 is automatic (harvestedRecipeLegs spreads the record).
+  // PP-3 (v1661) — Invariant #3 hop 1: leaves our boundary (a message a real person receives). Hop 2 is
+  // automatic (harvestedRecipeLegs spreads the record).
+  //
+  // v2.74.1680 — carry `false` TOO. v1661 wrote `if (e.outward === true)` because the axis was then raise-only,
+  // so a `false` was indistinguishable from absence and nothing cared. It cares now: `pipelineGate` treats
+  // UNDECLARED as "gate" and only an explicit boolean can relax anything, so dropping `outward: false` left the
+  // user's `{reversible:true, outward:false}` as half a declaration — and the create they had just approved for
+  // unattended running still queued. Caught by walking entry → record → leg end to end; the unit tests passed
+  // throughout because they build a leg by hand and never traverse hop 1.
+  if (typeof e.outward === 'boolean') rec.outward = e.outward;
+  // PP-4 (v2.74.1680) — Invariant #3 hop 1 for the PIPELINE gate's two axes.
+  //
+  // `reversible: true` is NOT a third name for `!destructive` (the §9.4 concern that got it rejected at v1661).
+  // `destructive` describes the ACTION; this is an author's explicit ASSERTION that this particular write is
+  // safe for a pipeline to run unattended inside a reviewed run. The difference is load-bearing: deriving
+  // reversibility from `!destructive` would make EVERY ordinary write auto — the product-wide loosening v1661
+  // refused — whereas an opt-in leaves every undeclared write gated, which is `pipelineGate`'s fail-closed rule.
+  if (typeof e.reversible === 'boolean') rec.reversible = e.reversible;   // an explicit NO is also a declaration, and it gates
   if (e.gql === true) rec.gql = true;
   if (e.shopProbe === true) rec.shopProbe = true;
   if (e.verifyIdentity === true) rec.verifyIdentity = true;
