@@ -18,6 +18,13 @@ import { REG_KEY, authSignal, applySignal, heartbeatTargets } from '../../Core/c
 const _transitionListeners = [];
 export function registerConnTransitionListener(fn) { if (typeof fn === 'function') _transitionListeners.push(fn); }
 
+// v2.74.1687 — CONN_FOCUS reloads the tab it focuses, debounced per tab so a re-entrant focus cannot wipe a
+// half-typed login form. SW-memory only: an idle restart forgets it, and the worst case of forgetting is one
+// extra reload of a page the user just landed on — strictly better than persisting state for a 10s window.
+const FOCUS_RELOAD_DEBOUNCE_MS = 10_000;
+const _focusReloadAt = new Map();   // tabId → last reload stamp
+try { chrome.tabs.onRemoved.addListener((tabId) => _focusReloadAt.delete(tabId)); } catch { /* */ }
+
 // ── the registry store (chained read-modify-write; single writer) ─────────────────────────────────────────────────
 let _chain = Promise.resolve();
 async function _read() {
@@ -100,9 +107,30 @@ export function createConnectionsHandlers({ invokeSgHandler } = {}) {
         try {
           const tabs = await chrome.tabs.query({});
           const hit = tabs.find((t) => { try { return t && !t.discarded && new URL(t.url).host.toLowerCase() === origin; } catch { return false; } });
-          if (hit) { await chrome.tabs.update(hit.id, { active: true }); try { await chrome.windows.update(hit.windowId, { focused: true }); } catch { /* */ } }
-          else await chrome.tabs.create({ url: `https://${origin}/`, active: true });
-          sendResponse({ success: true, opened: !hit });
+          let reloaded = false;
+          if (hit) {
+            await chrome.tabs.update(hit.id, { active: true });
+            try { await chrome.windows.update(hit.windowId, { focused: true }); } catch { /* */ }
+            // v2.74.1687 — FOCUS WAS NOT ENOUGH, and the asymmetry was the tell: the no-tab branch below calls
+            // `tabs.create`, which loads fresh, so a MISSING tab behaved correctly while an OPEN one did not.
+            // Focusing an existing tab left the user staring at the stale signed-out render they were already
+            // signed out on — the session had expired underneath a page rendered before it did. The button says
+            // "Sign in"; landing on a dead page that needs a manual F5 first is the button not doing its job.
+            //
+            // DEBOUNCED, because this is the one flow where a stray reload is expensive: the user is typing
+            // CREDENTIALS. A re-entrant CONN_FOCUS (double-click, a second warning line, the Connections card
+            // firing alongside a desk warning) would wipe a half-filled login form. Within the window we focus
+            // and leave the page alone — they are already looking at the live page we would have loaded.
+            const last = _focusReloadAt.get(hit.id) || 0;
+            if (Date.now() - last > FOCUS_RELOAD_DEBOUNCE_MS) {
+              _focusReloadAt.set(hit.id, Date.now());
+              try { await chrome.tabs.reload(hit.id); reloaded = true; } catch { /* a reload failure must not fail the focus */ }
+            }
+          } else {
+            await chrome.tabs.create({ url: `https://${origin}/`, active: true });
+          }
+          try { Logger.info('conn', `CONN ▸ focus ${origin} → ${hit ? (reloaded ? 'focused + reloaded' : 'focused (reload debounced)') : 'opened'}`); } catch { /* */ }
+          sendResponse({ success: true, opened: !hit, reloaded });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'focus-failed' }); }
       })();
       return true;
