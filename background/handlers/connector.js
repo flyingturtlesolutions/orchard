@@ -869,7 +869,32 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             const _shape = Array.isArray(_v) ? `array[${_v.length}]`
               : (_v && typeof _v === 'object') ? (() => { const l = Object.values(_v).find((x) => Array.isArray(x)); return l ? `list[${l.length}]` : `object{${Object.keys(_v).length}} keys:[${Object.keys(_v).slice(0, 12).join(',')}]`; })()
               : (_v == null ? 'empty' : typeof _v);
-            Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${reply && reply.success ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}`);
+            // v2.74.1670 — a per-item call inside a fan-out logs its SUCCESS at debug (dropped by the default
+            // INFO floor) and its FAILURE at info, always.
+            //
+            // `INVOKE ▸` is in `_DECISION_RE`, and one INVOKE per leg call was right when a turn made one call.
+            // A 121-division `RIDE_EACH` makes 121, and the live trace shows what that costs: 242 of 246 lines
+            // in the decisions view were INVOKE, and the ring evicted the run's own `STEPS ▸` line from the FULL
+            // log — the decisions view is worst exactly when a fan-out runs, which is when it is most needed.
+            //
+            // Invariant #1 says a new marker must be ADDED to `_DECISION_RE` or it is invisible. This is its
+            // counterpart, and it had not been written down: a marker that fires PER ITEM must not be in
+            // `_DECISION_RE` unsummarized, or it drowns the run it belongs to. The roll-up carries the successes;
+            // only the failures need to be individually visible.
+            const _ok = !!(reply && reply.success);
+            // v2.74.1674 — a quiet SUCCESS is NOT LOGGED AT ALL. The v1670 attempt logged it at debug and was
+            // inert, for a reason worth keeping: `background.js:148` calls `Logger.setLevel(LOG_LEVEL.DEBUG)`,
+            // so the service worker persists debug lines (266 of them in trace 224332) — and `_isDecisionLine`
+            // matches on the MARKER, not the level, so an `INVOKE ▸` at debug still floods the decisions view
+            // exactly as it did at info. I had read `#minLevel = INFO` as the default and never checked whether
+            // anything overrides it.
+            //
+            // Dropping the line is safe because the fan-out's roll-up already reports the successes in aggregate
+            // (`121 ok, 0 failed, 22 row(s)`), and a FAILURE still logs individually — which is the only part a
+            // roll-up cannot express.
+            if (!(payload && payload.quiet && _ok)) {
+              Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${_ok ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}`);
+            }
           } catch { /* observability must never break the call */ }
           // VT-0 (v2.74.1569) — the ONE outcome-funnel call (presence → drift, in order; DESIGN_vitals.md §4).
           // jsonBody: the content-script marks a failed body's JSON-ness (`json`); a rewritten failure

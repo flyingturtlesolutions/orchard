@@ -633,3 +633,27 @@ describe('DK-8g fix (v2.74.1499) — a SINGULAR case-spawn clause is a fan-out o
     assert.equal(isFanoutAsk('open the case file cabinet'), false);   // no count, no foreach → never
   });
 });
+
+// ── v2.74.1667 (live trace 211913) — the RETURN SHAPE is part of the contract ─────────────────────────────────
+describe('orchChain — decomposeAsk returns OBJECTS, and callers must read .text', () => {
+  it('every clause is {text, connective} — NOT a bare string', () => {
+    const out = decomposeAsk('get the open tasks, then draft an order');
+    assert.ok(out.length >= 1);
+    for (const c of out) {
+      assert.equal(typeof c, 'object', 'a caller mapping these through String() gets "[object Object]"');
+      assert.equal(typeof c.text, 'string');
+    }
+  });
+
+  it('THE BUG THIS PINS: a string coercion yields "[object Object]", which survives filter(Boolean)', () => {
+    // Shipped in v2.74.1666 and caught live: the workflow generator did `.map(_str).filter(Boolean)`, queued
+    // "[object Object]" as a step, and the front door was asked to interpret it (conf 0.1). The coercion is
+    // truthy and non-empty, so no falsy-filter catches it — the same trap as summarizeItem at v2.74.1663.
+    const coerced = decomposeAsk('get the tasks, then draft an order').map((c) => String(c).trim()).filter(Boolean);
+    assert.ok(coerced.every((s) => s === '[object Object]'), 'demonstrates the failure the correct call avoids');
+
+    const correct = decomposeAsk('get the tasks, then draft an order').map((c) => String(c && c.text).trim()).filter(Boolean);
+    assert.ok(correct.every((s) => s && s !== '[object Object]'));
+    assert.ok(correct.some((s) => /draft an order/.test(s)));
+  });
+});

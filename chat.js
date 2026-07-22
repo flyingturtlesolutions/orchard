@@ -3944,7 +3944,25 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   let rows = [];
   if (br.collection === 'prior' && priorValue != null) rows = primaryList(priorValue) || [];
   else {
-    const readAsk = (br.collection && br.collection.readAsk) || goal;
+    // v2.74.1668 (live trace 212655) — REFUSE THE SELF-RE-READ when the only thing to re-read with is the
+    // branch ask ITSELF.
+    //
+    // Live: "find open warranty tasks were replacements are requested" classified as `branch` with
+    // collection:'prior', arriving as the chain's FIRST clause — so there was no prior. The fallback then called
+    // `_chainConnectorRun(goal)`, and `goal` is the branch ask, which re-classified as `branch` at the same 0.92
+    // and came back as a clause payload rather than a read. Two 12.9k-token calls to reach "no collection".
+    //
+    // It is not merely wasteful, it is GUARANTEED useless: any ask that routed here routed here BECAUSE it reads
+    // as a branch, so re-interpreting it can only produce a branch again. Only an explicit `readAsk` — a
+    // different sentence, naming the list — can resolve a collection. Without one, say so and stop.
+    const _explicitRead = _str0(br.collection && br.collection.readAsk);
+    if (!_explicitRead) {
+      _setMessageBody(msg, 'I can sort a list, but I need the list first — ask for it, then say how to sort it (e.g. “get the open warranty tasks”, then “which of those ask for a replacement?”).', { markdown: true });
+      _orchFinalize(msg);
+      try { _orchLog(`BRANCH ▸ no collection — collection='prior' with no prior read, and no readAsk to resolve one (refused to re-interpret the branch ask as a read)`); } catch { /* */ }
+      return { ok: false, gap: true };
+    }
+    const readAsk = _explicitRead;
     _setMessageBody(msg, 'Reading the list…');
     let cr = null;
     try { cr = await _chainConnectorRun(readAsk, { tabId }); } catch { cr = null; }
@@ -4438,7 +4456,7 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
       for (let i = 0; i < all.length; i++) {
         if (_rideEachAbort) break;
         try { if (typeof onEach === 'function') onEach(i + 1, all.length, all[i].label); } catch { /* progress is cosmetic */ }   // DK-8c (v1494) — the live gap: the chain's each ran with a static step line
-        const r = await _rideExecOnce(leg, { ...params, [rp.each.name]: all[i].value }, { tabId, groundId });
+        const r = await _rideExecOnce(leg, { ...params, [rp.each.name]: all[i].value }, { tabId, groundId, quiet: true });
         if (r.ok) items.push({ label: all[i].label, rows: _rideEachRows(r.value) });
         else failed++;
       }
@@ -5078,7 +5096,69 @@ function _wfRenderPage() {
   const bar = document.createElement('div'); bar.className = 'wf-page-bar';
   const mkPageBtn = (label, on, primary) => { const b = document.createElement('button'); b.className = `suggestion-card wf-page-btn${primary ? ' wf-primary' : ''}`; b.innerHTML = `<div class="suggestion-card-name">${escHtml(label)}</div>`; b.addEventListener('click', on); bar.appendChild(b); };
 
-  if (w.phase === 'await-step') {
+  if (w.phase === 'plan') {
+    // v2.74.1671 — THE PLAN GATE. The proposed steps are approved AS A SET before any step-wise confirmation
+    // begins.
+    //
+    // The perspective panel has this shape already and it is the reason it works: propose reviews the whole
+    // OPTION SET (`onChoosePerspective` — pick one, then resolve), and only the structure stage is per-item.
+    // Without the set-level gate the first thing a user sees is step 1's "Run this step", which asks them to
+    // commit to a plan they were never shown as a plan.
+    //
+    // It is also the cheapest fix for the under-split problem. The live 4-step proposal was missing a
+    // read-instructions step; caught here, that costs one re-suggest — caught at step 2, it costs a run, a
+    // wrong result, and a wizard to unwind.
+    const plan = Array.isArray(w.plan) ? w.plan : [];
+    const cov = w.coverage || null;
+    const flags = (cov && Array.isArray(cov.compound)) ? cov.compound : [];
+
+    const sub = [`I'd do that in <strong>${plan.length}</strong> step${plan.length === 1 ? '' : 's'}. Check the plan before we start — each step still gets run and approved on its own.`];
+    if (cov && cov.underSplit) sub.push(`<span class="wf-warn">This looks like fewer steps than the request contains (at least ${cov.expectedMin} expected) — something may still be doing two things.</span>`);
+    else if (flags.length) sub.push('<span class="wf-warn">⚠ marks a step that still looks like more than one action.</span>');
+    status.innerHTML = `<div class="wf-page-sub">${sub.join('<br>')}</div>`;
+
+    // Append status BEFORE the list — the intro has to read above the steps it introduces, so this branch
+    // self-appends and returns, like the running/ran branch does for its result slot.
+    page.appendChild(status);
+
+    const list = document.createElement('div'); list.className = 'wf-page-steps';
+    plan.forEach((t, i) => {
+      const row = document.createElement('div'); row.className = 'wf-page-step';
+      const label = document.createElement('span');
+      label.textContent = `${i + 1}. ${t}${flags.includes(t) ? '  ⚠' : ''}`;
+      row.appendChild(label);
+      const drop = document.createElement('button');
+      drop.className = 'wf-step-drop'; drop.type = 'button'; drop.title = 'Not a step — remove it';
+      drop.textContent = '✗';
+      drop.addEventListener('click', () => {
+        // A removal is a REJECTION and it sticks: it rides into the next re-suggest so the model cannot
+        // re-offer it (the `rejectionContext` rule from Core/proposals.js).
+        w.plan = plan.filter((_, k) => k !== i);
+        w.rejectedSteps = [...(w.rejectedSteps || []), t].slice(-6);
+        _wfRenderPage();
+      });
+      row.appendChild(drop);
+      list.appendChild(row);
+    });
+    page.appendChild(list);
+
+    try {
+      const _inp = $('chat-input');
+      if (_inp) { _inp.placeholder = 'Type a step to add it to the plan…'; _inp.value = ''; _inp.focus(); }
+    } catch { /* */ }
+
+    if (plan.length) mkPageBtn(`✓ Use these ${plan.length} step${plan.length === 1 ? '' : 's'}`, () => {
+      w.queue = [...plan];
+      w.phase = 'await-step';
+      try { _orchLog(`WORKFLOW ▸ plan approved — ${plan.length} step(s)${(w.rejectedSteps || []).length ? `, ${(w.rejectedSteps || []).length} rejected` : ''}`); } catch { /* */ }
+      _wfRenderPage();
+    }, true);
+    if (w.ask) mkPageBtn('↻ Re-suggest', () => { const ask = w.ask; void _startWorkflowFromIntent(ask); });
+    mkPageBtn('Cancel', () => _wfCancel());
+    page.appendChild(bar);
+    host.appendChild(page);
+    return;   // self-appended: the intro must render above the step list it introduces
+  } else if (w.phase === 'await-step') {
     // PP-0c-gen (v2.74.1666) — a SUGGESTED next step, when the wizard was seeded from an intent.
     //
     // Generation seeds the QUEUE; it never seeds `steps`. Every suggested step still has to run and be approved
@@ -5086,20 +5166,65 @@ function _wfRenderPage() {
     // never generated prose as such, it was generated prose with "no author who knows what was meant". Here the
     // author is still the person reading this line before pressing the button.
     const _next = _str0(w.queue && w.queue.length ? w.queue[0] : '');
+    // v2.74.1674 — SHOW THE STEP ON THE PAGE, not only in the composer.
+    //
+    // Reported live: "the running step should be displayed here — current pasted in message input field". The
+    // page said "read it, edit it if it's not right" while the text it referred to was only in the input box
+    // below, so the instruction pointed at nothing. The step is the thing being approved; it belongs on the
+    // surface that is asking for the approval.
     status.innerHTML = _next
-      ? `<div class="wf-page-sub">${n ? `Step ${n + 1}` : 'First step'}, suggested from what you asked for — read it, edit it if it’s not right, then run it. Each step still gets proven on its own.</div>`
+      ? `<div class="wf-page-sub">${n ? `Step ${n + 1}` : 'First step'} of your plan — run it as written, or edit it in the box below first.</div><div class="wf-next-step">${escHtml(_next)}</div>`
       : `<div class="wf-page-sub">${n ? `Step ${n + 1}` : 'First step'} — type what this step should do in the message box below, then send. One step = one result you can look at and approve.</div>`;
     try {
       const _inp = $('chat-input');
       if (_inp) {
         _inp.placeholder = n ? 'Type the next step…' : 'Type the first step…';
-        if (_next && !_str0(_inp.value)) { _inp.value = _next; try { _autosizeInput(); } catch { /* */ } }
+        // v2.74.1674 — prefill when the composer is EMPTY **or** still holds the previous step's text.
+        //
+        // Reported live: "Add next step doesn't update to next step". The run button calls `_wfRunStep` directly
+        // rather than going through `sendChatMessage`, so the composer was never cleared — it kept step 1's text
+        // forever, the `!value` guard then blocked every later prefill, and the page offered step 2 while the box
+        // still said step 1. Tracking what we last prefilled means a re-render can refresh our own text without
+        // ever clobbering something the user typed.
+        const _mine = _str0(w.prefilled);
+        if (_next && (!_str0(_inp.value) || _str0(_inp.value) === _mine)) {
+          _inp.value = _next; w.prefilled = _next;
+          try { _autosizeInput(); } catch { /* */ }
+        }
         _inp.focus();
       }
     } catch { /* */ }
     if (_next) {
-      mkPageBtn(`▶ Run this step`, () => { const q = (w.queue || []).shift(); void _wfRunStep(_str0(q)); }, true);
-      mkPageBtn('Skip it', () => { (w.queue || []).shift(); try { const i2 = $('chat-input'); if (i2) i2.value = ''; } catch { /* */ } _wfRenderPage(); });
+      // Stage 10 — the composer IS the edit affordance: the suggestion is prefilled, and sending whatever is in
+      // the box runs THAT text. So "edit" needs no separate control, and an edited step is captured for stage 11
+      // rather than silently diverging from what was suggested.
+      mkPageBtn('▶ Run this step', () => {
+        const q = _str0((w.queue || []).shift());
+        let typed = q;
+        try { const i2 = $('chat-input'); if (i2 && _str0(i2.value)) typed = _str0(i2.value); } catch { /* */ } 
+        if (typed !== q) { w.editedSteps = [...(w.editedSteps || []), { from: q, to: typed }].slice(-6); }
+        // The queue advanced, so this text is spent: clear it and forget what we prefilled, or the next
+        // 'await-step' render finds a full box and shows the step that just ran.
+        try { const i3 = $('chat-input'); if (i3) i3.value = ''; } catch { /* */ }
+        w.prefilled = '';
+        void _wfRunStep(typed);
+      }, true);
+      // Stage 11 — a rejection STICKS. It rides into the next proposal so a re-roll cannot re-offer the thing
+      // just refused (the `rejectionContext` rule from Core/proposals.js, where rejections persist for 24h).
+      mkPageBtn('✗ Not a step', () => {
+        const q = _str0((w.queue || []).shift());
+        if (q) w.rejectedSteps = [...(w.rejectedSteps || []), q].slice(-6);
+        try { const i2 = $('chat-input'); if (i2) i2.value = ''; } catch { /* */ }
+        w.prefilled = '';
+        _wfRenderPage();
+      });
+      if (w.ask) {
+        mkPageBtn('↻ Re-suggest', () => {
+          const ask = w.ask;
+          try { const i2 = $('chat-input'); if (i2) i2.value = ''; } catch { /* */ }
+          void _startWorkflowFromIntent(ask);   // carries rejectedSteps/editedSteps forward via `w0`
+        });
+      }
     }
     mkPageBtn('Cancel', () => _wfCancel());
   } else if (w.phase === 'running' || w.phase === 'ran') {
@@ -5159,6 +5284,14 @@ async function _wfConsumeInput(text) {
   if (_wfForeign()) return;   // v1623 belt — a parked wizard never consumes another desk's input (and never dies for it)
   const t = String(text || '').trim();
   if (w.phase === 'await-name') { if (t) { w.name = t; } await _wfDoSave(); return; }
+  // v2.74.1671 — at the PLAN gate the composer ADDS a step rather than running one. Typing is how a missing
+  // step gets put back (the live 4-step plan was missing the read-instructions step), and it costs nothing —
+  // nothing runs until the plan is approved.
+  if (w.phase === 'plan') {
+    if (t) { w.plan = [...(Array.isArray(w.plan) ? w.plan : []), t]; try { const i2 = $('chat-input'); if (i2) i2.value = ''; } catch { /* */ } }
+    _wfRenderPage();
+    return;
+  }
   if (w.phase === 'await-step') { if (!t) { _wfRenderPage(); return; } await _wfRunStep(t); return; }
   _wfRenderPage();
 }
@@ -5180,20 +5313,41 @@ function _str0(v) { return typeof v === 'string' ? v.trim() : (v == null ? '' : 
  */
 async function _startWorkflowFromIntent(intent) {
   const goal = _str0(intent);
+  const w0 = _wfWizard;   // a re-roll carries the prior round's rejections/edits forward (stage 11)
   if (!goal) { await _startWorkflowWizard(); return; }
   const m = appendMessage({ role: 'assistant', body: '' });
   _setMessageBody(m, 'Working out the steps…');
 
-  // Prefer the front door's own decompose verdict (it sees the palette); fall back to the deterministic splitter
-  // so a model outage degrades to "type the steps yourself" rather than to nothing.
-  let steps = [];
+  // v2.74.1669 — MODEL FIRST, via a DEDICATED prompt. This reverses v1667's inversion, and the reason the
+  // inversion happened is worth keeping: I measured a BROKEN llm call (a router asked a decomposer's question,
+  // returning `branch`/`clarify` with no subAsks) against a splitter that produced output, and mistook
+  // "produced output" for "produced good output" — the two steps it produced were each several operations.
+  //
+  // Decomposition is natural-language INTERPRETATION, which is the model's job (the §1.1b rule, one level up:
+  // prose → model, structured fields → deterministic). `decomposeAsk` splits on GRAMMAR (`and|then|;|,` — no
+  // period, no `if`), so it cannot see that "search shopify for a matching profile. If none is found create a
+  // shopify profile." is a find-or-create. It stays as the fallback for when the model is unreachable, because
+  // a rough split the user can edit beats no wizard at all.
+  let steps = []; let coverage = null;
   try {
     const tab = await _orchActiveTab();
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId: (tab && typeof tab.id === 'number') ? tab.id : null });
-    const d = (r && r.success !== false && r.decision) ? normalizeInterpretDecision(r.decision, { retrieved: Array.isArray(r.retrieved) ? r.retrieved : [] }) : null;
-    if (d && Array.isArray(d.subAsks) && d.subAsks.length >= 2) steps = intentSplitSuggestion(d.subAsks).steps;
-  } catch { /* fall through to the deterministic split */ }
-  if (steps.length < 2) { try { steps = decomposeAsk(goal).map(_str0).filter(Boolean); } catch { steps = []; } }
+    const host = (() => { try { return tab && tab.url ? new URL(tab.url).host : ''; } catch { return ''; } })();
+    const r = await _orchReq('DECOMPOSE_STEPS', {
+      intent: goal, host,
+      // v2.74.1672 — the app's bound sites, so the handler can read THEIR capability declarations and tell the
+      // decomposer what the substrate forces (per-item drills, lookup ladders, join keys).
+      connections: _boundConnections(),
+      rejected: Array.isArray(w0 && w0.rejectedSteps) ? w0.rejectedSteps : [],
+      edited: Array.isArray(w0 && w0.editedSteps) ? w0.editedSteps : [],
+    });
+    if (r && r.success && Array.isArray(r.steps)) { steps = r.steps; coverage = r.coverage || null; }
+  } catch { /* fall through to the connective splitter */ }
+  if (!steps.length) {
+    try { steps = decomposeAsk(goal).map((c) => _str0(c && c.text)).filter(Boolean); } catch { steps = []; }
+    if (steps.length) { try { _orchLog('WORKFLOW ▸ steps from the connective splitter (model unavailable) — coarser, editable'); } catch { /* */ } }
+  }
+  // Belt: nothing unreadable may reach a queue the user is asked to APPROVE (the v1666 "[object Object]" bug).
+  steps = steps.map(_str0).filter((t) => t && t !== '[object Object]');
 
   try { _orchLog(`WORKFLOW ▸ intent "${goal.slice(0, 50)}" → ${steps.length} suggested step(s)`); } catch { /* */ }
 
@@ -5207,12 +5361,29 @@ async function _startWorkflowFromIntent(intent) {
   const w = _wfWizard;
   if (!w) return;
   w.ask = goal;                         // the UMBRELLA intent — recall matches against this, not the name
-  w.queue = steps.slice(0, 8);          // suggestions only; `steps` stays empty until each one is PROVEN
+  // v2.74.1671 — land on the PLAN GATE. `queue` stays EMPTY until the set is approved: nothing is offered for
+  // running until the user has seen the whole plan and said yes to it.
+  w.plan = steps.slice(0, 8);
+  w.queue = [];
+  w.phase = 'plan';
+  w.coverage = coverage;
+  w.rejectedSteps = Array.isArray(w0 && w0.rejectedSteps) ? w0.rejectedSteps : [];
+  w.editedSteps = Array.isArray(w0 && w0.editedSteps) ? w0.editedSteps : [];
+
+  // v2.74.1671 — the PAGE is the review surface now (it renders the steps, the ⚠ flags, the remove buttons and
+  // the approve bar), so this bubble stops duplicating the list. It exists for the thread's record: what was
+  // asked, and how many steps came back. Reading `w.plan`, not `w.queue` — the queue is deliberately empty until
+  // the plan is approved.
+  // v2.74.1673 — the bubble LISTS the steps again.
+  //
+  // v1671 removed the list because the plan page renders it, which was right about the review surface and wrong
+  // about the RECORD: the page is not exported, so a `gch` chat export carried "Proposed 5 steps" and no way to
+  // know what five. The page is where you review; this is where it survives.
   _setMessageBody(m, [
-    `I’d do that in **${w.queue.length}** steps:`,
-    ...w.queue.map((s, i) => `${i + 1}. ${escHtml(s)}`),
+    `Proposed **${w.plan.length}** step${w.plan.length === 1 ? '' : 's'} for “${escHtml(goal)}”:`,
+    ...w.plan.map((s, i) => `${i + 1}. ${escHtml(s)}`),
     '',
-    '_These are suggestions. Each one still runs and gets your approval before it’s saved — that’s what pins it to a real result instead of a sentence._',
+    '_Check the plan above before we start. Nothing runs until you approve it, and each step still gets approved on its own after that._',
   ].join('\n'), { markdown: true });
   _orchFinalize(m);
   _wfRenderPage();
@@ -6444,7 +6615,29 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           if (!brr || !brr.ok) return;
           if (brr.text) { st.readouts.push(brr.text); st.lastReadoutIdx = st.readouts.length - 1; }
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'branch', clause: clause.text, intent: clause.text });
-          continue;   // st.lastValue is deliberately UNCHANGED: a branch SORTS the rows, it does not replace them, so a following clause still composes against the full set.
+          // v2.74.1675 — A SINGLE-ARM BRANCH IS A FILTER, AND IT NARROWS THE WORKING SET.
+          //
+          // v1665 left `st.lastValue` untouched, reasoning that "a branch SORTS the rows, it does not replace
+          // them". Live trace 225450 shows that is wrong for the shape people actually type: step 3 "which of
+          // those ask for a replacement?" matched 12 of 22 — and step 4 "look each homeowner up in Shopify"
+          // then ran over **22**. Ten homeowners who never asked for a replacement were looked up, and step 5
+          // would have created profiles for them. The reasoning was right about MULTI-ARM branches and wrong
+          // about the filter case, which is the common one.
+          //
+          // The rule is the user's own language: "WHICH OF THOSE …?" names a subset and the next step's "each"
+          // means that subset. So one arm and no `otherwise` → narrow to the matched items. Two or more arms →
+          // leave the set alone, because there is no single "those" to mean and picking one would be a guess.
+          const _arms = Array.isArray(cr.branch.arms) ? cr.branch.arms : [];
+          if (_arms.length === 1 && !cr.branch.otherwise && Array.isArray(brr.results)) {
+            const _kept = brr.results.filter((r) => r && r.outcome === 'arm').map((r) => r.item);
+            // Narrow even to ZERO. Skipping the empty case would leave the FULL set as the prior, so a filter
+            // that matched nothing would hand the next step all 22 rows — the loudest possible wrong answer,
+            // and the exact inverse of what the user asked for. An empty prior makes the next clause report
+            // "nothing to work with", which is the honest outcome.
+            st.lastValue = _kept; st.lastReadoutIdx = null;   // KEEP st.lastLeg — the rows still descend from the source leg (the v1635 rule)
+            try { _orchLog(`BRANCH ▸ narrowed prior → ${_kept.length} of ${brr.results.length} (single arm "${_arms[0].label}" — a following "each" means these)`); } catch { /* */ }
+          }
+          continue;
         }
         if (cr && cr.map) {
           const mr = await _runMapClause(msg, cr.map, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
@@ -8076,7 +8269,12 @@ async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
 // DK-8b (v2.74.1493) — ONE per-item read executor, shared by the interactive fan-out and the chain path's headless
 // each (the CX-9b lesson, dispatch-path edition: hooking a layer on one path at a time re-learns the same bug).
 // Both transports: header-replay (the single-read branch's exact payload) or the cookie-ride/planExec channel.
-async function _rideExecOnce(leg, p, { tabId = null, groundId = null } = {}) {
+// v2.74.1670 — `quiet` marks a PER-ITEM call inside a fan-out. It suppresses only the SUCCESS line: the fan-out
+// already emits a roll-up (`RIDE_EACH ▸ … 121 ok, 0 failed, 21 row(s)`), so 121 individual successes add nothing
+// a reader needs — while a FAILURE still logs individually, because "which one failed" is exactly what the
+// roll-up cannot tell you. See the v1670 findings: a 121-division sweep put 242 INVOKE lines into the decisions
+// view, which is 98% of it, and evicted the run's own STEPS ▸ line from the full ring.
+async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = false } = {}) {
   let r = null;
   try {
     if (leg.tool.replay === 'headers') {
@@ -8085,7 +8283,7 @@ async function _rideExecOnce(leg, p, { tabId = null, groundId = null } = {}) {
       r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
     } else {
       const plan = planExec(leg, p, { tabId, groundId });
-      if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, plan.payload);
+      if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, quiet ? { ...plan.payload, quiet: true } : plan.payload);
     }
   } catch { r = null; }
   if (!r || r.success === false) return { ok: false, error: r && r.error, hint: r && r.hint };

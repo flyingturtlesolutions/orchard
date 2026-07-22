@@ -40,7 +40,8 @@ import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/wo
 import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
 import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
 import { buildAnswerShapeMessages, parseAnswerShapeOutput } from '../Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — match a read's answer to the question
-import { buildClassifyRequest, parseClassifyOutput } from '../Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text branch classification (pure prompt + strict parse)
+import { buildClassifyRequest, parseClassifyOutput } from '../Core/branchClassify.js';
+import { buildStepsMessages, parseStepsOutput, sanitizeSteps, deriveStepSpec, assessStepCoverage, buildResplitMessages, stepRejectionContext } from '../Core/stepsPrompt.js';   // v2.74.1669 — intent → workflow STEPS (one step = one leg); dedicated, because interpret is a router and decomposeAsk splits grammar   // PP-5 (v2.74.1662) — batched free-text branch classification (pure prompt + strict parse)
 import { buildCaseBriefMessages, parseCaseBrief } from '../Core/caseBrief.js';   // DK-8h — a spawned case's conversational framing (the requestor's voice)
 import { buildRecipePolishMessages, parseRecipePolishOutput } from '../Core/recipePolishPrompt.js';   // §17 — name/does/param-name a HARVESTED ride-recipe (structure-only input; the OBS-4 analog)
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
@@ -5494,6 +5495,61 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    *          degrades to UNKNOWN for every item, which is honest, rather than to a keyword fallback, which is
    *          the confidently-wrong answer this whole mechanism exists to avoid.
    */
+  /**
+   * v2.74.1669 — INTENT → WORKFLOW STEPS. Breaks a request into steps that are each ONE runnable action.
+   *
+   * A dedicated prompt rather than a reuse, because the two existing paths answer different questions and both
+   * failed live: `interpret` is a ROUTER ("what is this one ask?" — returned `branch`/`clarify`, no subAsks),
+   * and `decomposeAsk` is a CONNECTIVE splitter (`and|then|;|,` — no period, no `if`, so a find-or-create stays
+   * one clause). Neither splits on OPERATIONS, which is the only split the wizard's "one step = one result you
+   * can look at and approve" contract cares about.
+   *
+   * Returns [] when unavailable — the caller falls back to the connective splitter, which is worse but honest.
+   */
+  static async decomposeIntoSteps(intent, { host = '', rejected = [], edited = [], groundFacts = '' } = {}) {
+    const goal = String(intent || '').trim();
+    if (!goal || !(await AnthropicService.hasLlm())) return { steps: [], coverage: null, dropped: [] };
+
+    // Stage 2-3: CODE derives the parameters and assembles the rules block from them (the intentShape.js
+    // pattern). Stage 11: rejections and edits from a prior round ride back in, so a re-roll cannot re-offer
+    // what was just refused.
+    const spec = deriveStepSpec(goal);
+    const rejectionContext = stepRejectionContext(rejected, edited);
+    const { system, user } = buildStepsMessages(goal, { host, spec, rejectionContext, groundFacts });
+    const res = await AnthropicService.#call(system, user, 600, [], { role: 'routing', operation: 'decompose-steps' });
+    if (!res || res.success === false) return { steps: [], coverage: null, dropped: [] };
+
+    // Stage 5-6: parse, then the sanitizer bracket.
+    const san = sanitizeSteps(parseStepsOutput(res.text));
+    let steps = san.steps;
+
+    // Stage 7: COMPLETENESS BY CONSTRUCTION, as far as it can honestly go here.
+    //
+    // The perspective loop can APPEND what the model dropped because code independently knows the answer (the
+    // form oracle read the DOM). Code cannot do that here — splitting prose is the predictive half, and a split
+    // this module invented would be a guess wearing a guarantee's clothes. So the repair is a SECOND, NARROWER
+    // model call on the offending step alone, which is a much easier question than the original. Bounded to
+    // three, because a step that survives three re-splits is one a human should look at instead.
+    const compound = steps.filter((t) => assessStepCoverage([t], spec).compound.length).slice(0, 3);
+    for (const bad of compound) {
+      try {
+        const rq = buildResplitMessages(bad);
+        const rr = await AnthropicService.#call(rq.system, rq.user, 300, [], { role: 'routing', operation: 'resplit-step' });
+        if (!rr || rr.success === false) continue;
+        const parts = sanitizeSteps(parseStepsOutput(rr.text, { max: 4 })).steps;
+        if (parts.length > 1) {
+          const at = steps.indexOf(bad);
+          if (at >= 0) steps = [...steps.slice(0, at), ...parts, ...steps.slice(at + 1)];
+        }
+      } catch { /* the un-split step stands, and the coverage report will say so */ }
+    }
+    steps = sanitizeSteps(steps).steps;
+
+    // Stage 8: report what is still short of the floor. Reports, never repairs — the remaining judgement is the
+    // reviewer's, and the surface shows them exactly which step is still doing two things.
+    return { steps, coverage: assessStepCoverage(steps, spec), dropped: san.dropped, spec };
+  }
+
   static async classifyBranch({ items = [], arms = [], field = '' } = {}) {
     if (!Array.isArray(items) || !items.length || !Array.isArray(arms) || !arms.length) return null;
     if (!(await AnthropicService.hasLlm())) return null;

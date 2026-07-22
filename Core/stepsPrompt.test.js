@@ -1,0 +1,281 @@
+// Core/stepsPrompt.test.js — intent → workflow steps (v2.74.1669).
+//
+// The compound cases are taken verbatim from the live output the user rejected: two "steps" that were each
+// several operations. They are the specification.
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  buildStepsMessages, parseStepsOutput, looksCompound, compoundSteps, MAX_STEPS,
+  deriveStepSpec, buildStepsDirective, sanitizeSteps, assessStepCoverage, stepRejectionContext, buildResplitMessages,
+} from './stepsPrompt.js';
+
+describe('stepsPrompt — the prompt states the rule the wizard already promises', () => {
+  it('names the one-step rule and the operation kinds, not just "split it up"', () => {
+    const { system } = buildStepsMessages('do a thing');
+    assert.match(system, /one step = one action = one result/i);
+    assert.match(system, /READ A LIST/);
+    assert.match(system, /LOOK UP EACH ELSEWHERE/);
+    assert.match(system, /ONE WRITE/);
+  });
+
+  it('calls out the exact shapes that were under-split live', () => {
+    const { system } = buildStepsMessages('x');
+    assert.match(system, /find X where Y/, 'read+filter was shipped as one step');
+    assert.match(system, /create it if/, 'find-or-create was shipped as one step');
+    assert.match(system, /if <test> then <action>/);
+    assert.match(system, /full stop in/);
+  });
+
+  it('THE ROLE SEPARATION: names steps, never picks legs or writes parameters', () => {
+    // Transposed from proposePerspectives: "You do NOT pick elements or write selectors; you name the roles."
+    //   perspective:  name ROLES → resolveRoles picks SELECTORS → code verifies against the DOM
+    //   workflow:     name STEPS → the wizard RUNS it           → PP-0c banks what it resolved to
+    // Naming and resolving are separate calls on purpose. A model asked to do both invents the half it cannot
+    // check, and resolveRoles' own rule applies here with more force: a wrong selector is worse than a gap,
+    // and a wrong LEG is worse still, because a leg runs.
+    const { system } = buildStepsMessages('x');
+    assert.match(system, /do NOT pick legs or write parameters/i);
+    assert.match(system, /Never name a connector, endpoint, leg id, or parameter value/i);
+    assert.match(system, /user's own words/i);
+  });
+
+  it('disambiguates THEIR naming from OURS — the examples must not read as license to name legs', () => {
+    // The step examples say "look each homeowner up in Shopify" while the rule says never name a connector.
+    // Those are consistent ("Shopify" is their word, `shopify_create_customer` is a leg id) but the model
+    // should not have to infer it. Same device as the perspective prompt's "DEPTH IS NOT DOWNSTREAM".
+    const { system } = buildStepsMessages('x');
+    assert.match(system, /THEIR WORDS ARE NOT A LEG/);
+    assert.match(system, /shopify_create_customer/, 'names the machinery it must not write, concretely');
+  });
+
+  it('forbids guessing unstated details and forbids padding', () => {
+    const { system } = buildStepsMessages('x');
+    assert.match(system, /Never guess a filter, field name, id,\s*\n?status or date the user did not say/i);
+    assert.match(system, /leave the step in their words and let the run\s*\n?surface the gap/i);
+    assert.match(system, /do not pad/i);
+  });
+
+  it('carries the intent and the host', () => {
+    const { user } = buildStepsMessages('find open warranty tasks', { host: 'vendorsuite.drhorton.com' });
+    assert.match(user, /find open warranty tasks/);
+    assert.match(user, /vendorsuite\.drhorton\.com/);
+  });
+});
+
+describe('stepsPrompt — parsing is strict in the safe direction', () => {
+  it('reads a well-formed reply', () => {
+    const s = parseStepsOutput('{"steps":["get the open warranty tasks","which of those ask for a replacement?"]}');
+    assert.equal(s.length, 2);
+    assert.equal(s[0], 'get the open warranty tasks');
+  });
+
+  it('DROPS a non-string step — that is the v1666 "[object Object]" shape', () => {
+    const s = parseStepsOutput('{"steps":["get the tasks",{"text":"x"},null,42]}');
+    assert.deepEqual(s, ['get the tasks']);
+  });
+
+  it('drops the literal "[object Object]" if a model ever echoes one back', () => {
+    assert.deepEqual(parseStepsOutput('{"steps":["[object Object]","get the tasks"]}'), ['get the tasks']);
+  });
+
+  it('strips a numbering prefix the model added anyway', () => {
+    assert.deepEqual(parseStepsOutput('{"steps":["1. get the tasks","2) sort them"]}'), ['get the tasks', 'sort them']);
+  });
+
+  it('dedupes case-insensitively and caps the count', () => {
+    assert.deepEqual(parseStepsOutput('{"steps":["Get the tasks","get the tasks"]}'), ['Get the tasks']);
+    const many = parseStepsOutput(JSON.stringify({ steps: Array.from({ length: 30 }, (_, i) => `step number ${i}`) }));
+    assert.equal(many.length, MAX_STEPS);
+  });
+
+  it('unparseable output yields nothing rather than a guess', () => {
+    for (const bad of ['the model wandered off', '', null, undefined, '{}', '{"steps":"not an array"}']) {
+      assert.deepEqual(parseStepsOutput(bad), []);
+    }
+  });
+});
+
+describe('stepsPrompt — looksCompound flags the under-split shapes', () => {
+  it('THE TWO STEPS THE USER REJECTED are both flagged', () => {
+    // Verbatim from the live generation. These are the specification for "not a discrete step".
+    assert.equal(looksCompound('search shopify for a matching profile. If none is found create a shopify profile.'), true);
+    assert.equal(looksCompound('look each one up, and create it if missing'), true);
+  });
+
+  it('flags a full stop mid-step, a conditional, and a trailing write', () => {
+    assert.equal(looksCompound('do the first thing. then the second'), true);
+    assert.equal(looksCompound('check the status, unless it is closed'), true);
+    assert.equal(looksCompound('find the customer, and create a draft order'), true);
+    assert.equal(looksCompound('get the tasks and then sort them'), true);
+  });
+
+  it('does NOT flag a genuine single step', () => {
+    for (const s of [
+      'get the open warranty tasks',
+      'read the instructions on each one',
+      'which of those ask for a replacement?',
+      'look each homeowner up in Shopify',
+      'create a Shopify profile for them',
+    ]) assert.equal(looksCompound(s), false, s);
+  });
+
+  it('a trailing period alone is not compound', () => {
+    assert.equal(looksCompound('get the open warranty tasks.'), false);
+  });
+
+  it('compoundSteps returns only the offenders, and never throws', () => {
+    const out = compoundSteps(['get the tasks', 'look it up. create it if missing']);
+    assert.equal(out.length, 1);
+    assert.deepEqual(compoundSteps(null), []);
+    assert.equal(looksCompound(null), false);
+  });
+});
+
+// ── v2.74.1669 stages 2-11 — code computes the params, model interprets, code guarantees ──────────────────────
+describe('stepsPrompt — deriveStepSpec (the parameters CODE owns)', () => {
+  const S = (s) => deriveStepSpec(s);
+
+  it('THE REJECTED INTENT (verbatim, typo and all) still floors above the 2 steps that shipped', () => {
+    // Verbatim from the live session — the user typed "were" for "where", which is exactly why this is asserted
+    // against the raw text rather than a cleaned-up version.
+    const spec = S('find open warranty tasks were replacements are requested, then search shopify for a matching profile for each and create one if none is found');
+    assert.equal(spec.collection, true);
+    assert.equal(spec.findCreate, true);
+    assert.equal(spec.write, true);
+    assert.ok(spec.scale.min >= 3, `floor was ${spec.scale.min}; the live generation returned 2`);
+  });
+
+  it('THE DETECTOR IS A HINT, NOT A GATE — a typo lowers the floor and changes nothing else', () => {
+    // "were" vs "where" costs the read+filter signal. That is acceptable BY DESIGN: the floor tells the model
+    // how far it is under-splitting, it does not perform the split. A missed signal means a weaker hint, never
+    // a wrong answer — the general rules and the operation vocabulary are unconditional. Trying to make this
+    // regex typo-proof would be rebuilding natural-language understanding in a pattern, which is the exact
+    // mistake `decomposeAsk` embodies and the reason this module asks a model at all.
+    const typo = S('find open warranty tasks were replacements are requested');
+    const clean = S('find open warranty tasks where replacements are requested');
+    assert.equal(clean.readFilter, true);
+    assert.equal(typo.readFilter, false, 'documents the limit rather than pretending it is covered');
+    assert.ok(clean.scale.min > typo.scale.min);
+    // Both still carry the full unconditional rule set.
+    for (const s of [typo, clean]) assert.match(buildStepsMessages('x', { spec: s }).system, /one step = one action/i);
+  });
+
+  it('detects each shape on its own', () => {
+    assert.equal(S('find the tasks where replacements are requested').readFilter, true);
+    assert.equal(S('read the instructions on each one').collection, true);
+    assert.equal(S('look them up and create one if none is found').findCreate, true);
+    assert.equal(S('if it is overdue, close it').conditional, true);
+    assert.equal(S('draft an order').write, true);
+  });
+
+  it('a genuinely simple ask keeps a floor of 1 — the floor never inflates', () => {
+    const spec = S('get the open warranty tasks');
+    assert.equal(spec.scale.min, 1);
+    assert.deepEqual(spec.signals.filter((x) => x !== 'write'), []);
+  });
+
+  it('the floor is capped and reports how it was decided', () => {
+    const spec = S('find each task where x, then if none create one and send an update');
+    assert.ok(spec.scale.min <= MAX_STEPS);
+    assert.equal(spec.decidedBy, 'lexical');
+    assert.equal(S('get the tasks').decidedBy, 'default');
+  });
+
+  it('degenerate input does not throw', () => {
+    for (const bad of [null, undefined, '', 42]) assert.doesNotThrow(() => deriveStepSpec(bad));
+  });
+});
+
+describe('stepsPrompt — buildStepsDirective (the params become RULES, not a constant)', () => {
+  it('names the split each detected shape implies', () => {
+    const d = buildStepsDirective(deriveStepSpec('find tasks where x, look each up and create one if missing, then send it'));
+    assert.match(d, /AT LEAST \d+ separate actions/);
+    assert.match(d, /SEPARATE steps/);
+    assert.match(d, /COLLECTION/);
+    assert.match(d, /FIND-OR-CREATE/);
+    assert.match(d, /WRITE/);
+  });
+  it('a simple ask gets permission to stay one step', () => {
+    assert.match(buildStepsDirective(deriveStepSpec('get the open warranty tasks')), /may genuinely be one action/);
+  });
+  it('the directive reaches the prompt, marked as being about THIS request', () => {
+    const { system } = buildStepsMessages('find tasks where x and create one if missing');
+    assert.match(system, /ABOUT THIS PARTICULAR REQUEST/);
+    assert.match(system, /FIND-OR-CREATE/);
+  });
+});
+
+describe('stepsPrompt — sanitizeSteps (the code-side guarantee bracket)', () => {
+  it('drops machinery leaking into a step the user must read', () => {
+    const r = sanitizeSteps(['get the tasks', 'call shopify_create_customer', 'POST /api/v2/tickets.json', 'send {"status":"open"}']);
+    assert.deepEqual(r.steps, ['get the tasks']);
+    assert.equal(r.dropped.length, 3);
+    assert.ok(r.dropped.every((d) => /machinery/.test(d.why)));
+  });
+  it('strips numbering and bullets, clamps length, dedupes', () => {
+    const r = sanitizeSteps(['1. get the tasks', '• Get The Tasks', `- ${'x'.repeat(400)}`]);
+    assert.equal(r.steps[0], 'get the tasks');
+    assert.equal(r.steps.length, 2);
+    assert.ok(r.steps[1].length <= 200);
+  });
+  it('drops non-strings and placeholders rather than rendering them', () => {
+    const r = sanitizeSteps([{ text: 'x' }, null, '[object Object]', 'get the tasks']);
+    assert.deepEqual(r.steps, ['get the tasks']);
+  });
+  it('NEVER rewrites meaning — the text is what the user approves', () => {
+    const r = sanitizeSteps(['look each homeowner up in Shopify']);
+    assert.deepEqual(r.steps, ['look each homeowner up in Shopify']);
+  });
+});
+
+describe('stepsPrompt — assessStepCoverage (reports, never repairs)', () => {
+  it('flags an under-split against the intent\'s own floor', () => {
+    const spec = deriveStepSpec('find tasks where x, look each up and create one if missing');
+    const a = assessStepCoverage(['find tasks where x', 'look each up and create one if missing'], spec);
+    assert.equal(a.underSplit, true);
+    assert.equal(a.compound.length, 1);
+    assert.equal(a.complete, false);
+  });
+  it('a properly split proposal is complete', () => {
+    const spec = deriveStepSpec('find the open tasks then draft an order');
+    const a = assessStepCoverage(['find the open tasks', 'draft an order'], spec);
+    assert.equal(a.underSplit, false);
+    assert.equal(a.complete, true);
+  });
+  it('degenerate input does not throw', () => {
+    assert.doesNotThrow(() => assessStepCoverage(null, {}));
+  });
+});
+
+describe('stepsPrompt — rejections stick, edits teach', () => {
+  it('feeds rejected and rewritten steps into the next proposal', () => {
+    const c = stepRejectionContext(['search shopify and create a profile'], [{ from: 'do the thing', to: 'get the open warranty tasks' }]);
+    assert.match(c, /REJECTED/);
+    assert.match(c, /search shopify and create a profile/);
+    assert.match(c, /REWROTE/);
+    assert.match(c, /get the open warranty tasks/);
+  });
+  it('empty when there is nothing to carry', () => {
+    assert.equal(stepRejectionContext([], []), '');
+    assert.equal(stepRejectionContext(null, null), '');
+  });
+  it('reaches the user message', () => {
+    const { user } = buildStepsMessages('x', { rejectionContext: stepRejectionContext(['bad step'], []) });
+    assert.match(user, /bad step/);
+  });
+});
+
+describe('stepsPrompt — buildResplitMessages (repair is a narrower ASK, not a code split)', () => {
+  it('asks for one instruction\'s separate actions, keeping their words', () => {
+    const { system, user } = buildResplitMessages('search shopify for a matching profile. If none is found create a shopify profile.');
+    assert.match(system, /split ONE instruction/i);
+    assert.match(system, /look-up and the create/);
+    assert.match(system, /Keep their words/);
+    assert.match(user, /search shopify for a matching profile/);
+  });
+  it('permits "it really is one action"', () => {
+    assert.match(buildResplitMessages('x').system, /genuinely is ONE action, return it unchanged/);
+  });
+});

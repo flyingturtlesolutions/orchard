@@ -13,6 +13,10 @@
  */
 
 import { Logger } from '../../Core/Logger.js';
+import { AnthropicService } from '../../Services/AnthropicService.js';
+import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';
+import { curatedRidesForConnections } from '../../Core/rideRecipe.js';
+import { deriveGroundFacts, renderGroundFacts } from '../../Core/groundFacts.js';   // v2.74.1672 — the substrate facts the decomposer cannot infer (the form-oracle move)   // v2.74.1669 — the intent → steps decomposition (a dedicated prompt; interpret is a router)
 import {
   upsertCase, setBranch, addStage, addAction, closeCase, openItemIds, caseTally,
 } from '../../Core/pipelineCase.js';
@@ -41,6 +45,54 @@ async function _read() {
 
 export function createPipelineHandlers() {
   return {
+    /**
+     * v2.74.1669 — INTENT → WORKFLOW STEPS. One step = one action = one result a person can approve.
+     *
+     * Dedicated rather than reusing `interpret` (a ROUTER — returned `branch`/`clarify` with no subAsks live)
+     * or `decomposeAsk` (a CONNECTIVE splitter — no period, no `if`, so a find-or-create stays one clause).
+     * Returns the coverage report alongside the steps so the panel can show which step is still doing two
+     * things rather than silently accepting an under-split.
+     */
+    DECOMPOSE_STEPS: async (payload, _sender, sendResponse) => {
+      try {
+        const intent = String(payload?.intent ?? '').trim();
+        if (!intent) { sendResponse({ success: false, error: 'intent required' }); return; }
+        // v2.74.1672 — hand the model the site's OWN capability declarations. A 4-step plan shipped live that
+        // needed 5, and the missing step ("read the instructions on each one") was missing because nothing told
+        // the decomposer that the warranty list carries a per-item DRILL. That is catalog knowledge, and no
+        // prompt wording substitutes for it — the same reason `proposePerspectives` is handed the form oracle
+        // rather than asked to guess which fields a form requires.
+        let groundFacts = '';
+        try {
+          const conns = Array.isArray(payload?.connections) ? payload.connections : [];
+          if (conns.length) groundFacts = renderGroundFacts(deriveGroundFacts(curatedRidesForConnections(conns, CONNECTOR_RECIPES)));
+        } catch { groundFacts = ''; }   // facts are an ENRICHMENT: without them the decomposer still runs, just blinder
+
+        const out = await AnthropicService.decomposeIntoSteps(intent, {
+          host: String(payload?.host ?? ''),
+          rejected: Array.isArray(payload?.rejected) ? payload.rejected : [],
+          edited: Array.isArray(payload?.edited) ? payload.edited : [],
+          groundFacts,
+        });
+        const steps = (out && Array.isArray(out.steps)) ? out.steps : [];
+        try {
+          const c = out && out.coverage;
+          Logger.info('background', `STEPS ▸ "${intent.slice(0, 40)}" → ${steps.length} step(s)${groundFacts ? ' +facts' : ' NO-FACTS'}${c ? ` (floor ${c.expectedMin}${c.underSplit ? ' — UNDER-SPLIT' : ''}${c.compound.length ? `, ${c.compound.length} still compound` : ''})` : ''}${out && out.dropped && out.dropped.length ? ` — ${out.dropped.length} dropped` : ''}`);
+          // v2.74.1673 — LOG THE STEPS THEMSELVES, not just the count.
+          //
+          // v1671 moved the step list off the chat bubble and onto the plan page, on the reasoning that the page
+          // is the review surface. True for reviewing — and it made the plan unobservable in EVERY export: the
+          // page is not exported, the bubble no longer lists them, and this line carried only a number. A live
+          // 5-step plan came back and the trace could not say what the five were.
+          //
+          // The count is the DECISION; the steps are the DISPOSITION (the v1660 rule). One line, so a fan-out
+          // cannot bury it the way 121 INVOKE lines bury everything else.
+          if (steps.length) Logger.info('background', `STEPS ▸ plan: ${steps.map((s, i) => `${i + 1}) ${String(s).slice(0, 60)}`).join(' | ')}`);
+        } catch { /* */ }
+        sendResponse({ success: true, steps, coverage: (out && out.coverage) || null, dropped: (out && out.dropped) || [] });
+      } catch (e) { sendResponse({ success: false, error: String((e && e.message) || e) }); }
+    },
+
     /**
      * The re-run gate (§5.7). Returns the item ids that ALREADY have an open case for this pipeline, so the
      * panel can mark them `already-open` instead of minting a second case for the same record.
