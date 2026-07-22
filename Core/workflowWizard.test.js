@@ -7,6 +7,7 @@ import {
   classifyStepOutcome, outcomeWantsTeach, outcomeIsTransient, stepProvenance,
   targetSplitSuggestion, intentSplitSuggestion, buildWorkflowSave, wizardProgress,
   pinnedClause, replayPlan, replayLine, isPrePinned, WORKFLOW_SCHEMA,
+  stepBarClass, barWantsTeach,
 } from './workflowWizard.js';
 
 describe('workflowWizard — classifyStepOutcome (§3: the empirical outcome ladder)', () => {
@@ -170,5 +171,46 @@ describe('workflowWizard — PP-0c: pinnedClause + replayPlan', () => {
   it('the replay line states pinned / loose / stale and whether it stopped', () => {
     assert.match(replayLine({ pinned: 2, loose: 1, stale: [], runnable: true }), /2 pinned · 1 from text/);
     assert.match(replayLine({ pinned: 0, loose: 0, stale: [{}], runnable: false }), /STALE.*STOPPED/);
+  });
+});
+
+// v2.74.1688 — the FOUR-way bar contract. Three of these share `engaged:false` and only one is a failure; the
+// page previously read "no ranStep" as proof of one and told the user to teach a step that had worked.
+describe('workflowWizard — stepBarClass: an empty result is a CLASS, not the absence of one', () => {
+  const at = (o) => stepBarClass({ phase: 'ran', ...o });
+
+  it('THE LIVE BUG: ran, found nothing → nothing-to-do, NOT cant-engage', () => {
+    assert.equal(at({ engaged: false, nothingToDo: true }), 'nothing-to-do');
+    assert.equal(barWantsTeach(at({ engaged: false, nothingToDo: true })), false,
+      'there is nothing to demonstrate — the step worked');
+  });
+
+  it('a genuine non-engagement is the ONLY teach door', () => {
+    assert.equal(at({ engaged: false }), 'cant-engage');
+    assert.equal(barWantsTeach('cant-engage'), true);
+    for (const b of ['completed', 'nothing-to-do', 'transient', 'running', 'idle']) assert.equal(barWantsTeach(b), false, b);
+  });
+
+  it('transient (signed out) still wins over both — sign-in fixes it, teaching does not', () => {
+    assert.equal(at({ engaged: false, transient: true }), 'transient');
+    // and it wins even when both flags are somehow set: the session is the blocker either way
+    assert.equal(at({ engaged: false, transient: true, nothingToDo: true }), 'transient');
+  });
+
+  it('an engaged step is completed — the human judges the result', () => {
+    assert.equal(at({ engaged: true }), 'completed');
+    assert.equal(at({ engaged: true, nothingToDo: true }), 'completed', 'a ranStep beats the flag');
+  });
+
+  it('phases other than "ran" never produce an outcome class', () => {
+    assert.equal(stepBarClass({ phase: 'running', engaged: false }), 'running');
+    for (const p of ['await-step', 'banked', 'plan', '']) assert.equal(stepBarClass({ phase: p, engaged: false }), 'idle', p);
+  });
+
+  it('degenerate input does not throw, and does not accidentally accuse', () => {
+    assert.doesNotThrow(() => stepBarClass());
+    assert.equal(stepBarClass(), 'idle');
+    // `engaged: null` means "not determined" — it must NOT fall through to the failure class
+    assert.equal(at({ engaged: null }), 'completed');
   });
 });

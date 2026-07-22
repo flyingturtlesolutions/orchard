@@ -70,7 +70,7 @@ import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — suc
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
-import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
+import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
@@ -5608,12 +5608,24 @@ function _wfRenderPage() {
     }
     mkPageBtn('Cancel', () => _wfCancel());
   } else if (w.phase === 'running' || w.phase === 'ran') {
-    const _transient = (w.phase === 'ran' && w.current && w.current.transient === true);   // v1624 — a signed-out (auth) stop: sign in + retry, never teach
-    const _missed = (w.phase === 'ran' && w.current && w.current.engaged === false && !_transient);   // v1616 — no ranStep = never ran (excluding the transient case)
+    // v2.74.1688 — the FOUR-way bar contract, decided by the tested pure classifier rather than by three inline
+    // booleans. `transient`, `nothing-to-do` and `cant-engage` all have engaged===false and only the last is a
+    // failure; the order that separates them is the load-bearing part, and it now lives somewhere tests can hold it.
+    const _bar = stepBarClass({
+      phase: w.phase,
+      engaged: (w.current && w.current.engaged !== undefined) ? w.current.engaged : null,
+      transient: !!(w.current && w.current.transient),
+      nothingToDo: !!(w.current && w.current.nothingToDo),
+    });
+    const _transient = _bar === 'transient';
+    const _nothing = _bar === 'nothing-to-do';
+    const _missed = _bar === 'cant-engage';
     status.innerHTML = (w.phase === 'running')
       ? `<div class="wf-page-sub">Running “${escHtml((w.current && w.current.text) || '')}”…</div>`
       : _transient
         ? '<div class="wf-page-sub">This step needs you signed in — use the sign-in button below, then run it again.</div>'
+        : _nothing
+          ? '<div class="wf-page-sub">Nothing to do — the step before this one came back empty, so there was nothing to act on. The step itself is fine; nothing was created or sent.</div>'
         : _missed
           ? '<div class="wf-page-sub">That step couldn’t run — the note below says why. Teach it with a quick demo, run it again, or change the step.</div>'
           : `<div class="wf-page-sub">Ran “${escHtml((w.current && w.current.text) || '')}”. Does the result below look right?</div>`;
@@ -5626,6 +5638,13 @@ function _wfRenderPage() {
         // v1624 — a transient auth stop: the chain's Sign-in + ↻ Try again bar rides IN the result above (its retry
         // re-runs THIS step now, v1624). The wizard adds only a change-the-step escape — never a "show me" (nothing
         // to teach; the session is the blocker).
+        mkPageBtn('✎ Change the step', () => { w.phase = 'await-step'; w.current = null; w.runMsg = null; _wfRenderPage(); });
+      } else if (_nothing) {
+        // No teach door: there is nothing to demonstrate — the step worked. The step DEFINITION is still good (a
+        // queue that is empty today fills tomorrow), so keeping it is the primary action, and re-running is
+        // offered without failure framing because the queue really can change under us.
+        mkPageBtn('✓ Keep the step', () => _wfBank(), true);
+        mkPageBtn('↻ Run it again', () => { void _wfRunStep(w.current.text); });
         mkPageBtn('✎ Change the step', () => { w.phase = 'await-step'; w.current = null; w.runMsg = null; _wfRenderPage(); });
       } else if (_missed) {
         // §3 — an unengaged step has no result to judge: the wizard's OWN teach door (the chain's inline offer is
@@ -5787,6 +5806,7 @@ async function _wfRunStep(stepText) {
   const _ranBefore = (w.st.ranSteps || []).length;
   const _outsBefore = (w.st.readouts || []).length;
   w.st.lastAuthStop = null;   // v1624 — clear the transient marker; only THIS run's signed-out branch re-sets it
+  w.st.lastEmptyStop = null;   // v1688 — same discipline: only THIS run's empty-prior stop may re-set it
   // v1624 — a signed-out step's "↻ Try again" (the chain's sign-in bar, which rides into this page) re-runs the
   // STEP through the wizard instead of firing a fresh front-door ask (the "retries out of the wizard" bug).
   try { await _orchRunChain(runMsg, { tabId: w.tabId, clauses: [{ text: stepText }], firstMatch: null, ask: stepText, state: w.st, offers: false, onRetry: () => { void _wfRunStep(stepText); } }); }
@@ -5797,6 +5817,7 @@ async function _wfRunStep(stepText) {
   const ran = _engaged ? ((w.st.ranSteps || [])[(w.st.ranSteps || []).length - 1] || null) : null;
   w.current.provenance = stepProvenance(ran, stepText, '', Date.now());
   w.current.engaged = _engaged;
+  w.current.nothingToDo = !_engaged && !!w.st.lastEmptyStop;   // v1688 — ran correctly, and the right answer was nothing
   w.current.transient = !_engaged && !!w.st.lastAuthStop;   // v1624 — signed-out ≠ can't-engage: a transient auth stop wants Sign-in + Retry, never "show me"
   // v1616 — the page shows THIS step's output: the chain's completion render joins the WHOLE shared st.readouts
   // (right for an organic one-message chain; wrong here — earlier steps already showed on their own pages).
@@ -6897,6 +6918,12 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       const _stop = emptyPriorStop({ text: clause.text, priorValue: st.lastValue, narrowedFrom: st.lastNarrowedFrom || 0 });
       if (_stop.stop) {
         try { _orchLog(`PIPELINE ▸ stop ${_stop.why} — "${String(clause.text).slice(0, 50)}" refers to a set the last step left empty; nothing dispatched`); } catch { /* */ }
+        // v2.74.1688 — MARK IT AS AN OUTCOME. A stop pushes no `ranStep`, and the wizard reads "no ranStep" as
+        // "never engaged" → the teach/retry/change bar under "That step couldn't run". But this step DID run: it
+        // ran, determined there was nothing to act on, and stopped — which is the correct answer, not a failure.
+        // Offering "Teach it with a quick demo" there invites a demo of a capability that already works.
+        // Mirrors `lastAuthStop`, the existing precedent for "not engaged, but not broken either".
+        st.lastEmptyStop = { text: clause.text, narrowedFrom: st.lastNarrowedFrom || 0, at: Date.now() };
         _setMessageBody(msg, _stop.message, { markdown: true });
         _orchFinalize(msg);
         return;

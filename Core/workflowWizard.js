@@ -35,6 +35,34 @@ export function outcomeWantsTeach(cls) { return cls === 'cant-engage'; }
 /** Is a class a soft, retry-worthy failure (surface a reason, offer retry — never teach)? PURE. */
 export function outcomeIsTransient(cls) { return cls === 'transient'; }
 
+/**
+ * Which BAR does a finished run get? PURE. v2.74.1688.
+ *
+ * The wizard's page had three classes and needed four. All of `transient`, `nothing-to-do` and `cant-engage` share
+ * `engaged === false` — no `ranStep` was pushed — but only ONE of them is a failure, and the page was treating the
+ * absence of a ranStep as proof of one.
+ *
+ * Live: step 1 "get all new warranty requests" banked with 0 rows (there genuinely were none), step 2 correctly hit
+ * the empty-prior stop, and the page rendered *"That step couldn't run — Teach it with a quick demo"* over a step
+ * that had worked perfectly. Offering to teach a working capability is worse than saying nothing: it tells the
+ * person the system is broken, and invites them to spend minutes demonstrating something already learned.
+ *
+ * ORDER IS LOAD-BEARING — the three `engaged:false` classes must be tested most-specific first, because the
+ * fallback is the failure. This is the §5.5 "name every class including the zeroes" rule applied to outcomes: an
+ * empty result is a class, not the absence of one.
+ */
+export function stepBarClass({ phase = '', engaged = null, transient = false, nothingToDo = false } = {}) {
+  if (phase === 'running') return 'running';
+  if (phase !== 'ran') return 'idle';
+  if (engaged === false && transient) return 'transient';       // signed out — sign in, then retry
+  if (engaged === false && nothingToDo) return 'nothing-to-do';  // ran, and the right answer was nothing
+  if (engaged === false) return 'cant-engage';                   // genuinely never ran — the ONLY teach door
+  return 'completed';                                            // a result for the human to judge
+}
+
+/** Only a genuine can't-engage earns the teach door. PURE — the guard against re-collapsing the four classes. */
+export function barWantsTeach(bar) { return bar === 'cant-engage'; }
+
 // ── the chain→record bridge: a `st.ranSteps` entry ({capabilityId, kind, clause, intent, groundId?}) → the
 // body-blind provenance the workflow record stores (§10.A / §11: method is DISPLAY, never a binding; NO values).
 /**
