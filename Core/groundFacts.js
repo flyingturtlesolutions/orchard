@@ -86,7 +86,24 @@ export function deriveGroundFacts(recipes) {
     const name = _str(r.name);
     if (!name) continue;
 
-    if (r.write === true) { writes.push({ host, what: name }); continue; }
+    if (r.write === true) {
+      // v2.74.1683 — a write's PRECONDITIONS, derived from its own param declarations.
+      //
+      // `{ name: 'customer_gid', required: true, gid: 'Customer' }` says three things at once: this write cannot
+      // run without it, it is an ID, and the id is of a Customer — i.e. **it comes from a lookup, and a lookup
+      // can miss**. That is the fact behind "isn't creating a profile if one doesn't exist implied?": it IS
+      // implied, by the catalog, and the decomposer simply could not see it.
+      //
+      // Surfaced, never inserted. The prompt still forbids adding steps the user did not ask for, so this makes
+      // the model PROPOSE the missing step rather than the code inject it — and the plan gate is where a person
+      // accepts or drops it. A silent extra WRITE is exactly what the whole design refuses.
+      const needs = _arr(r.params)
+        .filter((p) => p && p.required && p.gid)
+        .map((p) => _str(p.gid))
+        .filter(Boolean);
+      writes.push({ host, what: name, needs: [...new Set(needs)] });
+      continue;
+    }
 
     // A LIST with a declared per-item drill — the fact that produces a missing step when it is unknown.
     if (r.listUrl || r.drill) {
@@ -158,7 +175,17 @@ export function renderGroundFacts(facts, { max = 6 } = {}) {
   if (ws.length) {
     lines.push('- Things that CHANGE something here (each is its own final step, never bundled with the lookup');
     lines.push('  that found its target):');
-    for (const w of ws) lines.push(`    · ${w.what}`);
+    for (const w of ws) lines.push(`    · ${w.what}${_arr(w.needs).length ? ` — needs ${w.needs.join(' and ')} first` : ''}`);
+  }
+
+  // The precondition rule, stated once and explicitly, because it is the one that produces a step the user did
+  // not say out loud. It must read as "tell them", not as "do it".
+  const needy = ws.filter((w) => _arr(w.needs).length);
+  if (needy.length) {
+    lines.push('- A write that "needs X first" cannot run without that X, and the X comes from a LOOKUP — which');
+    lines.push('  can find nothing. If the request does not say what to do when the lookup finds nothing, SAY SO');
+    lines.push('  in a step of its own (e.g. "create the missing ones first") rather than assuming it, and rather');
+    lines.push('  than silently producing a plan whose last step will fail for half the rows.');
   }
 
   return lines.join('\n');

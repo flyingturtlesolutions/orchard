@@ -4260,12 +4260,19 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
   // is read from the declaration rather than guessed from the ask (the v1617 rule: a declaration beats a guess).
   // v2.74.1682 — use the TESTED preflight rather than the inline duplicate that was here. It distinguishes
   // no-candidates from no-declaration, which the two branches below already needed to tell apart.
-  const _pf = writePreflight({ misses, sourceLeg: srcLeg });
+  const _pf = writePreflight({ misses, sourceLeg: srcLeg, want: goal });
   const targetId = _pf.ok ? _pf.targetId : '';
   if (!targetId) {
-    _setMessageBody(msg, 'I don’t have a declared way to turn these rows into new records — the source doesn’t say which create they fill, and I won’t invent one.', { markdown: true });
+    // v2.74.1683 — say WHICH failure. `ambiguous`/`target-mismatch` mean the declaration exists but does not
+    // cover what was asked; `no-declaration` means the source declares no write at all. Collapsing them would
+    // send a user to fix the wrong thing.
+    const _known = (_pf.targets || []).map((t) => String(t).replace(/_/g, ' ')).join(', ');
+    _setMessageBody(msg, _pf.reason === 'no-declaration'
+      ? 'I don’t have a declared way to turn these rows into new records — the source doesn’t say which create they fill, and I won’t invent one.'
+      : `That’s not a write these rows declare. From here they can fill: **${escHtml(_known)}**. Say which one, or add the mapping for the one you want.`,
+      { markdown: true });
     _orchFinalize(msg);
-    try { _orchLog('WRITE ▸ no writeMap on the source leg — refused to infer a target'); } catch { /* */ }
+    try { _orchLog(`WRITE ▸ ${_pf.reason} — wanted "${String(goal).slice(0, 40)}", declared [${(_pf.targets || []).join(', ')}]`); } catch { /* */ }
     return { ok: false, gap: true };
   }
   const createLeg = await _rideDrillLeg(srcLeg, targetId, (srcLeg.tool && srcLeg.tool.groundId) || null);

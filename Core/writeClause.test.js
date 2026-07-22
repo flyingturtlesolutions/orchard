@@ -61,12 +61,39 @@ describe('writeClause — preflight fails EARLY, with a distinguishable reason',
     assert.equal(r.reason, 'no-declaration');
   });
 
-  it('a declared target passes, and names it', () => {
+  it('a SINGLE declared target passes without needing to be named', () => {
     const r = writePreflight({ misses: [{ row: {} }, { row: {} }], sourceLeg: leg({ shopify_create_customer: { email: 'X' } }) });
     assert.equal(r.ok, true);
     assert.equal(r.targetId, 'shopify_create_customer');
     assert.deepEqual(r.declared, { email: 'X' });
     assert.equal(r.count, 2);
+  });
+
+  it('THE BUG: asking about a DRAFT ORDER must not answer about a CUSTOMER', () => {
+    // The original returned Object.keys(wmap)[0] regardless of what was asked, so a row declaring only
+    // `shopify_create_customer` answered `ok:true` to "create draft order" — and the caller would have filled
+    // customer fields and created the wrong kind of record. A confident answer about a different write is worse
+    // than an error.
+    const r = writePreflight({ misses: [{ row: {} }], sourceLeg: leg({ shopify_create_customer: {} }), want: 'a draft order' });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'target-mismatch');
+    assert.deepEqual(r.targets, ['shopify_create_customer']);
+  });
+
+  it('matches THEIR OWN WORDS against the declared targets — never a leg id from the model', () => {
+    const src = leg({ shopify_create_customer: { a: 1 }, shopify_create_order: { b: 2 } });
+    assert.equal(writePreflight({ misses: [{ row: {} }], sourceLeg: src, want: 'a draft order' }).targetId, 'shopify_create_order');
+    assert.equal(writePreflight({ misses: [{ row: {} }], sourceLeg: src, want: 'create a customer profile' }).targetId, 'shopify_create_customer');
+  });
+
+  it('SEVERAL targets and no match → AMBIGUOUS, never a guess', () => {
+    const src = leg({ shopify_create_customer: {}, shopify_create_order: {} });
+    const r = writePreflight({ misses: [{ row: {} }], sourceLeg: src, want: 'something else entirely' });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'ambiguous');
+    assert.equal(r.targets.length, 2);
+    // and with NOTHING said, several targets is still ambiguous — the first is not a default
+    assert.equal(writePreflight({ misses: [{ row: {} }], sourceLeg: src }).reason, 'ambiguous');
   });
 
   it('degenerate input does not throw', () => {

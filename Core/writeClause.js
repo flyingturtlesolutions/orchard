@@ -65,11 +65,35 @@ export function writeTally({ created = 0, queued = 0, blocked = 0, unfillable = 
  * set of cases for work that was never possible. The three reasons are distinct on purpose: no candidates is a
  * clean "nothing to do", a missing declaration is a catalog gap, and an unavailable target is a connection gap.
  */
-export function writePreflight({ misses = [], sourceLeg = null } = {}) {
+export function writePreflight({ misses = [], sourceLeg = null, want = '' } = {}) {
   const rows = Array.isArray(misses) ? misses : [];
   if (!rows.length) return { ok: false, reason: 'no-candidates' };
   const wmap = (sourceLeg && sourceLeg.tool && sourceLeg.tool.writeMap) || null;
-  const targetId = (wmap && typeof wmap === 'object') ? Object.keys(wmap)[0] : '';
-  if (!targetId) return { ok: false, reason: 'no-declaration' };
+  const ids = (wmap && typeof wmap === 'object') ? Object.keys(wmap) : [];
+  if (!ids.length) return { ok: false, reason: 'no-declaration' };
+
+  // v2.74.1683 — DISAMBIGUATE, do not take the first.
+  //
+  // The original took `Object.keys(wmap)[0]`, which is correct only while a source declares exactly one write
+  // target. Asked about a DRAFT ORDER against a row that declares `shopify_create_customer`, it returned
+  // `ok:true, targetId:'shopify_create_customer'` — a confident answer about a different write. That is worse
+  // than an error: the caller would have filled customer fields and created the wrong kind of record.
+  //
+  // `want` is the user's OWN WORDS ("a draft order"), never a leg id — the role separation holds. Code matches
+  // those words against the declared target ids; with several targets and no match it reports AMBIGUOUS rather
+  // than guessing, because guessing here writes something nobody asked for.
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const w = norm(want);
+  let targetId = '';
+  if (ids.length === 1 && !w) targetId = ids[0];
+  else if (w) {
+    const wt = w.split(/\s+/).filter((t) => t.length > 2);
+    targetId = ids.find((id) => { const t = norm(id); return wt.length && wt.every((x) => t.includes(x)); })
+      || ids.find((id) => { const t = norm(id); return wt.some((x) => t.includes(x)); })
+      || '';
+    if (!targetId) return { ok: false, reason: ids.length === 1 ? 'target-mismatch' : 'ambiguous', wanted: String(want), targets: ids };
+  } else {
+    return { ok: false, reason: 'ambiguous', wanted: '', targets: ids };
+  }
   return { ok: true, targetId, declared: wmap[targetId] || null, count: rows.length };
 }

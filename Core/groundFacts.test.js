@@ -139,3 +139,42 @@ describe('groundFacts — shapes the real catalog actually uses', () => {
     assert.deepEqual(f.lists[0].joinsOn, ['Addr']);
   });
 });
+
+// ── v2.74.1683 — write PRECONDITIONS: the answer to "isn't creating a profile implied?" ───────────────────────
+describe('groundFacts — a write\'s preconditions come from its own param declarations', () => {
+  const RECIPES2 = [
+    { id: 'shopify_create_customer', name: 'Create a Shopify customer', origin: 'admin.shopify.com', write: true,
+      params: [{ name: 'first_name', required: true }, { name: 'email' }] },
+    { id: 'shopify_create_order', name: 'Create a Shopify draft order', origin: 'admin.shopify.com', write: true,
+      params: [{ name: 'customer_gid', required: true, gid: 'Customer' }, { name: 'line_items', required: true }] },
+  ];
+
+  it('a required param carrying a `gid` IS the precondition — it says "this comes from a lookup"', () => {
+    const f = deriveGroundFacts(RECIPES2);
+    const order = f.writes.find((w) => /draft order/.test(w.what));
+    assert.deepEqual(order.needs, ['Customer'], 'customer_gid required + gid:Customer ⇒ needs a Customer first');
+    const cust = f.writes.find((w) => /create a shopify customer/i.test(w.what));
+    assert.deepEqual(cust.needs, [], 'a write with no id-params needs nothing looked up first');
+  });
+
+  it('the block SURFACES the precondition and the missing-lookup case', () => {
+    const block = renderGroundFacts(deriveGroundFacts(RECIPES2));
+    assert.match(block, /Create a Shopify draft order — needs Customer first/);
+    assert.match(block, /comes from a LOOKUP — which/);
+    assert.match(block, /SAY SO/);
+    assert.match(block, /create the missing ones first/);
+  });
+
+  it('it tells the model to PROPOSE the step, never to assume it', () => {
+    // The prompt still forbids adding steps the user did not ask for. This makes the gap VISIBLE so the model
+    // raises it and the plan gate decides — a silent extra WRITE is what the whole design refuses.
+    const block = renderGroundFacts(deriveGroundFacts(RECIPES2));
+    assert.match(block, /rather than assuming it/);
+    assert.ok(!/create it automatically|always create/i.test(block));
+  });
+
+  it('no needy write → no precondition paragraph', () => {
+    const block = renderGroundFacts(deriveGroundFacts([RECIPES2[0]]));
+    assert.ok(!/comes from a LOOKUP/.test(block));
+  });
+});
