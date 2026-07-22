@@ -139,7 +139,11 @@ async function _tick() {
     }
   }
 
-  if (scanned) {
+  // Log the summary ONLY on a real EVENT (a fire / park / disarm / overlap-skip). A standing state — a workflow
+  // that merely HAS a schedule, or a tier-'panel' one that stays due until the panel runs it — must not emit a
+  // line every 5-min tick, or it spams the decisions log (`CADENCE ▸` is in _DECISION_RE, so gc would fill with
+  // "0 fired, 0 parked …" forever). The panel surfaces standing-due; the scan need only speak when it acts.
+  if (fired || parked || disarmed || failedFire || inflight) {
     Logger.info('cadence', `CADENCE ▸ scan: ${scanned} triggered — ${fired} fired, ${parked} parked, ${deferred} deferred(panel), ${disarmed} disarmed, ${inflight} in-flight, ${failedFire} failed`);
   }
 }
