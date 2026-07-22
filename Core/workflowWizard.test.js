@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   classifyStepOutcome, outcomeWantsTeach, outcomeIsTransient, stepProvenance,
   targetSplitSuggestion, intentSplitSuggestion, buildWorkflowSave, wizardProgress,
+  pinnedClause, replayPlan, replayLine, isPrePinned, WORKFLOW_SCHEMA,
 } from './workflowWizard.js';
 
 describe('workflowWizard — classifyStepOutcome (§3: the empirical outcome ladder)', () => {
@@ -91,5 +92,83 @@ describe('workflowWizard — buildWorkflowSave + wizardProgress (§2.4/§10.E)',
     assert.deepEqual(wizardProgress([STEP('a', true), STEP('b', true)]), { total: 2, approved: 2, unproven: 0, canSaveReady: true, canSaveDraft: false });
     assert.deepEqual(wizardProgress([STEP('a', true), STEP('b', false)]), { total: 2, approved: 1, unproven: 1, canSaveReady: false, canSaveDraft: true });
     assert.equal(wizardProgress([STEP('a', true)]).canSaveReady, false, 'one step is not a workflow');
+  });
+});
+
+// ── PP-0c (v2.74.1666) — clause pinning: bank the RESOLUTION alongside the phrasing (§8.3 + §10.4) ────────────
+describe('workflowWizard — PP-0c: pinnedClause + replayPlan', () => {
+  it('stepProvenance now banks the resolution, not only the phrasing', () => {
+    const p = stepProvenance({ kind: 'connector', capabilityId: 'me.zendesk.get_ticket', intent: 'Get a ticket' }, 'get ticket 5', '', 100);
+    assert.equal(p.clause.kind, 'connector');
+    assert.equal(p.clause.capabilityId, 'me.zendesk.get_ticket');
+    assert.equal(p.text, 'get ticket 5', 'the phrasing is still authoritative as the label');
+  });
+
+  it('a step that engaged NOTHING pins no clause — absence is legitimate, not a failure', () => {
+    assert.equal(pinnedClause(null), null);
+    assert.equal(pinnedClause({}), null);
+    assert.equal(stepProvenance(null, 'some step').clause, undefined);
+  });
+
+  it('pins VALUES never — the body-blind rule (§11) is unchanged', () => {
+    const p = stepProvenance({ kind: 'connector', capabilityId: 'c1', bindings: { email: 'jane@x.co' } }, 's');
+    assert.equal(JSON.stringify(p).includes('jane@x.co'), false);
+  });
+
+  it('buildWorkflowSave stamps the schema, so "banked before the feature" is not inferred from field presence', () => {
+    const saved = buildWorkflowSave({ steps: [{ text: 'a', approved: true }, { text: 'b', approved: true }] }, 1);
+    assert.equal(saved.schema, WORKFLOW_SCHEMA);
+    assert.equal(isPrePinned(saved), false);
+    assert.equal(isPrePinned({ subAsks: ['a', 'b'] }), true, 'an unstamped legacy record is pre-pinned');
+  });
+
+  it('replay PREFERS the pinned clause and reports how many were loose', () => {
+    const wf = {
+      subAsks: ['step one', 'step two'],
+      steps: [{ text: 'step one', clause: { kind: 'connector', capabilityId: 'c1' } }, { text: 'step two' }],
+    };
+    const plan = replayPlan(wf, () => true);
+    assert.equal(plan.pinned, 1);
+    assert.equal(plan.loose, 1);
+    assert.equal(plan.runnable, true);
+    assert.equal(plan.clauses.length, 2);
+    assert.deepEqual(plan.clauses[0].pinned, { kind: 'connector', capabilityId: 'c1' });
+    assert.equal(plan.clauses[1].pinned, undefined, 'a text fallback carries no pin');
+  });
+
+  it('THE §10.4 CASE: a clause that no longer resolves STOPS the run — it does NOT fall back to text', () => {
+    const wf = {
+      subAsks: ['step one', 'step two'],
+      steps: [{ text: 'step one', clause: { kind: 'connector', capabilityId: 'gone' } }, { text: 'step two' }],
+    };
+    const plan = replayPlan(wf, (c) => c.capabilityId !== 'gone');
+    assert.equal(plan.runnable, false);
+    assert.equal(plan.stale.length, 1);
+    assert.equal(plan.stale[0].index, 0);
+    assert.equal(plan.clauses.some((c) => c.text === 'step one'), false,
+      'falling back here would be the fail-open: the workflow keeps running and quietly does something else');
+  });
+
+  it('a record with NO clauses at all replays entirely from text and stays runnable', () => {
+    const plan = replayPlan({ subAsks: ['a', 'b'], steps: [{ text: 'a' }, { text: 'b' }] }, () => false);
+    assert.equal(plan.runnable, true, 'an ABSENT clause is expected for a legacy record — only a broken PIN stops');
+    assert.equal(plan.loose, 2);
+    assert.equal(plan.pinned, 0);
+  });
+
+  it('with no resolver injected, pins are trusted (the caller opted out of drift checking)', () => {
+    const wf = { subAsks: ['a'], steps: [{ text: 'a', clause: { kind: 'connector', capabilityId: 'c1' } }] };
+    assert.equal(replayPlan(wf).pinned, 1);
+  });
+
+  it('degenerate records do not throw', () => {
+    for (const bad of [null, undefined, {}, { subAsks: null }, { subAsks: ['a'], steps: null }]) {
+      assert.doesNotThrow(() => replayPlan(bad, () => true));
+    }
+  });
+
+  it('the replay line states pinned / loose / stale and whether it stopped', () => {
+    assert.match(replayLine({ pinned: 2, loose: 1, stale: [], runnable: true }), /2 pinned · 1 from text/);
+    assert.match(replayLine({ pinned: 0, loose: 0, stale: [{}], runnable: false }), /STALE.*STOPPED/);
   });
 });

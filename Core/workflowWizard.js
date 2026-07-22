@@ -47,7 +47,39 @@ export function stepProvenance(ranStep, stepText, host = '', now = 0) {
   const r = (ranStep && typeof ranStep === 'object') ? ranStep : {};
   const kind = _str(r.kind) || null;                                  // 'ride'|'drive'|'navigate'|'fanout'|capability-kind
   const name = _str(r.intent) || _str(r.clause) || null;             // a human label, NOT a captured value
-  return { text: _str(stepText) || _str(r.clause), via: { kind, host: _str(host) || null, name: name ? name.slice(0, 80) : null }, bankedAt: Number.isFinite(now) ? now : 0 };
+  const out = { text: _str(stepText) || _str(r.clause), via: { kind, host: _str(host) || null, name: name ? name.slice(0, 80) : null }, bankedAt: Number.isFinite(now) ? now : 0 };
+  // PP-0c (v2.74.1666, DESIGN_peritem_pipeline.md §8.3) — BANK THE RESOLUTION, not only the phrasing.
+  //
+  // §8.1's finding: all three replay sites do `wf.subAsks.map((t) => ({ text: t }))`, so `subAsks` are STRINGS
+  // and replay RE-INTERPRETS PROSE every run. `steps[]` records the resolution site already, but nothing reads
+  // it at replay time — it is display and audit only. Direct evidence that this is not theoretical: the ask
+  // "for each result, read task instructions" classified as `fieldread` in one trace and `decompose` in another.
+  // Same words, different plan. A workflow banked on the first would silently take the second path later.
+  //
+  // What is pinned is the PLAN (which leg / which clause kind), never captured VALUES — §11's body-blind rule is
+  // unchanged, and this adds no new data to the record beyond what `via` already implies.
+  const pin = pinnedClause(r);
+  if (pin) out.clause = pin;
+  return out;
+}
+
+/**
+ * The resolvable half of a `ranSteps` entry — what the step RESOLVED TO, as opposed to what it was called.
+ * Returns null when the step engaged nothing worth pinning (a nav, a miss), which is a legitimate absence:
+ * §8.4 notes not every step type has a clause form, and the record must say WHICH rather than leave a reader
+ * to guess.
+ */
+export function pinnedClause(ranStep) {
+  const r = (ranStep && typeof ranStep === 'object') ? ranStep : null;
+  if (!r) return null;
+  const kind = _str(r.kind);
+  const capabilityId = _str(r.capabilityId);
+  if (!kind && !capabilityId) return null;
+  return {
+    kind: kind || null,
+    capabilityId: capabilityId || null,
+    ...(r.groundId ? { groundId: _str(r.groundId) } : {}),
+  };
 }
 
 // ── §10.C — SPLIT suggestions. TARGET split is capture-time (deterministic, from the resolver's system tokens);
@@ -91,7 +123,74 @@ export function buildWorkflowSave(w, now = 0) {
     steps: steps.map((s) => (s && s.provenance) ? s.provenance : { text: _str(s && s.text), via: { kind: null, host: null, name: null }, bankedAt: 0 }),
     status: allApproved ? 'ready' : 'draft',
     qualifiedAt: allApproved ? (Number.isFinite(now) ? now : 0) : 0,
+    // PP-0c (v2.74.1666) — §8.4's migration note: "a record banked before this change and one banked after are
+    // not equally trustworthy, and nothing currently distinguishes them. Consider stamping the schema version
+    // rather than inferring from field presence." Inferring from `clause`'s presence would conflate "banked
+    // before the feature existed" with "banked after, by a step that legitimately has no clause form".
+    schema: WORKFLOW_SCHEMA,
   };
+}
+
+/** Record schema. 1 = phrasing only (pre-PP-0c). 2 = steps may carry a pinned `clause`. */
+export const WORKFLOW_SCHEMA = 2;
+
+/** Was this record banked before clause-pinning existed? Then a missing clause is EXPECTED, not a drift signal. */
+export function isPrePinned(wf) {
+  return !wf || Number(wf.schema || 1) < 2;
+}
+
+/**
+ * PP-0c (v2.74.1666) — build the REPLAY PLAN for a saved workflow. PURE.
+ *
+ * §8.3: replay prefers the banked clause and falls back to re-interpreting `text` when absent. §10.4 completes
+ * that, and the completion is the whole point:
+ *
+ *   · clause ABSENT (banked before this feature) → fall back to text. Expected, fine, and counted.
+ *   · clause PRESENT but NO LONGER RESOLVABLE (the leg was re-declared, the ground disconnected) → **STOP AND
+ *     FLAG.** Never silently re-interpret.
+ *
+ * The second case is the hazard, because the obvious implementation reuses the same fallback for both and that
+ * is a fail-open of exactly the v1639 kind: the workflow keeps running and quietly does something else, with no
+ * signal. A drift check that can be bypassed by a fallback is not a drift check.
+ *
+ * @param {object} wf                         the saved workflow record
+ * @param {(clause:object) => boolean} canResolve  does this pinned clause still resolve? (injected — the caller
+ *                                            owns the palette; this module stays pure)
+ * @returns {{clauses:Array, pinned:number, loose:number, stale:Array, runnable:boolean}}
+ *          `stale` entries STOP the run; `loose` counts steps replayed from text (expected for old records).
+ */
+export function replayPlan(wf, canResolve = null) {
+  const subAsks = Array.isArray(wf && wf.subAsks) ? wf.subAsks : [];
+  const steps = Array.isArray(wf && wf.steps) ? wf.steps : [];
+  const clauses = [];
+  const stale = [];
+  let pinned = 0; let loose = 0;
+
+  for (let i = 0; i < subAsks.length; i++) {
+    const text = _str(subAsks[i]);
+    const step = steps[i] && typeof steps[i] === 'object' ? steps[i] : null;
+    const clause = step && step.clause && typeof step.clause === 'object' ? step.clause : null;
+
+    if (!clause) { loose++; clauses.push({ text }); continue; }
+
+    const ok = typeof canResolve === 'function' ? !!canResolve(clause) : true;
+    if (!ok) {
+      stale.push({ index: i, text, clause });
+      continue;                                   // NOT pushed as loose text — that would be the silent re-interpret
+    }
+    pinned++;
+    clauses.push({ text, pinned: clause });
+  }
+
+  return { clauses, pinned, loose, stale, runnable: stale.length === 0 };
+}
+
+/** The one-line replay disposition (§5.5). Says what was pinned, what fell back, and what stopped the run. */
+export function replayLine(plan) {
+  const p = plan || { pinned: 0, loose: 0, stale: [] };
+  const bits = [`${p.pinned} pinned`, `${p.loose} from text`];
+  if (p.stale && p.stale.length) bits.push(`${p.stale.length} STALE`);
+  return `WORKFLOW ▸ replay — ${bits.join(' · ')}${p.runnable ? '' : ' → STOPPED (a banked step no longer resolves)'}`;
 }
 
 /** Wizard progress: can it save, and why not. PURE (drives the Save button's enabled state + copy). */

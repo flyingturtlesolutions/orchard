@@ -70,7 +70,7 @@ import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — suc
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
-import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
+import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
@@ -3898,6 +3898,42 @@ function _branchScopeFor(item) {
   return { scope: s, collisions };
 }
 
+// PP-0c (v2.74.1666, DESIGN_peritem_pipeline.md §8.3 + §10.4) — the ONE replay-plan builder every workflow
+// replay site goes through.
+//
+// Before this, all three sites did `wf.subAsks.map((t) => ({ text: t }))` — subAsks are STRINGS, so replay
+// RE-INTERPRETED PROSE on every run. If interpretation shifted (a prompt edit, a model change, a differently
+// populated palette) the workflow did something different, with no edit and no signal. Evidence it is not
+// theoretical: the ask "for each result, read task instructions" classified as `fieldread` in one trace and
+// `decompose` in another — same words, different plan.
+//
+// The resolver is what makes §10.4's distinction enforceable: a clause that is ABSENT falls back to text
+// (expected for a record banked before pinning), while a clause that is PRESENT and no longer resolves STOPS
+// the run. Reusing the fallback for both would be a fail-open of exactly the v1639 kind.
+function _wfReplayPlan(wf) {
+  const _known = new Set();
+  try { for (const l of _boundConnections()) { if (l && l.key) _known.add(String(l.key)); } } catch { /* */ }
+  const plan = replayPlan(wf, (c) => {
+    if (!c) return false;
+    if (!c.capabilityId) return true;              // a kind-only pin (map/fieldRead/branch) needs no leg
+    return _known.size ? _known.has(String(c.capabilityId)) : true;   // no palette read → do not manufacture drift
+  });
+  try { _orchLog(replayLine(plan)); } catch { /* */ }
+  return plan;
+}
+
+// Render the honest stop when a banked step no longer resolves. Never silently re-interprets.
+function _wfReplayStopped(msg, wf, plan) {
+  const lines = plan.stale.map((s) => `• step ${s.index + 1} — “${escHtml(s.text)}” (was ${escHtml(s.clause.kind || 'a saved step')})`);
+  _setMessageBody(msg, [
+    `**${escHtml(wf.name || wf.ask || 'This workflow')}** can’t replay as saved — ${plan.stale.length} step${plan.stale.length === 1 ? '' : 's'} no longer resolve${plan.stale.length === 1 ? 's' : ''} to what ${plan.stale.length === 1 ? 'it was' : 'they were'} banked against:`,
+    ...lines,
+    '',
+    'I’ve stopped rather than re-interpreting the wording — that’s how a workflow quietly starts doing something else. Re-record the step, or run it by hand once and I’ll re-bank what it resolves to.',
+  ].join('\n'), { markdown: true });
+  _orchFinalize(msg);
+}
+
 async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
   _walkAbortFlag.requested = false;
   _ilBusy(msg, true);
@@ -4947,7 +4983,7 @@ function _wfAbandon() {
   // page; ＋ Workflow on that desk resumes them. Fire-and-forget — the abandon path must never block a send.
   try {
     if (w && w.appId && Array.isArray(w.steps) && w.steps.length >= 2) {
-      const payload = buildWorkflowSave({ ask: w.name || w.steps[0].text, name: w.name || null, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
+      const payload = buildWorkflowSave({ ask: w.ask || w.name || w.steps[0].text, name: w.name || null, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
       if (payload) {
         const draft = { ...payload, status: 'draft', qualifiedAt: 0 };
         if (w.draftId) updateWorkflow(w.appId, w.draftId, draft).catch(() => {});
@@ -5043,8 +5079,28 @@ function _wfRenderPage() {
   const mkPageBtn = (label, on, primary) => { const b = document.createElement('button'); b.className = `suggestion-card wf-page-btn${primary ? ' wf-primary' : ''}`; b.innerHTML = `<div class="suggestion-card-name">${escHtml(label)}</div>`; b.addEventListener('click', on); bar.appendChild(b); };
 
   if (w.phase === 'await-step') {
-    status.innerHTML = `<div class="wf-page-sub">${n ? `Step ${n + 1}` : 'First step'} — type what this step should do in the message box below, then send. One step = one result you can look at and approve.</div>`;
-    try { $('chat-input').placeholder = n ? 'Type the next step…' : 'Type the first step…'; $('chat-input').focus(); } catch { /* */ }
+    // PP-0c-gen (v2.74.1666) — a SUGGESTED next step, when the wizard was seeded from an intent.
+    //
+    // Generation seeds the QUEUE; it never seeds `steps`. Every suggested step still has to run and be approved
+    // one at a time, which is what banks its clause (PP-0c) and keeps §8.2's objection answered: the danger was
+    // never generated prose as such, it was generated prose with "no author who knows what was meant". Here the
+    // author is still the person reading this line before pressing the button.
+    const _next = _str0(w.queue && w.queue.length ? w.queue[0] : '');
+    status.innerHTML = _next
+      ? `<div class="wf-page-sub">${n ? `Step ${n + 1}` : 'First step'}, suggested from what you asked for — read it, edit it if it’s not right, then run it. Each step still gets proven on its own.</div>`
+      : `<div class="wf-page-sub">${n ? `Step ${n + 1}` : 'First step'} — type what this step should do in the message box below, then send. One step = one result you can look at and approve.</div>`;
+    try {
+      const _inp = $('chat-input');
+      if (_inp) {
+        _inp.placeholder = n ? 'Type the next step…' : 'Type the first step…';
+        if (_next && !_str0(_inp.value)) { _inp.value = _next; try { _autosizeInput(); } catch { /* */ } }
+        _inp.focus();
+      }
+    } catch { /* */ }
+    if (_next) {
+      mkPageBtn(`▶ Run this step`, () => { const q = (w.queue || []).shift(); void _wfRunStep(_str0(q)); }, true);
+      mkPageBtn('Skip it', () => { (w.queue || []).shift(); try { const i2 = $('chat-input'); if (i2) i2.value = ''; } catch { /* */ } _wfRenderPage(); });
+    }
     mkPageBtn('Cancel', () => _wfCancel());
   } else if (w.phase === 'running' || w.phase === 'ran') {
     const _transient = (w.phase === 'ran' && w.current && w.current.transient === true);   // v1624 — a signed-out (auth) stop: sign in + retry, never teach
@@ -5104,6 +5160,61 @@ async function _wfConsumeInput(text) {
   const t = String(text || '').trim();
   if (w.phase === 'await-name') { if (t) { w.name = t; } await _wfDoSave(); return; }
   if (w.phase === 'await-step') { if (!t) { _wfRenderPage(); return; } await _wfRunStep(t); return; }
+  _wfRenderPage();
+}
+
+/** Local trim helper — chat.js has no `_str`, and assuming one is how v1663's ReferenceErrors happened. */
+function _str0(v) { return typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()); }
+
+/**
+ * PP-0c-gen (v2.74.1666) — INTENT-DRIVEN workflow creation. `workflow: <what you want>`.
+ *
+ * §8 gated this behind PP-0c and the gate is now satisfied, so the shape it demanded is the shape built here:
+ * generation produces SUGGESTED STEPS ONLY. It seeds `w.queue`, never `w.steps`, so every step still runs and is
+ * approved individually through the existing wizard — which is what banks its resolved clause.
+ *
+ * That distinction is the whole safety argument. §8.2's objection to generation was not "prose is bad", it was
+ * that generated prose replayed per run has "no author who knows what was meant". Under PP-0c the author is the
+ * person who read each suggestion and watched it run, and what gets replayed is the resolution they approved —
+ * not the sentence a model wrote.
+ */
+async function _startWorkflowFromIntent(intent) {
+  const goal = _str0(intent);
+  if (!goal) { await _startWorkflowWizard(); return; }
+  const m = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(m, 'Working out the steps…');
+
+  // Prefer the front door's own decompose verdict (it sees the palette); fall back to the deterministic splitter
+  // so a model outage degrades to "type the steps yourself" rather than to nothing.
+  let steps = [];
+  try {
+    const tab = await _orchActiveTab();
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId: (tab && typeof tab.id === 'number') ? tab.id : null });
+    const d = (r && r.success !== false && r.decision) ? normalizeInterpretDecision(r.decision, { retrieved: Array.isArray(r.retrieved) ? r.retrieved : [] }) : null;
+    if (d && Array.isArray(d.subAsks) && d.subAsks.length >= 2) steps = intentSplitSuggestion(d.subAsks).steps;
+  } catch { /* fall through to the deterministic split */ }
+  if (steps.length < 2) { try { steps = decomposeAsk(goal).map(_str0).filter(Boolean); } catch { steps = []; } }
+
+  try { _orchLog(`WORKFLOW ▸ intent "${goal.slice(0, 50)}" → ${steps.length} suggested step(s)`); } catch { /* */ }
+
+  if (steps.length < 2) {
+    _setMessageBody(m, `I couldn’t break that into separate steps — it reads like one action. Say it as a sequence (“get X, then do Y”), or start an empty workflow with \`new workflow\` and type the steps yourself.`, { markdown: true });
+    _orchFinalize(m);
+    return;
+  }
+
+  await _startWorkflowWizard();
+  const w = _wfWizard;
+  if (!w) return;
+  w.ask = goal;                         // the UMBRELLA intent — recall matches against this, not the name
+  w.queue = steps.slice(0, 8);          // suggestions only; `steps` stays empty until each one is PROVEN
+  _setMessageBody(m, [
+    `I’d do that in **${w.queue.length}** steps:`,
+    ...w.queue.map((s, i) => `${i + 1}. ${escHtml(s)}`),
+    '',
+    '_These are suggestions. Each one still runs and gets your approval before it’s saved — that’s what pins it to a real result instead of a sentence._',
+  ].join('\n'), { markdown: true });
+  _orchFinalize(m);
   _wfRenderPage();
 }
 
@@ -5181,7 +5292,7 @@ function _wfSaveStart() {
 
 async function _wfDoSave() {
   const w = _wfWizard; if (!w) return;
-  const payload = buildWorkflowSave({ ask: w.name, name: w.name, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
+  const payload = buildWorkflowSave({ ask: w.ask || w.name, name: w.name, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
   if (!payload) { w.phase = 'banked'; _wfRenderPage(); return; }
   let ok = false;
   const _appId = w.appId || _memoryId();   // v1620 — the PINNED desk's key (w.appId captured at birth)
@@ -6287,7 +6398,19 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fanout', clause: clause.text, intent: clause.text });
       continue;
     }
-    const m = (i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text });
+    // PP-0c (v2.74.1666) — THE WARM PATH. A clause replayed from a banked workflow carries `pinned`, the
+    // resolution the human approved at author time. Honoring it here is the entire point of pinning: without
+    // this the pin would be stored, drift-checked, and then ignored while ORCH_MATCH re-derived the plan from
+    // prose on every run — which is the §8.1 behaviour PP-0c exists to end.
+    //
+    // Cold path unchanged: a clause with no pin (a fresh ask, or a record banked before pinning) falls through
+    // to ORCH_MATCH exactly as before. Warm path and cold path — the alias flywheel this project already runs
+    // on, applied to workflow steps instead of single asks.
+    const _pin = clause.pinned && typeof clause.pinned === 'object' ? clause.pinned : null;
+    const m = _pin && _pin.capabilityId
+      ? { capabilityId: _pin.capabilityId, decision: 'pinned', groundId: _pin.groundId || null, bindings: {}, candidate: { kind: _pin.kind || null, intent: clause.text } }
+      : ((i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text }));
+    if (_pin && _pin.capabilityId) { try { _orchLog(`WORKFLOW ▸ step ${i + 1} PINNED → ${_pin.capabilityId} (not re-interpreted)`); } catch { /* */ } }
     if (!m || !m.capabilityId || m.decision === 'miss') {
       // CX-4d (Slice A) — a grounded MISS may still be a CONNECTED session-ride read ("get my open tickets") that
       // doesn't live on the active tab — it rides the app's OWN logged-in origin. Try the app's connectors before
@@ -6529,7 +6652,9 @@ function _offerWorkflowReplay(goal, wf) {
     try { await bumpWorkflowRun(wf.appId || _memoryId(), wf.id); } catch { /* */ }   // corroboration — the record's OWN key (DK-8k merged reads can surface the other key's record)
     const tab = await _orchActiveTab();
     const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
-    _orchRunChain(m, { tabId, clauses: wf.subAsks.map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });   // replay via the same chain runner
+    const _plan = _wfReplayPlan(wf);
+    if (!_plan.runnable) { _wfReplayStopped(m, wf, _plan); return; }
+    _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask });   // replay via the same chain runner, PINNED where banked (PP-0c)
   }, { lockBar: true }));
   bar.appendChild(_mkBtn('No, interpret it', () => {
     bar.remove();
@@ -6603,7 +6728,10 @@ async function _renderWorkflows() {
       const tab = await _orchActiveTab();
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
       bumpWorkflowRun(wfKey, wf.id).catch(() => {});
-      _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId, clauses: (wf.subAsks || []).map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });
+      const _p2 = _wfReplayPlan(wf);
+      const _m2 = appendMessage({ role: 'assistant', body: '' });
+      if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
+      _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask });
     }));
     bar.appendChild(_mkBtn('🗑 Delete', async () => {
       bar.remove();
@@ -9784,6 +9912,18 @@ async function sendChatMessage() {
       await _startWorkflowWizard();
       return;
     }
+    // PP-0c-gen (v2.74.1666) — INTENT-DRIVEN creation: `workflow: <what you want>` / `make a workflow that …`.
+    // Safe only because PP-0c landed: this seeds SUGGESTED steps, each still proven and clause-pinned one at a
+    // time. Before clause-pinning, generated prose replayed per run was strictly worse than the manual wizard
+    // (§8.2), which is exactly why this entry did not exist.
+    {
+      const mWfIntent = text.match(/^(?:new|add|create|build|make)\s+(?:a\s+)?workflow\s*(?:that|to|which|for)?\s*[:\-]?\s+(.+)$/i)
+        || text.match(/^workflow\s*:\s*(.+)$/i);
+      if (mWfIntent && String(mWfIntent[1] || '').trim().length > 3) {
+        await _startWorkflowFromIntent(mWfIntent[1]);
+        return;
+      }
+    }
     if (/^show(\s+(me|the|it|tickets?|items?|sources?|profile|customer|order|orders|record|page))*\s*$/i.test(text) && _memoryId()) {
       await _showItemSources({});
       return;
@@ -11623,7 +11763,10 @@ async function _renderDeskLanding(conv) {
             const wf = c.wf || {};
             const tab = await _orchActiveTab();
             bumpWorkflowRun(wf.appId || _memoryId(), wf.id).catch(() => {});
-            _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: (wf.subAsks || []).map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });
+            const _p3 = _wfReplayPlan(wf);
+            const _m3 = appendMessage({ role: 'assistant', body: '' });
+            if (!_p3.runnable) { _wfReplayStopped(_m3, wf, _p3); return; }
+            _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask });
           } else if (c.kind === 'new-workflow') {
             void _startWorkflowWizard();   // WW-1 (v2.74.1610) — the ＋ Workflow card opens the wizard (capture → qualify → save)
           } else if (c.kind === 'command' && c.command === 'check-now') {
