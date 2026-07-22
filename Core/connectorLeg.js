@@ -28,11 +28,31 @@ export function connectorLegKey({ account = 'me', app, id, host = '' } = {}) {
 /**
  * Safety class from a tool's self-declared hints + whether the SOURCE is trusted (curated catalog). PURE.
  * Hints can only raise caution; an untrusted read never drops below 'confirm'. (§9)
+ *
+ * PP-3 (v2.74.1661) — the OUTWARD axis. DESIGN_peritem_pipeline.md §4 proposed adding BOTH `reversible` and
+ * `outward` and deriving `gate = outward || !reversible`. Reading the codebase first (per §9.4, which suspected
+ * exactly this) showed that only HALF of that is a real gap:
+ *
+ *   `reversible` ALREADY EXISTS, twice over. `destructive` is used as precisely `!reversible` — Core/proposals.js
+ *   renders a non-destructive proposal to the user as the literal word "reversible" — and `reversible` is also
+ *   already a live boolean on the capability side (Core/orchMatch.js → sg.js → chat.js's auto-fire veto). Adding
+ *   a third spelling would give one predicate three names, which is the §7.3 failure this project keeps hitting.
+ *
+ *   `outward` has NO name anywhere. It is currently smuggled in by mislabeling outward legs as `destructive`:
+ *   aw_send_sms is flagged destructive while destroying nothing, with a comment explaining that an SMS "can't be
+ *   unsent". The cost of having no word for it is visible one entry away — `add_comment` with public:true replies
+ *   to the CUSTOMER, is equally unsendable, and sits at single-click 'confirm' because it is merely a write.
+ *
+ * So: `outward` is added, `reversible` is NOT. And the axis is RAISE-ONLY, deliberately — §4's literal
+ * `gate = outward || !reversible` would LOWER shopify_create_customer / create_order / add_tags / create_user
+ * from today's 'confirm' floor to un-gated, across the whole system, as a side effect of a per-item pipeline
+ * change. The user's policy (drafts and profile-creation un-gated) is about what a PIPELINE may do unattended,
+ * and belongs at the pipeline's own gate — not in the global classifier every existing surface reads.
  */
-export function hintToSafety({ readOnlyHint = false, destructiveHint = false } = {}, trusted = false) {
-  if (destructiveHint) return 'gated';            // raise — always honored
-  if (trusted && readOnlyHint) return 'auto';     // lower — only for a vetted read
-  return 'confirm';                                // floor — writes, and untrusted reads
+export function hintToSafety({ readOnlyHint = false, destructiveHint = false, outward = false } = {}, trusted = false) {
+  if (destructiveHint || outward) return 'gated';   // raise — always honored. Outward = leaves our boundary, can't be unsent.
+  if (trusted && readOnlyHint) return 'auto';       // lower — only for a vetted read
+  return 'confirm';                                  // floor — writes, and untrusted reads
 }
 
 /**
@@ -102,7 +122,11 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
     source: 'builtin',
     params: params.map((p) => (p && p.name) || p).filter(Boolean),
     paramSchema: recipeParamSchema(params),
-    safety: hintToSafety({ readOnlyHint: !write, destructiveHint: r.destructive === true }, trusted),
+    // PP-3 (v2.74.1661) — `outward` rides here as hop 3 of the invariant-#3 threading (recipeFromCatalogEntry →
+    // harvestedRecipeLegs' spread → recipeToLeg). This is THE field-reader: a marker not read here is silently
+    // dropped on the SEEDED path while the curated path keeps working, which is the exact failure mode that
+    // invariant records ("the curated app worked, the forged/seeded Ground silently lost the marker").
+    safety: hintToSafety({ readOnlyHint: !write, destructiveHint: r.destructive === true, outward: r.outward === true }, trusted),
     tool: {
       impl: 'session', account, app,
       recipeId: id,   // v2.74.1340 (review A/§18) — the BARE stored id: the arm guard matches per-Ground records by THIS, never the prefixed leg.key

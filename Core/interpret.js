@@ -14,8 +14,9 @@
 import { legRef } from './legRef.js';
 import { normalizeMapVerdict } from './peritemMap.js';
 import { normalizeFieldReadVerdict } from './fieldRead.js';   // PM-9 — the per-item own-record read   // PM-1 (v2.74.1625) — the per-item cross-system MAP verdict
+import { normalizeBranchVerdict } from './branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH
 
-export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record
+export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread', 'branch'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record; PP-1 (v1661) — `branch` = the per-item classify-and-route
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
@@ -75,6 +76,14 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     if (subAsks.length >= 2) return { ...base, intent: 'decompose', subAsks, why: why || 'map-underspecified→decompose' };
     return { ...base, intent: 'clarify', question: 'What field of each item should I look up, and on which system?', why: why || 'map-underspecified' };
   }
+  if (intent === 'branch') {
+    // PP-1 (v2.74.1661) — a per-item CLASSIFY-AND-ROUTE. `arms` is the only required slot (§1.2): a required
+    // `otherwise` would force the model to invent one, which is the failure that cost three versions (itemField
+    // v1636, the bulk-write shape v1638, target.system v1643-48). No arms → clarify, never a half-branch.
+    const br = normalizeBranchVerdict(d.branch || d);
+    if (br) return { ...base, branch: br };
+    return { ...base, intent: 'clarify', question: 'What should I sort each item by, and into which groups?', why: why || 'branch-underspecified' };
+  }
   if (intent === 'clarify') {
     return { ...base, question: _str(d.question) || 'Can you say that a different way?' };
   }
@@ -103,6 +112,12 @@ export function applyConfidenceGate(decision, { minConfidence = 0.6 } = {}) {
   // than one). Below the gate → clarify with the map's own question.
   if (d.intent === 'map' && d.confidence < minConfidence) {
     return { ...d, intent: 'clarify', question: d.question || 'I can look each one up on another system — which field, and where?', why: `low-confidence ${d.confidence} < ${minConfidence}` };
+  }
+  // PP-1 (v2.74.1661) — a BRANCH earns the gate more than a map, not less. A map fans N READS off one shaky
+  // interpretation; a branch fans N ROUTING decisions, and each arm can carry a write. Mis-sorting 22 items into
+  // the replacements arm is a worse first move than asking one question.
+  if (d.intent === 'branch' && d.confidence < minConfidence) {
+    return { ...d, intent: 'clarify', question: d.question || 'I can sort them into groups — what should I sort on, and which groups?', why: `low-confidence ${d.confidence} < ${minConfidence}` };
   }
   return d;
 }

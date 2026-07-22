@@ -64,6 +64,7 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   // record (no empty keys), so a plain Zendesk-read record is byte-identical to before.
   if (e.write === true) rec.write = true;
   if (e.destructive === true) rec.destructive = true;                 // kept explicit too (safetyClass already encodes it)
+  if (e.outward === true) rec.outward = true;                         // PP-3 (v1661) — Invariant #3 hop 1. Leaves our boundary (a message a real person receives); raise-only, read by recipeToLeg's hintToSafety. Hop 2 is automatic (harvestedRecipeLegs spreads the record).
   if (e.gql === true) rec.gql = true;
   if (e.shopProbe === true) rec.shopProbe = true;
   if (e.verifyIdentity === true) rec.verifyIdentity = true;

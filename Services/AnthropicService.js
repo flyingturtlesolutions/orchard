@@ -17,6 +17,7 @@
 
 import { Logger }          from '../Core/Logger.js';
 import { SchemaValidator } from './SchemaValidator.js';
+import { redactDeep, restore, restoreDeep } from '../Core/redact.js';   // R-1/R-2/R-3 (v2.74.1662) — the pre-#call PII boundary (DESIGN_llm_privacy.md §5)
 // PB-10 — intent-driven proposal: the rules block is ASSEMBLED from the intent's extracted parameters
 // (shape/completeness/cardinality + must-cover fields) instead of a static minimal-roles prior.
 import { deriveIntentSpec, buildProposeDirective } from '../Core/intentShape.js';
@@ -39,6 +40,7 @@ import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/wo
 import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
 import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
 import { buildAnswerShapeMessages, parseAnswerShapeOutput } from '../Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — match a read's answer to the question
+import { buildClassifyRequest, parseClassifyOutput } from '../Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text branch classification (pure prompt + strict parse)
 import { buildCaseBriefMessages, parseCaseBrief } from '../Core/caseBrief.js';   // DK-8h — a spawned case's conversational framing (the requestor's voice)
 import { buildRecipePolishMessages, parseRecipePolishOutput } from '../Core/recipePolishPrompt.js';   // §17 — name/does/param-name a HARVESTED ride-recipe (structure-only input; the OBS-4 analog)
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
@@ -56,6 +58,19 @@ const MODEL_OBSERVATION_FRONTIER = 'claude-opus-4-7';
 // routed calls 400. v1 routes only two harmless ops (see ROLE_MODEL_POLICY).
 const MODEL_FAST        = 'claude-haiku-4-5';
 const SETTINGS_KEY      = 'settings:anthropic_key';
+
+// R-4 (v2.74.1662, DESIGN_llm_privacy.md §5) — the PII-redaction toggle.
+//
+// DEFAULT OFF, deliberately, and this is a considered deviation from the spec's "default-on for connector-backed
+// Grounds". Redaction changes what the model SEES on every one of the 65 call sites that reach #post, and the
+// quality effect of reasoning over `⟦person_1⟧` instead of a name cannot be measured headless. Shipping it
+// default-on would be an unverifiable behaviour change across the entire product, justified by a test suite that
+// proves the substitution is correct and proves nothing about whether the answers stay good.
+//
+// So: opt-in here, verify live, then flip the default. NOTE the one path that does NOT wait for that — the
+// per-item free-text classifier (PP-5) redacts UNCONDITIONALLY, because §5 makes redaction a precondition of
+// that egress rather than a preference about it.
+const REDACT_KEY        = 'settings:redact_pii';
 
 // v2.74.154 — Per-million-token USD pricing for cost-metadata logging on
 // LLM observations. Update when Anthropic changes published rates.
@@ -5083,14 +5098,51 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     });
   }
 
+  /**
+   * R-4 (v2.74.1662) — is PII redaction enabled? Reads `settings:redact_pii`, DEFAULT OFF (see REDACT_KEY).
+   * Fail-safe on a storage error: returns false rather than throwing, because a redactor that breaks every LLM
+   * call when storage hiccups is worse than one that is briefly inactive — and the honest indicator (which
+   * reports whether redaction actually fired) is what tells the user which state they are in.
+   */
+  static async #redactionOn() {
+    try {
+      const got = await chrome.storage.local.get(REDACT_KEY);
+      return got && got[REDACT_KEY] === true;
+    } catch { return false; }
+  }
+
   // v2.74.945 (CR-D6) — THE transport core (extracted from #call's E5 hardening) so every request shape
   // shares ONE timeout/cancel/retry implementation: TIMEOUT via an own AbortController (default 60s,
   // meta.timeoutMs to tighten); CANCEL via meta.signal merged into the same controller (CR-S4); ONE
   // bounded jittered retry (~0.8–1.5s) on 429/5xx/network — never on an abort or a non-429 4xx (the
   // managed proxy's ~29s ceiling makes more retries wall-clock-hostile).
-  static async #post(_llm, bodyObj, meta, logTag) {
+  static async #post(_llm, bodyObj, meta, logTag, redOut = null) {
     const timeoutMs = (meta && Number.isFinite(meta.timeoutMs) && meta.timeoutMs > 0) ? meta.timeoutMs : 60000;
-    const _requestBody = JSON.stringify(bodyObj);
+
+    // R-2 (v2.74.1662, DESIGN_llm_privacy.md §5) — REDACT HERE, at the last point before the bytes leave.
+    //
+    // This is the only outbound fetch in the extension, and it is downstream of every message builder, so one
+    // pass covers all 65 call sites — including the 3 that go through #callTool and bypass #call entirely.
+    // Redacting in a BUILDER would have missed the highest-sensitivity channel outright: buildAnswerMessages
+    // puts the caller's `seed` into the SYSTEM slot, and <RECORD>/<FINDINGS>/<CASE_RECORD> are baked into that
+    // seed by the panel before any builder runs. Guard where the value is ADMITTED, not where it was assembled.
+    //
+    // `redOut` carries the map back to the caller for the R-3 restore, per-call rather than module-level so
+    // concurrent calls cannot cross-contaminate each other's pseudonyms.
+    let _body = bodyObj;
+    if (redOut && await AnthropicService.#redactionOn()) {
+      const names = Array.isArray(redOut.names) ? redOut.names : [];
+      const r = redactDeep(bodyObj, { names, skipKeys: ['model', 'max_tokens', 'tool_choice'] });
+      _body = r.value;
+      redOut.map = r.map;
+      redOut.redacted = r.redacted;
+      // v2.74.1663 (bug pass) — Logger.INFO, not DEBUG. `#minLevel` defaults to INFO, so a debug line is
+      // dropped before it is ever persisted: the ONE line that proves redaction actually fired would have been
+      // invisible in every trace, including a FULL one. A privacy control nobody can verify from the log is a
+      // privacy control nobody should trust.
+      if (r.redacted) Logger.info('AnthropicService', `REDACT ▸ ${r.redacted} value(s) pseudonymized before egress [${logTag}]`);
+    }
+    const _requestBody = JSON.stringify(_body);
     const _attempt = async () => {
       const ac = new AbortController();
       const onCallerAbort = () => { try { ac.abort(); } catch { /* */ } };
@@ -5148,22 +5200,33 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: 0, ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model: model || null, error: 'no-api-key' });
       return { success: false, error: 'No API key', latencyMs: 0, usage: { inputTokens: 0, outputTokens: 0 } };
     }
+    // R-2/R-3 (v2.74.1662) — the tool path needs its own context. Without one it would silently bypass the
+    // redactor entirely: #post only redacts when handed a redOut, and these three sites never reach #call.
+    const _red = { map: null, redacted: 0, names: Array.isArray(meta?.redactNames) ? meta.redactNames : [] };
     try {
       const res = await AnthropicService.#post(_llm, {
         model, max_tokens: maxTokens, system: systemPrompt, tools, tool_choice,
         messages: [{ role: 'user', content: userContent }],
-      }, meta, `${role}/${operation}`);
+      }, meta, `${role}/${operation}`, _red);
       const latencyMs = Math.round(now() - t0);
       if (!res.ok) {
         const body = await res.text();
         AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs, ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model, error: `HTTP ${res.status}` });
         return { success: false, error: `HTTP ${res.status}: ${body.slice(0, 200)}`, httpStatus: res.status, httpBody: body, latencyMs, usage: { inputTokens: 0, outputTokens: 0 } };
       }
-      const data = await res.json();
+      let data = await res.json();
       const usage = {
         inputTokens : Number(data?.usage?.input_tokens  ?? 0),
         outputTokens: Number(data?.usage?.output_tokens ?? 0),
       };
+      // R-3 on the PARSED reply. This path returns `data` and its callers read `tool_use.input` directly, so
+      // there is no text choke to restore at — and restoring through the parsed structure is the safer form
+      // anyway: no string literal exists to corrupt, so the escaping question never arises.
+      if (_red.map) {
+        const rr = restoreDeep(data, _red.map);
+        data = rr.value;
+        if (rr.unresolved) Logger.warn('AnthropicService', `REDACT ▸ ${rr.unresolved} unresolved pseudonym(s) in a tool reply [${role}/${operation}]`);
+      }
       AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs, ok: true, outputChars: JSON.stringify(data?.content ?? '').length, inTokens: usage.inputTokens, outTokens: usage.outputTokens, costUsd: estimateCostUSD(model, usage)?.total ?? null, model });
       return { success: true, data, usage, latencyMs };
     } catch (err) {
@@ -5198,8 +5261,12 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       ...extraMessages,
     ];
 
+    // R-2/R-3 (v2.74.1662) — one redaction context per call. `names` lets a caller seed the name-set from the
+    // read's own fields (§5: names cannot be pattern-detected, so without a seed they are not redacted at all).
+    const _red = { map: null, redacted: 0, names: Array.isArray(meta?.redactNames) ? meta.redactNames : [] };
+
     try {
-      const res = await AnthropicService.#post(_llm, { model, max_tokens: maxTokens, system: systemPrompt, messages }, meta, `${role}/${operation}`);
+      const res = await AnthropicService.#post(_llm, { model, max_tokens: maxTokens, system: systemPrompt, messages }, meta, `${role}/${operation}`, _red);
 
       if (!res.ok) {
         const body = await res.text();
@@ -5209,8 +5276,19 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       const data = await res.json();
       // v2.74.934 (CR-E5) — find the first TEXT block: content[0] isn't guaranteed text on multi-block
       // responses (the old read returned '' → a misleading "Empty response from Claude").
-      const text = (Array.isArray(data?.content) ? data.content.find((b) => b && b.type === 'text')?.text : data?.content?.[0]?.text) ?? '';
+      let text = (Array.isArray(data?.content) ? data.content.find((b) => b && b.type === 'text')?.text : data?.content?.[0]?.text) ?? '';
       if (!text) throw new Error('Empty response from Claude');
+
+      // R-3 — de-pseudonymize LOCALLY, before the reply reaches any caller. The user sees the real name; the
+      // model never did. This sits UPSTREAM of every JSON.parse and of `#stripFences`, which is required: a
+      // structured reply can carry a redacted value in a param (`{"params":{"query":"⟦email_1⟧"}}`), and without
+      // restoring it here the connector would search for the literal pseudonym and return nothing — a silent
+      // wrong answer rather than an error. `restore` is JSON-aware for exactly this reason.
+      if (_red.map) {
+        const rr = restore(text, _red.map);
+        text = rr.text;
+        if (rr.unresolved) Logger.warn('AnthropicService', `REDACT ▸ ${rr.unresolved} unresolved pseudonym(s) in the reply — the model may have invented one [${role}/${operation}]`);
+      }
 
       // v2.74.154 — Expose token usage to callers so LLM observation
       // sites can log cost metadata. Keyed in camelCase (inputTokens /
@@ -5396,6 +5474,35 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 300, [], { role: 'routing', operation: 'answer-shape' });
     if (!res || res.success === false) return { answer: null, showList: false };
     return parseAnswerShapeOutput(res.text);
+  }
+
+  /**
+   * PP-5 (v2.74.1662, DESIGN_peritem_pipeline.md §1.1b + §6) — classify N items into named arms in ONE call.
+   *
+   * The batching is a CORRECTNESS property as much as a cost one: the original argument for keyword matching
+   * rested on "N items = N model calls", which was simply false. One call classifies the whole collection, and
+   * §10.2 requires exactly that shape anyway — classify ALL items before acting on ANY, so the distribution can
+   * be shown before anything writes.
+   *
+   * REDACTION IS UNCONDITIONAL HERE, and does not consult the `settings:redact_pii` toggle. The toggle governs
+   * whether the general boundary is active; §5 makes redaction a PRECONDITION of this particular egress rather
+   * than a preference about it — "instruction TEXT may go to the model; ADDRESSES must be redacted from it."
+   * Callers pass already-redacted text and hold the map; this method never sees a real address.
+   *
+   * @param {{items:Array<{id:string,text:string}>, arms:Array<{label:string,is:string}>, field?:string}} args
+   * @returns {Promise<{byId:Map, invalid:number, missing:string[]}|null>} null when unavailable — the caller
+   *          degrades to UNKNOWN for every item, which is honest, rather than to a keyword fallback, which is
+   *          the confidently-wrong answer this whole mechanism exists to avoid.
+   */
+  static async classifyBranch({ items = [], arms = [], field = '' } = {}) {
+    if (!Array.isArray(items) || !items.length || !Array.isArray(arms) || !arms.length) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const req = buildClassifyRequest({ items, arms, field });
+    // maxTokens scales with the collection: ~40 tokens per verdict plus headroom, floored so a tiny run still fits.
+    const budget = Math.min(4000, Math.max(400, items.length * 60));
+    const res = await AnthropicService.#call(req.system, req.user, budget, [], { role: 'routing', operation: 'branch-classify' });
+    if (!res || res.success === false) return null;
+    return parseClassifyOutput(res.text, { items, armLabels: req.armLabels });
   }
 
   /**

@@ -19,6 +19,25 @@ describe('hintToSafety — hints may only RAISE caution (§9)', () => {
     assert.equal(hintToSafety({}, true), 'confirm');
     assert.equal(hintToSafety(undefined, false), 'confirm');
   });
+
+  // PP-3 (v2.74.1661) — the OUTWARD axis. DESIGN_peritem_pipeline.md §4, narrowed by §9.4's suspicion, which the
+  // source confirmed: `destructive` already means `!reversible` (Core/proposals.js renders a non-destructive
+  // proposal as the literal word "reversible"), so only `outward` was genuinely missing.
+  it('outward → gated: a message a real person receives is human-approved, even when it destroys nothing', () => {
+    assert.equal(hintToSafety({ outward: true }, true), 'gated');
+    assert.equal(hintToSafety({ outward: true, destructiveHint: false }, true), 'gated');
+  });
+  it('outward BEATS a readOnlyHint from a trusted source — the axis only ever raises', () => {
+    assert.equal(hintToSafety({ outward: true, readOnlyHint: true }, true), 'gated');
+  });
+  it('REGRESSION GUARD: adding outward must not LOWER anything that is gated today', () => {
+    // §4's literal `gate = outward || !reversible` would have un-gated every reversible internal write
+    // (shopify_create_customer / create_order / add_tags / create_user) from today's 'confirm' floor, across
+    // every existing surface, as a side effect of a per-item pipeline change. The axis is raise-only instead.
+    assert.equal(hintToSafety({ outward: false }, true), 'confirm', 'a non-outward write keeps its confirm floor');
+    assert.equal(hintToSafety({ outward: false, destructiveHint: true }, true), 'gated');
+    assert.equal(hintToSafety({ readOnlyHint: true, outward: false }, true), 'auto', 'a vetted read still drops to auto');
+  });
 });
 
 describe('pruneSchema — keep type/enum/required, drop verbosity (§12)', () => {

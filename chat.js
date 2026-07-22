@@ -73,6 +73,12 @@ import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkf
 import { buildWorkflowSave, stepProvenance } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
+import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
+import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
+import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
+import { redact, restore, newRedactionMap } from './Core/redact.js';   // R-1 (v2.74.1662) — pseudonymize identity before the instruction text ever leaves (DESIGN_llm_privacy.md §5)
+import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
+import { Scope, scalar, record as scopeRecord, document as scopeDocument } from './Services/Scope.js';
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate, INTENTS } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -2031,6 +2037,21 @@ async function _runChildTask(child, task) {
   } else if (d && d.intent === 'act' && d.capabilityId) {
     // a page action / write capability — NOT run unattended (the safety pause).
     body = `Needs you — “${task}” needs a page action or a write I won’t run unattended. Open this conversation to continue.`;
+  } else if (d && (d.map || d.fieldRead || d.branch)) {
+    // PP-1 (v2.74.1661) — THE THIRD DROP SITE, made honest rather than silently absent.
+    //
+    // The clause handlers (_runMapClause / _runFieldReadClause / _runBranchClause) all render into a `msg`
+    // element and finalize a panel bubble; this lane has a child CONVERSATION and no such element, so they
+    // cannot simply be called here. Before this branch, a per-item clause verdict fell into the `else` below
+    // and was quietly reasoned about in prose — the v1658 shape exactly: classified correctly, then vanished,
+    // with a plausible-looking answer standing in for work that never ran.
+    //
+    // Running clauses headless in the child lane is real work (a render-free handler contract). Until then the
+    // drop is REPORTED at both the trace and the bubble, which is the difference between a known gap and a
+    // silent wrong answer.
+    const _kind = d.branch ? 'branch' : (d.map ? 'map' : 'fieldread');
+    try { _orchLog(`DISPATCH ▸ ${_kind} → NOT RUN @child-lane (per-item clauses need a render target; reported, not silently reasoned)`); } catch { /* */ }
+    body = `Needs you — “${task}” resolves to a per-item **${_kind}** step, which I can’t run inside a sub-task yet. Open this conversation and ask it there.`;
   } else {
     // issue #2 — REASON about the task by DEFAULT (answer / decompose / teach / clarify / navigate / no-leg act).
     // issue #1 — GROUND it: read the record first (via the inherited connections) so "research #X" reasons over the
@@ -3818,7 +3839,7 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
   let found = 0; let whole = 0; let missing = 0;
   const lines = [];
   for (const row of use) {
-    const label = summarizeItem(row) || '(row)';
+    const label = _rowLabel(row);   // v2.74.1663 — was `summarizeItem(row) || '(row)'`, which renders the literal "[object Object]": summarizeItem returns a RECORD, and an object is always truthy so the fallback never fired. Pre-existing, found during the PP bug pass.
     const raw = extractValue(row, fp.path);
     const sec = readFieldSection(raw, fr.term);
     if (sec.mode === 'empty') { missing++; lines.push(`• **${escHtml(label)}** — no ${escHtml(fr.field)} on this record`); continue; }
@@ -3831,7 +3852,200 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
   _setMessageBody(msg, [head, tally, ...lines].join('\n'), { markdown: true });
   _orchFinalize(msg);
   try { _orchLog(`FIELD_READ ▸ ${use.length} × "${fp.path}"${fr.term ? ` term "${fr.term}"` : ''} → ${found} found, ${whole} whole-field, ${missing} empty`); } catch { /* */ }
-  return { ok: true, text: lines.join('\n') };
+  // PP-1 (v2.74.1661) — RETURN THE ENRICHED ROWS. `use` carries the drill-merged detail (the `...use[k], ...detail`
+  // spread above), which is the ONLY place the read field exists; the source list never had it. Without this the
+  // chain's fieldRead branch left `st.lastValue` untouched, so a following clause composed against the PRE-read
+  // list — and a BRANCH on the field just read would evaluate every item as UNKNOWN (the field is genuinely absent
+  // there). `rows` is the capped `use` deliberately: those are the rows actually read, and branching over rows the
+  // read never reached would manufacture unknowns rather than report them.
+  return { ok: true, text: lines.join('\n'), rows: use, fieldPath: fp.path, capped: !!capped };
+}
+
+// PP-1 (v2.74.1661, DESIGN_peritem_pipeline.md §1.1c/§2.0.1) — the per-item BRANCH clause.
+//
+// Same collection contract as fieldRead/map (piped prior read, else self-contained), then per row: build a scope,
+// evaluate each arm's assertion through the CANONICAL scope-side evaluator, and route. The decision logic is pure
+// (Core/branchClause.js) and the reach is a pure adapter (Core/branchScope.js) — this function owns only I/O.
+//
+// THE THREE OUTCOMES ARE THE DELIVERABLE. `arm` · `none` · `unknown` stay distinct all the way to the render,
+// because the whole failure this clause exists to avoid is an unevaluable predicate quietly reading as FALSE and
+// routing an item down a real arm. Anything that could not be judged is shown as such and counted separately.
+// v2.74.1663 (bug pass) — `summarizeItem` returns an OBJECT ({id,title,status,body,url}), not a string. Coercing
+// it with String()/escHtml() yields the literal "[object Object]", and `obj || '(row)'` never falls through
+// because an object is always truthy. The correct idiom is already in this file at the fan-out identify()
+// helper: read `.title`, fall back to `.id`, then to a couple of fields. Centralized here so the next caller
+// cannot re-derive it a fourth way.
+function _rowLabel(row) {
+  try {
+    const it = summarizeItem(row, { displayId: null }) || {};
+    const t = String(it.title ?? '').trim();
+    if (t) return t;
+    if (it.id != null && it.id !== '') return String(it.id);
+    const f = itemFields(row, { max: 2 }).map(([, v]) => v).filter(Boolean).join(' · ');
+    return f || '(row)';
+  } catch { return '(row)'; }
+}
+
+function _branchScopeFor(item) {
+  const { bindings, collisions } = planBindings(item);
+  const s = new Scope();
+  for (const b of bindings) {
+    if (b.kind === 'record') s.set(b.name, scopeRecord(b.value));
+    else if (b.kind === 'document') s.set(b.name, scopeDocument({ content: String(b.value ?? '') }));
+    else s.set(b.name, scalar(b.value ?? '', b.subtype || 'string'));
+  }
+  return { scope: s, collisions };
+}
+
+async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
+  _walkAbortFlag.requested = false;
+  _ilBusy(msg, true);
+  try { _orchLog(`BRANCH ▸ start arms=${br.arms.map((a) => a.label).join('|')} mode=${br.mode} collection=${typeof br.collection === 'object' ? 'self' : br.collection} prior=${priorValue != null ? 'yes' : 'no'}`); } catch { /* */ }
+
+  // 1) the COLLECTION — identical contract to fieldRead (v1659's lesson: a door that supplies no prior makes a
+  // 'prior' clause fall through to re-reading a list from the literal phrase, and resolve nothing).
+  let rows = [];
+  if (br.collection === 'prior' && priorValue != null) rows = primaryList(priorValue) || [];
+  else {
+    const readAsk = (br.collection && br.collection.readAsk) || goal;
+    _setMessageBody(msg, 'Reading the list…');
+    let cr = null;
+    try { cr = await _chainConnectorRun(readAsk, { tabId }); } catch { cr = null; }
+    if (cr && cr.ok) rows = primaryList(cr.value) || [];
+    else {
+      const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
+      if (_prior.length) rows = _prior;
+      else {
+        _setMessageBody(msg, `Couldn’t read the list to sort${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}. Name it explicitly (e.g. “for each open warranty task…”).`);
+        _orchFinalize(msg);
+        try { _orchLog(`BRANCH ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve`); } catch { /* */ }
+        return { ok: false };
+      }
+    }
+  }
+  if (!rows.length) { _setMessageBody(msg, 'Nothing to sort — the list came back empty.'); _orchFinalize(msg); try { _orchLog('BRANCH ▸ empty collection'); } catch { /* */ } return { ok: false }; }
+
+  const cap = Math.max(1, Math.min(br.cap || _MAP_WINDOW, rows.length));
+  const capped = rows.length > cap;
+  const use = rows.slice(0, cap);
+
+  // 2) PP-5 — if any arm is model-classified, classify EVERY item in ONE call BEFORE routing any of them.
+  //
+  // §10.2's rule, and it is not merely an optimization: a one-item trial proves the MECHANISM and never the
+  // POPULATION, and this project's own data disproves the assumption that item 1 is representative (the field
+  // read came back 11 found / 11 whole-field — half the records had the part, half did not). Classifying the
+  // whole collection first also means the distribution can be shown before anything acts.
+  //
+  // REDACTION HAPPENS HERE, unconditionally and before the text is handed over. The identity set is seeded from
+  // each record's OWN fields, which is the only way an ADDRESS gets redacted at all — no regex finds a street
+  // address, but the record knows which field holds one. The map stays in the panel; the service never sees it.
+  let classifyBy = null;
+  const _cArms = classifyArms(br);
+  if (_cArms.length) {
+    // v2.74.1662 — String(...).trim(), NOT a `_str` helper: chat.js has no such binding, and an undefined
+    // identifier here throws at RUNTIME while passing `node --check` cleanly. That exact class cost six bugs in
+    // one session (v1655's `readouts`, v1660's `INTENTS`), every one of them written late in a working stretch.
+    const cField = String((_cArms[0].when && _cArms[0].when.field) ?? '').trim() || String(br.classifyField || '').trim();
+    const redMap = newRedactionMap();
+    // v2.74.1663 (bug pass) — the correlation id is the ROW INDEX, and that choice is load-bearing twice over.
+    //
+    // CORRECTNESS: it is unique by construction. The first version keyed on `summarizeItem(it)`, which returns
+    // an OBJECT — so `String(...)` produced "[object Object]" for every row, all N items collapsed onto ONE id,
+    // the model returned one verdict for it, and every item read that verdict. Twenty-two records would have
+    // been routed to a single arm, confidently, with an honest-looking tally underneath. Caught in the bug pass.
+    //
+    // PRIVACY: an index carries no information. The obvious alternatives both leak — a row's title is often the
+    // customer's name, and the JSON fallback was the whole record verbatim, in the payload of the one call whose
+    // entire purpose is to not send that.
+    const payloadItems = [];
+    use.forEach((it, i) => {
+      const raw = cField ? String(extractValue(it, cField) ?? '') : '';
+      if (!raw.trim()) return;   // no text to judge → no verdict → UNKNOWN downstream, which is the honest outcome
+      const { text } = redact(raw, { names: identityValues(it), map: redMap });
+      payloadItems.push({ id: String(i), text: text.slice(0, 2000) });
+    });
+
+    try { _orchLog(`BRANCH ▸ classify ${payloadItems.length} item(s) × ${_cArms.length} arm(s) on "${cField || '(record)'}" — redacted before egress`); } catch { /* */ }
+    let resp = null;
+    try {
+      resp = await _orchReq('CLASSIFY_BRANCH_ITEMS', {
+        items: payloadItems, field: cField,
+        arms: _cArms.map((a) => ({ label: a.label, is: String((a.when && a.when.is) ?? '').trim() })),
+      });
+    } catch { resp = null; }
+
+    if (resp && resp.success && Array.isArray(resp.verdicts)) {
+      // Restore the model's REASONS locally — they may quote the redacted text, and the user should read the
+      // real words even though the model never saw them.
+      classifyBy = new Map(resp.verdicts.map((v) => [String(v.id), { group: String(v.group), why: restore(String(v.why || ''), redMap).text }]));
+      try { _orchLog(`BRANCH ▸ classified — ${classifyTally(classifyBy, _cArms.map((a) => a.label))}${resp.invalid ? ` (${resp.invalid} invalid)` : ''}`); } catch { /* */ }
+    } else {
+      // Unavailable → every classified arm answers UNKNOWN. Deliberately NOT a keyword fallback: literal
+      // matching on free text does not fail loudly, it fails confidently ("do NOT send a replacement" contains
+      // "replacement"), so a silent downgrade to keywords would be worse than no answer at all.
+      classifyBy = new Map();
+      try { _orchLog(`BRANCH ▸ classifier unavailable (${(resp && resp.error) || 'no response'}) — every classified arm answers unknown, NOT a keyword guess`); } catch { /* */ }
+    }
+  }
+
+  // 3) per row: scope → evaluate → route. Deterministic arms stay local — no network, nothing leaves the panel.
+  const results = [];
+  const unknownWhy = [];
+  // The lookup key MUST be the same index used when building the payload above. Keyed any other way, every
+  // classified item would miss its verdict and answer UNKNOWN — which at least fails honestly, but silently
+  // wastes the call and reports "couldn't tell" for work the model actually did.
+  //
+  // `makeClassifyEvaluator` calls `idOf(item)` with ONE argument, so the index is CLOSED OVER per iteration
+  // rather than taken as a second parameter — a two-arg form silently receives `undefined` and keys every
+  // lookup on the string "undefined".
+  for (let _i = 0; _i < use.length; _i++) {
+    const item = use[_i];
+    const _idOf = () => String(_i);
+    if (_walkAbortFlag.requested) break;
+    const { scope, collisions } = _branchScopeFor(item);
+    if (collisions.length) { try { _orchLog(`BRANCH ▸ binding collision on ${collisions.join(',')} — record binding kept`); } catch { /* */ } }
+    const deterministic = makeBranchEvaluator({
+      evaluate: evaluateDataCondition,
+      scope,
+      lookup: (n) => scope.get(n),
+      onUnknown: (w) => { if (unknownWhy.length < 6) unknownWhy.push(w); },
+    });
+    // One evaluator, two kinds of arm: `classify` arms read the batched verdict, everything else falls through
+    // to the deterministic adapter. Both answer in the same three-valued shape, so evalBranch cannot tell them
+    // apart — which is what lets a single branch mix a status check with a prose judgement.
+    const evaluator = classifyBy
+      ? makeClassifyEvaluator({ byId: classifyBy, idOf: _idOf, fallback: (a) => deterministic(a) })
+      : (a) => deterministic(a);
+    results.push({ item, ...evalBranch(item, br, (a, it) => evaluator(a, it)) });
+  }
+
+  // 3) render, grouped by arm, with `no arm` and `couldn’t tell` as FIRST-CLASS groups — never omitted, because a
+  // class that is silently absent reads as "did not happen" (§5.5).
+  const groups = new Map(br.arms.map((a) => [a.label, []]));
+  const none = []; const unknown = [];
+  for (const r of results) {
+    if (r.outcome === 'arm') for (const a of r.arms) groups.set(a.label, [...(groups.get(a.label) || []), r]);
+    else if (r.outcome === 'none') none.push(r);
+    else unknown.push(r);
+  }
+  const lines = [];
+  for (const [label, list] of groups) {
+    lines.push(`**${escHtml(label)}** — ${list.length}`);
+    for (const r of list) lines.push(`  • ${escHtml(_rowLabel(r.item))}${r.skipped && r.skipped.length ? `  _(also matched ${r.skipped.map((s) => escHtml(s.label)).join(', ')})_` : ''}`);
+  }
+  if (none.length) { lines.push(`**no arm matched** — ${none.length}`); for (const r of none) lines.push(`  • ${escHtml(_rowLabel(r.item))}`); }
+  if (unknown.length) {
+    lines.push(`**couldn’t tell** — ${unknown.length}`);
+    for (const r of unknown) lines.push(`  • ${escHtml(_rowLabel(r.item))}${r.why ? ` — _${escHtml(String(r.why).slice(0, 90))}_` : ''}`);
+  }
+
+  const tally = branchTally(results, { arms: br.arms });
+  const head = `Sorted each record into **${br.arms.length}** group${br.arms.length === 1 ? '' : 's'}.${capped ? `  (first ${cap} of ${rows.length})` : ''}`;
+  _setMessageBody(msg, [head, tally, ...lines].join('\n'), { markdown: true });
+  _orchFinalize(msg);
+  try { _orchLog(`BRANCH ▸ ${results.length} × ${br.mode} → ${tally}${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
+  if (unknownWhy.length) { try { _orchLog(`BRANCH ▸ unknown reasons: ${unknownWhy.join(' | ')}`); } catch { /* */ } }
+  return { ok: true, text: lines.join('\n'), results, groups };
 }
 
 async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
@@ -5883,6 +6097,7 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // D
   // dispatch is only reached by the `i:` command, so the whole feature was unreachable through the front door).
   if (d.intent === 'map' && d.map) { try { _orchLog('DISPATCH ▸ map → chain'); } catch { /* */ } return { map: d.map }; }
   if (d.intent === 'fieldread' && d.fieldRead) { try { _orchLog('DISPATCH ▸ fieldread → chain'); } catch { /* */ } return { fieldRead: d.fieldRead }; }   // PM-9 (v1649)
+  if (d.intent === 'branch' && d.branch) { try { _orchLog('DISPATCH ▸ branch → chain'); } catch { /* */ } return { branch: d.branch }; }   // PP-1 (v1661) — door A. Its execution half is in _orchRunChain below; this door only carries the payload up, so wiring one without the other returns a payload nobody reads.
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
@@ -6028,7 +6243,24 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         if (cr && cr.fieldRead) {   // PM-9 (v1649) — the per-item OWN-RECORD read
           const frr = await _runFieldReadClause(msg, cr.fieldRead, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
           if (frr && frr.text) { st.readouts.push(frr.text); st.lastReadoutIdx = st.readouts.length - 1; }   // v1655 — st.readouts, as every sibling in this loop uses; bare `readouts` is a DIFFERENT function's local (ReferenceError, live-reported)
+          // PP-1 (v2.74.1661) — thread the ENRICHED rows forward, as the map branch below already does. Before
+          // this, a fieldRead was a composition DEAD END: it rendered and returned, leaving st.lastValue at the
+          // pre-read list, so `list → read instructions → branch on instructions` could not work at all. KEEP
+          // st.lastLeg — the enriched rows still descend from the source leg, and a following clause needs its
+          // drill/joinKey declaration (the v1635 rule, same reason).
+          if (frr && frr.ok && Array.isArray(frr.rows) && frr.rows.length) {
+            st.lastValue = frr.rows; st.lastReadoutIdx = st.readouts.length - 1;
+            st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fieldRead', clause: clause.text, intent: clause.text });
+            try { _orchLog(`FIELD_READ ▸ composed ${frr.rows.length} enriched row(s) → prior${frr.capped ? ' (CAPPED — a following clause sees only the rows actually read)' : ''}`); } catch { /* */ }
+          }
           continue;
+        }
+        if (cr && cr.branch) {   // PP-1 (v1661) — door A′, the execution half. Supplies the prior exactly as its siblings do.
+          const brr = await _runBranchClause(msg, cr.branch, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+          if (!brr || !brr.ok) return;
+          if (brr.text) { st.readouts.push(brr.text); st.lastReadoutIdx = st.readouts.length - 1; }
+          st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'branch', clause: clause.text, intent: clause.text });
+          continue;   // st.lastValue is deliberately UNCHANGED: a branch SORTS the rows, it does not replace them, so a following clause still composes against the full set.
         }
         if (cr && cr.map) {
           const mr = await _runMapClause(msg, cr.map, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
@@ -8555,7 +8787,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // nothing else, so "never ran" and "ran and found nothing" were indistinguishable. Now the line says whether
   // the clause PAYLOAD arrived and whether the intent is one the registry KNOWS.
   try {
-    const _clauseKey = ['map', 'fieldRead'].find((k) => d && d[k]) || null;
+    const _clauseKey = ['map', 'fieldRead', 'branch'].find((k) => d && d[k]) || null;   // PP-1 (v1661) — this array is a THIRD whitelist (after INTENTS and parseInterpretOutput's); a clause missing here logs payload:none while working fine, which is worse than useless in a diagnosis.
     const _known = INTENTS.includes(d.intent);
     _orchLog(`INTERPRET ▸ "${goal.slice(0, 50)}" → ${d.intent} (conf ${d.confidence}${d.why ? `; ${d.why}` : ''}) payload:${_clauseKey || 'none'} registry:${_known ? 'ok' : 'UNKNOWN'}`);
   } catch { /* */ }
@@ -8609,6 +8841,21 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
         priorLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null,
       });
     } catch (e) { _clauseError('fieldread', e, msg); }
+    return true;
+  }
+  // PP-1 (v2.74.1661) — the per-item BRANCH, at THIS door too, in the SAME edit that added it to the chain door.
+  // The rule above is written from the v1658 count (5 of 17), so it is followed here rather than re-learned: both
+  // doors, both supplying a prior, in one change. `_lastGroundedRead` is this door's chain-state equivalent.
+  if (d.intent === 'branch' && d.branch) {
+    try { _orchLog('DISPATCH ▸ branch → _runBranchClause @interpret-door'); } catch { /* */ }
+    try {
+      await _runBranchClause(msg, d.branch, {
+        tabId,
+        goal,
+        priorValue: (_lastGroundedRead && _lastGroundedRead.value) || null,
+        priorLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null,
+      });
+    } catch (e) { _clauseError('branch', e, msg); }
     return true;
   }
 

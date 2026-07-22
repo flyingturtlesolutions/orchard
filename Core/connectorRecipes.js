@@ -730,10 +730,15 @@ export const CONNECTOR_RECIPES = [
     identityGql: { endpoint: acGqlEndpoint('GetCurrentAgentV2_Query'), body: acGqlBody('GetCurrentAgentV2_Query', {}), idPath: 'data.getAgentV2.ID' },
     body: acGqlBody('UpdateAgent_Mutation', { input: { ID: '{me}', availability: { preference: '{preference}' } } }),
     params: [{ name: 'preference', type: 'string', enum: ['ALWAYS_OPENED', 'ALWAYS_CLOSED', 'DOING_BACK_OFFICE', 'OTHER'], required: true, hint: 'ALWAYS_OPENED = available; ALWAYS_CLOSED = unavailable / do-not-disturb / busy; DOING_BACK_OFFICE = back-office; OTHER = custom' }] },   // v1470 — the opaque enum needs user-language mapping (live: "set me to unavailable" fell to teach)
-  { ...AC, id: 'aw_send_sms', name: 'Send an SMS from my line', write: true, destructive: true, method: 'POST', gql: true, contentType: 'application/json',
+  { ...AC, id: 'aw_send_sms', name: 'Send an SMS from my line', write: true, destructive: true, outward: true, method: 'POST', gql: true, contentType: 'application/json',
     // v2.74.1459 (safety review) — destructive: an SMS is an OUTWARD-FACING message to a real external person (can't
     // unsend), so it rides the two-step confirm tier (safetyClass 'destructive'), same as Zendesk merge/mark-as-spam —
     // never the single-click write gate. The §9 outward-comms rule: a message a human receives is human-approved.
+    // PP-3 (v2.74.1661) — `outward: true` now says that DIRECTLY. This is a no-op on behavior (destructive already
+    // gates it) and a correction to the VOCABULARY: this leg destroys nothing, and reading `destructive` here as
+    // evidence that "destructive means irreversible" is what made the axis ambiguous in the first place. The
+    // mislabel had a real cost one entry over — `add_comment` with public:true is equally unsendable and sits at
+    // single-click, because there was no word for the property it shares with this leg.
     does: 'send an SMS text from one of your Aircall lines to an external number, riding your login',
     endpoint: acGqlEndpoint('sendMessage_Mutation'),
     body: acGqlBody('sendMessage_Mutation', { input: { text: '{text}', mediaKeys: [], lineID: '{lineId}', externalNumber: '{phone}' } }),

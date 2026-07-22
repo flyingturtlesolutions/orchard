@@ -36,11 +36,17 @@ export function normalizeBranchVerdict(v) {
   for (const a of _arr(o.arms)) {
     if (!a || typeof a !== 'object') continue;
     if (!a.when || typeof a.when !== 'object') continue;   // `when` is an ASSERTION, never prose (§1.2)
-    arms.push({
-      when: a.when,
-      label: _str(a.label) || `arm ${arms.length + 1}`,
-      then: _arr(a.then),
-    });
+    const label = _str(a.label) || `arm ${arms.length + 1}`;
+    // v2.74.1663 (bug pass) — THE ARM'S LABEL IS AUTHORITATIVE, and a model-classified `when` is forced to it.
+    //
+    // A classify arm is decided by matching the label the classifier RETURNS against the one on the assertion.
+    // The label sent to the classifier is the ARM's, so if `when.label` were absent or merely different — a
+    // model writing {"label":"Replacements"} against an arm called "replacements", say — every classify arm
+    // would evaluate FALSE and every item would land in `none`. A whole run reporting "no arm matched", with a
+    // correct-looking tally and no error anywhere. Forcing the two to agree removes the failure mode instead of
+    // documenting it.
+    const when = (a.when.type === 'classify') ? { ...a.when, label } : a.when;
+    arms.push({ when, label, then: _arr(a.then) });
   }
   if (!arms.length) return null;
   const mode = BRANCH_MODES.includes(o.mode) ? o.mode : 'first';

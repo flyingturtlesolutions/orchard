@@ -1485,6 +1485,31 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // PP-5 (v2.74.1662, DESIGN_peritem_pipeline.md §1.1b) — CLASSIFY_BRANCH_ITEMS: one batched call that sorts N
+    // items into named arms by reading a free-text field. The panel redacts each item's text BEFORE sending
+    // (identity seeded from the record's own fields — §5 requires the address out, and no regex finds a street
+    // address), so this handler only ever sees pseudonymized text and never holds the map.
+    //
+    // Fails to null rather than to a keyword fallback. A keyword fallback is precisely the confidently-wrong
+    // answer PP-5 exists to prevent ("do NOT send a replacement" contains "replacement"), so when the model is
+    // unavailable every item becomes UNKNOWN and a human reads them — the honest degradation.
+    CLASSIFY_BRANCH_ITEMS: async (payload, _sender, sendResponse) => {
+      try {
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        const arms = Array.isArray(payload?.arms) ? payload.arms : [];
+        const field = String(payload?.field ?? '').trim();
+        if (!items.length || !arms.length) { sendResponse({ success: false, error: 'items and arms required' }); return; }
+        const out = await AnthropicService.classifyBranch({ items, arms, field });
+        if (!out) { sendResponse({ success: false, error: 'classifier unavailable' }); return; }
+        // A Map cannot cross the message boundary — send an array and let the panel rebuild it.
+        const verdicts = [...out.byId.entries()].map(([id, v]) => ({ id, group: v.group, why: v.why }));
+        try { Logger.info('background', `BRANCH ▸ classified ${verdicts.length} item(s) over ${arms.length} arm(s)${out.invalid ? ` — ${out.invalid} invalid verdict(s)` : ''}${out.missing.length ? ` — ${out.missing.length} skipped` : ''}`); } catch { /* */ }
+        sendResponse({ success: true, verdicts, invalid: out.invalid, missing: out.missing });
+      } catch (e) {
+        sendResponse({ success: false, error: String((e && e.message) || e) });
+      }
+    },
+
     // F-2 (v2.74.1176, DESIGN_llm_front_door.md §9) — INTERPRET_ASK: the LLM front-door INTERPRET call. Resolves the
     // Ground + retrieves the candidate set (ORCH_MATCH-as-RETRIEVER — the SAME tool-RAG as ROUTE_ASK, FED not gating),
     // then AnthropicService.interpret returns the raw §9.2 decision {intent, capabilityId|op, params, subAsks,

@@ -8,6 +8,7 @@ import {
   seedFromCatalog, mergeRecipes, setEnabled, review, downgradeSafety, editMeta, armable, acceptPendingReads,
   curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries,
 } from './rideRecipe.js';
+import { recipeToLeg } from './connectorLeg.js';   // PP-3 (v1661) — hop 3, so the Invariant-#3 test can assert on the LEG rather than the record
 
 // A miniature of the CONNECTOR_RECIPES shape.
 const CATALOG = [
@@ -217,5 +218,30 @@ describe('PM (v2.74.1633) — joinKey rides the SEEDED path (Invariant #3 hop 1)
     const rec = recipeFromCatalogEntry({ id: 'x', method: 'GET', endpoint: '/e', appHost: 'a.com', joinKey: ['AddressLine1'] }, { origin: 'a.com' });
     assert.deepEqual(rec.joinKey, ['AddressLine1']);
     assert.ok(!('joinKey' in recipeFromCatalogEntry({ id: 'y', method: 'GET', endpoint: '/e', appHost: 'a.com' }, { origin: 'a.com' })));
+  });
+});
+
+describe('PP-3 (v2.74.1661) — `outward` rides the SEEDED path (Invariant #3 hop 1)', () => {
+  it('recipeFromCatalogEntry carries outward; absent stays absent', () => {
+    const rec = recipeFromCatalogEntry({ id: 'x', method: 'POST', endpoint: '/e', appHost: 'a.com', write: true, outward: true }, { origin: 'a.com' });
+    assert.equal(rec.outward, true);
+    assert.ok(!('outward' in recipeFromCatalogEntry({ id: 'y', method: 'GET', endpoint: '/e', appHost: 'a.com' }, { origin: 'a.com' })));
+  });
+
+  it('THE INVARIANT: a SEEDED record reaches recipeToLeg still gated — the curated path is not the test', () => {
+    // The failure this guards is the one Invariant #3 was written from: the curated app keeps working (it reads
+    // the catalog ENTRY directly) while a forged / Overview-workbench Ground silently loses the marker, because
+    // only the seeded path exercises all three hops. So: go entry → record → leg, and assert on the LEG.
+    const rec = recipeFromCatalogEntry(
+      { id: 'send', method: 'POST', endpoint: '/msg', appHost: 'a.com', app: 'aircall', write: true, outward: true },
+      { origin: 'a.com' },
+    );
+    const leg = recipeToLeg({ ...rec, app: 'aircall', origin: 'a.com' }, { trusted: true });
+    assert.ok(leg, 'the seeded record must still build a leg');
+    assert.equal(leg.safety, 'gated', 'outward survived catalog → record → leg');
+
+    // And the control: the same leg WITHOUT the marker is merely a write, so a silent drop would be visible here.
+    const bare = recipeFromCatalogEntry({ id: 'send', method: 'POST', endpoint: '/msg', appHost: 'a.com', app: 'aircall', write: true }, { origin: 'a.com' });
+    assert.equal(recipeToLeg({ ...bare, app: 'aircall', origin: 'a.com' }, { trusted: true }).safety, 'confirm');
   });
 });

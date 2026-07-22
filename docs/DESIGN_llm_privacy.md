@@ -1,6 +1,6 @@
 # DESIGN — LLM privacy boundary (data egress to the model)
 
-**Status:** §3 minimization STARTED (the interrogator answer-shaper, v2.74.1267, sends a minimized projection — no record bodies). §4 redactor + §5 local-tier are SPEC. This doc is the system-of-record for *what user/customer data leaves the device for the LLM, and how it's bounded.*
+**Status:** §3 minimization STARTED (the interrogator answer-shaper, v2.74.1267). **§5 R-1/R-2/R-3 BUILT at v2.74.1662** (`Core/redact.js` + the `#post` boundary + the restore); **R-4 built as a global toggle, DEFAULT OFF** — see §7. §4(c) local-tier is still SPEC. This doc is the system-of-record for *what user/customer data leaves the device for the LLM, and how it's bounded.*
 
 Companion to `DESIGN_injection_boundary.md`. **They solve different problems and must not be conflated** (see §2).
 
@@ -56,4 +56,42 @@ The choke point is `#call`-adjacent (payload assembly), so it covers every chann
 ## 6. Built vs owed
 
 - **Built (v2.74.1267):** minimization on the interrogator answer-shaper — record **bodies no longer leave** for "how many / which / is there" questions; `readShapeFacts` sends `{id,title,status}` + an exact code-computed count.
-- **Owed:** the §5 redactor (highest leverage), minimization on the `<RECORD>`/`<FINDINGS>` reasoning paths, the local-model tier, and the disclosure/consent posture.
+- **Built (v2.74.1662):** the §5 redactor — R-1 `Core/redact.js` (27 tests), R-2 at the transport boundary, R-3 restore, R-4 toggle. See §7.
+- **Owed:** minimization on the `<RECORD>`/`<FINDINGS>` reasoning paths, the local-model tier, the disclosure/consent posture, **and flipping R-4's default** (§7).
+
+---
+
+## 7. What shipped at v2.74.1662, and the four things to know
+
+**The boundary is `AnthropicService.#post`, not a builder.** That is the only outbound `fetch` in the extension
+and it sits downstream of every message builder, so one pass covers all 65 call sites — including the 3 that go
+through `#callTool` and never touch `#call`. Redacting in a builder would have missed the single most sensitive
+channel outright: `buildAnswerMessages` puts the caller's `seed` into the **SYSTEM** prompt, and
+`<RECORD>` / `<FINDINGS>` / `<CASE_RECORD>` are baked into that seed by the panel before any builder runs. Guard
+where the value is admitted.
+
+**Restore is JSON-aware, because it had to be.** ~40 call sites `JSON.parse` the reply and six PREFILL an
+assistant fragment that is string-concatenated back on before parsing. Substituting a real value containing `"`
+or `\` into an unparsed JSON string literal corrupts the parse and loses the entire response. So a restored value
+goes in RAW when it needs no escaping (emails, phones, most names — the common case) and is escaped only when it
+both needs it and sits inside a string literal. The tool path restores through the *parsed* structure instead,
+where the question cannot arise.
+
+**Names and addresses are seeded, not detected.** No regex reliably finds either. Pattern detection covers
+email / phone / uuid / long-numeric-id (reusing `Core/Logger.js`'s scrub patterns, so its two production
+anti-false-positive fixes come along). Everything else is redacted because a CALLER supplied the value — and
+`Core/branchClassify.js#identityValues` is how the per-item pipeline does that, reading the record's own
+address/name/contact fields. **This is how §5's "addresses must be redacted" is actually satisfied:** the address
+is a field on the row, not a pattern to guess.
+
+**R-4 defaults OFF, and that is a deliberate deviation from §5's "default-on for CS Grounds."** Redaction changes
+what the model SEES on every call, and the quality effect of reasoning over `⟦person_1⟧` instead of a name cannot
+be measured headless. The test suite proves the substitution is *correct*; it proves nothing about whether the
+answers stay *good*. Shipping default-on would be an unverifiable behaviour change across the whole product.
+**The one exception is deliberate:** the per-item free-text classifier (PP-5) redacts UNCONDITIONALLY, because
+`DESIGN_peritem_pipeline.md` §5 makes redaction a precondition of *that* egress rather than a preference about it.
+
+**Next:** enable `settings:redact_pii`, run a grounded read + an answer, and confirm (a) the answer still names
+the right person after restore, (b) no `REDACT ▸ unresolved` warnings, (c) answer quality is unchanged. Then flip
+the default. **The residual is unchanged and worth restating: pseudonymization defeats *identity* leakage, not
+*content* leakage.** A ticket body's substance still goes to the model. Only §4(c)'s local tier answers that.

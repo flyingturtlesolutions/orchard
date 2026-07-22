@@ -1,8 +1,15 @@
 # DESIGN — the PER-ITEM PIPELINE (BRANCH · UPSERT · the reach)
 
 **Status:** PP-1's pure core is BUILT and committed (`Core/branchClause.js` + 16 tests). Nothing is wired. PP-0 is
-answered (§2.0); PP-0b/0c/0d are open. Written 2026-07-21 after PM-9 (per-item field read) proved out live.
+answered (§2.0); **PP-0b is answered (§1.1c)**; PP-0c/0d/0e/0f are open. Written 2026-07-21 after PM-9 (per-item
+field read) proved out live.
 **Read §9 before building anything** — it lists what this spec asserts without having verified.
+
+**The method rule, earned the expensive way:** *read before designing, and WRITE DOWN what you read.* Eight times
+in the session this spec came from, a planned build collapsed into wiring once an existing contract was read
+(`coerceParams`, the fleet queue, `detect`, the assertion vocabulary, the wizard-as-trial-gate, `runId`, the
+predicate bridge). Reading does not persist across a long session; writing does. Every ⛔ and every §9 item below
+exists because something was inferred from identifier names instead of read from a switch statement.
 **Scope rule, stated by the user and load-bearing:** *"Do not design to support this specific workflow — build the
 structures that will support any workflow with this abstract shape."* Every example below is an INSTANCE. If a
 decision here only makes sense for warranty tasks, it is wrong.
@@ -49,18 +56,24 @@ claim than the evidence supports.
 | per-item field read | ✅ | ✅ **PROVEN** — 22/22, term extraction | `Core/fieldRead.js`, `_runFieldReadClause` |
 | cross-system lookup | ✅ | ✅ **PROVEN** — 7-rung ladder, 21/22 | `Core/peritemMap.js`, `_runMapClause` |
 | **branch** control flow | ✅ | ❌ **UNVERIFIED** — never run from the clause path, never with a per-item record scope | `detect` — `nodeRegistry.js`, `ExecutionEngine.#executeDetectNode` |
-| **branch predicate** | ✅ | ⚠️ **partial** — `evaluateDataCondition(cond, scope)` needs no tab (§2.0), but `scopeFor(item)` is unwritten (PP-0b) | `Services/DataAssertion.js` |
+| **branch predicate** | ✅ | ⚠️ **partial** — vocabulary + binding granularity now READ (§1.1c); needs no tab (§2.0); `scopeFor(item)` still unwritten but fully specified | `Services/DataAssertion.js`, `Core/orchAnalyze.js` |
 | **upsert** shape | ✅ | ❌ **UNVERIFIED** — what triggers `try`'s `recover` is unknown (§3) | `try` node |
 | case per item | ✅ | ⚠️ **shape unread** — the fan-out already emits cases; §5.7 specs a parallel shape without having read theirs | dossier fan-out |
 | approval queue | ✅ | ✅ **PROVEN** — staleness CAS + ledger | `Core/proposals.js`, `ProposalStore.js`, `_approveMany` |
 | write core | ✅ | ❌ zero importers by design | `Core/writeMap.js` |
 | **undo / rollback** | ❌ | ❌ **ABSENT** — no Shopify delete leg exists at all (PP-0d) | — |
 
-**The honest claim: no stage requires a NEW PRIMITIVE. That is not the same as "it assembles."** Six times this
+**The honest claim: no stage requires a NEW PRIMITIVE. That is not the same as "it assembles."** Repeatedly this
 session a planned build collapsed into wiring once an existing contract was read (`coerceParams` already dropped
-placeholders; the fleet queue already WAS batch approval; `detect` already branches; `field_contains` exists; the
-assertion vocabulary is single-sourced; the wizard already IS the trial gate). That track record is why the
+placeholders; the fleet queue already WAS batch approval; `detect` already branches; the assertion vocabulary is
+single-sourced; the wizard already IS the trial gate; the fleet sweep's `runId` may already be the run object;
+the clause-path predicate engine is already reachable via `orch_predicate`). That track record is why the
 optimistic reading is tempting — and exactly why the two ❌ rows must be verified before being counted on.
+
+**One entry was struck from that list, and it is the instructive one.** An earlier draft counted *"`field_contains`
+exists"* among the wins. **It does not** — not in the scope-side evaluator (§1.1's ⛔ block). So the very paragraph
+arguing "read the contract before building" contained an item that had been grepped rather than read. The pattern
+is real, and it is not self-verifying: *"I found it already existed"* is itself a claim that needs the read.
 
 ### §1.1 The branch predicate, concretely
 
@@ -96,9 +109,10 @@ evaluate engine-side against `scope` — i.e. against RECORDS, not the DOM.
 > (the ONLY contains-style predicate, on a *document* binding), and `orch_predicate` (an escape hatch, unread).
 > `every_record_*` is collection-shaped and therefore the wrong shape for per-item.
 >
-> **NEXT READ (small, blocks PP-1):** `binding_is_document` / `document_contains` semantics — does a long
-> free-text field qualify as a document? — and what `orch_predicate` permits. Those decide whether
-> structured-field branching is expressible today or needs a new condition type.
+> ~~**NEXT READ (small, blocks PP-1):**~~ **DONE — see §1.1c.** Both were read against source. The answer:
+> **no new condition type is required**, and the deterministic ceiling is meaningfully higher than this block
+> implies — but it is governed by BINDING GRANULARITY, not by the condition list. §1.1c is the authoritative
+> statement; the switch above remains accurate as the *native* set.
 
 ~~Available data predicates:~~ *(superseded — see the block above)*
 
@@ -168,6 +182,79 @@ changed items are classified).
 tell"* and drop the item into `unknown` rather than guessing — and a negated or context-dependent instruction is
 exactly what should land there for a human to read. A model forced to pick an arm is no better than a keyword.
 
+### §1.1c PP-0b ANSWERED — the real predicate ceiling *(read against source 2026-07-21)*
+
+Both open reads are done. **No new condition type is required.** The deterministic floor is higher than the ⛔
+block implies — but the thing that governs it is **binding granularity**, not the condition list, and that is the
+finding that changes how `scopeFor` must be written.
+
+**There are two routes to a branch predicate, not one.**
+
+1. **Native scope conditions** — the switch in the ⛔ block. These address `cond.binding` **plus `cond.fieldName`**
+   for the record family, so per-field structured tests work directly over a record binding:
+   `record_has_field` (`DataAssertion.js:370`) and `record_field_non_empty` (`:382`).
+2. **`orch_predicate`** (`DataAssertion.js:517`) — a bridge to `evaluatePredicate` (`Core/orchAnalyze.js:135`),
+   the SAME evaluator the chat interpreter uses. Its op set, read from the switch:
+
+```
+exists · none · contains · not_contains · gt · gte · lt · lte · eq        + spec.negate (flips LAST)
+```
+
+`contains`/`not_contains` lowercase both sides; `gt/gte/lt/lte/eq` compare either `_count` (when
+`spec.target === 'count'`) or the first number parsed out of the coerced scalar. It ships `predicateLabel`
+(`orchAnalyze.js:160`), which renders an arm in English — *"it mentions X"*, *"it's over 30"* — which is exactly
+what §10.2's review-before-acting needs, already built.
+
+> #### THE BINDING-GRANULARITY RULE — the actual PP-0b finding
+>
+> **`orch_predicate` carries NO `fieldName`.** It takes `{binding, specJson}` and coerces the WHOLE binding
+> through `_coerceForPredicate` (`DataAssertion.js:57`). For `kind:'record'` that coercion is
+> `Object.values(fields).join(' ')` — **every field value flattened into one string.**
+>
+> So over a *record* binding, `orch_predicate contains "replacement"` searches **all fields at once**, and
+> `gt` parses the first number out of a concatenated blob of every field value — which is not a numeric test on
+> anything meaningful.
+>
+> **Therefore: a field that needs a rich predicate must be bound as its OWN binding.** `scopeFor(item)` is not
+> "wrap the record"; it is:
+>
+> ```
+> scopeFor(item) → Scope with
+>    record(item)                    under a stable binding name   // record_has_field / record_field_non_empty
+>    document(item.<longTextField>)  under its own binding name    // document_contains, orch_predicate contains
+>    scalar(item.<numericField>)     under its own binding name    // orch_predicate gt/gte/lt/lte/eq
+> ```
+>
+> This corrects the shorthand carried out of the PP-0b session (*"record(item) + document(item.Instructions)"*),
+> which is right about the two constructors and silent about the rule that makes them necessary. **Which fields
+> get their own binding is a declaration** (§1.3), not something the adapter can infer — and that is a genuine
+> new obligation on the declaration, not a free consequence.
+
+**Three hazards found in the same read. Each is small, each fails in the unsafe direction, none is hypothetical
+once branch arms are being authored:**
+
+1. **Two contains-style predicates with DIFFERENT case semantics.** Native `document_contains` (`:503`) is
+   `content.includes(needle)` — **case-SENSITIVE**. `orch_predicate`'s `contains` lowercases both sides —
+   **case-INSENSITIVE**. Same verb, same document, different answer. Pick one per project and say which;
+   `orch_predicate` is the better default because case-sensitivity on human-authored text is a bug generator.
+2. **`exists` is not a presence test.** It routes through `_countFromValue`, where any non-empty scalar → 1 but
+   the literal words `no|none|zero|nothing|n/a` → 0. So a field containing the string `"none"` reads as ABSENT.
+   That is defensible for observation results and actively wrong for a record field whose value is legitimately
+   the word "none". **Use `record_field_non_empty` for presence, not `exists`.**
+3. **Unknown op + `negate:true` returns TRUE — a fail-OPEN,** contradicting `evaluatePredicate`'s own doc comment
+   (*"Unknown op → false … a closed gate is a safe default"*). The `default:` arm sets `r = false` and the negate
+   flip is applied afterwards, unconditionally. A typo'd op in a negated arm therefore matches **every item**.
+   Given §4's DEFAULTS-FAIL-CLOSED rule this is the wrong direction, and a branch arm is precisely a place where
+   generated specs will contain typo'd ops. **PP-1 must not rely on the evaluator failing closed here** — either
+   validate the op against the known set before evaluating, or fix the flip to skip the default arm.
+
+**What this does NOT rescue.** `orch_predicate`'s `contains` is still `String.includes` with a lowercase. It is
+better provisioned than §1.1 claimed and it does not touch §1.1b's conclusion: *"do NOT send a replacement"* still
+satisfies `contains "replacement"` and still routes confidently wrong. `not_contains` and `negate` permit
+*"mentions replacement AND does not mention 'do not'"*, which is keyword logic wearing a better suit — it breaks
+on `"declined"`, `"already sent"`, `"under repair instead"`. **Model classification for free text; deterministic
+predicates for structured fields; the declaration says which.** Unchanged.
+
 ### §1.2 The BRANCH clause contract *(missing from v1 — the largest gap)*
 
 `map` and `fieldRead` each have an explicit verdict shape and a normalizer. BRANCH had a described MECHANISM and
@@ -196,7 +283,8 @@ Rules, each earned by a specific failure:
 
 ### §1.3 Who authors the predicate *(unstated in v1 — the central design axis)*
 
-`field_contains(Instructions, "replacement")` is declared data. **By whom** decides what this system is:
+A predicate — `document_contains(Instructions, "replacement")`, or the `orch_predicate` equivalent — is declared
+data. **By whom** decides what this system is:
 
 | source | when it is right | precedent |
 |---|---|---|
@@ -252,16 +340,28 @@ evalBranch(item, verdict, (assertion, it) => evaluateDataCondition(assertion, sc
 
 The injection chosen to DEFER the A/B decision turned out to BE the design. PP-1's reach is one adapter function.
 
-**The one unknown left is bounded and is not architectural:** what `Scope` shape `evaluateDataCondition` expects.
-`Services/Scope.js` exports `Scope, scalar, list, record, document`; the open question is only whether a per-item
-record wraps as `record(...)` and under what binding name the `field` of a condition resolves. Read
-`evaluateDataCondition`'s field-resolution path and `Scope.js` before writing `scopeFor`.
+~~**The one unknown left is bounded…**~~ **ANSWERED — see §1.1c.** `Services/Scope.js` exports
+`Scope, scalar, list, record, document`; a condition addresses `cond.binding` (+ `cond.fieldName` for the record
+family), and the load-bearing consequence is the **binding-granularity rule**: `orch_predicate` has no
+`fieldName` and flattens a record binding to one joined string, so any field needing a rich predicate must be
+bound separately. `scopeFor` is specified in §1.1c and is now a writing job, not a reading one.
 
-**A correctness note for that adapter, carried from §1.2:** `evaluateDataCondition` returns a boolean. The
-three-outcome contract needs UNKNOWN distinguishable from FALSE, so `scopeFor`/the adapter must return
-`undefined` when the condition names a field the record does not carry — do NOT let "absent field" collapse into
-"false". If `evaluateDataCondition` cannot express that distinction, the adapter must pre-check field presence
-(`field_present` semantics) before delegating.
+**A correctness note for that adapter, carried from §1.2 — and it is HARDER than this section first claimed.**
+`evaluateDataCondition` does **not** return a boolean; it returns `{ ok: boolean, reason: string }`. That sounds
+like it helps, and it does not: **every failure path returns `ok:false`** — unbound binding, wrong `kind`, missing
+field, empty needle, and a caught throw alike. FALSE and COULD-NOT-EVALUATE are therefore **already merged** at
+this layer, separated only by the prose in `reason`.
+
+**Do not parse `reason` to recover the distinction.** Those strings are diagnostic text, not an API; they are
+formatted for humans, they vary per case, and pinning the three-outcome contract to their wording makes an
+unannounced string edit a silent routing change. **The adapter must PRE-CHECK before delegating** — confirm the
+binding exists and is of the expected `kind`, and for a field test confirm the field is present
+(`record_has_field` semantics, *not* the falsified `field_present`) — and return UNKNOWN itself. Only when the
+pre-check passes does a returned `ok:false` mean a genuine FALSE.
+
+This is the §1.2 three-outcome contract's real cost, and it lands entirely on the adapter. It is also the v1637
+bug's exact shape (unreachable read scored as a miss) waiting one layer down: without the pre-check, a per-item
+branch routes items to `otherwise` whenever a field is merely absent.
 
 ### §2.1 The original A/B framing *(history — superseded by §2.0)*
 
@@ -320,8 +420,32 @@ UPSERT(find, create, act):
 the map ladder treated an unreachable rung as a miss and descended to a weaker key (v1637), and a truthy-but-
 pathless resolver result rendered a field named "undefined" (v1653). For UPSERT the failure is worse than either —
 *miss* creates a record, *unreachable* must not, and conflating them means duplicate records on every transport
-blip. `try`'s `recover` arm reached on ANY failure would be exactly this bug; **confirm what triggers `recover`
-before using it.**
+blip. ~~`try`'s `recover` arm reached on ANY failure would be exactly this bug; confirm what triggers `recover`
+before using it.~~
+
+> ## ✅ CONFIRMED, AND THE ANSWER IS NO: **`try` IS THE WRONG HOST.** *(read 2026-07-21, built around at v1661)*
+>
+> `Services/ExecutionEngine.js:1515-1531` chooses `recover` by ELIMINATION on a three-valued status —
+> `ok` returns, `aborted` propagates, **everything else runs recover**. The result shape is `{status, error?}`
+> where `error` is a bare STRING (`:560-567`): no code, no category, no cause.
+>
+> And unreachability is normalized INTO that bucket before `try` ever sees it. `TemplateWalker.#msg` retries a
+> never-delivered channel 6× then throws, and every `#executeStep` call site catches that throw and converts it
+> to a success-false string. So a dead tab, an uninjected content script, a Cloudflare interstitial, and a
+> lookup that legitimately matched nothing all arrive as the SAME `status:'failed'`.
+>
+> A find-or-create on `try` would therefore create a duplicate record every time the lookup merely failed to
+> reach the service — the v1637 bug with a write on the end of it. The engine even COMPUTES a structured cause
+> (`PreconditionGate` returns a `classification`) and then discards it at exactly this point, putting it in the
+> emitted event and not the returned result.
+>
+> **`Core/upsert.js` therefore owns its own control flow** over a find that must report three outcomes, and
+> `normalizeFindResult` is deliberately strict: an unrecognized shape is `unreachable`, never `miss`.
+>
+> *(Same read, relevant to §9.1: `detect` cannot give the three-outcome contract either.
+> `TemplateWalker.js:1602-1606` catches a throwing predicate into `matched = false`, so "no arm matched" and "a
+> predicate threw" are indistinguishable, and `#executeDetectNode` reads only `probe.ok`. This is why BRANCH
+> reaches the evaluator through an adapter that PRE-CHECKS, rather than through `detect`.)*
 
 ### §3.1 Multi-arm items *(unresolved in v1)*
 
@@ -364,6 +488,30 @@ outward    : true | false      — does this leave our boundary (email sent, ord
 gate = outward || !reversible
 ```
 
+> ## ⚠ AMENDED AT BUILD TIME (v2.74.1661). ONE axis was added, not two — and it RAISES ONLY.
+>
+> **`reversible` was NOT added.** §9.4's suspicion was correct: `destructive` already means exactly
+> `!reversible`, and `reversible` is separately already a live boolean on the capability side. Three names for
+> one predicate is the §7.3 failure. **`outward` was added** — it had no name anywhere.
+>
+> **The derived rule above was NOT implemented as written, because it LOOSENS.** Read literally,
+> `gate = outward || !reversible` makes every reversible internal write free — `shopify_create_customer`,
+> `shopify_update_customer`, `shopify_create_order`, `create_user`, `add_tags`, `set_ticket_requester` are all
+> `reversible:true, outward:false`. Today every one of them floors at `confirm` via `hintToSafety` and
+> fail-closes without `confirmed:true` at both executor belts. Shipping the rule as stated would have **un-gated
+> that entire class across every existing surface** as a side effect of a per-item pipeline change.
+>
+> That is not what the user's policy asks for. "Profile creation is un-gated, it's a system-internal reversible
+> step" is a statement about what a PIPELINE may do unattended within a reviewed run — it is not a request to
+> lower the global floor for every ad-hoc write in the product. **So the gate relaxation belongs at the
+> pipeline's own gate, where the run, the trial and the case give it context; the global classifier keeps its
+> floor.** `hintToSafety` gained `outward` as a raise-only input and nothing else.
+>
+> **Still owed:** the param-conditional case. `add_comment`'s outward-ness depends on `public:true`, but
+> `hintToSafety` runs at leg-BUILD time before params bind, so a static declaration would over-gate internal
+> notes. That needs an invoke-time `outwardWhen` evaluated where the bound params exist. Until it lands, a public
+> customer reply still goes out on one click while an SMS needs two.
+
 Under that rule the user's policy falls out with no special-casing: create-customer (`reversible:true,
 outward:false`) → free; draft order (`reversible:true, outward:false`) → free; **confirm order**
 (`reversible:false, outward:true`) → gated; **send email** (`outward:true`) → gated. Money and inventory remain
@@ -391,12 +539,24 @@ sent on every run that has unclassified items. The redaction is therefore on the
 What still never leaves: row values used as lookup keys — the map threads them into a search PARAMETER, never a
 prompt, which is why the address (the join key since v1633) has never reached a model and must not start now.
 
-Note what is already true: the map threads row values into a search **parameter**, never a prompt, so the join key
-(the address, since v1633) has never reached the model. **The branch as specced needs no model at all** —
-`field_contains` is deterministic. Egress only arises if §6's optional classifier is built.
+> ⛔ **A first-draft paragraph was removed here.** It read: *"The branch as specced needs no model at all —
+> `field_contains` is deterministic. Egress only arises if §6's optional classifier is built."* It contradicted
+> the paragraph directly above it and rested on `field_contains`, which does not exist in the scope-side
+> evaluator (§1.1's ⛔ block). Both of its claims are false: the branch DOES need a model for free-text arms
+> (§1.1b), so egress is on the hot path and not conditional on an optional build.
 
 If it is: batch one call for N items (not per-item — the cost property), strip addresses before sending, and keep
 the result to a label the branch consumes. See `docs/DESIGN_llm_privacy.md` (R-1..R-4 redactor).
+
+> **DONE at v2.74.1662.** The redactor exists (`Core/redact.js`, R-1/R-2/R-3 wired at the transport boundary) and
+> PP-5 uses it **unconditionally** — it does not consult the global `settings:redact_pii` toggle, because this
+> section makes redaction a PRECONDITION of this egress rather than a preference about it.
+>
+> **How the address requirement is actually met, since it is not obvious:** no regex reliably detects a street
+> address. `identityValues` (`Core/branchClassify.js`) reads the record's OWN address/name/contact fields and
+> redacts *those values* out of the instruction text. The address is redacted because the record told us what it
+> is — not because a pattern guessed. The map stays in the panel; the service never receives it, and the model's
+> returned reasons are restored locally so the user reads real words the model never saw.
 
 ---
 
@@ -473,17 +633,23 @@ are needed.
 - **PP-0** — ~~answer §2's two open questions~~ **DONE.** Both answered by reading two module headers (§2.0): the
   condition vocabulary is single-sourced with family-tagged evaluators; scope-side needs no tab; `SieveExecutor`
   does not duplicate anything. The reach is an adapter, not a lowering layer.
-- **PP-0b** *(the residue, bounded)* — read `evaluateDataCondition`'s field resolution + `Services/Scope.js` to
-  write `scopeFor(item)`. Confirm how a per-item record wraps and how a condition's `field` resolves against it.
-  **This is the only thing PP-1's reach still waits on.**
+- **PP-0b** — ~~read `evaluateDataCondition`'s field resolution + `Services/Scope.js`~~ **DONE (§1.1c).** No new
+  condition type needed. Three things came out of it that PP-1 must honor: the **binding-granularity rule** (a
+  field needing a rich predicate gets its own binding — `orch_predicate` has no `fieldName`), the **pre-check
+  obligation** (§2.0.1 — `ok:false` merges FALSE with COULD-NOT-EVALUATE; do not parse `reason`), and three
+  small hazards (case-semantics split, `exists` ≠ presence, unknown-op+`negate` fails OPEN).
+  **PP-1's reach is now unblocked** — `scopeFor` is a writing job.
 - **PP-0c** *(gates GENERATION, not PP-1)* — §8: add `clause?` to `steps[]`, bank it at wizard-approve time, and
   make replay prefer it over re-interpreting `text`. Independent of the per-item work and worth doing on its own
   merits: today every banked workflow re-asks the model on every run, and `ready` does not pin what a step
   resolved to. **Intent→workflow generation should not be built before this** — generated prose re-interpreted
   per run, with no author who knows what was meant, is worse than the manual wizard it would replace.
-- **PP-0e** *(check before building — §10.3)* — does the fleet sweep's `runId` + ledger generalise into the run
-  identity §5.6 needs? Read `appendLedger`/`ledgerEntry` call sites. **If yes, run ownership is wiring, not a
-  build.** Seventh candidate this session for "reading the contract collapses the build".
+- **PP-0e** — ~~does the fleet sweep's `runId` + ledger generalise?~~ **READ. NO — build the run object.** The
+  full evidence is in §9.2. Short version: capped-and-evicting at 500 shared across kinds, a strict field
+  whitelist that would silently swallow an `itemId`, a run verdict that is computed and discarded, and
+  run-openness living outside the ledger behind a 5-minute timer only one of the two sweep twins writes.
+  **This is the first time this session that reading the contract did NOT collapse the build** — worth noting,
+  because seven prior candidates did, and the streak was starting to feel like a law.
 - **PP-0f** *(§10.2 — cheapest high-value item in this spec)* — the read-only CLASSIFICATION PASS: classify every
   item in one batched call, show the distribution, act on nothing. Independently useful (it answers "what is
   actually in my queue?"), and it is the prerequisite for stratified trialling.
@@ -495,17 +661,39 @@ are needed.
   problem: the wizard proves a step BY RUNNING IT, so the first workflow containing a create will leave real
   records behind with no cleanup path. Needs the three-outcome contract too (`undone | failed | unreachable`),
   reverse-order rollback, and the created id captured durably at creation or there is nothing to undo with.
-- **PP-1** — reach: BRANCH from the per-item pipeline, whichever of A/B §2 selects. Pure core + tests first.
-- **PP-2** — UPSERT with the three-outcome contract and the inline re-check.
-- **PP-3** — the `reversible`/`outward` axes + `gate = outward || !reversible`; thread per invariant #3 (three
-  catalog→leg hops) and refresh through `mergeRecipes`.
+- **PP-1** — ~~reach: BRANCH from the per-item pipeline~~ **BUILT AND WIRED (v2.74.1661).**
+  `Core/branchScope.js` (the adapter: `planBindings` + `precheckCondition` + `makeBranchEvaluator`, pure and
+  injected) + `_runBranchClause` in chat.js. Threaded through every seam the clause path has: `INTENTS`,
+  `normalizeInterpretDecision`, `parseInterpretOutput`'s payload whitelist, the prompt vocabulary + shape line,
+  the `INTERPRET ▸` payload probe's third whitelist, **both** dispatcher doors *and* the chain's execution half,
+  the child-lane drop site, and `_DECISION_RE`. Confidence-gated like `map`. 27 tests.
+  **Blocker fixed in the same pass:** `fieldRead` never set `st.lastValue`, so it was a composition DEAD END —
+  `list → read instructions → branch on instructions` could not work at all, and every predicate on the read
+  field would have evaluated UNKNOWN. It now returns and threads its enriched rows.
+- **PP-2** — **CORE BUILT (v2.74.1661), runtime deliberately unwired.** `Core/upsert.js`: three-outcome contract,
+  inline re-check, `upsertOnce` for §3.1's shared-target hazard, trial-tag passthrough. 21 tests. NOT built on
+  `try` — see §3's confirmed block. Wiring it to real create legs is the write path and stays behind the
+  existing `Core/writeMap.js` boundary until a human drives a trial.
+- **PP-3** — **BUILT, AMENDED (v2.74.1661).** `outward` only, raise-only; `reversible` rejected as a duplicate of
+  `destructive`. Threaded per invariant #3 (`rideRecipe.js` hop 1 · `harvestedRecipeLegs` spread hop 2 ·
+  `connectorLeg.js#recipeToLeg` hop 3), with a seeded-path test that asserts on the LEG. See §4's ⚠ amendment
+  for why `gate = outward || !reversible` was NOT implemented as written.
 - **PP-4** — declare the gate on existing write legs; verify the user's policy falls out unchanged.
-- **PP-5** — **model classification for FREE-TEXT branch arms. NOT a fallback: for a free-text field this is the
-  PRIMARY mechanism** (§1.1b). Deterministic `field_*` predicates stay primary for structured fields, and the
-  declaration says which kind a field is. Requirements: ONE batched call per run (never per item); the verdict
-  BANKED per item with its reason (§1.1b), so re-runs are stable and only new/changed items are classified;
-  `unknown` is a first-class answer the classifier must be able to give; addresses redacted before the text is
-  sent (§5).
+  *Partly done:* `aw_send_sms` now declares `outward` honestly. **Owed:** the param-conditional case
+  (`add_comment public:true`) needs an invoke-time `outwardWhen`, since `hintToSafety` runs before params bind.
+- **PP-5** — **BUILT (v2.74.1662).** `Core/branchClassify.js` (26 tests) + `AnthropicService.classifyBranch` +
+  the `CLASSIFY_BRANCH_ITEMS` handler + the `classify` arm form in the interpret prompt. All four requirements
+  are honored: ONE batched call per run · `unknown` is first-class (and an INVENTED arm label is downgraded to
+  unknown and counted, never guessed) · the banking shape exists with change-detection by text hash ·
+  **addresses redacted before egress**.
+  Two things worth knowing. **The redaction is SEEDED, not detected** — no regex finds a street address, so
+  `identityValues` reads the record's own address/name/contact FIELDS and redacts those values; the address has
+  been the map's join key since v1633, and it still never rides into a prompt. **The unavailable path degrades to
+  UNKNOWN, never to keywords** — a keyword fallback is exactly the confidently-wrong answer this rung exists to
+  prevent, so when the model is unreachable every classified arm answers unknown and a human reads them.
+  *Owed:* the banking is BUILT but not yet PERSISTED — `bankedVerdict`/`unbankedItems` exist and are tested, and
+  nothing writes them to storage yet, so today every run re-classifies. That is correctness-neutral and costs a
+  call per run.
   *(The earlier ">20% land unmatched, then consider a model" threshold is withdrawn — it measured the wrong
   thing. Literal matching does not FAIL LOUDLY on free text, it fails SILENTLY and confidently: "do NOT send a
   replacement" matches `contains "replacement"`. An unmatched-rate metric cannot see that class of error at all.)*
@@ -616,20 +804,61 @@ The §1 table now says this outright, but it bears repeating as a rule: **`detec
 reached from the clause path, over a per-item record scope, has never been observed.** Neither has `try`'s
 `recover` arm under a failed lookup. Verify both before treating BRANCH or UPSERT as wiring rather than building.
 
-### §9.2 The orchestration owner does not exist
-See §5.6. Policy for caps, isolation, abort and the run verdict is specified against an object the codebase does
-not have. **Decide (a) or (b) before PP-1.**
+### §9.2 The orchestration owner does not exist — **READ 2026-07-21: build it (option a)**
+See §5.6. **PP-0e is answered, and the answer is that the ledger cannot own a run.** The fleet sweep's `runId` is
+a copy-pasted template literal in two files (`chat.js:4407`, `background/handlers/fleet.js:198`) that already
+disagree — one stamps an in-flight marker, one does not — and it is never returned from the function that mints
+it. `Core/actionLedger.js` is a **narration substrate, not run state**:
+- `LEDGER_CAP = 500` and silently evicting (`ActionLedgerStore.js:9,39`), shared across all kinds for the
+  instance. A per-item run writing ~3 entries per item starts evicting **its own earliest entries** near N≈150.
+- `ledgerEntry` is a strict field WHITELIST (`:20-34`) — an `itemId` or an outcome enum would be dropped with no
+  error — and an unrecognized `kind` silently coerces to `'proposal'` (`:17`).
+- **The run verdict is computed and thrown away.** The `sweep` entry is written BEFORE the execution loop
+  (`fleet.js:340` vs `:347`), so its counts predate every outcome; the real tallies are locals that reach a chat
+  note and a log line and are never ledgered.
+- Run-openness lives outside the ledger entirely, as a **5-minute wall-clock guess** (`fleetSchedule.js:86`) that
+  only the headless twin participates in.
 
-### §9.3 The CASE shape is reinvented, not read
-§5.7 proposes a structure while the dossier fan-out already emits cases with a shape of its own. **Read theirs
-first.** This is the write-batch mistake — inventing an approval flow that already existed — and it is being
-repeated inside the document that records it as a lesson.
+So: `runId` is reusable as a CONVENTION (extract the mint), per-item outcome records are a small extension, and
+the run verdict + "already processed in an open run" are **absent**. Build the run object.
 
-### §9.4 `reversible` may be a third name for `destructive`
-§4 adds `reversible` / `outward`. But `hintToSafety` already consumes `destructiveHint`, and the catalog already
-declares `safetyClass: 'destructive'`. **If `destructive` already means `!reversible`, then §4 introduces a
-competing vocabulary for a concept that has one** — precisely the failure §7.3 warns about. Check before
-building PP-3; the real gap may be only `outward`.
+### §9.3 The CASE shape is reinvented, not read — **READ 2026-07-21: WRONG SHAPE, and there is a better precedent**
+Read theirs first, and the answer is that neither existing shape fits. A "case" is a `Conversation` row, and the
+two paths that mint them do not share a definition:
+- **Dossier fan-out case** — a sub-task conversation. **No status field at all**; existence IS open, and the only
+  close is deletion. `patchMeta`'s allow-list (`ConversationStore.js:279`) is closed, so a verdict field is a
+  store change, not a field addition.
+- **Vitals incident case** (`vtc_`) — a near-empty conversation SHELL whose real state (`status`, `openedAt`,
+  `closedAt`, `evidence[]`) lives in a **sidecar store** (`Core/vitals.js:89-95`).
+
+Three things a per-item pipeline needs are unrepresentable today: **failed vs never-ran** (`_runChildTask`
+collapses three outcomes into `'needs-you'` and then discards the status entirely — `chat.js:2045`, `2107`),
+per-stage verdicts (the container is a `messages[]` transcript; stage results are prose bubbles), and
+actions-with-approval-state at the right grain (ledger and proposals key by `instanceId`, which every case under
+a desk SHARES).
+
+**The precedent to copy is the vitals sidecar, not the fan-out** — real state in an owned store, conversation as
+a render shell, with `evidence[]` + open-or-append (`vitals.js:79`) as the closest existing analogue to
+per-stage verdicts.
+
+*(Found in passing, unrelated to this design: `patchMeta` silently drops `summary` and `resolvedAt` because
+neither is on its allow-list, while `chat.js:11598-11600` writes both. So `conv.resolvedAt` is never set, the
+`!conv.resolvedAt` guard is permanently true, and every `VITALS_CHANGED` re-patches and re-logs
+`VITALS ▸ case resolved` for every closed incident.)*
+
+### §9.4 `reversible` may be a third name for `destructive` — **CONFIRMED. Only `outward` was new.**
+It is. `Core/proposals.js:124` is a literal rendering ternary:
+`p.safety === 'destructive' ? 'hard to reverse (source closes)' : 'reversible'` — the codebase already prints a
+non-destructive proposal to the user as the word **"reversible"**. And `reversible` separately exists as a live
+boolean on the capability side (`Core/orchMatch.js:25` → `sg.js:553` → `chat.js:6487,7390`, where it is a hard
+veto on auto-fire). Adding a third spelling would have given one predicate three names.
+
+`outward` genuinely had no name — it was smuggled in by **mislabeling** outward legs as destructive
+(`aw_send_sms` is flagged `destructive` while destroying nothing, with a comment explaining an SMS "can't be
+unsent"). The cost was visible one entry away: `add_comment` with `public:true` REPLIES TO THE CUSTOMER, is
+equally unsendable, and sat at single-click `confirm` because it is merely a write.
+
+**Built at v2.74.1661: `outward` only, and RAISE-ONLY** — see the §4 amendment.
 
 ### §9.5 Nesting is structurally possible and completely unspecified
 `arms[].then` is `clause[]`, so a branch can contain a branch. Depth limit, cycle detection, whether a nested
@@ -746,9 +975,10 @@ Three parts, and the third **corrects a fail-open introduced in §8.3 of this sa
 ## §11 What this spec deliberately does NOT decide
 
 **PP-0 removed two of these** (§2.0): the A/B reach choice, and whether `try` sits under the same evaluator
-question — both dissolved once the condition layering was read rather than inferred. What remains genuinely open:
-`scopeFor(item)` (PP-0b, bounded), whether `try`'s `recover` is reached on ANY failure or specific classes (§3),
-and PP-5 (deferred by design, with a threshold).
+question — both dissolved once the condition layering was read rather than inferred. **PP-0b removed a third**
+(§1.1c): the predicate vocabulary is settled and needs no new condition type. What remains genuinely open:
+whether `try`'s `recover` is reached on ANY failure or specific classes (§3), the execution-policy owner
+(§9.2 — decide (a) or (b) before PP-1), and PP-5 (deferred by design).
 
 *(Revised. The first draft ALSO left the BRANCH contract, predicate authorship, multi-arm semantics, gate
 defaults, observability, execution policy, case shape and re-run behaviour unstated. Those were not deliberate —
@@ -757,10 +987,14 @@ contract and a permissive gate default — were the dangerous kind, because both
 clause yields confident garbage, and an unclassified write simply executes. What follows is the genuine
 remainder.)*
 
-- A/B in §2 — needs PP-0.
-- Whether `try` is the right host for UPSERT — depends on what triggers `recover`.
-- Whether BRANCH is a new node type or a new reach to `detect` — likely the latter, unconfirmed.
+- ~~A/B in §2 — needs PP-0.~~ **RESOLVED** (§2.0.1): an adapter, not a lowering layer.
+- ~~Whether BRANCH is a new node type or a new reach to `detect`.~~ **RESOLVED — neither.** `Core/branchClause.js`
+  owns the arm logic and takes an INJECTED evaluator; the adapter hands it `evaluateDataCondition`. `detect` is
+  not on the per-item path at all. (The injection chosen to DEFER this choice turned out to be the design.)
+- Whether `try` is the right host for UPSERT — still open; depends on what triggers `recover` (§3).
 - The classifier (PP-5) — deferred until measured, on purpose.
+- **Which fields a record declares as separately-bound** (§1.1c's binding-granularity rule) — a new obligation on
+  the declaration, surfaced by PP-0b and not yet designed. It belongs with §1.3's authorship question.
 
 Leaving these open is the point. Every expensive error this session came from deciding one of these by inference
 instead of by reading.
