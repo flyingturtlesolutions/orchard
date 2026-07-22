@@ -65,7 +65,11 @@ export function createPipelineHandlers() {
         let groundFacts = '';
         try {
           const conns = Array.isArray(payload?.connections) ? payload.connections : [];
-          if (conns.length) groundFacts = renderGroundFacts(deriveGroundFacts(curatedRidesForConnections(conns, CONNECTOR_RECIPES)));
+          // v2.74.1689 — render UNCONDITIONALLY. The old `if (conns.length)` gated the whole block on a connected
+          // site, which was right while every fact described one. It is wrong now that the block also states what
+          // ORCHARD ITSELF can do: "open a case" is valid with no connections at all, and gating it meant the one
+          // user who most needs to hear "you can open a case here" — the one with nothing connected — heard nothing.
+          groundFacts = renderGroundFacts(deriveGroundFacts(conns.length ? curatedRidesForConnections(conns, CONNECTOR_RECIPES) : []));
         } catch { groundFacts = ''; }   // facts are an ENRICHMENT: without them the decomposer still runs, just blinder
 
         const out = await AnthropicService.decomposeIntoSteps(intent, {

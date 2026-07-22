@@ -94,10 +94,38 @@ describe('groundFacts — the rendered block', () => {
     assert.ok(!/\/#warranty|itemUrl|listUrl/.test(block), 'leaked an endpoint template');
   });
 
-  it('an empty ground renders nothing rather than an empty heading', () => {
-    assert.equal(renderGroundFacts(deriveGroundFacts([])), '');
-    assert.equal(hasGroundFacts(deriveGroundFacts([])), false);
+  it('an empty ground renders no SITE facts rather than an empty heading', () => {
+    // v2.74.1689 — scoped to `own: []`. Orchard's own capabilities are not site facts and render regardless; the
+    // property this test protects is that an empty CATALOG produces no site headings.
+    assert.equal(renderGroundFacts(deriveGroundFacts([]), { own: [] }), '');
+    assert.equal(hasGroundFacts(deriveGroundFacts([]), { own: [] }), false);
     assert.equal(hasGroundFacts(deriveGroundFacts(RECIPES)), true);
+  });
+
+  // v2.74.1689 — OUR OWN capabilities reach the planner. The live failure they fix happens at PLAN time, before
+  // any router runs: "open a new case listing instructions" was decomposed into "create a Zendesk ticket for
+  // each", because the only case-shaped thing on the menu was a connected site's write.
+  it('states what ORCHARD itself can do, even with no site catalog at all', () => {
+    const block = renderGroundFacts(deriveGroundFacts([]));
+    assert.match(block, /ORCHARD ITSELF/);
+    assert.match(block, /Open a case/);
+    assert.ok(block.trim().length > 0, 'a user with no connections can still ask for a case');
+  });
+
+  it('and FORBIDS the substitution, not just offers the alternative', () => {
+    // Naming the option is not enough if the model still believes a case must live in a ticketing system. The
+    // prohibition is the load-bearing half.
+    const block = renderGroundFacts(deriveGroundFacts(RECIPES));
+    assert.match(block, /Do NOT rewrite/);
+    assert.match(block, /ticket, issue, or record on a connected site/);
+    assert.match(block, /only when the request names that system/i);
+  });
+
+  it('carries no leg ids — the planner picks steps, never legs', () => {
+    const block = renderGroundFacts(deriveGroundFacts([]));
+    for (const id of ['OPEN_CASE', 'LIST_CASES', 'CLOSE_CASE', 'zendesk_create_ticket']) {
+      assert.ok(!block.includes(id), `leaked a leg id: ${id}`);
+    }
   });
 
   it('a list WITHOUT a drill contributes no drill rule', () => {

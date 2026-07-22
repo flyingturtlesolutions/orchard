@@ -32,6 +32,18 @@
  */
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
+
+/**
+ * Orchard's OWN capabilities, in the same human terms the site facts use — no leg ids (the prompt's role
+ * separation is "you do NOT pick legs"). Mirrors the `domain:'self'` case legs in Core/palette.js; kept here as
+ * plain text rather than imported so this module stays pure and dependency-free, and so the WORDING can be tuned
+ * for a planner rather than for a router.
+ */
+export const OWN_CAPABILITIES = [
+  { what: 'Open a case', note: 'a local review record, held here — NOT a ticket on any connected site' },
+  { what: 'Close a case', note: 'mark one dealt with' },
+  { what: 'Show my cases', note: 'list what is still waiting on a person' },
+];
 const _arr = (v) => (Array.isArray(v) ? v : []);
 
 /**
@@ -144,9 +156,29 @@ export function deriveGroundFacts(recipes) {
  * being asked to learn the substrate — it is being told which splits the substrate forces. A fact the model
  * cannot act on is prompt weight for nothing.
  */
-export function renderGroundFacts(facts, { max = 6 } = {}) {
+export function renderGroundFacts(facts, { max = 6, own = OWN_CAPABILITIES } = {}) {
   const f = facts && typeof facts === 'object' ? facts : { lists: [], lookups: [], writes: [] };
   const lines = [];
+
+  // v2.74.1689 — OUR OWN capabilities, stated BEFORE the site's, because the failure they fix is a substitution
+  // that happens at plan time.
+  //
+  // Live: "open a new case listing instructions" was decomposed into "create a Zendesk ticket for each". The
+  // planner was handed a menu of the site's writes and nothing else, so it rendered the user's word into the
+  // nearest item ON THAT MENU. Adding a `case` INTENT (v1686) could not help — by the time the router read the
+  // step, the step no longer said "case". A capability has to be visible where the PLAN is written.
+  //
+  // Stated as a prohibition as well as an offer, because the substitution is the failure mode: naming the option
+  // is not enough if the model still believes a case must live in a ticketing system.
+  const _own = Array.isArray(own) ? own.filter((o) => o && _str(o.what)) : [];
+  if (_own.length) {
+    lines.push('- Things ORCHARD ITSELF can do, with no connected site involved (these are local, reversible, and');
+    lines.push('  send nothing anywhere):');
+    for (const o of _own.slice(0, max)) lines.push(`    · ${_str(o.what)}${_str(o.note) ? ` — ${_str(o.note)}` : ''}`);
+    lines.push('  When the request asks for one of these WITHOUT naming a system, use it AS WORDED. Do NOT rewrite');
+    lines.push('  "open a case" into a ticket, issue, or record on a connected site — that sends real work to a real');
+    lines.push('  queue the user did not ask for. Name a connected write only when the request names that system.');
+  }
 
   const drillLists = _arr(f.lists).filter((l) => l.hasDrill).slice(0, max);
   if (drillLists.length) {
@@ -192,6 +224,6 @@ export function renderGroundFacts(facts, { max = 6 } = {}) {
 }
 
 /** True when the facts carry anything worth sending. Keeps an empty block out of the prompt entirely. */
-export function hasGroundFacts(facts) {
-  return !!renderGroundFacts(facts).trim();
+export function hasGroundFacts(facts, opts = {}) {
+  return !!renderGroundFacts(facts, opts).trim();
 }

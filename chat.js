@@ -81,7 +81,8 @@ import { openRun, recordStage, closeItem, closeRun, markAlreadyOpen, runStartLin
 import { resolveWriteValue, buildWriteProposals } from './Core/writeMap.js';
 import { writeTally, writePreflight } from './Core/writeClause.js';
 import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
-import { emptyPriorStop } from './Core/priorScope.js';   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
+import { emptyPriorStop } from './Core/priorScope.js';
+import { casePeek } from './Core/pipelineCase.js';   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
@@ -4511,6 +4512,88 @@ async function _runCaseClause(msg, cs, { tabId, priorValue = null, priorLeg = nu
   return { ok: true, opened, failed, run };
 }
 
+// ── v2.74.1689 — Orchard's OWN case legs (domain:'self'). ───────────────────────────────────────────────────────
+//
+// Single-shot handlers behind OPEN_CASE / LIST_CASES / CLOSE_CASE. The per-item fan-out stays the `case` CLAUSE:
+// same split as `write`, where `shopify_create_customer` is the leg and `write` is the clause that fans it.
+//
+// WHY THESE ARE LEGS AND NOT ONLY A CLAUSE KIND. The v1686 `case` intent made the ROUTER able to pick a case. It
+// did nothing for the step DECOMPOSER, which writes the plan first and reads a different catalog — so
+// "open a new case listing instructions" was rewritten as "create a Zendesk ticket for each" at plan time, and by
+// the time the router saw the step it no longer said "case". A capability has to be visible where the plan is
+// WRITTEN, and a leg is the one shape every surface already reads.
+
+/** The pipeline key standalone (non-clause) cases live under. Kept stable so LIST/CLOSE find what OPEN made. */
+const _ADHOC_CASES = 'case:adhoc';
+
+async function _openCaseFromLeg(msg, params = {}) {
+  const title = _str0(params.title) || _str0(params.label);
+  if (!title) {
+    _setMessageBody(msg, 'What should the case be about? Give it a title and I’ll open one.', { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog('CASE   ▸ leg open — refused, no title'); } catch { /* */ }
+    return;
+  }
+  // The id is derived from the title so re-asking for the same case UPDATES rather than duplicates — §5.7's
+  // re-run rule applied to the ad-hoc path, where there is no per-item id to key on.
+  const itemId = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'case';
+  let res = null;
+  try {
+    res = await _orchReq('PIPELINE_RECORD_ITEM', {
+      pipeline: _ADHOC_CASES, itemId, label: title, runId: '',
+      stages: [{ name: 'case', verdict: 'open', detail: 'opened by hand' }],
+      line: 'opened for review',
+    });
+  } catch { res = null; }
+  if (!res || !res.success) {
+    _setMessageBody(msg, 'Couldn’t open the case — nothing was saved.', { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog('CASE   ▸ leg open FAILED — storage'); } catch { /* */ }
+    return;
+  }
+  _setMessageBody(msg, res.opened
+    ? `Opened a case — **${escHtml(title)}**. It’s local to Orchard; nothing was sent anywhere.`
+    : `That case is already open — **${escHtml(title)}**. Nothing duplicated.`, { markdown: true });
+  _orchFinalize(msg);
+  try { _orchLog(`CASE   ▸ leg open "${title.slice(0, 40)}" → ${res.opened ? 'opened' : 'already open'} (${res.id})`); } catch { /* */ }
+}
+
+async function _listCasesMsg(msg) {
+  let r = null;
+  try { r = await _orchReq('PIPELINE_CASES', {}); } catch { r = null; }
+  const all = (r && r.success && Array.isArray(r.cases)) ? r.cases : [];
+  const open = all.filter((c) => c && c.state === 'open');
+  if (!open.length) {
+    _setMessageBody(msg, all.length ? 'No open cases — everything has been closed.' : 'No cases yet.', { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`CASE   ▸ leg list → 0 open of ${all.length}`); } catch { /* */ }
+    return;
+  }
+  const lines = open.slice(0, 24).map((c) => {
+    const peek = casePeek(c);
+    return `- **${escHtml(_str0(c.label) || _str0(c.id))}** — ${escHtml(_str0(peek && peek.line) || 'open')}`;
+  });
+  const head = `${open.length} open case${open.length === 1 ? '' : 's'}${open.length > 24 ? ' (first 24)' : ''}`;
+  _setMessageBody(msg, [head, '', ...lines].join('\n'), { markdown: true });
+  _orchFinalize(msg);
+  try { _orchLog(`CASE   ▸ leg list → ${open.length} open of ${all.length}`); } catch { /* */ }
+}
+
+async function _closeCaseFromLeg(msg, params = {}) {
+  const id = _str0(params.id);
+  if (!id) {
+    _setMessageBody(msg, 'Which case? Say “show my cases” and name one.', { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog('CASE   ▸ leg close — refused, no id'); } catch { /* */ }
+    return;
+  }
+  let ok = false;
+  try { const r = await _orchReq('PIPELINE_CLOSE_CASE', { id, state: 'done', verdict: _str0(params.verdict) }); ok = !!(r && r.success); } catch { ok = false; }
+  _setMessageBody(msg, ok ? 'Closed.' : 'Couldn’t close that case — check the id with “show my cases”.', { markdown: true });
+  _orchFinalize(msg);
+  try { _orchLog(`CASE   ▸ leg close ${id} → ${ok ? 'closed' : 'failed'}`); } catch { /* */ }
+}
+
 
 async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
   const system = map.target.system;
@@ -8599,6 +8682,13 @@ const IL_PANEL_LEGS = {
   REVIEW_QUEUE:             { run: async () => { await _runFleetSweep(); return { rendered: true }; } },
   SHOW_ITEM_SOURCES:        { run: async (_msg, { params } = {}) => { await _showItemSources(params || {}); return { rendered: true }; } },
   SHOW_WORK:                { run: async () => { await _renderWorkTraceMsg(); return { rendered: true }; } },   // FL-1e (v1352)
+  // v2.74.1689 — Orchard's OWN case legs. Single-shot lives here; the per-item fan-out stays the `case` CLAUSE,
+  // exactly as `write` fans a declared create leg. The leg is how a case is SEEN and SELECTED (by the router, and
+  // — the point of this change — by the step DECOMPOSER, which reads the same catalog); the clause is how it runs
+  // over N rows.
+  OPEN_CASE:                { run: async (msg, { params } = {}) => { await _openCaseFromLeg(msg, params || {}); return { rendered: true }; } },
+  LIST_CASES:               { run: async (msg) => { await _listCasesMsg(msg); return { rendered: true }; } },
+  CLOSE_CASE:               { run: async (msg, { params } = {}) => { await _closeCaseFromLeg(msg, params || {}); return { rendered: true }; } },
   CLEAR_CHAT:               { run: async () => { await _clearCurrentChat(); return { rendered: true }; } },     // v1354 — confirm lives INSIDE (one bar for the leg AND the command path)
   EXPLORE_PAGE:             { run: async (msg) => { await _chatExplore({ msg }); return { rendered: true }; } },
   TOGGLE_TRACKING:          { run: async (msg) => {
@@ -9789,7 +9879,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // FL (v2.74.1348, DESIGN_app_fleet.md) — interpret picked a fleet CONSOLE leg (NL → IL, the v1166 inversion:
   // "review the queue" / "show me both tickets" / "open zendesk" — never a regex). Offered only for a connected
   // app (sg.js gates via fleetOfferedLegs). Params bound by interpret ({proposal|targets|origin}) for the show leg.
-  if (d.intent === 'act' && (d.capabilityId === 'REVIEW_QUEUE' || d.capabilityId === 'SHOW_ITEM_SOURCES' || d.capabilityId === 'SHOW_WORK' || d.capabilityId === 'CLEAR_CHAT')
+  if (d.intent === 'act' && (d.capabilityId === 'OPEN_CASE' || d.capabilityId === 'LIST_CASES' || d.capabilityId === 'CLOSE_CASE' || d.capabilityId === 'REVIEW_QUEUE' || d.capabilityId === 'SHOW_ITEM_SOURCES' || d.capabilityId === 'SHOW_WORK' || d.capabilityId === 'CLEAR_CHAT')
       && retrieved.some((l) => l && l.domain === 'self' && l.key === d.capabilityId)) {
     if (d.capabilityId === 'CLEAR_CHAT') {   // v1354 — "clear chat" / "start over" (used to fall through to the teach offer)
       _setMessageBody(msg, 'One moment…');

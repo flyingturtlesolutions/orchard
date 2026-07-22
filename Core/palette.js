@@ -44,6 +44,30 @@ export const BUILTIN_LEGS = [
   { key: 'RELOAD_EXTENSION',         name: 'Reload extension',     does: 'reload the extension (dev)',                           mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
   { key: 'EXPLORE_PAGE',             name: 'Explore this page',    does: 'map/ground the current page so I learn what it offers', mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
   { key: 'TOGGLE_TRACKING',          name: 'Toggle interaction tracking', does: 'turn the interaction monitor (learns capabilities from your clicks) on or off', mode: 'act', domain: 'self', safety: 'confirm', params: [], requires: [] },
+  // Self — CASES (v2.74.1689). Orchard's OWN review records, offered as legs rather than reachable only through a
+  // clause kind. The reason is a live misroute: "open a new case listing instructions" was decomposed into
+  // "create a Zendesk ticket for each" at PLAN time, because the only case-shaped thing the planner could SEE was
+  // a connected site's write. Adding the intent (v1686) did not help — by the time the router ran, the step no
+  // longer said "case". Discovery has to happen where the plan is written, and a leg is what every surface reads.
+  //
+  // This is not a new architecture: `domain:'self'` legs already exist and already dispatch panel-local. Cases
+  // were simply missing from the one list that makes a capability visible everywhere at once.
+  { key: 'OPEN_CASE',  name: 'Open a case',   mode: 'act', domain: 'self', safety: 'auto', source: 'builtin',
+    does: "open a CASE — Orchard's own local review record, stored here and visible only to you. NOT a ticket, issue, or record on any connected site: if the ask names a system (Zendesk, Jira, Shopify), use that system's own capability instead. Reversible — a case costs nothing to open or close.",
+    params: ['title', 'scope'],
+    paramSchema: { type: 'object', properties: {
+      title: { type: 'string', description: "what the case is about, in the user's own words" },
+      scope: { type: 'string', description: '"item" = one case per record (the default, for "for each …"), "run" = a single case covering the whole set' },
+    }, required: [] } },
+  { key: 'LIST_CASES', name: 'Show my cases', mode: 'ask', domain: 'self', safety: 'auto', source: 'builtin',
+    does: 'list the open Orchard cases — what is still waiting on a person', params: [] },
+  { key: 'CLOSE_CASE', name: 'Close a case',  mode: 'act', domain: 'self', safety: 'confirm', source: 'builtin',
+    does: 'close an Orchard case that has been dealt with',
+    params: ['id', 'verdict'],
+    paramSchema: { type: 'object', properties: {
+      id: { type: 'string', description: 'the case id to close' },
+      verdict: { type: 'string', description: 'a short note on how it was resolved' },
+    }, required: ['id'] } },
   // Self — CANVAS render (ACT×Self → the SW channel RENDER_CANVAS, not panel-local). CA-2 (DESIGN_canvas.md §3).
   // Offered ONLY when the bound app DEFINES a presentation layer (`requires:['canvas']` → env.canvas, set in CA-6);
   // until then never offered. `spec` is the model-authored CanvasSpec (validated by canvasSpec.normalizeCanvasSpec).
