@@ -12,6 +12,8 @@
 // Replaying it re-runs the same chain, so the inner per-step gates (the chain's "Run all", the map's batch confirm,
 // the write gate) still apply; the suggestion itself is a confirm. Nothing here bypasses an effect gate.
 
+import { normalizeTrigger } from './trigger.js';
+
 const _str = (x) => String(x == null ? '' : x).trim();
 
 // WF-2 suppression, single-sourced: a never-run, twice-dismissed workflow stops suggesting ("no" ≥2× + never ran).
@@ -41,7 +43,18 @@ function _normSteps(raw) {
     const text = _str(s.text); if (!text) return null;
     const v = (s.via && typeof s.via === 'object') ? s.via : {};
     const via = { kind: _str(v.kind) || null, host: _str(v.host) || null, name: _str(v.name).slice(0, 80) || null };
-    return { text, via, bankedAt: Number.isFinite(s.bankedAt) ? s.bankedAt : 0 };
+    const out = { text, via, bankedAt: Number.isFinite(s.bankedAt) ? s.bankedAt : 0 };
+    // PP-0c (§8.3 / DESIGN_cadence.md §2.1) — carry the pinned RESOLUTION ({kind, capabilityId, groundId?}) that
+    // buildWorkflowSave/pinnedClause emit. Additive + whitelisted for the SAME reason as orphanedFrom below: this
+    // literal is closed by construction, and BOTH saveWorkflow and updateWorkflow route through normalize — so
+    // without this line no pinned clause ever reaches storage, replayPlan always takes the loose branch, and the
+    // drift check can never fire (a drift check bypassed by a fallback is not a drift check, workflowWizard §180).
+    if (s.clause && typeof s.clause === 'object') {
+      const kind = _str(s.clause.kind) || null;
+      const capabilityId = _str(s.clause.capabilityId) || null;
+      if (kind || capabilityId) out.clause = { kind, capabilityId, ...(s.clause.groundId ? { groundId: _str(s.clause.groundId) } : {}) };
+    }
+    return out;
   }).filter(Boolean);
 }
 
@@ -73,6 +86,14 @@ export function normalizeWorkflow(raw) {
     orphanedFrom: (r.orphanedFrom && typeof r.orphanedFrom === 'object') ? r.orphanedFrom : undefined,
     qualifiedAt: Number.isFinite(r.qualifiedAt) ? r.qualifiedAt : 0,  // WW-1 — when every step was approved (empirical proof stamp)
     steps: _normSteps(r.steps),                                       // WW-1 — body-blind per-step provenance (display/audit)
+    // PP-0c (§8.4 / DESIGN_cadence.md §2.1) — the record SCHEMA version (1 = phrasing only, 2 = steps may carry a
+    // pinned clause). buildWorkflowSave emits it; whitelisted here so an edit can't strip it and turn every record
+    // back into isPrePinned()===true, which silently bypasses the drift check. undefined for legacy records.
+    schema: Number.isFinite(r.schema) ? r.schema : undefined,
+    // CD-0 (DESIGN_cadence.md §7) — the cadence TRIGGER: when the workflow runs by itself. A FIELD on the workflow,
+    // not an entity (§1). Whitelisted on orphanedFrom's precedent so an edit can't strip it; normalizeTrigger
+    // (Core/trigger.js, pure) returns undefined when there is no valid cadence.
+    trigger: normalizeTrigger(r.trigger),
   };
 }
 

@@ -33,13 +33,27 @@ describe('deskLanding — buildDeskLanding (the v1602 page shape)', () => {
     assert.equal(s.cards[0].title, 'Big one');
     assert.equal(s.cards[0].wf.id, 'b', 'the record rides — the panel replays it through the chain runner verbatim');
     assert.match(s.cards[0].sub, /3 steps · run 9×/);
-    assert.ok(!s.cards.some((c) => c.kind === 'new-workflow'), 'banked workflows → no ＋ card');
+    // CD-2 (§6.5) — ＋ Workflow is ALWAYS present now (creating a 2nd workflow was impossible under the old guard);
+    // it sits LAST, after the workflow cards.
+    assert.equal(s.cards.at(-1).kind, 'new-workflow', 'banked workflows still get a ＋ card to add another');
+    assert.equal(s.cards.filter((c) => c.kind === 'workflow').length, 3);
   });
   it('no banked workflow → exactly one ＋ Workflow card (never invented actions, never bare text)', () => {
     const s = buildDeskLanding({ title: 'Fresh', description: 'A new desk.' });
     assert.equal(s.cards.length, 1);
     assert.equal(s.cards[0].kind, 'new-workflow');
     assert.equal(s.cards[0].title, '＋ Workflow');
+  });
+  it('CD-2 — a scheduled workflow shows its honest cadence on the card (runs vs due)', () => {
+    // a pinned-ride (tier-sw) workflow → "runs"; a branch step (tier-panel) → "due"; paused → nothing.
+    const swWf = WF({ id: 's', name: 'Sched', subAsks: ['a', 'b'], steps: [{ text: 'a', via: { kind: 'navigate' } }, { text: 'b', via: { kind: 'connector' }, clause: { kind: 'ride', capabilityId: 'c', groundId: 'g' } }], trigger: { kind: 'cadence', minutes: 240, enabled: true } });
+    const panelWf = WF({ id: 'p', name: 'Panel', subAsks: ['a', 'b'], steps: [{ text: 'a', via: { kind: 'branch' } }], trigger: { kind: 'cadence', minutes: 60, enabled: true } });
+    const pausedWf = WF({ id: 'z', name: 'Paused', subAsks: ['a', 'b'], trigger: { kind: 'cadence', minutes: 60, enabled: false } });
+    const s = buildDeskLanding({ title: 'X', workflows: [swWf, panelWf, pausedWf] });
+    const byName = (n) => s.cards.find((c) => c.kind === 'workflow' && c.title === n);
+    assert.match(byName('Sched').sub, /⏱ runs every 4h/);
+    assert.match(byName('Panel').sub, /⏱ due every 1h/);
+    assert.ok(!/⏱/.test(byName('Paused').sub), 'a paused cadence shows nothing');
   });
   it('the Admin desk: the three operator commands as its cards, vitals kept BELOW, its OWN description', () => {
     const s = buildDeskLanding({ title: 'Admin desk', isAdmin: true, workflows: [WF()] });

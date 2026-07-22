@@ -5,6 +5,8 @@
 // result → an outcome CLASS (so chat.js routes to the right prompt), bridges a chain `ranStep` → body-blind
 // provenance, computes the capture/qualify SPLIT suggestions (§10.C), and assembles the save payload. All tested.
 
+import { armTrigger } from './trigger.js';
+
 const _str = (x) => String(x == null ? '' : x).trim();
 
 // ── §3 — the outcome classifier. Reuses the vitals AUTH vocabulary for the transient class (signed-out / session
@@ -144,7 +146,7 @@ export function buildWorkflowSave(w, now = 0) {
   if (subAsks.length < 2) return null;                               // the store rejects <2 anyway — fail early, honestly
   const allApproved = steps.every((s) => s && s.approved === true);
   const ask = _str(w && w.ask) || _str(w && w.name) || subAsks.join('; ');   // umbrella; last resort is the joined steps
-  return {
+  const payload = {
     ask,
     name: _str(w && w.name) || null,
     subAsks,
@@ -157,6 +159,15 @@ export function buildWorkflowSave(w, now = 0) {
     // before the feature existed" with "banked after, by a step that legitimately has no clause form".
     schema: WORKFLOW_SCHEMA,
   };
+  // CD-6.6 (DESIGN_cadence.md §6.6/§7) — the optional cadence stage arms a trigger AT SAVE. Only a READY workflow
+  // (every step approved) can carry an armed cadence — a draft is not schedulable (§7 naming-first + status gate).
+  // The honest label (runs vs due) is the tier's job, computed later; here we just arm the field.
+  const cadence = Number(w && w.cadenceMinutes);
+  if (allApproved && Number.isFinite(cadence) && cadence > 0) {
+    const trig = armTrigger(cadence, now);
+    if (trig) payload.trigger = trig;
+  }
+  return payload;
 }
 
 /** Record schema. 1 = phrasing only (pre-PP-0c). 2 = steps may carry a pinned `clause`. */

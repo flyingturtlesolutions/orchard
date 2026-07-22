@@ -56,6 +56,16 @@ describe('ConversationStore — dev-conversation fields round-trip (DBR-2)', () 
   it('patchMeta on a missing conversation is a safe no-op', async () => {
     assert.equal(await ConversationStore.patchMeta('nope-' + randomUUID(), { status: 'merged' }), null);
   });
+  // DESIGN_cadence.md §2.2 (regression guard) — the allow-list dropped summary + resolvedAt, so resolvedAt was
+  // never set: the `!conv.resolvedAt` guard stayed permanently true and every VITALS_CHANGED re-logged every
+  // closed incident forever. The vitals sidecar (§6.3) clones this path, so the field must persist.
+  it('patchMeta persists summary + resolvedAt (v1691)', async () => {
+    const c = await ConversationStore.create({ title: 'incident', kind: 'chat' });
+    await ConversationStore.patchMeta(c.id, { summary: 'resolved: route drifted', resolvedAt: 1234567 });
+    const loaded = await ConversationStore.load(c.id);
+    assert.equal(loaded.summary, 'resolved: route drifted');
+    assert.equal(loaded.resolvedAt, 1234567);
+  });
 });
 
 describe('deriveBranchName — valid + collision-resistant (DBR-2)', () => {

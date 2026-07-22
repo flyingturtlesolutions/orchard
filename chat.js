@@ -71,6 +71,7 @@ import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowShares
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
+import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
@@ -581,6 +582,20 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
   if (!list.length) return;
   if (!confirm(`Delete all ${list.length} conversation${list.length === 1 ? '' : 's'}? This can't be undone.`)) return;
   try { _getDevBridge()?.cancelAllRuns?.(); } catch { /* */ }   // v2.74.1095 — stop any live dev runs first so they don't orphan (hold host slots)
+  // v2.74.1691 (DESIGN_cadence.md §2.3) — the per-row delete stamps a desk's saved workflows with its NAME before
+  // the record dies (chat.js:1006) so they stay findable in Studio; deleteAll skipped it, stranding every desk's
+  // workflows unnamed. A bulk wipe takes ALL desks, so unlike the per-row path there is no live SIBLING to protect
+  // — stamp each distinct workflow key once, best-effort, never blocking the wipe.
+  try {
+    const _seen = new Set();
+    for (const c of list) {
+      for (const k of [c && c.instanceId, c && c.appId].filter(Boolean)) {
+        if (_seen.has(k)) continue;
+        _seen.add(k);
+        await markWorkflowsOrphaned(k, c && c.title);
+      }
+    }
+  } catch { /* a stamp must never block the wipe */ }
   await ConversationStore.deleteAll();
   _clearCurrentConversation();
   _resetConversation();
@@ -5453,7 +5468,7 @@ function ageWordMs(ms) { const mn = Math.floor(ms / 60e3); if (mn < 1) return 'j
 // the result renders IN the page) → the human ✓banks / ✗show-me / ↻retry → then [+ next step] · [Save] · [Cancel].
 // NAMING comes LAST (Save → the input awaits a name). Cancel is guarded. Cadence is WW-2.
 let _wfWizard = null;   // { steps:[{text,provenance}], name, st, tabId, phase, current, runMsg }
-// phase: 'await-step' (input awaits the step) | 'running' | 'ran' (result up, approve/decline) | 'banked' (choices) | 'await-name'
+// phase: 'plan' | 'await-step' (input awaits the step) | 'running' | 'ran' (result up, approve/decline) | 'banked' (choices) | 'await-name' | 'cadence' (CD-6.6 — optional schedule pick, then save)
 
 function _wfFreshChainState() {
   return { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, lastLeg: null, lastReadoutIdx: null, policyConfig: _currentConversationConfig };
@@ -5545,11 +5560,11 @@ function _wfRenderPage() {
   // awaits review / sits banked, the input LOCKS (a message typed there fell through to the organic door, ran as
   // a desk ask, flipped the surface, and stranded the wizard). The buttons are the only doors; every exit path
   // (_wfExitPage / _wfAbandon / show-me's thread borrow) unlocks.
-  const _lock = (w.phase === 'running' || w.phase === 'ran' || w.phase === 'banked');
+  const _lock = (w.phase === 'running' || w.phase === 'ran' || w.phase === 'banked' || w.phase === 'cadence');   // CD-6.6 — cadence is buttons-only
   try {
     const inp = $('chat-input');
     inp.disabled = _lock;
-    if (_lock) inp.placeholder = w.phase === 'running' ? 'Step running…' : (w.phase === 'ran' ? 'Review the result — use the buttons above' : 'Add the next step, save, or cancel — buttons above');
+    if (_lock) inp.placeholder = w.phase === 'running' ? 'Step running…' : (w.phase === 'ran' ? 'Review the result — use the buttons above' : (w.phase === 'cadence' ? 'Pick a schedule or save — buttons above' : 'Add the next step, save, or cancel — buttons above'));
   } catch { /* */ }
   try { if (_lock) $('btn-chat-send').disabled = true; } catch { /* pre-typed text could otherwise leave send live */ }
   // v2.74.1615 — the renderer ASSERTS its surface (the v1608 landing lesson): every appendMessage on the current
@@ -5768,6 +5783,17 @@ function _wfRenderPage() {
     try { $('chat-input').placeholder = 'Name this workflow…'; $('chat-input').focus(); } catch { /* */ }
     mkPageBtn('← Back', () => { w.phase = 'banked'; _wfRenderPage(); });
     mkPageBtn('Cancel', () => _wfCancel());
+  } else if (w.phase === 'cadence') {
+    // CD-6.6 (DESIGN_cadence.md §6.6/§7) — the optional "add a schedule" step. Both a cadence pick AND "just save"
+    // land in _wfDoSave; the pick sets w.cadenceMinutes first, which buildWorkflowSave arms into a trigger. The
+    // honest label §7.3 (runs vs due) is computed from the tier when the card renders — here we only pick the rate.
+    const _picked = Number(w.cadenceMinutes) || 0;
+    status.innerHTML = `<div class="wf-page-sub">Run this on a schedule? It’ll fire by itself at this rate. You can change or remove it later from the workflow’s edit icon.${_picked ? `<br><strong>Selected: every ${escHtml(_cadenceLabel(_picked))}</strong>` : ''}</div>`;
+    for (const [label, mins] of [['Every hour', 60], ['Every 4 hours', 240], ['Every day', 1440]]) {
+      mkPageBtn(`${_picked === mins ? '● ' : ''}${label}`, () => { w.cadenceMinutes = (w.cadenceMinutes === mins ? 0 : mins); _wfRenderPage(); });
+    }
+    mkPageBtn(_picked ? `✓ Save — runs every ${_cadenceLabel(_picked)}` : 'Save — no schedule', () => _wfDoSave(), true);
+    mkPageBtn('← Back', () => { w.phase = 'await-name'; w.cadenceMinutes = 0; _wfRenderPage(); });
   }
   page.appendChild(status);
   page.appendChild(bar);
@@ -5779,7 +5805,8 @@ async function _wfConsumeInput(text) {
   const w = _wfWizard; if (!w) return;
   if (_wfForeign()) return;   // v1623 belt — a parked wizard never consumes another desk's input (and never dies for it)
   const t = String(text || '').trim();
-  if (w.phase === 'await-name') { if (t) { w.name = t; } await _wfDoSave(); return; }
+  // CD-6.6 (DESIGN_cadence.md §6.6) — naming is followed by the optional CADENCE stage, not an immediate save.
+  if (w.phase === 'await-name') { if (t) { w.name = t; } w.phase = 'cadence'; _wfRenderPage(); return; }
   // v2.74.1671 — at the PLAN gate the composer ADDS a step rather than running one. Typing is how a missing
   // step gets put back (the live 4-step plan was missing the read-instructions step), and it costs nothing —
   // nothing runs until the plan is approved.
@@ -5959,15 +5986,19 @@ function _wfSaveStart() {
   w.phase = 'await-name'; _wfRenderPage();
 }
 
+// CD-6.6 — a compact human interval for the cadence stage's copy (chat.js doesn't import Core/trigger).
+function _cadenceLabel(minutes) { const m = Math.round(Number(minutes) || 0); if (m <= 0) return '—'; if (m % 1440 === 0) return m === 1440 ? 'day' : `${m / 1440} days`; if (m % 60 === 0) return m === 60 ? 'hour' : `${m / 60}h`; return `${m}m`; }
+
 async function _wfDoSave() {
   const w = _wfWizard; if (!w) return;
-  const payload = buildWorkflowSave({ ask: w.ask || w.name, name: w.name, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
+  // CD-6.6 — pass the picked cadence so buildWorkflowSave arms a trigger (only on a READY, all-approved workflow).
+  const payload = buildWorkflowSave({ ask: w.ask || w.name, name: w.name, cadenceMinutes: Number(w.cadenceMinutes) || 0, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
   if (!payload) { w.phase = 'banked'; _wfRenderPage(); return; }
   let ok = false;
   const _appId = w.appId || _memoryId();   // v1620 — the PINNED desk's key (w.appId captured at birth)
   try {
-    if (w.draftId) {   // WW-1b — a RESUMED draft saves IN PLACE (the surrogate id survives — a future routine binding holds)
-      const list = await updateWorkflow(_appId, w.draftId, { ask: payload.ask, name: payload.name, subAsks: payload.subAsks, steps: payload.steps, status: payload.status, qualifiedAt: payload.qualifiedAt });
+    if (w.draftId) {   // WW-1b — a RESUMED draft saves IN PLACE (the surrogate id survives — a routine binding holds)
+      const list = await updateWorkflow(_appId, w.draftId, { ask: payload.ask, name: payload.name, subAsks: payload.subAsks, steps: payload.steps, status: payload.status, qualifiedAt: payload.qualifiedAt, ...(payload.trigger ? { trigger: payload.trigger } : {}) });
       ok = Array.isArray(list) && list.some((x) => x && x.id === w.draftId && x.status === payload.status);
     } else {
       const list = await saveWorkflow(_appId, payload);
@@ -5977,7 +6008,8 @@ async function _wfDoSave() {
   // append the confirmation FIRST (so #messages is non-empty), THEN exit — else _wfExitPage would render the front
   // page over an empty thread and the confirmation would land in a hidden surface.
   const done = appendMessage({ role: 'assistant', body: '' });
-  _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now, click it to run.` : 'Couldn’t save the workflow — try again.', { markdown: true });
+  const _sched = payload.trigger ? ` It’s set to run every ${_cadenceLabel(payload.trigger.minutes)} — change or remove that from its edit icon.` : '';
+  _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now, click it to run.${_sched}` : 'Couldn’t save the workflow — try again.', { markdown: true });
   _orchFinalize(done);
   // v2.74.1619 — the wizard's save is TRACE-VISIBLE (gl 194814: the whole wizard arc left zero log evidence — steps
   // never echo, runs are transient; the durable record deserves one line. WORKFLOW ▸ is already in _DECISION_RE.)
@@ -7486,7 +7518,10 @@ async function _renderWorkflows() {
   for (const wf of wfs) {
     const wfKey = wf.appId || appId;   // DK-8k — operate on the record's OWN store
     const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
-    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''})` });
+    // CD-1a/CD-4 — the honest cadence line: a tier-'sw' workflow RUNS on the clock, a tier-'panel' one is DUE on
+    // next desk-open (§7.3). Disabled/absent → nothing shown.
+    const _sched = _wfScheduleLabel(wf);
+    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''}${_sched ? ` · ⏱ ${_sched}` : ''})` });
     const bar = _orchActionBar(row);
     bar.appendChild(_mkOnceBtn('▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
       const tab = await _orchActiveTab();
@@ -7497,12 +7532,44 @@ async function _renderWorkflows() {
       if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
       _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask });
     }));
+    bar.appendChild(_mkBtn('⏱ Schedule', () => _wfScheduleBar(row, wf, wfKey)));   // CD-4 — arm / change / remove the cadence
     bar.appendChild(_mkBtn('🗑 Delete', async () => {
       bar.remove();
       try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
       _setMessageBody(row, `Deleted${wf.name ? ` “${wf.name}”` : ''}.`);
     }));
   }
+}
+
+// CD-1a/CD-4 — the honest schedule label for a saved workflow (§7.3): "runs every 4h" (tier-'sw', fires headless)
+// vs "due every 4h" (tier-'panel', runs on next desk-open). Paused/absent → ''.
+function _wfScheduleLabel(wf) {
+  const t = wf && wf.trigger;
+  if (!t || !t.minutes) return '';
+  const every = _cadenceLabel(t.minutes);
+  if (!t.enabled) return `paused (every ${every})`;
+  return workflowTier(wf) === 'sw' ? `runs every ${every}` : `due every ${every}`;
+}
+
+// CD-4 — the arm/change/remove-cadence control: replace the row's bar with the interval picker; each choice writes
+// through WORKFLOW_TRIGGER_SET (the SW normalizes + persists). "Off" clears the cadence.
+function _wfScheduleBar(row, wf, wfKey) {
+  try { const old = row.querySelector('.orch-actions'); if (old) old.remove(); } catch { /* */ }
+  const bar = _orchActionBar(row);
+  const cur = (wf.trigger && wf.trigger.minutes && wf.trigger.enabled) ? wf.trigger.minutes : 0;
+  const set = async (minutes) => {
+    const trigger = minutes > 0 ? { kind: 'cadence', minutes, enabled: true } : null;
+    let ok = false;
+    try { const r = await _orchReq('WORKFLOW_TRIGGER_SET', { appId: wfKey, workflowId: wf.id, trigger }); ok = !!(r && r.success !== false); wf.trigger = r && r.trigger ? r.trigger : (trigger || undefined); } catch { /* */ }
+    try { bar.remove(); } catch { /* */ }
+    _setMessageBody(row, ok
+      ? `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  ${minutes > 0 ? `— now ${_wfScheduleLabel(wf)}. Re-type \`workflows\` to manage.` : '— schedule removed.'}`
+      : 'Couldn’t update the schedule — try again.');
+  };
+  for (const [label, mins] of [['Every hour', 60], ['Every 4h', 240], ['Every day', 1440]]) {
+    bar.appendChild(_mkBtn(`${cur === mins ? '● ' : ''}${label}`, () => set(mins)));
+  }
+  bar.appendChild(_mkBtn(cur ? 'Turn off' : 'No schedule', () => set(0)));
 }
 
 // ORCH-CB — COLD ground: the LLM planner couldn't bind a plan, but a STRUCTURED ask still has shape. Comprehend it
@@ -8703,6 +8770,9 @@ const IL_PANEL_LEGS = {
   OPEN_CASE:                { run: async (msg, { params } = {}) => { await _openCaseFromLeg(msg, params || {}); return { rendered: true }; } },
   LIST_CASES:               { run: async (msg) => { await _listCasesMsg(msg); return { rendered: true }; } },
   CLOSE_CASE:               { run: async (msg, { params } = {}) => { await _closeCaseFromLeg(msg, params || {}); return { rendered: true }; } },
+  // CD-2 (DESIGN_cadence.md §3.2) — "show my workflows" / "what runs automatically" → the manage view (run · schedule
+  // · delete per row). The leg renders its own bubbles, so it swallows msg (rendered:true) like the case legs.
+  OPEN_WORKFLOWS:           { run: async (msg) => { try { msg.remove(); } catch { /* */ } await _renderWorkflows(); return { rendered: true }; } },
   CLEAR_CHAT:               { run: async () => { await _clearCurrentChat(); return { rendered: true }; } },     // v1354 — confirm lives INSIDE (one bar for the leg AND the command path)
   EXPLORE_PAGE:             { run: async (msg) => { await _chatExplore({ msg }); return { rendered: true }; } },
   TOGGLE_TRACKING:          { run: async (msg) => {

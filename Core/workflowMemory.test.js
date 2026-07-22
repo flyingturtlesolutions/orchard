@@ -24,6 +24,43 @@ describe('workflowMemory — normalizeWorkflow', () => {
     assert.equal(workflowId('x', ['a', 'b']), workflowId('X', ['A', 'B']));   // case-insensitive
     assert.notEqual(workflowId('x', ['a', 'b']), workflowId('x', ['a', 'c']));
   });
+
+  // DESIGN_cadence.md §2.1 (BLOCKER regression guard) — the literal is closed by construction, and BOTH
+  // saveWorkflow and updateWorkflow route through normalize; a field that isn't whitelisted is dropped on every
+  // normalize including on edit. Before v1691 clause + schema were silently dropped, so no pinned clause ever
+  // reached storage and the drift check could never fire.
+  it('carries a step\'s pinned clause + the record schema through normalize', () => {
+    const w = normalizeWorkflow(WF('read each ticket and triage', ['read each ticket', 'triage each'], {
+      schema: 2,
+      steps: [
+        { text: 'read each ticket', clause: { kind: 'connector', capabilityId: 'cap-1', groundId: 'g-1' } },
+        { text: 'triage each', via: { kind: 'branch' } },   // no clause form — legitimately absent
+      ],
+    }));
+    assert.equal(w.schema, 2);
+    assert.deepEqual(w.steps[0].clause, { kind: 'connector', capabilityId: 'cap-1', groundId: 'g-1' });
+    assert.equal('clause' in w.steps[1], false, 'a step with no resolution carries no clause');
+  });
+  it('a clause with neither kind nor capabilityId is dropped (junk in → nothing pinned)', () => {
+    const w = normalizeWorkflow(WF('a', ['step one', 'step two'], { steps: [{ text: 'step one', clause: {} }, { text: 'step two' }] }));
+    assert.equal('clause' in w.steps[0], false);
+  });
+  it('legacy records have no schema (→ isPrePinned) and no trigger', () => {
+    const w = normalizeWorkflow(WF('a', ['step one', 'step two']));
+    assert.equal(w.schema, undefined);
+    assert.equal(w.trigger, undefined);
+  });
+
+  // CD-0 — the cadence trigger is a FIELD on the workflow and must survive normalize (same whitelist discipline).
+  it('carries a normalized cadence trigger, and drops an invalid one', () => {
+    const w = normalizeWorkflow(WF('a', ['step one', 'step two'], {
+      trigger: { minutes: 240, enabled: true, nextDue: 5000 },
+    }));
+    assert.equal(w.trigger.kind, 'cadence');
+    assert.equal(w.trigger.minutes, 240);
+    assert.equal(w.trigger.enabled, true);
+    assert.equal(normalizeWorkflow(WF('a', ['x1', 'x2'], { trigger: { enabled: true } })).trigger, undefined); // no minutes
+  });
 });
 
 describe('workflowMatch — recall by overlap-coefficient', () => {

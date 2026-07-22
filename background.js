@@ -46,6 +46,7 @@ import { createFleetHandlers, registerFleetAlarmListener } from './background/ha
 import { createConnectionsHandlers, registerConnTransitionListener, readConnRegistry, reportAuthSignal } from './background/handlers/connections.js';  // CP-1/2 (v2.74.1506) — the connections auth-presence registry; VT (v2.74.1570) — the heartbeat moved into the vitals scheduler; the transition listener feeds vitals incidents + the sign-in catch-up
 import { createPipelineHandlers } from './background/handlers/pipeline.js';   // PP (v2.74.1665, DESIGN_peritem_pipeline.md §5.7/§9.3) — the per-item CASE sidecar (vitals-pattern store; the Conversation record cannot hold case state)
 import { initVitals, onConnTransition, createVitalsHandlers } from './background/handlers/vitals.js';   // VT-0..4 (v2.74.1569-1572, DESIGN_vitals.md) — the outcome funnel + scheduler + daily visit + incident store
+import { initCadence, createCadenceHandlers } from './background/handlers/cadence.js';   // CD-1 (v2.74.1692, DESIGN_cadence.md §2/§5) — the one clock owner for time-triggered workflows (scanner + headless fire + run history)
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
@@ -427,6 +428,10 @@ registerFleetAlarmListener({ invokeSgHandler: _invokeSgHandler });
 // connections transition listener feeds vitals its presence incidents + the signed-out→fresh catch-up (VT-4).
 initVitals({ invokeSgHandler: _invokeSgHandler, readRideRecipes: _readRideRecipes, writeRideRecipes: _writeRideRecipes, readConnRegistry, reportAuthSignal });
 registerConnTransitionListener(onConnTransition);
+// CD-1 (v2.74.1692, DESIGN_cadence.md §2/§5) — the ONE clock owner for time-triggered workflows: a single
+// `cadence:tick` alarm that scans workflow records and fires the tier-'sw' ones that are due (headless, through
+// the normal INVOKE_SESSION executor). Like vitals, the alarm is durable and only the listener re-registers here.
+initCadence({ invokeSgHandler: _invokeSgHandler, readRideRecipes: _readRideRecipes });
 
 
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
@@ -1762,6 +1767,7 @@ const _sgMessageHandlers = {
   ...createConnectionsHandlers({ invokeSgHandler: _invokeSgHandler }),   // CP-1/2 (v1506) — CONN_LIST / CONN_CHECK / CONN_FOCUS (the auth-presence registry)
   ...createPipelineHandlers(),   // PP (v2.74.1665) — PIPELINE_OPEN_ITEMS / PIPELINE_RECORD_ITEM / PIPELINE_CASES / PIPELINE_CLOSE_CASE
   ...createVitalsHandlers(),   // VT-2 (v2.74.1571) — VITALS_STATUS / VITALS_BADGE / VITALS_CHECK_NOW (the Admin desk's read surface)
+  ...createCadenceHandlers(),   // CD-1 (v2.74.1692) — WORKFLOW_TRIGGER_SET / WORKFLOW_RUNS / WORKFLOW_RUN_FIRE (arm a cadence · read run history · manual headless fire)
 
   ...createDiscoveryHandlers({
     readSiteMap          : _readSiteMap,

@@ -60,6 +60,35 @@ import would have thrown at SW module-link and broken the whole background. Fixe
 **None of the SW fire path is live-verified** — the scanner, INVOKE_SESSION fire, and chrome.storage/alarms seams
 can't be exercised headless. Reload the extension and watch for `CADENCE ▸` lines in a decisions download.
 
+**Progress (v2.74.1693) — cadence is now REACHABLE + MANAGEABLE end-to-end (gate 2955/0, undef clean).** The panel
+can build a scheduled workflow, list workflows, and arm/change/remove a schedule. Built this pass:
+- **CD-6.6 — the wizard cadence STAGE.** After naming, the wizard shows an optional schedule pick (hourly / 4h /
+  daily / no-schedule); the pick threads through `buildWorkflowSave` → `armTrigger` (READY workflows only — a
+  draft is not schedulable) → the store. New `'cadence'` phase in `_wfConsumeInput`/`_wfRenderPage`, composer
+  locked, `_cadenceLabel` helper, save confirmation states the schedule. Pure part regression-tested.
+- **CD-2 — `＋ Workflow` unhidden.** `Core/deskLanding.js` now offers it ALWAYS (was `!cards.length` — the §0
+  dead-end that made a second workflow uncreatable). Tests updated.
+- **CD-2 — `OPEN_WORKFLOWS` self-leg.** Added to `Core/palette.js` beside `LIST_CASES`, dispatched via
+  `IL_PANEL_LEGS` in chat.js. "show my workflows" / "what runs automatically" now resolve through the router
+  (and the step DECOMPOSER sees it — the v1689 no-silent-substitution lesson).
+- **CD-4 (manage view) — the schedule control.** `_renderWorkflows` (the `workflows` / `OPEN_WORKFLOWS` view)
+  now shows each workflow's honest cadence and offers ▶ Run · ⏱ Schedule (arm/change/remove via
+  `WORKFLOW_TRIGGER_SET`) · 🗑 Delete per row.
+- **CD-2 — launch cards show the cadence** ("⏱ runs every 4h" / "due every 4h") via the pure builder. Tested.
+
+**Still remaining (large, live-only):**
+- **CD-3** — intent-first `＋ Workflow` (repoint the card at an intent prompt). Left deliberately: it touches the
+  composer intercept + a new wizard phase, high-risk to do blind; the `workflow: <intent>` command is the
+  intent-first door meanwhile.
+- **CD-6** — the run-HISTORY overlay (the `WORKFLOW_RUNS` handler is wired, but no UI reads it yet); copy `.rail`,
+  add the page-slot owner value.
+- **CD-7** — parked writes as real `wfp_` cases + `Approve & continue` resume. The scanner already parks + drops
+  a `cadence:parked:<runId>` marker; promoting it to a case is the panel piece.
+- **CD-1a phase 2** — the panel DOM reporter (route the panel run through `Core/runDriver` too, so panel and SW
+  are ONE loop with two reporters — §9.4). Phase 1 deliberately left the panel path on `_orchRunChain`.
+- **CD-1 cutover** — retire `fleet.js:559-570` + migrate `fleetRoutine` records. The new clock owner runs in
+  PARALLEL for now.
+
 ---
 
 ## 0. If you read nothing else

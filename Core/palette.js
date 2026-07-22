@@ -61,6 +61,11 @@ export const BUILTIN_LEGS = [
     }, required: [] } },
   { key: 'LIST_CASES', name: 'Show my cases', mode: 'ask', domain: 'self', safety: 'auto', source: 'builtin',
     does: 'list the open Orchard cases — what is still waiting on a person', params: [] },
+  // CD-2 (DESIGN_cadence.md §3.2) — WORKFLOWS resolve through the front door as a LEG, never a composer regex: so
+  // "show my workflows", "what runs automatically", and the step DECOMPOSER all see the capability (the v1689
+  // lesson: a capability absent from the catalog is not unavailable, it is silently SUBSTITUTED with a wrong act).
+  { key: 'OPEN_WORKFLOWS', name: 'Show my workflows', mode: 'ask', domain: 'self', safety: 'auto', source: 'builtin',
+    does: 'list this desk\'s saved WORKFLOWS — the multi-step tasks you built, which of them run automatically on a schedule, and when each is next due. For "show my workflows", "what runs automatically", "my scheduled tasks", "my automations", "workflows".', params: [] },
   { key: 'CLOSE_CASE', name: 'Close a case',  mode: 'act', domain: 'self', safety: 'confirm', source: 'builtin',
     does: 'close an Orchard case that has been dealt with',
     params: ['id', 'verdict'],

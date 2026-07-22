@@ -89,6 +89,17 @@ describe('workflowWizard — buildWorkflowSave + wizardProgress (§2.4/§10.E)',
   it('<2 steps → null (the store rejects it anyway — fail early)', () => {
     assert.equal(buildWorkflowSave({ steps: [STEP('only one', true)] }), null);
   });
+  it('CD-6.6 — a cadence arms a trigger, but ONLY on a ready (all-approved) workflow', () => {
+    const ready = buildWorkflowSave({ ask: 'x', steps: [STEP('a', true), STEP('b', true)], cadenceMinutes: 240 }, 1000);
+    assert.equal(ready.trigger.kind, 'cadence');
+    assert.equal(ready.trigger.minutes, 240);
+    assert.equal(ready.trigger.enabled, true);
+    assert.equal(ready.trigger.nextDue, 1000 + 240 * 60_000);
+    const draft = buildWorkflowSave({ ask: 'x', steps: [STEP('a', true), STEP('b', false)], cadenceMinutes: 240 }, 1000);
+    assert.equal('trigger' in draft, false, 'a draft is not schedulable');
+    const none = buildWorkflowSave({ ask: 'x', steps: [STEP('a', true), STEP('b', true)] }, 1000);
+    assert.equal('trigger' in none, false, 'no cadence picked → no trigger');
+  });
   it('wizardProgress: ready needs ≥2 steps all approved; draft when any unproven', () => {
     assert.deepEqual(wizardProgress([STEP('a', true), STEP('b', true)]), { total: 2, approved: 2, unproven: 0, canSaveReady: true, canSaveDraft: false });
     assert.deepEqual(wizardProgress([STEP('a', true), STEP('b', false)]), { total: 2, approved: 1, unproven: 1, canSaveReady: false, canSaveDraft: true });

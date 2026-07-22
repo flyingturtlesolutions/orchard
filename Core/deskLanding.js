@@ -33,6 +33,16 @@ export function descNamesConnections(description, labels) {
  */
 
 import { isBankedWorkflow } from './workflowMemory.js';   // v1641 — one definition of "a banked workflow"
+import { workflowTier } from './workflowTier.js';         // CD-1a — the honest cadence label (runs vs due)
+import { describeMinutes } from './trigger.js';
+
+// CD-2 (DESIGN_cadence.md §7.3) — the workflow card's honest schedule suffix. A tier-'sw' workflow "runs every 4h"
+// (fires headless on the clock), a tier-'panel' one is "due every 4h" (runs on next desk-open). Paused/absent → ''.
+function _landingCadence(w) {
+  const t = w && w.trigger;
+  if (!t || !t.minutes || t.enabled === false) return '';
+  return `${workflowTier(w) === 'sw' ? 'runs' : 'due'} every ${describeMinutes(t.minutes)}`;
+}
 export function buildDeskLanding({ title = '', description = '', isAdmin = false, workflows = [], connections = [] } = {}) {
   const name = String(title || '').trim() || (isAdmin ? 'Admin desk' : '');
   // v1603 (live: "sub header has no description") — the Admin desk is not a catalog desk, so it has no
@@ -60,9 +70,12 @@ export function buildDeskLanding({ title = '', description = '', isAdmin = false
       .slice(0, LANDING_MAX_WORKFLOWS);
     for (const w of wfs) {
       const steps = Array.isArray(w.subAsks) ? w.subAsks.length : 0;
-      cards.push({ kind: 'workflow', title: String(w.name || w.ask).slice(0, 70), sub: `${steps || '?'} step${steps === 1 ? '' : 's'}${w.runs ? ` · run ${w.runs}×` : ''}`, wf: w });
+      const cadence = _landingCadence(w);   // CD-2 (§7.3) — a scheduled workflow says so on its card
+      cards.push({ kind: 'workflow', title: String(w.name || w.ask).slice(0, 70), sub: `${steps || '?'} step${steps === 1 ? '' : 's'}${w.runs ? ` · run ${w.runs}×` : ''}${cadence ? ` · ⏱ ${cadence}` : ''}`, wf: w });
     }
-    if (!cards.length) cards.push({ kind: 'new-workflow', title: '＋ Workflow', sub: 'save a multi-step task you run often' });
+    // CD-2 (DESIGN_cadence.md §6.5 / §0 dead-end) — ＋ Workflow is ALWAYS offered, not only on an empty page.
+    // The old `!cards.length` guard made a SECOND workflow uncreatable from the surface once the first was saved.
+    cards.push({ kind: 'new-workflow', title: '＋ Workflow', sub: cards.length ? 'build another multi-step task' : 'save a multi-step task you run often' });
   }
 
   return { heading: LANDING_GREETING, sub, connections: connLine, cards, vitalsAfter: isAdmin === true };
