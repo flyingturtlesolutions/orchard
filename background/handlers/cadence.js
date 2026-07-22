@@ -19,7 +19,7 @@ import { normalizeWorkflow } from '../../Core/workflowMemory.js';
 import { isDue, coalescedCount, advanceTrigger, recordFailure, disarm, normalizeTrigger, armTrigger } from '../../Core/trigger.js';
 import { runsHeadless } from '../../Core/workflowTier.js';
 import { replayPlan } from '../../Core/workflowWizard.js';
-import { runWorkflow, makeAccumulatorReporter } from '../../Core/runDriver.js';
+import { runWorkflow, makeAccumulatorReporter, makeResumeReporter } from '../../Core/runDriver.js';
 import { mintRunId } from '../../Core/pipelineRun.js';
 import { priorRunVerdict } from '../../Core/fleetSchedule.js';
 import { recipeToLeg } from '../../Core/connectorLeg.js';
@@ -56,6 +56,32 @@ async function _stampRunMarker(workflowId, runId, now) {
 }
 async function _clearRunMarker(workflowId) {
   try { await chrome.storage.local.remove(RUN_PREFIX + workflowId); } catch { /* */ }
+}
+
+// ── CD-7 (§8) — parked-run markers (the resumable record a write-bearing scheduled run leaves) ────────────────────
+async function _listParked() {
+  let all = null;
+  try { all = await chrome.storage.local.get(null); } catch { return []; }
+  const out = [];
+  for (const [k, v] of Object.entries(all || {})) {
+    if (k.startsWith(PARK_PREFIX) && v && typeof v === 'object') out.push({ ...v, runId: v.runId || k.slice(PARK_PREFIX.length) });
+  }
+  return out.sort((a, b) => (b.at || 0) - (a.at || 0));
+}
+async function _readParked(runId) {
+  try { const k = PARK_PREFIX + runId; return (await chrome.storage.local.get(k))?.[k] || null; } catch { return null; }
+}
+async function _clearParked(runId) {
+  try { await chrome.storage.local.remove(PARK_PREFIX + runId); } catch { /* */ }
+}
+async function _resolveWorkflow(workflowId) {
+  try {
+    for (const g of await listAllWorkflows()) {
+      const hit = (g.items || []).find((x) => x && x.id === workflowId);
+      if (hit) return { wf: normalizeWorkflow(hit), appId: g.appId };
+    }
+  } catch { /* */ }
+  return { wf: null, appId: null };
 }
 
 // ── the scan (§2.1): checks in order, cheapest first — every one a reason NOT to fire ─────────────────────────────
@@ -117,10 +143,11 @@ async function _tick() {
 }
 
 // ── the fire: resolve → drive → write history → advance/record (§5.5 "go through the normal executor") ────────────
-async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto' } = {}) {
+// `reporter`/`startIndex` are the CD-7 resume seam: a resume passes a makeResumeReporter() + the parked stepIndex.
+async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', reporter = null, startIndex = 0 } = {}) {
   const runId = mintRunId({ now, rand: (now % 997) / 997 });   // deterministic-ish entropy (Math.random is banned in Core; fine here)
   await _stampRunMarker(wf.id, runId, now);
-  const reporter = makeAccumulatorReporter();
+  const rep = reporter || makeAccumulatorReporter();
   let out = { verdict: 'failed' };
   try {
     const plan = replayPlan(wf, (clause) => _canResolve(clause));
@@ -131,7 +158,8 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto' } =
     } else {
       out = await runWorkflow({
         clauses: plan.clauses,
-        reporter,
+        reporter: rep,
+        startIndex: Math.max(0, Number(startIndex) || 0),
         runStep: (clause, cctx) => _runStep(clause, { ...cctx, runId, wf }),
       });
     }
@@ -141,15 +169,16 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto' } =
   }
   await _clearRunMarker(wf.id);
 
-  const snap = reporter.snapshot();
+  const snap = rep.snapshot();
   const counts = { steps: snap.steps, done: snap.results.length, parked: snap.parked ? 1 : 0 };
   const verdict = out.verdict === 'parked' || snap.parked ? 'parked' : out.verdict;
+  const parkedRunId = out.parkedRunId || runId;
 
   // history entry (§6.3) — auto vs manual, verdict, the coalesced-backlog note, and due!=ran (§7.3)
   try {
     await appendRunEntry(wf.id, {
       at: trig.nextDue || now, ranAt: now, trigger, verdict, counts,
-      ...(verdict === 'parked' ? { parkedRunId: out.parkedRunId || runId, why: 'a write step needs approval' } : {}),
+      ...(verdict === 'parked' ? { parkedRunId, why: 'a write step needs approval' } : {}),
       ...(coalesced > 1 ? { coalesced } : {}),
     });
   } catch { /* history must never block the clock */ }
@@ -158,9 +187,15 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto' } =
   // one-off failure (that would let a hand-run silently reschedule the automation).
   const auto = trigger === 'auto';
   if (verdict === 'parked') {
-    // persist a minimal resume marker so the parked run is not lost (CD-7 promotes this to a wfp_ case + resume UI)
-    try { await chrome.storage.local.set({ [PARK_PREFIX + (out.parkedRunId || runId)]: { workflowId: wf.id, appId, stepIndex: out.parkedAt, at: now } }); } catch { /* */ }
-    Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" PARKED at step ${out.parkedAt + 1} — a write needs a human (run ${out.parkedRunId || runId})`);
+    // CD-7 (§8) — persist the parked run as a resumable record: { workflowId, appId, stepIndex, at, preview }.
+    // The panel surfaces it as a wfp_ case (Approve & continue / Cancel run); resume re-fires from stepIndex.
+    try {
+      await chrome.storage.local.set({ [PARK_PREFIX + parkedRunId]: {
+        runId: parkedRunId, workflowId: wf.id, appId, name: wf.name || wf.ask || wf.id,
+        stepIndex: out.parkedAt, at: now, preview: (snap.preview && typeof snap.preview === 'object') ? snap.preview : null,
+      } });
+    } catch { /* */ }
+    Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" PARKED at step ${out.parkedAt + 1} — a write needs a human (run ${parkedRunId})`);
     if (auto) await _advance(appId, wf, now);
   } else if (verdict === 'failed') {
     if (auto) await _recordFailure(appId, wf, now);
@@ -168,7 +203,7 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto' } =
     Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" ran → ${verdict} (${counts.done}/${snap.total} step(s))${coalesced > 1 ? ` · ${coalesced} collapsed` : ''}`);
     if (auto) await _advance(appId, wf, now);
   }
-  return { verdict };
+  return { verdict, parkedRunId: verdict === 'parked' ? parkedRunId : '' };
 }
 
 // One step. Phase 1: a pinned READ ride runs through the normal executor; a write PARKS (§8); a nav is a no-op
@@ -293,8 +328,58 @@ export function createCadenceHandlers() {
           if (!runsHeadless(wf)) { sendResponse({ success: false, error: 'panel-tier', tier: 'panel' }); return; }
           const now = Date.now();
           const res = await _fire(owner, wf, wf.trigger || normalizeTrigger({ minutes: 60 }), { now, coalesced: 1, trigger: 'manual' });
-          sendResponse({ success: true, verdict: res.verdict });
+          sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'fire-failed' }); }
+      })();
+      return true;
+    },
+    // CD-7 (§8) — the PARKED runs waiting on a human. payload: { appId? } (optional filter). Each is a run that
+    // reached a write on a schedule and stopped; the panel surfaces them as wfp_ cases with Approve & continue.
+    WORKFLOW_PARKED: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const appId = payload && payload.appId;
+          let parked = await _listParked();
+          if (appId) parked = parked.filter((p) => p && p.appId === appId);
+          sendResponse({ success: true, parked });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'parked-failed' }); }
+      })();
+      return true;
+    },
+    // CD-7 (§8) — APPROVE & CONTINUE: re-fire the parked run from its stepIndex, approving the write the person saw.
+    // A later write re-parks (one approval per write). payload: { runId }.
+    WORKFLOW_RESUME_PARKED: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const runId = payload && payload.runId;
+          if (!runId) { sendResponse({ success: false, error: 'runId required' }); return; }
+          const marker = await _readParked(runId);
+          if (!marker) { sendResponse({ success: false, error: 'parked-run-not-found' }); return; }
+          const { wf, appId } = await _resolveWorkflow(marker.workflowId);
+          if (!wf) { sendResponse({ success: false, error: 'workflow-not-found' }); await _clearParked(runId); return; }
+          await _clearParked(runId);   // this park is consumed; a re-park mints a fresh marker
+          Logger.info('cadence', `TRIGGER ▸ resume "${wf.name || wf.id}" from step ${(marker.stepIndex || 0) + 1} (approved write, run ${runId})`);
+          const res = await _fire(appId || marker.appId, wf, wf.trigger || normalizeTrigger({ minutes: 60 }),
+            { now: Date.now(), coalesced: 1, trigger: 'manual', reporter: makeResumeReporter(), startIndex: Number(marker.stepIndex) || 0 });
+          sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'resume-failed' }); }
+      })();
+      return true;
+    },
+    // CD-7 (§8) — CANCEL RUN: drop the parked run without approving the write. payload: { runId }. Records history.
+    WORKFLOW_CANCEL_PARKED: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const runId = payload && payload.runId;
+          if (!runId) { sendResponse({ success: false, error: 'runId required' }); return; }
+          const marker = await _readParked(runId);
+          await _clearParked(runId);
+          if (marker && marker.workflowId) {
+            try { await appendRunEntry(marker.workflowId, { at: marker.at || Date.now(), ranAt: Date.now(), trigger: 'manual', verdict: 'partial', why: 'parked write cancelled by the user' }); } catch { /* */ }
+            Logger.info('cadence', `TRIGGER ▸ cancel parked run ${runId} ("${marker.name || marker.workflowId}") — the write was not sent`);
+          }
+          sendResponse({ success: true });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'cancel-failed' }); }
       })();
       return true;
     },

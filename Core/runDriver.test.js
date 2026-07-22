@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runWorkflow, normalizeReporter, makeAccumulatorReporter, DRIVER_VERDICTS } from './runDriver.js';
+import { runWorkflow, normalizeReporter, makeAccumulatorReporter, makeResumeReporter, DRIVER_VERDICTS } from './runDriver.js';
 
 // A recording reporter — proves the loop calls the contract in order.
 function recorder() {
@@ -101,10 +101,10 @@ describe('runDriver — reporter contract', () => {
     const out = await runWorkflow({ clauses: [{ text: 'write' }], reporter: rep, runStep });
     assert.equal(out.verdict, 'parked');
   });
-  it('makeAccumulatorReporter (SW side) records results + parks on gate', async () => {
+  it('makeAccumulatorReporter (SW side) records results, parks on gate, keeps the write preview', async () => {
     const rep = makeAccumulatorReporter();
     const runStep = async (c, ctx) => {
-      if (c.text === 'write') { await ctx.reporter.gate({}); return { park: true }; }
+      if (c.text === 'write') { const d = await ctx.reporter.gate({ recipe: 'send email' }); return d === true ? { ok: true } : { park: true }; }
       return { ok: true, value: c.text };
     };
     await runWorkflow({ clauses: [{ text: 'read' }, { text: 'write' }], reporter: rep, runStep });
@@ -112,6 +112,31 @@ describe('runDriver — reporter contract', () => {
     assert.deepEqual(snap.results, ['read']);
     assert.equal(snap.parked, true);
     assert.equal(snap.verdict, 'parked');
+    assert.deepEqual(snap.preview, { recipe: 'send email' });   // §8 — the case shows what it would have written
+  });
+});
+
+describe('runDriver — makeResumeReporter (§8 / CD-7)', () => {
+  // a workflow with a read, then TWO writes; resuming approves the FIRST write and re-parks at the second.
+  const runStep = async (c, ctx) => {
+    if (/^write/.test(c.text)) { const d = await ctx.reporter.gate({ recipe: c.text }); return d === true ? { ok: true, value: `sent:${c.text}` } : { park: true }; }
+    return { ok: true, value: c.text };
+  };
+  it('approves the first write (the one the human OK’d), re-parks at the next', async () => {
+    const rep = makeResumeReporter();
+    const out = await runWorkflow({ clauses: [{ text: 'read' }, { text: 'write1' }, { text: 'write2' }], reporter: rep, runStep, startIndex: 1 });
+    assert.equal(out.verdict, 'parked');       // stopped again at write2
+    assert.equal(out.parkedAt, 2);
+    const snap = rep.snapshot();
+    assert.equal(snap.approvedWrite, true);
+    assert.ok(snap.results.includes('sent:write1'), 'the approved write executed');
+    assert.deepEqual(snap.preview, { recipe: 'write2' }, 'the NEXT write needs its own approval');
+  });
+  it('with a single write, resume runs to completion', async () => {
+    const rep = makeResumeReporter();
+    const out = await runWorkflow({ clauses: [{ text: 'read' }, { text: 'write1' }], reporter: rep, runStep, startIndex: 1 });
+    assert.equal(out.verdict, 'complete');
+    assert.equal(rep.snapshot().approvedWrite, true);
   });
 });
 

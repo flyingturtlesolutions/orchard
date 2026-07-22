@@ -115,17 +115,44 @@ function _result(verdict, ranSteps, failedSteps, parkedAt, parkedRunId, state) {
  * entry. Kept here (not the handler) so the accumulation is tested. PURE.
  */
 export function makeAccumulatorReporter() {
-  const acc = { steps: 0, total: 0, results: [], verdict: '', lastText: '', gates: 0 };
+  const acc = { steps: 0, total: 0, results: [], verdict: '', lastText: '', gates: 0, preview: null };
   return {
     step(i, total, text) { acc.steps = Math.max(acc.steps, i + 1); acc.total = total; acc.lastText = String(text || ''); },
     progress() { /* no surface */ },
     result(payload) { acc.results.push(payload); },
-    gate() { acc.gates++; return 'park'; },   // §8 — a scheduled run reaching a write always parks
+    gate(preview) { acc.gates++; acc.preview = preview || null; return 'park'; },   // §8 — a scheduled run reaching a write always parks; keep the preview for the case
     done(verdict) { acc.verdict = String(verdict || ''); },
     snapshot() {
       return {
         steps: acc.steps, total: acc.total, results: acc.results.slice(),
-        verdict: acc.verdict, parked: acc.gates > 0 || acc.verdict === 'parked',
+        verdict: acc.verdict, parked: acc.gates > 0 || acc.verdict === 'parked', preview: acc.preview,
+      };
+    },
+  };
+}
+
+/**
+ * The RESUME reporter (§8, CD-7): after a human approved a parked run, re-fire it with THIS reporter. The FIRST
+ * write it reaches — the one the person saw the preview for and approved — gets `gate()→true` (proceed); every
+ * SUBSEQUENT write re-parks (`'park'`), because §8's rule is one approval per write, never a blanket "approve the
+ * rest". Same accumulation as the SW reporter otherwise. PURE.
+ */
+export function makeResumeReporter() {
+  const acc = { steps: 0, total: 0, results: [], verdict: '', gates: 0, approved: false, preview: null };
+  return {
+    step(i, total) { acc.steps = Math.max(acc.steps, i + 1); acc.total = total; },
+    progress() { /* no surface */ },
+    result(payload) { acc.results.push(payload); },
+    gate(preview) {
+      acc.gates++;
+      if (!acc.approved) { acc.approved = true; return true; }   // the approved write proceeds
+      acc.preview = preview || null; return 'park';              // a later write re-parks (a fresh approval)
+    },
+    done(verdict) { acc.verdict = String(verdict || ''); },
+    snapshot() {
+      return {
+        steps: acc.steps, total: acc.total, results: acc.results.slice(),
+        verdict: acc.verdict, parked: acc.verdict === 'parked', preview: acc.preview, approvedWrite: acc.approved,
       };
     },
   };

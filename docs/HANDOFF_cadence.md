@@ -83,12 +83,26 @@ RUN-level rows (time · auto/manual · counts · verdict, parked → "waiting on
 the overlay motion + page-slot owner value is polish; §6's actual requirement (a person can READ the history) is
 met. The overlay-on-card-body (§6.2) remains as visual polish.
 
+**Progress (v2.74.1695) — CD-7 parked writes are RESUMABLE.** A scheduled run reaching a write parks (writePolicy
+has no 'auto'); CD-7 makes that parked run visible and actionable:
+- `Core/runDriver.js` gains `makeResumeReporter()` (tested) — gate approves the FIRST write (the one the human
+  OK'd) and re-parks at the next (one approval per write, §8); `makeAccumulatorReporter` now captures the write
+  PREVIEW for the case.
+- `background/handlers/cadence.js`: `_fire` takes a `{reporter, startIndex}` resume seam and stores a rich parked
+  marker `{runId, workflowId, appId, name, stepIndex, at, preview}`. New handlers `WORKFLOW_PARKED` (list),
+  `WORKFLOW_RESUME_PARKED` (approve & re-fire from the parked step), `WORKFLOW_CANCEL_PARKED` (drop + history).
+- Panel: `_renderParkedRuns` surfaces parked runs ABOVE the manage view with the write preview + ✓ Approve &
+  continue / ✕ Cancel run. Resume that hits a LATER write re-parks (told to re-open workflows).
+- NOTE: parked runs surface as bubbles in the manage view, not yet the §8 `wfp_<runId>` desk CASE — the case
+  entity (VT-2b pattern) is a further step; the resumable record + approve/cancel loop is complete.
+
 **Still remaining (large, live-only):**
 - **CD-3** — intent-first `＋ Workflow` (repoint the card at an intent prompt). Left deliberately: it touches the
   composer intercept + a new wizard phase, high-risk to do blind; the `workflow: <intent>` command is the
   intent-first door meanwhile.
 - **CD-6 overlay polish** — the `.rail`-style takeover from the card body + the explicit page-slot owner value
   (§6.2/§6.4). The history itself is readable now (bubble list); this is the motion.
+- **CD-7 as a desk CASE** — promote the parked bubble to a real `wfp_<runId>` case on the workflow's desk.
 - **CD-7** — parked writes as real `wfp_` cases + `Approve & continue` resume. The scanner already parks + drops
   a `cadence:parked:<runId>` marker; promoting it to a case is the panel piece.
 - **CD-1a phase 2** — the panel DOM reporter (route the panel run through `Core/runDriver` too, so panel and SW

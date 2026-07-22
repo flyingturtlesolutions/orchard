@@ -7514,6 +7514,7 @@ async function _renderWorkflows() {
   if (!appId) { _setMessageBody(m, 'Open a desk — workflows are saved per desk.'); return; }
   let wfs = [];
   try { wfs = await _loadWorkflowsMerged(); } catch { /* */ }   // DK-8k — the manage view sweeps every candidate key too
+  await _renderParkedRuns(appId);   // CD-7 (§8) — surface any scheduled run that stopped at a write, needing approval, ABOVE the list
   if (!wfs.length) { _setMessageBody(m, 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.'); return; }
   _setMessageBody(m, `${wfs.length} saved workflow${wfs.length === 1 ? '' : 's'} :`);
   for (const wf of wfs) {
@@ -7541,6 +7542,38 @@ async function _renderWorkflows() {
       _setMessageBody(row, `Deleted${wf.name ? ` “${wf.name}”` : ''}.`);
     }));
   }
+}
+
+// CD-7 (DESIGN_cadence.md §8) — surface PARKED runs: a scheduled run that reached a write and stopped (writePolicy
+// has no 'auto' — an unattended write always parks). Each is shown with the write preview + Approve & continue /
+// Cancel run. Approve re-fires from the parked step, approving that write; a LATER write re-parks (one per write).
+async function _renderParkedRuns(appId) {
+  let r = null;
+  try { r = await _orchReq('WORKFLOW_PARKED', { appId }); } catch { /* */ }
+  const parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [];
+  if (!parked.length) return 0;
+  for (const p of parked) {
+    const prev = (p.preview && typeof p.preview === 'object') ? p.preview : {};
+    const what = prev.recipe || prev.step || 'a write step';
+    const row = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(row, `⚠ **“${escHtml(p.name || p.workflowId)}”** ran on schedule and stopped — **${escHtml(String(what))}** is a write that needs your approval before it sends.`, { markdown: true });
+    const bar = _orchActionBar(row);
+    bar.appendChild(_mkOnceBtn('✓ Approve & continue', async () => {
+      _setMessageBody(row, `Approving “${escHtml(String(what))}” and continuing the run…`, { markdown: true });
+      let res = null;
+      try { res = await _orchReq('WORKFLOW_RESUME_PARKED', { runId: p.runId }); } catch { /* */ }
+      const v = res && res.verdict;
+      _setMessageBody(row, (res && res.success !== false)
+        ? (v === 'parked' ? 'Sent — the run continued and stopped at the NEXT write. Re-type `workflows` to approve it.' : `Done — the run ${v === 'complete' ? 'completed' : (v || 'finished')}.`)
+        : `Couldn’t resume — ${_errWord(res && res.error)}.`, { markdown: true });
+    }));
+    bar.appendChild(_mkBtn('✕ Cancel run', async () => {
+      try { bar.remove(); } catch { /* */ }
+      try { await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
+      _setMessageBody(row, 'Cancelled — the write was not sent.', { markdown: true });
+    }));
+  }
+  return parked.length;
 }
 
 // CD-6 (DESIGN_cadence.md §6) — the RUN HISTORY view. History is its OWN store (wfruns:<workflowId>), never the
