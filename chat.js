@@ -85,6 +85,7 @@ import { writeTally, writePreflight } from './Core/writeClause.js';
 import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
 import { emptyPriorStop } from './Core/priorScope.js';
 import { casePeek } from './Core/pipelineCase.js';   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
+import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
@@ -13032,6 +13033,18 @@ function _syncIncidentCases(status = null) {
         } catch { conv = null; }
       }
       if (!conv) continue;
+      // v2.74.1703 — AUTO-DISMISS a resolved PRESENCE case. A sign-out that healed itself is not attention: the
+      // Connections card already shows the origin fresh, so the case's job is done. Removes only the RAIL surface
+      // (the store keeps the closed incident as history); drift cases are NEVER dismissed here. Guarded off the
+      // case the user is currently VIEWING — yanking their open surface would be jarring; it clears next sync.
+      if (shouldDismissIncidentCase(inc, { now: Date.now() }) && caseId !== String(_currentConversationId || '')) {
+        try {
+          await ConversationStore.delete(caseId);
+          railDirty = true;
+          try { _orchLog(`VITALS ▸ case dismissed — [presence] ${String(inc.subject || '').slice(0, 48)} (self-healed)`); } catch { /* */ }
+        } catch { /* a dismiss that fails just leaves the ✓ card; harmless */ }
+        continue;
+      }
       try { await ConversationStore.updateMessage(caseId, 'incident_card', { role: 'assistant', body: _incidentCardBody(inc) }, { upsert: true }); } catch { /* */ }
       const last = (inc.evidence || []).slice(-1)[0];
       const peek = inc.status === 'open' ? (last ? friendlyVitalsLine(last.line).slice(0, 80) : 'open') : 'resolved';   // v1590 — human words in the Rail peek too
@@ -13039,6 +13052,10 @@ function _syncIncidentCases(status = null) {
       if (inc.status === 'closed' && !conv.resolvedAt) {
         try { await ConversationStore.patchMeta(caseId, { resolvedAt: inc.closedAt || Date.now() }); } catch { /* */ }
         try { _orchLog(`VITALS ▸ case resolved — [${inc.cls}] ${String(inc.subject || '').slice(0, 48)}`); } catch { /* */ }
+        // v2.74.1703 — a just-resolved presence case shows its ✓ now, then dismisses. Schedule ONE re-sync past
+        // the grace so it clears without needing another trigger (Admin re-open / next transition). Best-effort:
+        // if the panel is gone by then, the next natural sync dismisses it anyway (the pure check is idempotent).
+        if (inc.cls === 'presence') { try { setTimeout(() => { void _syncIncidentCases(); }, PRESENCE_DISMISS_GRACE_MS + 1000); } catch { /* */ } }
       }
     }
     if (railDirty) { try { await _refreshRailIfOpen(); } catch { /* */ } }   // v1588 — drawer-aware (closed pays nothing) + coalesced

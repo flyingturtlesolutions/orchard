@@ -122,6 +122,33 @@ export function openIncidents(list) {
   return (Array.isArray(list) ? list : []).filter((x) => x && x.status === 'open').sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
 }
 
+/**
+ * How long a RESOLVED presence case lingers in the Rail (showing its "✓ all clear") before it auto-dismisses.
+ * v2.74.1703 — long enough to register that it cleared, short enough not to accumulate.
+ */
+export const PRESENCE_DISMISS_GRACE_MS = 30_000;
+
+/**
+ * Should this incident's Rail CASE be auto-dismissed (deleted)? PURE. v2.74.1703.
+ *
+ * "Silence when green" vs "history, not attention" collided: a resolved presence case was kept forever, and once
+ * its incident aged out of the store (INCIDENT_CAP) the case ORPHANED. The reconciliation splits by class:
+ *
+ *   · PRESENCE self-heals — a sign-out that fixed itself needs no permanent record; the Connections card already
+ *     shows the origin fresh. So a resolved presence case dismisses after a short grace (the ✓ shows first).
+ *   · DRIFT (and anything else) is a SUBSTANTIVE problem worth keeping as history — never auto-dismissed here.
+ *
+ * The store still holds the closed incident as history (until it ages out); this only removes the RAIL surface.
+ */
+export function shouldDismissIncidentCase(inc, { now = 0, graceMs = PRESENCE_DISMISS_GRACE_MS } = {}) {
+  if (!inc || typeof inc !== 'object') return false;
+  if (inc.status !== 'closed') return false;   // only a RESOLVED case
+  if (inc.cls !== 'presence') return false;     // presence only — drift is kept as history
+  const closedAt = Number(inc.closedAt) || 0;
+  if (!closedAt) return false;                  // no resolution stamp → keep (defensive)
+  return (Number(now) - closedAt) >= Math.max(0, Number(graceMs) || 0);
+}
+
 // ── VT-2c (v2.74.1583) — the rolling outcome TALLY: per-ground per-day {ok,auth,miss,other} counts, the funnel's ──
 // one new write path. This is the metric class the binary drift flag can't carry (a ground at 82% is telling you
 // something "shape ok" can't) — success RATES + failure MIX for the dashboard, body-blind by construction (counts

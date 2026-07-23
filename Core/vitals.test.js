@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import { classifyLegOutcome, pickCanary, canaryPlaceholdersFillable, dueForDaily, upsertIncident, resolveIncident, openIncidents, INCIDENT_CAP, EVIDENCE_CAP,
   tallyClassOf, tallyDayKey, tallyTick, tallySummary, tallyByDay, TALLY_KEEP_DAYS,
-  kaSetOptIn, kaCadenceMs, kaNotePing, kaRecordDeath, kaPlan, KA_FLOOR_MS, KA_DEFAULT_MS, KA_SAMPLE_CAP } from './vitals.js';
+  kaSetOptIn, kaCadenceMs, kaNotePing, kaRecordDeath, kaPlan, KA_FLOOR_MS, KA_DEFAULT_MS, KA_SAMPLE_CAP , shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './vitals.js';
 
 const NOW = 1750000000000;
 
@@ -258,5 +258,31 @@ describe('vitals — KA attempt-throttle (bcp polish)', () => {
     assert.deepEqual(kaPlan(book, registry, { now, openOrigins: ['a.com'], ephemeralOk: true }), [], 'pinged 10m ago (cadence 30m) → left alone even though verification is stale');
     book['a.com'].lastPingAt = now - 2 * H;
     assert.equal(kaPlan(book, registry, { now, openOrigins: ['a.com'], ephemeralOk: true }).length, 1, 'attempt older than the cadence → due again');
+  });
+});
+
+describe('shouldDismissIncidentCase — a self-healed PRESENCE case leaves the Rail; drift stays (v2.74.1703)', () => {
+  const G = PRESENCE_DISMISS_GRACE_MS;
+  it('resolved presence, past the grace → dismiss', () => {
+    assert.equal(shouldDismissIncidentCase({ cls: 'presence', status: 'closed', closedAt: 1000 }, { now: 1000 + G }), true);
+    assert.equal(shouldDismissIncidentCase({ cls: 'presence', status: 'closed', closedAt: 1000 }, { now: 1000 + G + 5000 }), true);
+  });
+  it('within the grace → keep (the ✓ shows first)', () => {
+    assert.equal(shouldDismissIncidentCase({ cls: 'presence', status: 'closed', closedAt: 1000 }, { now: 1000 + G - 1 }), false);
+    assert.equal(shouldDismissIncidentCase({ cls: 'presence', status: 'closed', closedAt: 1000 }, { now: 1000 }), false);
+  });
+  it('an OPEN presence case is never dismissed (it still needs attention)', () => {
+    assert.equal(shouldDismissIncidentCase({ cls: 'presence', status: 'open', openedAt: 1000 }, { now: 1e12 }), false);
+  });
+  it('DRIFT is kept as history — never auto-dismissed, however old', () => {
+    assert.equal(shouldDismissIncidentCase({ cls: 'drift', status: 'closed', closedAt: 1000 }, { now: 1e12 }), false);
+  });
+  it('a resolved case with no closedAt stamp is kept (defensive)', () => {
+    assert.equal(shouldDismissIncidentCase({ cls: 'presence', status: 'closed' }, { now: 1e12 }), false);
+    assert.equal(shouldDismissIncidentCase({ cls: 'presence', status: 'closed', closedAt: 0 }, { now: 1e12 }), false);
+  });
+  it('degenerate input does not throw', () => {
+    for (const bad of [null, undefined, 'x', 7, {}]) assert.doesNotThrow(() => shouldDismissIncidentCase(bad, { now: 1 }));
+    assert.equal(shouldDismissIncidentCase(null, {}), false);
   });
 });
