@@ -10,7 +10,7 @@
  */
 
 import { Logger } from '../../Core/Logger.js';
-import { REG_KEY, authSignal, applySignal, heartbeatTargets } from '../../Core/connectionPresence.js';
+import { REG_KEY, authSignal, applySignal, heartbeatTargets, pickSignInTab } from '../../Core/connectionPresence.js';
 import { signInLandingPath } from '../../Core/connectorRecipes.js';   // v1701 — the human console path (Zendesk agent = /agent), so a fresh sign-in tab reaches the agent auth, not the help centre
 
 // VT-4 (v2.74.1572, DESIGN_vitals.md §3.2) — SW-side transition subscribers (the CONN_STATUS_CHANGED broadcast
@@ -24,7 +24,8 @@ export function registerConnTransitionListener(fn) { if (typeof fn === 'function
 // extra reload of a page the user just landed on — strictly better than persisting state for a 10s window.
 const FOCUS_RELOAD_DEBOUNCE_MS = 10_000;
 const _focusReloadAt = new Map();   // tabId → last reload stamp
-try { chrome.tabs.onRemoved.addListener((tabId) => _focusReloadAt.delete(tabId)); } catch { /* */ }
+const _originTab = new Map();       // v2.74.1702 — origin → the tab this origin's sign-in last used (reuse over recreate)
+try { chrome.tabs.onRemoved.addListener((tabId) => { _focusReloadAt.delete(tabId); for (const [o, id] of _originTab) { if (id === tabId) _originTab.delete(o); } }); } catch { /* */ }
 
 // ── the registry store (chained read-modify-write; single writer) ─────────────────────────────────────────────────
 let _chain = Promise.resolve();
@@ -107,36 +108,39 @@ export function createConnectionsHandlers({ invokeSgHandler } = {}) {
         if (!origin) { sendResponse({ success: false, error: 'no-origin' }); return; }
         try {
           const tabs = await chrome.tabs.query({});
-          const hit = tabs.find((t) => { try { return t && !t.discarded && new URL(t.url).host.toLowerCase() === origin; } catch { return false; } });
-          let reloaded = false;
-          if (hit) {
-            await chrome.tabs.update(hit.id, { active: true });
-            try { await chrome.windows.update(hit.windowId, { focused: true }); } catch { /* */ }
-            // v2.74.1687 — FOCUS WAS NOT ENOUGH, and the asymmetry was the tell: the no-tab branch below calls
-            // `tabs.create`, which loads fresh, so a MISSING tab behaved correctly while an OPEN one did not.
-            // Focusing an existing tab left the user staring at the stale signed-out render they were already
-            // signed out on — the session had expired underneath a page rendered before it did. The button says
-            // "Sign in"; landing on a dead page that needs a manual F5 first is the button not doing its job.
-            //
-            // DEBOUNCED, because this is the one flow where a stray reload is expensive: the user is typing
-            // CREDENTIALS. A re-entrant CONN_FOCUS (double-click, a second warning line, the Connections card
-            // firing alongside a desk warning) would wipe a half-filled login form. Within the window we focus
-            // and leave the page alone — they are already looking at the live page we would have loaded.
-            const last = _focusReloadAt.get(hit.id) || 0;
+          const landing = signInLandingPath(origin);
+          // v2.74.1702 — REUSE over recreate. The host-only match (v1687) missed an expired tab already REDIRECTED
+          // to the branded sign-in host (support.<x>.com/auth/…), so it spawned a DUPLICATE — and every repeat
+          // click another. `pickSignInTab` reclaims, most-specific first: a live on-origin tab (RELOAD — keeps its
+          // deep `return_to`), the tab this origin's sign-in last used wherever it has since drifted (NAVIGATE
+          // back to the console), or a sign-in page whose `return_to` still names the origin (the drifted
+          // ORIGINAL, reclaimed on the first click). Only a genuine no-tab case opens fresh.
+          //
+          // DEBOUNCED (v1687): the user is typing CREDENTIALS — a re-entrant focus (double-click, a second warning
+          // line, the Connections card firing alongside a desk warning) must not reload/navigate a half-filled
+          // login form out from under them. Within the window we focus and leave the page alone.
+          const pick = pickSignInTab(tabs, origin, _originTab.get(origin));
+          let outcome;
+          if (pick) {
+            const t = tabs.find((x) => x.id === pick.tabId);
+            await chrome.tabs.update(pick.tabId, { active: true });
+            try { if (t) await chrome.windows.update(t.windowId, { focused: true }); } catch { /* */ }
+            _originTab.set(origin, pick.tabId);
+            const last = _focusReloadAt.get(pick.tabId) || 0;
             if (Date.now() - last > FOCUS_RELOAD_DEBOUNCE_MS) {
-              _focusReloadAt.set(hit.id, Date.now());
-              try { await chrome.tabs.reload(hit.id); reloaded = true; } catch { /* a reload failure must not fail the focus */ }
-            }
+              _focusReloadAt.set(pick.tabId, Date.now());
+              try {
+                if (pick.action === 'navigate') { await chrome.tabs.update(pick.tabId, { url: `https://${origin}${landing}` }); outcome = 'reused + navigated'; }
+                else { await chrome.tabs.reload(pick.tabId); outcome = 'reused + reloaded'; }
+              } catch { outcome = 'reused (mutate failed)'; /* a reload/navigate failure must not fail the focus */ }
+            } else { outcome = 'reused (debounced)'; }
           } else {
-            // v2.74.1701 — open the human CONSOLE path, not the bare origin. `https://<origin>/` sends a
-            // signed-out Zendesk agent to the public help centre, never the agent sign-in — the console lives at
-            // `/agent` (derived from the recipe's declared human page). An existing tab (above) keeps its DEEP url
-            // on reload, which gives Zendesk the richest `return_to`; only the fresh-tab case needs the landing.
-            const landing = signInLandingPath(origin);
-            await chrome.tabs.create({ url: `https://${origin}${landing}`, active: true });
+            const created = await chrome.tabs.create({ url: `https://${origin}${landing}`, active: true });
+            if (created && created.id != null) _originTab.set(origin, created.id);
+            outcome = `opened ${landing}`;
           }
-          try { Logger.info('conn', `CONN ▸ focus ${origin} → ${hit ? (reloaded ? 'focused + reloaded' : 'focused (reload debounced)') : `opened ${signInLandingPath(origin)}`}`); } catch { /* */ }
-          sendResponse({ success: true, opened: !hit, reloaded });
+          try { Logger.info('conn', `CONN ▸ focus ${origin} → ${outcome}`); } catch { /* */ }
+          sendResponse({ success: true, reused: !!pick });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'focus-failed' }); }
       })();
       return true;

@@ -150,3 +150,45 @@ export function attentionOrigins(registry, origins) {
     .filter((e) => e && want.has(e.origin) && (e.status === STATUS.SIGNED_OUT || e.status === STATUS.WRONG_ACCOUNT))
     .map((e) => ({ origin: e.origin, status: e.status, cause: e.cause || null }));
 }
+
+/**
+ * Pick the tab a "Sign in" click should REUSE, or null to open a fresh one. PURE. v2.74.1702.
+ *
+ * The goal is REUSE over recreate. The naive "a tab whose host === origin" check misses the common case: an
+ * expired Zendesk agent tab has already been REDIRECTED off the origin to the branded sign-in host
+ * (`support.<x>.com/auth/v3/signin?…return_to=…deako.zendesk.com…`), so host-matching finds nothing and a
+ * duplicate tab is spawned — and every repeat click spawns another. Three reuse paths, most-specific first:
+ *
+ *   1. a live tab STILL on the origin host — reload it (its deep URL gives Zendesk the richest `return_to`).
+ *   2. the tab WE previously opened/focused for this origin (`rememberedId`), wherever it has since drifted —
+ *      navigate it back to the console landing to re-trigger a clean auth redirect. This is what stops the
+ *      pile-up on repeat clicks.
+ *   3. a sign-in page whose URL still REFERENCES the origin (its `return_to` carries the origin host verbatim —
+ *      only the slashes are percent-encoded) — the drifted ORIGINAL tab, reclaimed on the very first click.
+ *      Guarded to auth-shaped URLs so a stray page merely mentioning the host is not hijacked.
+ *
+ * @param {Array<{id:number,url:string}>} tabs
+ * @param {string} origin                        host, e.g. 'deako.zendesk.com'
+ * @param {number|null} rememberedId             the tab this origin's sign-in last used, if any
+ * @returns {{tabId:number, action:'reload'|'navigate'}|null}
+ */
+export function pickSignInTab(tabs, origin, rememberedId = null) {
+  const list = (Array.isArray(tabs) ? tabs : []).filter((t) => t && typeof t.url === 'string' && t.id != null);
+  const o = _str(origin).toLowerCase();
+  if (!o) return null;
+  const hostOf = (u) => { try { return new URL(u).host.toLowerCase(); } catch { return ''; } };
+
+  const onOrigin = list.find((t) => hostOf(t.url) === o);
+  if (onOrigin) return { tabId: onOrigin.id, action: 'reload' };
+
+  if (rememberedId != null) {
+    const remembered = list.find((t) => t.id === rememberedId);
+    if (remembered) return { tabId: remembered.id, action: 'navigate' };
+  }
+
+  const authRef = list.find((t) => t.url.toLowerCase().includes(o)
+    && /(\/(auth|sign-?in|login|access)\b|[?&]return_to=)/i.test(t.url));
+  if (authRef) return { tabId: authRef.id, action: 'navigate' };
+
+  return null;
+}
