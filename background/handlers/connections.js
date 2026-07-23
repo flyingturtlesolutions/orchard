@@ -162,14 +162,21 @@ export function createConnectionsHandlers({ invokeSgHandler } = {}) {
             await chrome.tabs.update(pick.tabId, { active: true });
             try { if (t) await chrome.windows.update(t.windowId, { focused: true }); } catch { /* */ }
             _originTab.set(origin, pick.tabId);
-            const last = _focusReloadAt.get(pick.tabId) || 0;
-            if (Date.now() - last > FOCUS_RELOAD_DEBOUNCE_MS) {
-              _focusReloadAt.set(pick.tabId, Date.now());
-              try {
-                if (pick.action === 'navigate') { await chrome.tabs.update(pick.tabId, { url: `https://${origin}${landing}` }); outcome = 'reused + navigated'; }
-                else { await chrome.tabs.reload(pick.tabId); outcome = 'reused + reloaded'; }
-              } catch { outcome = 'reused (mutate failed)'; /* a reload/navigate failure must not fail the focus */ }
-            } else { outcome = 'reused (debounced)'; }
+            if (pick.action === 'focus') {
+              // v2.74.1707 — the target is ALREADY a sign-in page: focus only, never mutate. Reloading/navigating
+              // would restart the login and wipe a half-typed password (the debounce window is shorter than a
+              // person types).
+              outcome = 'reused (focus — already signing in)';
+            } else {
+              const last = _focusReloadAt.get(pick.tabId) || 0;
+              if (Date.now() - last > FOCUS_RELOAD_DEBOUNCE_MS) {
+                _focusReloadAt.set(pick.tabId, Date.now());
+                try {
+                  if (pick.action === 'navigate') { await chrome.tabs.update(pick.tabId, { url: `https://${origin}${landing}` }); outcome = 'reused + navigated'; }
+                  else { await chrome.tabs.reload(pick.tabId); outcome = 'reused + reloaded'; }
+                } catch { outcome = 'reused (mutate failed)'; /* a reload/navigate failure must not fail the focus */ }
+              } else { outcome = 'reused (debounced)'; }
+            }
           } else {
             const created = await chrome.tabs.create({ url: `https://${origin}${landing}`, active: true });
             if (created && created.id != null) _originTab.set(origin, created.id);

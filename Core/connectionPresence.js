@@ -172,23 +172,30 @@ export function attentionOrigins(registry, origins) {
  * @param {number|null} rememberedId             the tab this origin's sign-in last used, if any
  * @returns {{tabId:number, action:'reload'|'navigate'}|null}
  */
+// Is this URL a sign-in / SSO page? Broad on purpose: `/auth|signin|login|access` paths, WS-Federation
+// (`/idp/…?wtrealm=…&wa=wsignin1.0`, the drhorton SSO shape), and a `return_to`-bearing query.
+const _AUTH_URL_RE = /(\/(auth|sign-?in|login|access)\b|\/idp\/|[?&](return_to|wtrealm|wctx|wa)=)/i;
+
 export function pickSignInTab(tabs, origin, rememberedId = null) {
   const list = (Array.isArray(tabs) ? tabs : []).filter((t) => t && typeof t.url === 'string' && t.id != null);
   const o = _str(origin).toLowerCase();
   if (!o) return null;
   const hostOf = (u) => { try { return new URL(u).host.toLowerCase(); } catch { return ''; } };
+  // v2.74.1707 — a reuse target that is ALREADY on a sign-in page must only be FOCUSED, never
+  // reloaded/navigated: re-triggering the flow restarts the login and would wipe a half-typed password (the exact
+  // harm the 10s debounce guards, but a person types for longer than 10s). "Focus, don't disturb."
+  const act = (t, mutate) => ({ tabId: t.id, action: _AUTH_URL_RE.test(t.url) ? 'focus' : mutate });
 
   const onOrigin = list.find((t) => hostOf(t.url) === o);
-  if (onOrigin) return { tabId: onOrigin.id, action: 'reload' };
+  if (onOrigin) return act(onOrigin, 'reload');   // on the app (maybe stale) → reload re-triggers auth, keeps the deep return_to
 
   if (rememberedId != null) {
     const remembered = list.find((t) => t.id === rememberedId);
-    if (remembered) return { tabId: remembered.id, action: 'navigate' };
+    if (remembered) return act(remembered, 'navigate');   // our tab, wherever it drifted → re-trigger via the landing
   }
 
-  const authRef = list.find((t) => t.url.toLowerCase().includes(o)
-    && /(\/(auth|sign-?in|login|access)\b|[?&]return_to=)/i.test(t.url));
-  if (authRef) return { tabId: authRef.id, action: 'navigate' };
+  const authRef = list.find((t) => t.url.toLowerCase().includes(o) && _AUTH_URL_RE.test(t.url));
+  if (authRef) return { tabId: authRef.id, action: 'focus' };   // the drifted original, already a login page → just focus
 
   return null;
 }

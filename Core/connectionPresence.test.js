@@ -111,10 +111,16 @@ describe('pickSignInTab — reuse a tab over recreating one (v2.74.1702)', () =>
     const tabs = [{ id: 5, url: 'https://deako.zendesk.com/agent/filters/35274215827863' }, { id: 6, url: 'https://google.com' }];
     assert.deepEqual(pickSignInTab(tabs, O), { tabId: 5, action: 'reload' });
   });
-  it('THE LIVE BUG: an expired tab REDIRECTED to the branded sign-in host is reclaimed via return_to → navigate', () => {
-    // host is now support.deako.com, so host-matching finds nothing — but return_to still names the origin.
+  it('THE LIVE BUG: an expired tab REDIRECTED to the branded sign-in PAGE is reclaimed via return_to → FOCUS (not restart)', () => {
+    // host is now support.deako.com, so host-matching finds nothing — but return_to still names the origin, and it
+    // IS a login page, so we focus (v1707), never navigate: re-triggering would wipe a half-typed password.
     const tabs = [{ id: 9, url: 'https://support.deako.com/auth/v3/signin?notice=timeout&return_to=https%3A%2F%2Fdeako.zendesk.com%2Fagent%2Ffilters%2F35274215827863&role=agent' }];
-    assert.deepEqual(pickSignInTab(tabs, O), { tabId: 9, action: 'navigate' });
+    assert.deepEqual(pickSignInTab(tabs, O), { tabId: 9, action: 'focus' });
+  });
+  it('v1707 — a REMEMBERED tab already on a login page is FOCUSED, not navigated (no credential wipe)', () => {
+    // VendorSuite SSO shape: /idp/…?wtrealm=… — a login page, so even our remembered tab is left alone.
+    const sso = [{ id: 4, url: 'https://cplogin.drhorton.com/idp/prp.wsf?wtrealm=urn:vendorsuite:web&wa=wsignin1.0' }];
+    assert.deepEqual(pickSignInTab(sso, 'vendorsuite.drhorton.com', 4), { tabId: 4, action: 'focus' });
   });
   it('the tab WE last used for this origin is reused wherever it drifted → navigate (stops the pile-up)', () => {
     const tabs = [{ id: 12, url: 'https://support.deako.com/hc/en-us' }];   // drifted to the help centre, no return_to
