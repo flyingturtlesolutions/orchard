@@ -28,6 +28,16 @@ describe('stepsPrompt — the prompt states the rule the wizard already promises
     assert.match(system, /full stop in/);
   });
 
+  it('v2.74.1708 — a case is a PRESENTATION target, and "show X in a case" is not split from its case', () => {
+    // Live: "display each homeowner's contact IN A NEW CASE" decomposed into a bare "display …" step + a dangling
+    // "open a case" step. The case is WHERE the contact is shown — the presentation and its target are one action.
+    const { system } = buildStepsMessages('x');
+    assert.match(system, /PRESENT IN A CASE/);
+    assert.match(system, /DO NOT SPLIT A PRESENTATION FROM ITS TARGET/i);
+    assert.match(system, /open a case showing X/);
+    assert.match(system, /never a dangling/i);
+  });
+
   it('THE ROLE SEPARATION: names steps, never picks legs or writes parameters', () => {
     // Transposed from proposePerspectives: "You do NOT pick elements or write selectors; you name the roles."
     //   perspective:  name ROLES → resolveRoles picks SELECTORS → code verifies against the DOM

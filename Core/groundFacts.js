@@ -40,7 +40,7 @@ const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String
  * for a planner rather than for a router.
  */
 export const OWN_CAPABILITIES = [
-  { what: 'Open a case', note: 'a local review record, held here — NOT a ticket on any connected site' },
+  { what: 'Open a case', note: 'a local review record that PRESENTS what a prior step read (its label + the fields shown) — the DESTINATION when the ask says "in a new case" / "show X in a case", NOT a ticket on any connected site' },
   { what: 'Close a case', note: 'mark one dealt with' },
   { what: 'Show my cases', note: 'list what is still waiting on a person' },
 ];
