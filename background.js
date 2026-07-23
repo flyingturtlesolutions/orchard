@@ -24,6 +24,7 @@
 
 import { Logger, LOG_LEVEL }  from './Core/Logger.js';
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
+import { livePromptTexts, livePromptMeta } from './Core/promptCatalog.js';   // v1710 — the Docs tab's live prompt catalog (no drift)
 import * as Locale          from './Core/locale.js';   // v2.74.397 — Perspective/Locale builder + query API
 import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
@@ -6398,7 +6399,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'GET_PROMPTS':
-      sendResponse({ prompts: AnthropicService.getPromptTexts() });
+      // v2.74.1710 — merge the LIVE modern-family prompts (sourced from Core/*Prompt.js builders, can't drift)
+      // over the legacy hand-maintained snapshot, and hand Studio the catalog metadata so the new prompts render
+      // without a second hardcoded registry to keep in sync.
+      sendResponse({ prompts: { ...AnthropicService.getPromptTexts(), ...livePromptTexts() }, catalog: livePromptMeta() });
       return false;
 
 

@@ -6661,10 +6661,13 @@ async function renderPromptsTab() {
     chrome.runtime.sendMessage({ type: 'GET_PROMPTS' }, r)
   );
   const prompts = res?.prompts ?? {};
+  // v2.74.1710 — the live modern-family catalog rides alongside the legacy registry (metadata sourced from the
+  // Core/*Prompt.js builders themselves, so a new prompt module appears here without a second hardcoded entry).
+  const _liveCatalog = Array.isArray(res?.catalog) ? res.catalog : [];
 
   list.innerHTML = '';
 
-  PROMPT_REGISTRY.forEach(entry => {
+  [...PROMPT_REGISTRY, ..._liveCatalog].forEach(entry => {
     const text = prompts[entry.id] ?? '(prompt text unavailable)';
     const card = document.createElement('div');
     card.className = 'prompt-card';
