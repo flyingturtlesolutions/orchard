@@ -39,10 +39,15 @@ export const MAX_STEPS = 8;
 // is the §1.1b rule applied one level up — and it is why these signals go into the prompt as instructions rather
 // than being used to split the text directly, which is what `decomposeAsk` does and why it under-splits.
 
-const _COLLECTION = /\b(each|every|all (?:the |of )?|for ?each|per (?:item|task|row|one|record)|them|those|the ones|any that)\b/i;
+// v2.74.1709 — bare "all" was a false COLLECTION signal ("get all open tasks" is one bulk read, not a per-item
+// pass), so it inflated the floor and told the model to add a step that isn't there. Dropped; the genuine
+// per-item markers (each / every / for each / per X / those / them / the ones) stay.
+const _COLLECTION = /\b(each|every|for ?each|per (?:item|task|row|one|record)|them|those|the ones|any that)\b/i;
 const _CONDITIONAL = /\b(if|unless|when|whenever|otherwise|else|in case)\b/i;
 const _FINDCREATE = /\b(?:create|add|make|open)\b[^.?!]{0,40}\b(?:if|when|unless)\b|\b(?:if|when)\b[^.?!]{0,40}\b(?:none|no match|not found|missing|does ?n[o']t exist)\b|\bor create\b/i;
-const _WRITE = /\b(create|draft|send|post|update|add|delete|remove|set|assign|close|order|submit|save|write|reply|email|message)\b/i;
+// v2.74.1709 — several write-verbs are also common NOUNS ("the order", "a result set", "the blog post"). The
+// determiner lookbehind excludes the noun sense so a floor is not inflated by "tasks by order number" etc.
+const _WRITE = /(?<!\b(?:the|a|an|this|that|these|those|its|our|their|your|my|no|by|in|of|result|blog|word)\s)\b(create|draft|send|post|update|add|delete|remove|set|assign|close|order|submit|save|write|reply|email|message)\b/i;
 const _READFILTER = /\b(find|get|list|show|search|fetch|pull)\b[^.?!]{0,60}\b(where|that|which|with|containing|asking for|requesting|marked)\b/i;
 
 /**
@@ -92,7 +97,7 @@ export function buildStepsDirective(spec = {}) {
   const lines = [];
 
   if (scale.min > 1) {
-    lines.push(`- This request contains AT LEAST ${scale.min} separate actions. Fewer than ${scale.min} steps means you have left two actions bundled together. That is the most common mistake.`);
+    lines.push(`- This looks like AT LEAST ${scale.min} separate actions. Returning fewer usually means two are bundled (the common mistake) — but this is an estimate from the wording, so if the request genuinely is simpler, trust the request over this count.`);
   } else {
     lines.push('- This may genuinely be one action. If it is, return one step — do not pad it.');
   }
@@ -177,7 +182,8 @@ export function buildStepsMessages(intent, { host = '', spec = null, rejectionCo
   const _spec = spec || deriveStepSpec(intent);
   const directive = buildStepsDirective(_spec);
   const system = [
-    'You break a request into the smallest steps that can each be RUN and CHECKED on their own.',
+    'You break a request into the FEWEST steps such that each one is a single result a person can run and check on',
+    'its own. FEWEST, not smallest — never split an action from the thing that completes it (see below).',
     '',
     // The role separation, transposed from proposePerspectives' second sentence ("You do NOT pick elements or
     // write selectors; you name the roles and describe what fills each"). Same two-phase shape, same reason:
@@ -190,25 +196,27 @@ export function buildStepsMessages(intent, { host = '', spec = null, rejectionCo
     'each step should do, and the system works out which capability answers it by RUNNING it and showing the',
     'result. Never name a connector, endpoint, leg id, or parameter value. Never guess a filter, field name, id,',
     'status or date the user did not say. If a detail is missing, leave the step in their words and let the run',
-    'surface the gap.',
-    '',
-    'THEIR WORDS ARE NOT A LEG. If the user says "Shopify", keep "Shopify" — that is what they called it. What',
-    'you must not write is the machinery: `shopify_create_customer`, `/admin/api/customers.json`, `{"status":',
-    '"open"}`. Repeat their naming; never invent ours.',
+    'surface the gap. THEIR WORDS ARE NOT A LEG: if they say "Shopify", write "Shopify" — never the machinery',
+    '(`shopify_create_customer`, `/admin/api/customers.json`, `{"status":"open"}`).',
     '',
     'THE RULE — one step = one action = one result a person can look at and approve.',
     'If a step would produce two results, or do something a person could approve separately, SPLIT IT.',
     '',
-    'The kinds of single step that exist:',
-    '  · READ A LIST            — "get the open warranty tasks"',
-    '  · READ A FIELD PER ITEM  — "read the instructions on each one"',
-    '  · SORT / FILTER          — "which of those ask for a replacement?"',
-    '  · LOOK UP EACH ELSEWHERE — "look each homeowner up in Shopify"',
-    '  · ONE WRITE              — "create a Shopify profile for them"',
-    '  · PRESENT IN A CASE      — "open a case for each showing their contact". A case is a local review record;',
-    '                             it SHOWS what a prior step read. It is a DESTINATION, not an afterthought.',
+    'Common kinds of single step. The examples come from DIFFERENT sites on purpose — the SHAPE is what matters,',
+    'not the nouns; never carry a name from one example into a request that did not use it:',
+    '  · READ A LIST            — "get this week\'s calendar events"',
+    '  · READ A FIELD PER ITEM  — "read the vendor note on each one"',
+    '  · SORT / FILTER          — "which of those are still unresolved?"',
+    '  · LOOK UP EACH ELSEWHERE — "look each caller up in the CRM"',
+    '  · GO SOMEWHERE           — "open the billing dashboard"',
+    '  · ONE WRITE              — "send each of them a reminder"',
+    '  · PRESENT IN A CASE      — "open a case for each listing what it needs". A case is a local review record',
+    '                             that SHOWS what a prior step read — a DESTINATION, not an afterthought.',
     '',
-    'SPLIT THESE APART — each is more than one step, and they are the common mistakes:',
+    'ORDER so each step has its input: anything done to "each" / "those" comes AFTER the step that produced them,',
+    'and anything that shows / files / writes X comes AFTER the step that read X.',
+    '',
+    'SPLIT THESE APART — each is more than one step. These are the common UNDER-splitting mistakes:',
     '  · "find X where Y"                → READ the list, THEN filter it. Two steps.',
     '  · "look it up, and create it if',
     '     it is missing"                 → the LOOKUP, THEN the create. Two steps.',
@@ -216,12 +224,14 @@ export function buildStepsMessages(intent, { host = '', spec = null, rejectionCo
     '  · a sentence with a full stop in',
     '    the middle                      → almost always two steps.',
     '',
-    'BUT DO NOT SPLIT A PRESENTATION FROM ITS TARGET — this is the mirror mistake, just as wrong:',
-    '  · "display / show / list X IN A CASE" is ONE step: "open a case showing X". The case is WHERE X is shown —',
-    '    never emit a bare "display X" and then a separate bare "open a case". A case can only show what a prior',
-    '    step READ, so if X is per-item detail not already on the list, the READ of X is its own step BEFORE the',
-    '    case — e.g. "read each homeowner\'s contact" THEN "open a case for each showing it", never a dangling',
-    '    "open a case" with nothing bound to it.',
+    'BUT THESE ARE ONE STEP — over-splitting is just as wrong, and it is the mistake you are MORE prone to, so',
+    'weigh it equally. Do NOT split an action from what completes it:',
+    '  · a PRESENTATION and its target  → "display / show / list X IN A CASE" is ONE step: "open a case showing X".',
+    '    The case is WHERE X appears; never a bare "display X" and then a dangling "open a case". (A case shows',
+    '    only what a prior step READ — so if X is per-item detail, the READ of X is its own step BEFORE the case.)',
+    '  · a LOOK-UP and its key          → "search the CRM for their email" is ONE step, not "get the email" and',
+    '    then "look them up".',
+    '  · a READ and its columns         → "get the tickets with their status" is ONE read, not a read then a fetch.',
     '',
     'Write each step as a short instruction in the user\'s own words. Do not add steps they did not ask for. If',
     'the request is genuinely one action, return the single step — do not pad it.',
@@ -234,8 +244,8 @@ export function buildStepsMessages(intent, { host = '', spec = null, rejectionCo
     // not guesses)". Telling the model WHY a fact outranks its own judgement is what stops it reasoning past
     // one. These come from the site's own capability declarations, and they force splits no wording could.
     ...(_str(groundFacts) ? [
-      'WHAT THIS SITE ACTUALLY SUPPORTS (read from its capabilities — authoritative, not a guess. These override',
-      'your instincts about how many steps something takes):',
+      'WHAT THIS SITE ACTUALLY SUPPORTS (read from its capabilities — authoritative WHERE THEY SPEAK; trust them',
+      'over a guess about step count, but where they are silent, use your judgment):',
       _str(groundFacts),
       '',
     ] : []),

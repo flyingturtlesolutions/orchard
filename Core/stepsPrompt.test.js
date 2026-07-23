@@ -33,9 +33,12 @@ describe('stepsPrompt — the prompt states the rule the wizard already promises
     // "open a case" step. The case is WHERE the contact is shown — the presentation and its target are one action.
     const { system } = buildStepsMessages('x');
     assert.match(system, /PRESENT IN A CASE/);
-    assert.match(system, /DO NOT SPLIT A PRESENTATION FROM ITS TARGET/i);
+    assert.match(system, /BUT THESE ARE ONE STEP/i, 'the over-split counter is a first-class section, not a lone case exception');
+    assert.match(system, /over-splitting is just as wrong/i);
+    assert.match(system, /a PRESENTATION and its target/i);
     assert.match(system, /open a case showing X/);
-    assert.match(system, /never a dangling/i);
+    assert.match(system, /dangling/i);
+    assert.match(system, /a LOOK-UP and its key/i, 'the principle generalizes beyond the case');
   });
 
   it('THE ROLE SEPARATION: names steps, never picks legs or writes parameters', () => {
@@ -184,6 +187,18 @@ describe('stepsPrompt — deriveStepSpec (the parameters CODE owns)', () => {
     const spec = S('get the open warranty tasks');
     assert.equal(spec.scale.min, 1);
     assert.deepEqual(spec.signals.filter((x) => x !== 'write'), []);
+  });
+
+  it('v2.74.1709 — the floor no longer inflates on lexical FALSE POSITIVES (the critical-review fixes)', () => {
+    // bare "all" is a bulk read, not a per-item pass; write-verbs that are also nouns must not fire.
+    assert.equal(S('get all open tasks').collection, false, '"all" alone is not a per-item collection');
+    assert.equal(S('get tasks by order number').write, false, '"order" the noun (by order …) is not a write');
+    assert.equal(S('show the result set').write, false, '"result set" is not a write');
+    assert.equal(S('in order to send the update').write, true, 'a real write after "in order to" still fires (order excluded, send fires)');
+    // and the genuine signals survive the tightening:
+    assert.equal(S('read the note on each one').collection, true);
+    assert.equal(S('draft an order').write, true, 'draft is the verb; "an order" the noun is excluded but draft still fires');
+    assert.equal(S('send a reminder').write, true);
   });
 
   it('the floor is capped and reports how it was decided', () => {
