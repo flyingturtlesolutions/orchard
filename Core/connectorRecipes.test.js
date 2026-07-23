@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath} from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
@@ -297,6 +297,32 @@ describe('recipeForOrigin — pick the strong-probe recipe for a host (AS-4 veri
     assert.equal(recipeForOrigin('zendesk.com').app, 'zendesk');                 // exact host
     assert.equal(recipeForOrigin('https://support.deako.com'), null);            // no recipe → generic verify path
     assert.equal(recipeForOrigin(''), null);
+  });
+});
+
+describe('signInLandingPath — a fresh sign-in tab reaches the human CONSOLE, not the anon root (v1701)', () => {
+  it('THE BUG: Zendesk → /agent (the bare origin lands on the help centre, never the agent sign-in)', () => {
+    // `https://deako.zendesk.com/` redirects a signed-out agent to support.<x>.com/hc/en-us; `/agent` is what
+    // produces /auth/v3/signin?…role=agent. Derived from the recipe's declared human page (`/agent/tickets/{id}`).
+    assert.equal(signInLandingPath('deako.zendesk.com'), '/agent');
+    assert.equal(signInLandingPath('https://deako.zendesk.com'), '/agent');
+    assert.equal(signInLandingPath('zendesk.com'), '/agent');
+  });
+  it('a connector with no matching recipe falls back to "/" — no regression for a plain site', () => {
+    assert.equal(signInLandingPath('support.deako.com'), '/');
+    assert.equal(signInLandingPath(''), '/');
+    assert.equal(signInLandingPath('example.com'), '/');
+  });
+  it('skips a leading {param} segment when deriving from a human page', () => {
+    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/{id}' }]), '/');
+    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/records/{id}' }]), '/records');
+  });
+  it('an explicit `console` field wins over derivation (declaration over heuristic)', () => {
+    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/agent/t/{id}', console: '/login' }]), '/login');
+  });
+  it('degenerate input does not throw', () => {
+    for (const bad of [null, undefined, 7, {}]) assert.doesNotThrow(() => signInLandingPath(bad));
+    assert.equal(signInLandingPath('x', null), '/');
   });
 });
 

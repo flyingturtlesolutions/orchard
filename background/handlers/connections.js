@@ -11,6 +11,7 @@
 
 import { Logger } from '../../Core/Logger.js';
 import { REG_KEY, authSignal, applySignal, heartbeatTargets } from '../../Core/connectionPresence.js';
+import { signInLandingPath } from '../../Core/connectorRecipes.js';   // v1701 — the human console path (Zendesk agent = /agent), so a fresh sign-in tab reaches the agent auth, not the help centre
 
 // VT-4 (v2.74.1572, DESIGN_vitals.md §3.2) — SW-side transition subscribers (the CONN_STATUS_CHANGED broadcast
 // does not reach the SW's own listeners): vitals registers here at wiring time (background.js) to open/close
@@ -127,9 +128,14 @@ export function createConnectionsHandlers({ invokeSgHandler } = {}) {
               try { await chrome.tabs.reload(hit.id); reloaded = true; } catch { /* a reload failure must not fail the focus */ }
             }
           } else {
-            await chrome.tabs.create({ url: `https://${origin}/`, active: true });
+            // v2.74.1701 — open the human CONSOLE path, not the bare origin. `https://<origin>/` sends a
+            // signed-out Zendesk agent to the public help centre, never the agent sign-in — the console lives at
+            // `/agent` (derived from the recipe's declared human page). An existing tab (above) keeps its DEEP url
+            // on reload, which gives Zendesk the richest `return_to`; only the fresh-tab case needs the landing.
+            const landing = signInLandingPath(origin);
+            await chrome.tabs.create({ url: `https://${origin}${landing}`, active: true });
           }
-          try { Logger.info('conn', `CONN ▸ focus ${origin} → ${hit ? (reloaded ? 'focused + reloaded' : 'focused (reload debounced)') : 'opened'}`); } catch { /* */ }
+          try { Logger.info('conn', `CONN ▸ focus ${origin} → ${hit ? (reloaded ? 'focused + reloaded' : 'focused (reload debounced)') : `opened ${signInLandingPath(origin)}`}`); } catch { /* */ }
           sendResponse({ success: true, opened: !hit, reloaded });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'focus-failed' }); }
       })();

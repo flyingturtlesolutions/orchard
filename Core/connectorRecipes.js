@@ -882,6 +882,40 @@ export function recipeForOrigin(origin) {
   }) || null;
 }
 
+/**
+ * The path a signed-out human should be sent to in order to reach THIS connector's sign-in. PURE. v2.74.1701.
+ *
+ * ── WHY THE BARE ORIGIN IS WRONG ────────────────────────────────────────────────────────────────────────────
+ * A vitals "signed out" incident's Sign-in button opened `https://<origin>/`. For Zendesk that redirects a
+ * signed-out visitor to the branded HELP CENTRE (`support.<x>.com/hc/en-us`), NOT the agent sign-in — the agent
+ * console lives under `/agent`, and hitting it is what produces `/auth/v3/signin?…&role=agent&return_to=…`. So the
+ * bare origin lands the operator on the public marketing/help page and the case never clears.
+ *
+ * The recipe already DECLARES where the human works: `itemUrl`/`listUrl` are the human pages (Zendesk's
+ * `/agent/tickets/{id}`, `/agent/search/…`). The console ROOT is their first real path segment — `/agent`. So the
+ * landing is derived, not guessed, and it is automatically right for any connector that declares a human page.
+ * An explicit `console` field on a recipe wins if one is ever added (declaration over derivation).
+ *
+ * Falls back to `/` (the old behaviour, no regression) when nothing is declared — a connector whose root IS its
+ * sign-in.
+ */
+export function signInLandingPath(origin, recipes = CONNECTOR_RECIPES) {
+  const host = String(origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  if (!host) return '/';
+  const r = (Array.isArray(recipes) ? recipes : []).find((x) => {
+    const ah = String(x && x.appHost || '').toLowerCase();
+    return ah && (host === ah || host.endsWith('.' + ah));
+  });
+  if (!r) return '/';
+  // Explicit declaration wins.
+  const explicit = String(r.console || '').trim();
+  if (explicit.startsWith('/')) return explicit;
+  // Else derive the console ROOT from a declared human page: its first NON-parameter path segment.
+  const human = String(r.itemUrl || r.listUrl || '').trim();
+  const seg = human.replace(/^\//, '').split(/[/?#]/).find((s) => s && !s.startsWith('{'));
+  return seg ? `/${seg}` : '/';
+}
+
 // A short, stable `app` slug for a host's registrable domain (deakoapi.deako.com → 'deako'). Used only to build a
 // unique leg.key (`account.app.id`); not semantic. PURE.
 function _appFromHost(host) {
