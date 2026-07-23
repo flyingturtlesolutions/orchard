@@ -82,13 +82,20 @@ async function _probeTargets(invokeSgHandler, targets) {
   return probed;
 }
 
-// v2.74.1705 — EVENT-DRIVEN re-verify: don't wait ~20 min for the next presence tick after a human signs in.
-// Signing in NAVIGATES the tab (site → SSO → back to the app), so when a tab finishes loading on an origin the
-// registry currently believes is signed-out, re-probe THAT origin immediately. A fresh probe closes the incident,
-// which auto-dismisses its case (v1703) within seconds instead of a sweep away. Guarded to not-fresh origins
-// (a navigation to a healthy site costs a cheap registry lookup and returns) and debounced per origin (a sign-in
-// flow fires several `complete` events across its redirects).
-function _wireSignInReverify(invokeSgHandler) {
+// v2.74.1705/1706 — EVENT-DRIVEN re-verify, BOTH directions: don't wait ~20 min for the next presence tick after
+// the connection state changes under a tab. Loading a page on a connected origin re-probes THAT origin, and the
+// transition (if any) drives the incident — CLOSED on fresh (sign-in → case auto-dismisses, v1703), OPENED on
+// signed-out (an expiry the poll would otherwise miss until its next tick). This is the user-side twin of the
+// ride funnel, which already opens/closes incidents the instant an ORCHARD ride sees the auth flip (VT-0,
+// connector.js). The 20-min sweep shrinks to the backstop for a session that dies with NO ride and NO visit — the
+// one case with no event to hang off.
+//
+// v1706 removed the `=== 'fresh'` half of the guard: probing only not-fresh origins caught sign-IN but was blind
+// to expiry-on-load. We still skip UNCONNECTED origins (a navigation anywhere else is a cheap lookup and returns),
+// and debounce 5s per origin (one load fires several `complete` events across redirects). Note: a site that hard-
+// redirects to a login HOST on expiry (the tab leaves the origin) is not caught here — its host is not in the
+// registry — but the ride funnel and the next return-to-origin load both catch it.
+function _wireConnReverify(invokeSgHandler) {
   if (typeof invokeSgHandler !== 'function') return;
   const _reprobeAt = new Map();   // origin → last re-probe stamp
   try {
@@ -99,12 +106,12 @@ function _wireSignInReverify(invokeSgHandler) {
       (async () => {
         const reg = await _read();
         const e = reg[host];
-        if (!e || !e.status || e.status === 'fresh') return;   // only a signed-out / wrong-account origin
+        if (!e || !e.status) return;   // CONNECTED origins only (fresh OR not) — the flip in either direction matters
         const last = _reprobeAt.get(host) || 0;
         if (Date.now() - last < 5_000) return;
         _reprobeAt.set(host, Date.now());
         const targets = heartbeatTargets(reg, [host], { now: Date.now(), minAgeMs: 0, cap: 1 });
-        if (targets.length) await _probeTargets(invokeSgHandler, targets);   // fresh → reportAuthSignal → incident closes → case dismisses
+        if (targets.length) await _probeTargets(invokeSgHandler, targets);   // → reportAuthSignal → transition → incident opened/closed
       })().catch(() => { /* a re-probe is best-effort */ });
     });
   } catch { /* tabs.onUpdated unavailable — the sweep still catches it, just slower */ }
@@ -112,7 +119,7 @@ function _wireSignInReverify(invokeSgHandler) {
 
 /** The CONN_* handler map (merged into the SW dispatch like every domain). */
 export function createConnectionsHandlers({ invokeSgHandler } = {}) {
-  _wireSignInReverify(invokeSgHandler);
+  _wireConnReverify(invokeSgHandler);
   return {
     // The registry, verbatim (statuses + ages; identityName is display-only). The panel renders the Overview card.
     CONN_LIST: (_payload, _sender, sendResponse) => {
