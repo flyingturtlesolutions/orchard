@@ -122,6 +122,22 @@ page / desk landing (skips unless the thread is the active surface + no wizard),
 A closed panel misses the nudge and finds the run in the manage-view parked banner (unchanged fallback). Chosen
 over a `wfp_` Rail case (below) as the low-risk way to make a silently-parked run discoverable.
 
+**Progress (v2.74.1711) — CD-1a step 1: the SHARED ride-step primitive.** `Core/rideStep.js` (+12 tests) now owns
+the pinned-ride / nav step execution — resolve → armable-check → write-gate (park vs proceed, §8) → leg →
+INVOKE_SESSION — as ONE injected-IO implementation. `background/handlers/cadence.js` `_runStep`/`_canResolve` are
+now thin wrappers over `runRideStep`/`rideStepResolvable` (identical behavior; recipeToLeg/planExec/armable imports
+moved into rideStep). This is the §9.4 "one module" for the subset the SW and panel both execute.
+
+**On the full CD-1a "one loop" (inspection finding, IMPORTANT for the next builder).** After reading
+`_orchRunChain` (chat.js:7024, ~300 lines) end-to-end: it is NOT a clean mechanical extraction. The panel loop
+interleaves nav / fan-out (CV-4) / empty-prior-stop / warm-path / connector-run special cases with shared `st`
+state, and it is structurally a SUPERSET of the SW loop (rich interactive rendering incl. connector tables) rather
+than a second copy of the same thing. Routing the panel's ▶ Run through `runDriver`+`runRideStep` would DEGRADE
+rendering (lose `renderConnectorLines` tables) and risk an undetectable regression in the product's core run path.
+So the honest unit of unification is the STEP (done), not the LOOP. The panel already reaches the shared SW driver
+via the ⚡ Headless button (WORKFLOW_RUN_FIRE); the interactive `_orchRunChain` legitimately stays richer. Only
+adopt `runRideStep` in the panel once a live harness can prove the rendering parity.
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK

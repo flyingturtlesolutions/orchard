@@ -22,9 +22,7 @@ import { replayPlan } from '../../Core/workflowWizard.js';
 import { runWorkflow, makeAccumulatorReporter, makeResumeReporter } from '../../Core/runDriver.js';
 import { mintRunId } from '../../Core/pipelineRun.js';
 import { priorRunVerdict } from '../../Core/fleetSchedule.js';
-import { recipeToLeg } from '../../Core/connectorLeg.js';
-import { planExec } from '../../Core/execPlan.js';
-import { armable } from '../../Core/rideRecipe.js';
+import { runRideStep, rideStepResolvable } from '../../Core/rideStep.js';   // CD-1a (§9.4) — the SHARED pinned-ride/nav step primitive (one impl for SW + panel)
 
 const TICK_ALARM = 'cadence:tick';
 const TICK_MINUTES = 5;                    // honor the 5-min cadence floor (Core/trigger clamps below this)
@@ -217,56 +215,22 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
   return { verdict, parkedRunId: verdict === 'parked' ? parkedRunId : '' };
 }
 
-// One step. Phase 1: a pinned READ ride runs through the normal executor; a write PARKS (§8); a nav is a no-op
-// success (the ride's ephemeral tab carries its own URL). Everything else can't reach here — the tier gate ensures
-// every step is sw-eligible before we fire.
-async function _runStep(clause, ctx) {
-  const via = clause && clause.pinned ? clause.pinned : null;
-  const kind = String((via && via.kind) || '').trim();
-  if (kind === 'navigate' || (!via && /navigate/i.test(clause && clause.text || ''))) return { ok: true, value: null };
-
-  const groundId = via && via.groundId;
-  const capId = via && via.capabilityId;
-  if (!groundId || !capId) return { ok: false, error: 'unpinned-step' };
-
-  let recs = [];
-  try { recs = (await _ctx.readRideRecipes(groundId)) || []; } catch { recs = []; }
-  const rec = recs.find((r) => r && r.id === capId);
-  if (!rec) return { ok: false, error: 'recipe-gone' };
-  if (!armable(rec)) return { ok: false, error: 'not-armed' };
-
-  // §8 — a write reached unattended parks. writePolicy has no 'auto': a GET is safetyClass 'auto', anything else
-  // is a write/act. The reporter's gate decides (SW ⇒ 'park'; a panel reporter could approve live).
-  const isWrite = rec.write === true || (rec.safetyClass && rec.safetyClass !== 'auto');
-  if (isWrite) {
-    const decision = await ctx.reporter.gate({ workflowId: ctx.wf && ctx.wf.id, step: clause.text, recipe: rec.name || capId, groundId });
-    if (decision !== true) return { park: true, parkedRunId: ctx.runId };
-  }
-
-  const leg = recipeToLeg({ ...rec, groundId }, { account: 'me', trusted: true });
-  if (!leg || !leg.tool) return { ok: false, error: 'no-leg' };
-  const plan = planExec(leg, {}, {});
-  if (!plan || plan.ok === false || plan.channel !== 'INVOKE_SESSION') return { ok: false, error: 'no-plan' };
-  let r = null;
-  try { r = await _ctx.invokeSgHandler('INVOKE_SESSION', plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'invoke-threw' }; }
-  const ok = !!(r && r.success !== false);
-  return ok ? { ok: true, value: (r && r.value) } : { ok: false, error: (r && r.error) || 'invoke-failed' };
+// One step, through the SHARED primitive (Core/rideStep — the SAME one the panel's tier-'sw' replay will use, so
+// the two never diverge, §9.4). The SW injects its IO: readRideRecipes + INVOKE_SESSION via _invokeSgHandler; the
+// reporter's gate decides park-vs-proceed on a write (the SW accumulator reporter returns 'park').
+function _runStep(clause, ctx) {
+  return runRideStep(clause, {
+    readRecipes: _ctx.readRideRecipes,
+    invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', payload),
+    reporter: ctx.reporter,
+    runId: ctx.runId,
+    workflowId: ctx.wf && ctx.wf.id,
+  });
 }
 
-// Does a pinned clause still resolve? (replayPlan's drift check, §2.1). A ground + capability that reads back an
-// armable recipe resolves; anything else is drift → STOP the run, never re-interpret.
-async function _canResolve(clause) {
-  const pin = clause && (clause.pinned || clause.clause);
-  if (!pin) return true;                                  // a loose (text) step is legitimately unpinned
-  const kind = String(pin.kind || '').trim();
-  if (kind === 'navigate') return true;
-  const groundId = pin.groundId, capId = pin.capabilityId;
-  if (!groundId || !capId) return false;
-  try {
-    const recs = (await _ctx.readRideRecipes(groundId)) || [];
-    const rec = recs.find((r) => r && r.id === capId);
-    return !!(rec && armable(rec));
-  } catch { return false; }
+// The drift check (§2.1), via the same shared primitive.
+function _canResolve(clause) {
+  return rideStepResolvable(clause, { readRecipes: _ctx.readRideRecipes });
 }
 
 // ── trigger write-backs (through the sanctioned store path; updateWorkflow re-normalizes + whitelists trigger) ─────
