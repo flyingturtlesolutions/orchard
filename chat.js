@@ -24,7 +24,7 @@ import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.7
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
 import { buildDeskLanding } from './Core/deskLanding.js';   // DL-1 (v2.74.1600) — the desk LAUNCH page (pure assembly; proven sources only)
@@ -1824,7 +1824,7 @@ async function _fanoutParentApp() {
 // CV-4 — create one child conversation per item label under `app` (the shared fan-out CORE, used by both the
 // `subtasks:` explicit list AND the CV-4-full enumerate-from-read path). Returns the CREATED records (so the map's
 // run loop can drive them); reveals the drawer. AP-0 — a sub-task SHARES its parent app's memory key (instanceId) + type.
-async function _createSubTasks(app, items) {
+async function _createSubTasks(app, items, { brief = true } = {}) {
   const specs = planSubTasks(app, items);
   // DK-8k (v2.74.1504) — never re-open an ALREADY-OPEN case: re-running the same read (the live workflow test
   // loop) spawned a duplicate case per run ("duplicate cases unchecked"). Identity = the case title (the item's
@@ -1851,7 +1851,10 @@ async function _createSubTasks(app, items) {
     } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
   }
   if (created.length) { _expandedApps.add(app.id); _revealRail().catch(() => {}); }   // v2.74.1249 — OPEN the drawer (if closed) so the spawned children are visible, not just refresh-if-open
-  if (briefable.length) _briefCases(app, briefable).catch(() => {});   // DK-8h — non-blocking: cases exist NOW; the framing lands when it lands
+  // v2.74.1712 — a FIELD-DISPLAY fan-out ("open a case SHOWING each's name and contact") keeps its RAW record card
+  // (which shows the drilled fields) instead of the requestor's-voice narrative, which omits field names and
+  // invents a next-move prompt — the wrong artifact when the ask asked to SHOW specific fields.
+  if (brief && briefable.length) _briefCases(app, briefable).catch(() => {});   // DK-8h — non-blocking: cases exist NOW; the framing lands when it lands
   return { created, skipped };   // DK-8k — callers report skips honestly ("N already open")
 }
 
@@ -1975,7 +1978,10 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
       if (entry) it.focus = [entry];
     }
   }
-  const { created, skipped } = await _createSubTasks(childApp, foItems);   // DK-8k — already-open cases skip (dedup by title under this desk)
+  // v2.74.1712 — a FIELD-DISPLAY fan-out ("open a case SHOWING each's name and contact") keeps the raw record card
+  // (the drilled fields) rather than the requestor's-voice CASE_BRIEF narrative, which omits field names.
+  const _brief = !isFieldDisplayAsk(clause);
+  const { created, skipped } = await _createSubTasks(childApp, foItems, { brief: _brief });   // DK-8k — already-open cases skip (dedup by title under this desk)
   // EPHEMERAL (v2.74.1262) — a REDUCE over the set: the workers run → the parent SYNTHESIZES their findings → the
   // workers CLOSE (delete). No durable sub-tasks; the deliverable is the summary. Auto-runs (the ask was the intent).
   if (lifecycle === 'ephemeral' && created.length) {

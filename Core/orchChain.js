@@ -327,6 +327,21 @@ export function fanoutLifecycle(ask) {
 /** Convenience: is this fan-out EPHEMERAL (its workers are disposed after the reduce)? PURE. */
 export function isEphemeralFanout(ask) { return fanoutLifecycle(ask) === 'ephemeral'; }
 
+// A FIELD-DISPLAY fan-out wants specific fields SHOWN, not a worked narrative — "open a case SHOWING each's name
+// and contact", "list each with its status". Live (gl 2026-07-23): such an ask fanned out correctly (it drilled
+// each record, contacts included) but then CASE_BRIEF replaced the field card with a requestor's-voice NARRATIVE
+// that omits field names and appends a next-move prompt — the exact wrong artifact for "show me these fields",
+// and it dropped the very contact info the drill had just fetched. A display verb with NO analysis/reduce verb is
+// the discriminator: keep the raw record card (which shows the drilled fields) instead of briefing it.
+const _DISPLAY_VERB = /\b(?:show(?:ing|s|n)?|display(?:ing|s|ed)?|list(?:ing|s)?)\b/i;
+
+/** Within a fan-out, does this ask want the record's FIELDS displayed (keep the raw card) rather than a worked
+ *  narrative brief? PURE. v2.74.1712. An analysis/reduce verb (research/summarize) means a genuine worked case. */
+export function isFieldDisplayAsk(ask) {
+  const s = String(ask || '');
+  return _DISPLAY_VERB.test(s) && !_ANALYSIS.test(s) && !_REDUCE.test(s);
+}
+
 /**
  * v2.74.1547 — the READ-shaped ask a SELF-CONTAINED fan-out enumerates with. The clause carries BOTH the
  * collection and the spawn ("foreach division, open new warranty tasks in a new case"); handing the WHOLE

@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, innerDirective, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
@@ -96,6 +96,27 @@ describe('orchChain — fanoutLifecycle (v2.74.1262: persistent by default, ephe
     assert.equal(personaHint('summarize each one, keep it concise'), true);           // "concise"
     assert.equal(personaHint('research each in a new conversation'), false);          // plain task → no LLM
     assert.equal(personaHint('get my tickets and summarize'), false);
+  });
+});
+
+describe('orchChain — isFieldDisplayAsk (v2.74.1712: a SHOW/LIST fan-out keeps its raw field card, not a brief)', () => {
+  it('a display verb with NO analysis/reduce verb → keep the fields (the live 2026-07-23 bug)', () => {
+    assert.equal(isFieldDisplayAsk('open a case showing each primary homeowner\'s name and contact information'), true);
+    assert.equal(isFieldDisplayAsk('open each in a case listing its status and owner'), true);
+    assert.equal(isFieldDisplayAsk('open each order in a case, show the line items'), true);
+    assert.equal(isFieldDisplayAsk('display each contact in a new case'), true);
+  });
+  it('an analysis/reduce verb means a genuine WORKED case → brief it (not a bare field display)', () => {
+    assert.equal(isFieldDisplayAsk('research each ticket and show what you find'), false, 'research → worked narrative');
+    assert.equal(isFieldDisplayAsk('review each order and list the risks'), false, 'review → worked assessment');
+    assert.equal(isFieldDisplayAsk('summarize each ticket and show the digest'), false, 'summarize (reduce) → brief');
+    assert.equal(isFieldDisplayAsk('draft a reply to each, showing the tone'), false, 'draft (analysis) → worked');
+  });
+  it('no display verb at all → not a field display (the caller keeps its default: brief)', () => {
+    assert.equal(isFieldDisplayAsk('open each ticket in its own case'), false, 'plain open, no SHOW/LIST');
+    assert.equal(isFieldDisplayAsk('research each in a new conversation'), false);
+    assert.equal(isFieldDisplayAsk(''), false);
+    assert.equal(isFieldDisplayAsk(null), false);
   });
 });
 
