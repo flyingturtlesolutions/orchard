@@ -1,6 +1,8 @@
 # DESIGN — The Decision Gate (the "B.5" rail)
 
 **Status:** specced 2026-07-22, nothing built. Greenfield — no routing/eval test infrastructure exists today.
+**Parent:** `docs/DESIGN_hardening_ladder.md` (the A·B·B.5·C ladder) — this doc is the authority on the B.5 rail;
+the ladder owns the frame and the A/B/C rails.
 
 **Thesis:** an AI app is a **stochastic front** (the model's aim) bolted to a **deterministic back** (the code that
 catches what the model says and acts on it). Almost all AI testing aims at the front and is therefore a *scoreboard*
