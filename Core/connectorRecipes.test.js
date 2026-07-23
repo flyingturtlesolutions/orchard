@@ -300,25 +300,27 @@ describe('recipeForOrigin — pick the strong-probe recipe for a host (AS-4 veri
   });
 });
 
-describe('signInLandingPath — a fresh sign-in tab reaches the human CONSOLE, not the anon root (v1701)', () => {
-  it('THE BUG: Zendesk → /agent (the bare origin lands on the help centre, never the agent sign-in)', () => {
-    // `https://deako.zendesk.com/` redirects a signed-out agent to support.<x>.com/hc/en-us; `/agent` is what
-    // produces /auth/v3/signin?…role=agent. Derived from the recipe's declared human page (`/agent/tickets/{id}`).
+describe('signInLandingPath — the bare root triggers login on most sites; Zendesk is the declared exception (v1704)', () => {
+  it('DEFAULT is "/" — for most sites the bare origin is what redirects to login', () => {
+    // THE VendorSuite BUG: its itemUrl is a HASH route (/#dashboard); v1701's derivation made a bogus /dashboard,
+    // and even /#dashboard is not the trigger — visiting / is what redirects to the drhorton SSO.
+    assert.equal(signInLandingPath('vendorsuite.drhorton.com'), '/');
+    assert.equal(signInLandingPath('https://vendorsuite.drhorton.com'), '/');
+    assert.equal(signInLandingPath('admin.shopify.com'), '/');
+    assert.equal(signInLandingPath('support.deako.com'), '/');   // no recipe
+    assert.equal(signInLandingPath(''), '/');
+    assert.equal(signInLandingPath('example.com'), '/');
+  });
+  it('Zendesk is the ONE exception — root → help centre, so console:/agent is DECLARED on the recipe', () => {
     assert.equal(signInLandingPath('deako.zendesk.com'), '/agent');
     assert.equal(signInLandingPath('https://deako.zendesk.com'), '/agent');
     assert.equal(signInLandingPath('zendesk.com'), '/agent');
   });
-  it('a connector with no matching recipe falls back to "/" — no regression for a plain site', () => {
-    assert.equal(signInLandingPath('support.deako.com'), '/');
-    assert.equal(signInLandingPath(''), '/');
-    assert.equal(signInLandingPath('example.com'), '/');
-  });
-  it('skips a leading {param} segment when deriving from a human page', () => {
-    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/{id}' }]), '/');
-    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/records/{id}' }]), '/records');
-  });
-  it('an explicit `console` field wins over derivation (declaration over heuristic)', () => {
-    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/agent/t/{id}', console: '/login' }]), '/login');
+  it('an explicit `console` wins; itemUrl is NOT a sign-in trigger and is no longer derived', () => {
+    assert.equal(signInLandingPath('x', [{ appHost: 'x', console: '/login' }]), '/login');
+    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/dashboard/{id}' }]), '/', 'a human work page is not a sign-in entry');
+    assert.equal(signInLandingPath('x', [{ appHost: 'x', itemUrl: '/#dashboard' }]), '/', 'a hash route is never mangled into a path');
+    assert.equal(signInLandingPath('x', [{ appHost: 'x' }]), '/');
   });
   it('degenerate input does not throw', () => {
     for (const bad of [null, undefined, 7, {}]) assert.doesNotThrow(() => signInLandingPath(bad));

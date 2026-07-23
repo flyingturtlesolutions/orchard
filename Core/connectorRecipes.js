@@ -93,7 +93,7 @@ export function acGqlEndpoint(operationName) {
 // FL-1c (v2.74.1347) — `itemUrl`: the HUMAN page for this recipe's object (the agent-workspace ticket view),
 // templated on {id}. GROUND TRUTH: proposal/ledger targets link to the real page, assembled from TRUSTED data only
 // (connection origin + this template + a sanitized id) — the model never mints URLs. view_user overrides (users).
-const ZD = Object.freeze({ app: 'zendesk', appHost: 'zendesk.com', verifyIdentity: true, identityProbe: '/api/v2/users/me.json', method: 'GET', itemUrl: '/agent/tickets/{id}' });
+const ZD = Object.freeze({ app: 'zendesk', appHost: 'zendesk.com', verifyIdentity: true, identityProbe: '/api/v2/users/me.json', method: 'GET', itemUrl: '/agent/tickets/{id}', console: '/agent' });   // v1704 — root → help centre; /agent → the agent sign-in (signInLandingPath exception)
 
 /**
  * CX-7 (v2.74.1386) — is a GraphQL document READ-ONLY (a query, never a mutation/subscription)? The Shopify ride's
@@ -883,21 +883,24 @@ export function recipeForOrigin(origin) {
 }
 
 /**
- * The path a signed-out human should be sent to in order to reach THIS connector's sign-in. PURE. v2.74.1701.
+ * The path a signed-out human should be sent to in order to trigger THIS connector's real sign-in. PURE.
+ * v2.74.1704 — DEFAULT `/`, explicit `console` for the exceptions. (Superseded the v1701 itemUrl derivation.)
  *
- * ── WHY THE BARE ORIGIN IS WRONG ────────────────────────────────────────────────────────────────────────────
- * A vitals "signed out" incident's Sign-in button opened `https://<origin>/`. For Zendesk that redirects a
- * signed-out visitor to the branded HELP CENTRE (`support.<x>.com/hc/en-us`), NOT the agent sign-in — the agent
- * console lives under `/agent`, and hitting it is what produces `/auth/v3/signin?…&role=agent&return_to=…`. So the
- * bare origin lands the operator on the public marketing/help page and the case never clears.
+ * ── THE RULE, AND WHY THE DERIVATION WAS WRONG ──────────────────────────────────────────────────────────────
+ * For MOST sites the bare origin root IS the sign-in trigger: visiting `https://<origin>/` while signed out
+ * redirects to the login (VendorSuite's `/` → the drhorton SSO at `cplogin.drhorton.com`; Shopify/HubSpot/Aircall
+ * likewise). So the DEFAULT is `/`.
  *
- * The recipe already DECLARES where the human works: `itemUrl`/`listUrl` are the human pages (Zendesk's
- * `/agent/tickets/{id}`, `/agent/search/…`). The console ROOT is their first real path segment — `/agent`. So the
- * landing is derived, not guessed, and it is automatically right for any connector that declares a human page.
- * An explicit `console` field on a recipe wins if one is ever added (declaration over derivation).
+ * v1701 tried to be clever and DERIVE a console path from the recipe's human page (`itemUrl`/`listUrl`). That was
+ * wrong twice over, and VendorSuite proved it: its itemUrl is a HASH ROUTE (`/#dashboard`), which the derivation
+ * mangled into a bogus real path `/dashboard` — and even the correct `/#dashboard` is not the sign-in trigger,
+ * the bare `/` is. A human WORK page is not a sign-in ENTRY page; conflating them is the bug.
  *
- * Falls back to `/` (the old behaviour, no regression) when nothing is declared — a connector whose root IS its
- * sign-in.
+ * ── THE ONE REAL EXCEPTION IS DECLARED, NOT DERIVED ─────────────────────────────────────────────────────────
+ * Zendesk's root goes to the public HELP CENTRE, not the agent login; only `/agent` produces
+ * `/auth/v3/signin?…&role=agent`. That is a genuine exception, so the ZD recipe DECLARES `console: '/agent'`.
+ * Declaration over heuristic — the honest version of the v1701 intent. Any site whose root does not trigger login
+ * adds its own `console`; everything else gets `/` and is correct.
  */
 export function signInLandingPath(origin, recipes = CONNECTOR_RECIPES) {
   const host = String(origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
@@ -906,14 +909,8 @@ export function signInLandingPath(origin, recipes = CONNECTOR_RECIPES) {
     const ah = String(x && x.appHost || '').toLowerCase();
     return ah && (host === ah || host.endsWith('.' + ah));
   });
-  if (!r) return '/';
-  // Explicit declaration wins.
-  const explicit = String(r.console || '').trim();
-  if (explicit.startsWith('/')) return explicit;
-  // Else derive the console ROOT from a declared human page: its first NON-parameter path segment.
-  const human = String(r.itemUrl || r.listUrl || '').trim();
-  const seg = human.replace(/^\//, '').split(/[/?#]/).find((s) => s && !s.startsWith('{'));
-  return seg ? `/${seg}` : '/';
+  const explicit = r ? String(r.console || '').trim() : '';
+  return explicit.startsWith('/') ? explicit : '/';
 }
 
 // A short, stable `app` slug for a host's registrable domain (deakoapi.deako.com → 'deako'). Used only to build a
