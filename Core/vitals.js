@@ -129,6 +129,24 @@ export function openIncidents(list) {
 export const PRESENCE_DISMISS_GRACE_MS = 30_000;
 
 /**
+ * The recently-RESOLVED incidents, newest-closed first — the AUDIT record behind an auto-dismiss. PURE. v2.74.1705.
+ *
+ * The case (attention surface) is deleted when it self-heals, but the closed incident is still in the store
+ * (INCIDENT_CAP keeps the newest, closed ageing out first). So the record the Admin desk shows for "what was
+ * auto-dismissed and why" is just these — no new store, the history already exists. Each carries its evidence
+ * timeline, so the panel can render subject + how it resolved + when.
+ *
+ * @param {Array} incidents         the full incident list (open + closed) from VITALS_STATUS
+ * @param {{now?:number, max?:number, cls?:string|null}} opts   cls filters (e.g. 'presence' = the auto-dismissed)
+ */
+export function recentlyResolved(incidents, { now = 0, max = 5, cls = null } = {}) {
+  return (Array.isArray(incidents) ? incidents : [])
+    .filter((x) => x && x.status === 'closed' && Number(x.closedAt) > 0 && (!cls || x.cls === cls))
+    .sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0))
+    .slice(0, Math.max(0, Number(max) || 0));
+}
+
+/**
  * Should this incident's Rail CASE be auto-dismissed (deleted)? PURE. v2.74.1703.
  *
  * "Silence when green" vs "history, not attention" collided: a resolved presence case was kept forever, and once

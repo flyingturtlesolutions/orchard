@@ -85,7 +85,7 @@ import { writeTally, writePreflight } from './Core/writeClause.js';
 import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
 import { emptyPriorStop } from './Core/priorScope.js';
 import { casePeek } from './Core/pipelineCase.js';   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
-import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
+import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS, recentlyResolved } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
@@ -12963,7 +12963,18 @@ async function _maybeRenderAdminDesk() {
   // ONE pointer line (silence when green: none → no line at all).
   const openInc = (r.incidents || []).filter((x) => x && x.status === 'open');
   const incLine = openInc.length ? `\n\n⚠ ${openInc.length} open incident${openInc.length === 1 ? '' : 's'} — see the case${openInc.length === 1 ? '' : 's'} under Admin desk in the Rail.` : '';
-  const body = `**Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}${incLine}`;   // v2.74.1581 — emoji-free chrome (user directive)
+  // v2.74.1705 — the AUTO-DISMISS audit trail. A self-healed presence case is removed from the Rail (attention),
+  // but the Admin desk keeps the record of what was actioned and why: subject · how it resolved · when. Reads the
+  // closed incidents already in the store — no new write path. Presence-only (drift resolutions stay as cases).
+  const resolved = recentlyResolved(r.incidents || [], { now, max: 5, cls: 'presence' });
+  const resolvedBlock = resolved.length
+    ? `\n\n**Recently auto-resolved**\n${resolved.map((inc) => {
+        const last = (inc.evidence || []).slice(-1)[0];
+        const how = last ? friendlyVitalsLine(last.line) : 'signed back in';
+        return `• ${escHtml(String(inc.subject || '').slice(0, 48))} — ${escHtml(how)} · cleared ${clockWord(inc.closedAt, now)}`;
+      }).join('\n')}`
+    : '';
+  const body = `**Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}${incLine}${resolvedBlock}`;   // v2.74.1581 — emoji-free chrome (user directive)
   let msg = document.querySelector('#messages .message[data-message-id="vitals_card"]');
   if (msg) _setMessageBody(msg, body, { markdown: true });
   else msg = appendMessage({ role: 'assistant', body, id: 'msg-vitals_card' });

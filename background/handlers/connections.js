@@ -82,8 +82,37 @@ async function _probeTargets(invokeSgHandler, targets) {
   return probed;
 }
 
+// v2.74.1705 — EVENT-DRIVEN re-verify: don't wait ~20 min for the next presence tick after a human signs in.
+// Signing in NAVIGATES the tab (site → SSO → back to the app), so when a tab finishes loading on an origin the
+// registry currently believes is signed-out, re-probe THAT origin immediately. A fresh probe closes the incident,
+// which auto-dismisses its case (v1703) within seconds instead of a sweep away. Guarded to not-fresh origins
+// (a navigation to a healthy site costs a cheap registry lookup and returns) and debounced per origin (a sign-in
+// flow fires several `complete` events across its redirects).
+function _wireSignInReverify(invokeSgHandler) {
+  if (typeof invokeSgHandler !== 'function') return;
+  const _reprobeAt = new Map();   // origin → last re-probe stamp
+  try {
+    chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+      if (!changeInfo || changeInfo.status !== 'complete' || !tab || !tab.url) return;
+      let host = ''; try { host = new URL(tab.url).host.toLowerCase(); } catch { return; }
+      if (!host) return;
+      (async () => {
+        const reg = await _read();
+        const e = reg[host];
+        if (!e || !e.status || e.status === 'fresh') return;   // only a signed-out / wrong-account origin
+        const last = _reprobeAt.get(host) || 0;
+        if (Date.now() - last < 5_000) return;
+        _reprobeAt.set(host, Date.now());
+        const targets = heartbeatTargets(reg, [host], { now: Date.now(), minAgeMs: 0, cap: 1 });
+        if (targets.length) await _probeTargets(invokeSgHandler, targets);   // fresh → reportAuthSignal → incident closes → case dismisses
+      })().catch(() => { /* a re-probe is best-effort */ });
+    });
+  } catch { /* tabs.onUpdated unavailable — the sweep still catches it, just slower */ }
+}
+
 /** The CONN_* handler map (merged into the SW dispatch like every domain). */
 export function createConnectionsHandlers({ invokeSgHandler } = {}) {
+  _wireSignInReverify(invokeSgHandler);
   return {
     // The registry, verbatim (statuses + ages; identityName is display-only). The panel renders the Overview card.
     CONN_LIST: (_payload, _sender, sendResponse) => {

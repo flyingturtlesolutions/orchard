@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import { classifyLegOutcome, pickCanary, canaryPlaceholdersFillable, dueForDaily, upsertIncident, resolveIncident, openIncidents, INCIDENT_CAP, EVIDENCE_CAP,
   tallyClassOf, tallyDayKey, tallyTick, tallySummary, tallyByDay, TALLY_KEEP_DAYS,
-  kaSetOptIn, kaCadenceMs, kaNotePing, kaRecordDeath, kaPlan, KA_FLOOR_MS, KA_DEFAULT_MS, KA_SAMPLE_CAP , shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './vitals.js';
+  kaSetOptIn, kaCadenceMs, kaNotePing, kaRecordDeath, kaPlan, KA_FLOOR_MS, KA_DEFAULT_MS, KA_SAMPLE_CAP , shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS , recentlyResolved } from './vitals.js';
 
 const NOW = 1750000000000;
 
@@ -284,5 +284,30 @@ describe('shouldDismissIncidentCase — a self-healed PRESENCE case leaves the R
   it('degenerate input does not throw', () => {
     for (const bad of [null, undefined, 'x', 7, {}]) assert.doesNotThrow(() => shouldDismissIncidentCase(bad, { now: 1 }));
     assert.equal(shouldDismissIncidentCase(null, {}), false);
+  });
+});
+
+describe('recentlyResolved — the auto-dismiss audit trail (v2.74.1705)', () => {
+  const INC = [
+    { cls: 'presence', subject: 'a.com', status: 'closed', closedAt: 300, evidence: [{ line: 'signed in again' }] },
+    { cls: 'presence', subject: 'b.com', status: 'open', openedAt: 100 },
+    { cls: 'presence', subject: 'c.com', status: 'closed', closedAt: 500 },
+    { cls: 'drift', subject: 'd.com', status: 'closed', closedAt: 900 },
+    { cls: 'presence', subject: 'e.com', status: 'closed', closedAt: 0 },   // no stamp → excluded
+  ];
+  it('returns CLOSED incidents newest-first; excludes open and un-stamped', () => {
+    const r = recentlyResolved(INC, { now: 1000 });
+    assert.deepEqual(r.map((x) => x.subject), ['d.com', 'c.com', 'a.com']);   // 900, 500, 300
+  });
+  it('cls filter isolates the presence auto-dismissals (drift resolutions are kept as cases, not audited here)', () => {
+    const r = recentlyResolved(INC, { now: 1000, cls: 'presence' });
+    assert.deepEqual(r.map((x) => x.subject), ['c.com', 'a.com']);
+  });
+  it('honours max', () => {
+    assert.equal(recentlyResolved(INC, { now: 1000, max: 1 }).length, 1);
+    assert.equal(recentlyResolved(INC, { now: 1000, max: 0 }).length, 0);
+  });
+  it('degenerate input does not throw and returns []', () => {
+    for (const bad of [null, undefined, 'x', 7, {}]) assert.deepEqual(recentlyResolved(bad, {}), []);
   });
 });
