@@ -55,16 +55,14 @@ describe('deskLanding — buildDeskLanding (the v1602 page shape)', () => {
     assert.match(byName('Panel').sub, /⏱ due every 1h/);
     assert.ok(!/⏱/.test(byName('Paused').sub), 'a paused cadence shows nothing');
   });
-  it('v1721 — orphaned banks put a RECOVERY card on the landing, ahead of ＋ Workflow', () => {
-    const s = buildDeskLanding({ title: 'Warranty', workflows: [], orphanBanks: [{ deskName: 'Warranty', count: 2 }] });
-    assert.equal(s.cards[0].kind, 'adopt-workflows');
-    assert.match(s.cards[0].title, /Recover 2 saved workflows/);
-    assert.match(s.cards[0].sub, /deleted “Warranty” desk/);
-    assert.equal(s.cards[1].kind, 'new-workflow');
-    assert.match(s.cards[1].sub, /save a multi-step task/, 'an adopt card alone is still a fresh start (copy keys off workflow cards)');
-    const none = buildDeskLanding({ title: 'W', orphanBanks: [] });
-    assert.ok(!none.cards.some((c) => c.kind === 'adopt-workflows'));
-    assert.ok(!buildDeskLanding({ isAdmin: true, orphanBanks: [{ deskName: 'X', count: 1 }] }).cards.some((c) => c.kind === 'adopt-workflows'), 'admin desk never adopts');
+  it('v1722 (user ruling) — a deleted desk\'s workflow is an ORDINARY card, tagged with its origin desk', () => {
+    const orphan = WF({ id: 'o1', name: 'Test flow', subAsks: ['a', 'b'], runs: 3, orphanedFrom: { deskName: 'Warranty', at: 1 } });
+    const s = buildDeskLanding({ title: 'Warranty 2', workflows: [orphan] });
+    const card = s.cards.find((c) => c.kind === 'workflow');
+    assert.ok(card, 'renders as a normal workflow card — no recovery ceremony');
+    assert.equal(card.title, 'Test flow');
+    assert.match(card.sub, /from “Warranty”/, 'the origin tag is its only difference');
+    assert.ok(!s.cards.some((c) => c.kind === 'adopt-workflows'), 'the v1721 recovery card is gone');
   });
   it('the Admin desk: the three operator commands as its cards, vitals kept BELOW, its OWN description', () => {
     const s = buildDeskLanding({ title: 'Admin desk', isAdmin: true, workflows: [WF()] });

@@ -7517,6 +7517,26 @@ function _workflowKeys() {
 async function _loadWorkflowsMerged() {
   const out = [];
   for (const k of _workflowKeys()) { try { out.push(...await loadWorkflows(k)); } catch { /* */ } }
+  // v2.74.1722 (user ruling, superseding v1720/v1721's adopt ceremony) — a deleted desk's workflows APPEAR HERE
+  // like any other: every reader of this loader (launch cards, the workflows view, recall, the DK-8j dedup gate)
+  // sees them as ordinary workflows, tagged with their origin desk. Only STAMPED banks merge (the sibling guard
+  // means a stamped key has no live desk — another live desk's bank can never leak in), deduped against the live
+  // list by id then contentId (a workflow the user already rebuilt wins). Ownership moves silently only when it
+  // must: scheduling one re-keys it to this desk (_wfScheduleBar), because the scanner's desk-liveness check
+  // would forever re-disarm a trigger living on a dead key. Best-effort — a scan failure never hides live cards.
+  try {
+    const mine = new Set(_workflowKeys());
+    const seenId = new Set(out.map((w) => w && w.id).filter(Boolean));
+    const seenContent = new Set(out.map((w) => w && w.contentId).filter(Boolean));
+    for (const b of await listAllWorkflows()) {
+      if (!b || !b.orphaned || mine.has(String(b.appId)) || !b.items.length) continue;
+      for (const w of b.items) {
+        if (!w || seenId.has(w.id) || (w.contentId && seenContent.has(w.contentId))) continue;
+        seenId.add(w.id); if (w.contentId) seenContent.add(w.contentId);
+        out.push(w);
+      }
+    }
+  } catch { /* the orphan merge must never hide the desk's own workflows */ }
   return out;
 }
 async function _matchWorkflow(goal) {
@@ -7630,42 +7650,8 @@ async function _renderWorkflows() {
       bar.appendChild(_mkBtn('Not now', () => { try { bar.remove(); } catch { /* */ } }));
     }
   } catch { /* the offer must never block the list */ }
-  // v2.74.1720 (live report: "saved workflow is still deleted when desk is deleted") — the ADOPTION door. The
-  // records DO survive a desk delete (WF-3: ConversationStore touches only conversation keys; the delete path
-  // stamps orphanedFrom) — but every panel reader sweeps the LIVE desk's keys, and a recreated desk mints a NEW
-  // instanceId (AP-0), so the surviving bank was reachable only from Studio: "data intact, permanently invisible",
-  // the exact WF-3 class one level up. Offer each ORPHANED bank here; adopting RE-KEYS the records to this desk —
-  // the surrogate id is preserved, so the trigger AND the wfruns history (both workflow-id-keyed) travel with
-  // them, which is §9's promise completed. Only stamped banks are offered (the sibling guard means a stamped key
-  // has no live desk); a bank another live desk owns is never shown.
-  try {
-    const _mine = new Set(_workflowKeys());
-    const _banks = (await listAllWorkflows()).filter((b) => b && b.orphaned && !_mine.has(String(b.appId)) && b.items.length);
-    for (const b of _banks) {
-      const from = (b.items.find((x) => x && x.orphanedFrom) || {}).orphanedFrom || {};
-      const n = b.items.length;
-      const row = appendMessage({ role: 'assistant', body: '' });
-      _setMessageBody(row, `**${n} workflow${n === 1 ? '' : 's'}** survive${n === 1 ? 's' : ''} from the deleted desk “${escHtml(from.deskName || 'a deleted desk')}” — adopt ${n === 1 ? 'it' : 'them'} into this desk? Schedules arrive paused (re-arm with ⏱); run history travels along.`, { markdown: true });
-      const bar = _orchActionBar(row);
-      bar.appendChild(_mkOnceBtn(`⤵ Adopt ${n === 1 ? 'it' : `all ${n}`}`, async () => {
-        const dest = _memoryId();
-        let moved = 0;
-        for (const wf of b.items) {
-          try {
-            // id honored → the trigger + wfruns history keys hold. The schedule arrives PAUSED by construction
-            // (not merely "the scanner probably disarmed it") — a deleted desk's automation must never resurrect
-            // armed without the user re-saying so; ⏱ re-arms in one click.
-            await saveWorkflow(dest, { ...wf, orphanedFrom: undefined, ...(wf.trigger ? { trigger: { ...wf.trigger, enabled: false } } : {}) });
-            await deleteWorkflow(b.appId, wf.id);                            // the old bank empties; no double home
-            moved++;
-          } catch { /* per-record best-effort */ }
-        }
-        try { _orchLog(`WORKFLOW ▸ adopted ${moved}/${n} from orphaned bank "${String(from.deskName || b.appId).slice(0, 40)}"`); } catch { /* */ }
-        _setMessageBody(row, moved ? `✓ Adopted ${moved} workflow${moved === 1 ? '' : 's'} — re-type \`workflows\` to see ${moved === 1 ? 'it' : 'them'}.` : 'Couldn’t adopt them — try again.', { markdown: true });
-      }));
-      bar.appendChild(_mkBtn('Not now', () => { try { bar.remove(); } catch { /* */ } }));
-    }
-  } catch { /* the adoption offer must never block the list */ }
+  // v2.74.1722 — the v1720 adopt BANNER is gone (user ruling): orphaned workflows now merge straight into the
+  // list via _loadWorkflowsMerged, as ordinary rows tagged "from <desk>". Ownership re-keys lazily on ⏱ schedule.
   if (!wfs.length) { _setMessageBody(m, 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.'); return; }
   _setMessageBody(m, `${wfs.length} saved workflow${wfs.length === 1 ? '' : 's'} :`);
   for (const wf of wfs) {
@@ -7677,7 +7663,8 @@ async function _renderWorkflows() {
     const _sched = _wfScheduleLabel(wf);
     const _t = workflowTier(wf);
     const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
-    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''}${_sched ? ` · ⏱ ${_sched}` : ''}${_due ? ' · ⏰ due now' : ''})` });
+    const _from = (wf.orphanedFrom && wf.orphanedFrom.deskName) ? ` · from “${String(wf.orphanedFrom.deskName).slice(0, 40)}”` : '';   // v1722 — a deleted desk's workflow, tagged, otherwise ordinary
+    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''}${_sched ? ` · ⏱ ${_sched}` : ''}${_due ? ' · ⏰ due now' : ''}${_from})` });
     const bar = _orchActionBar(row);
     bar.appendChild(_mkOnceBtn(_due ? '▶ Run now (due)' : '▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
       const tab = await _orchActiveTab();
@@ -7797,6 +7784,19 @@ function _wfScheduleBar(row, wf, wfKey) {
   const set = async (minutes) => {
     const trigger = minutes > 0 ? { kind: 'cadence', minutes, enabled: true } : null;
     let ok = false;
+    // v2.74.1722 — scheduling is the ONE moment an orphaned (deleted-desk) workflow must change owner: the
+    // scanner's desk-liveness check auto-disarms any trigger living on a dead key, so a schedule set there would
+    // silently die on the next tick. Re-key to THIS desk first (surrogate id preserved → history travels; the
+    // orphan tag drops); everything else (run/history/delete) works fine against the old bank and never re-keys.
+    try {
+      if (!_workflowKeys().includes(String(wfKey))) {
+        const dest = _memoryId();
+        await saveWorkflow(dest, { ...wf, orphanedFrom: undefined });
+        await deleteWorkflow(wfKey, wf.id);
+        wfKey = dest; wf.orphanedFrom = undefined;
+        try { _orchLog(`WORKFLOW ▸ re-keyed "${String(wf.name || wf.ask).slice(0, 40)}" to this desk (scheduled from an orphaned bank)`); } catch { /* */ }
+      }
+    } catch { /* a failed re-key falls through — the set below still applies to the old key */ }
     try { const r = await _orchReq('WORKFLOW_TRIGGER_SET', { appId: wfKey, workflowId: wf.id, trigger }); ok = !!(r && r.success !== false); wf.trigger = r && r.trigger ? r.trigger : (trigger || undefined); } catch { /* */ }
     try { bar.remove(); } catch { /* */ }
     _setMessageBody(row, ok
@@ -12859,22 +12859,13 @@ async function _renderDeskLanding(conv) {
     if ((conv.messages || []).some((m) => m && m.role === 'user')) return;   // the launch state ends at the first operator ask
     let workflows = [];
     if (!isAdmin) { try { workflows = (await _loadWorkflowsMerged()) || []; } catch { workflows = []; } }
-    // v2.74.1721 (live report) — orphaned banks surface ON THE LANDING (recovery outranks creation): the adoption
-    // door behind the `workflows` command was invisible from the page where a person looks for their workflows.
-    let orphanBanks = [];
-    if (!isAdmin) {
-      try {
-        const _mine = new Set(_workflowKeys());
-        orphanBanks = (await listAllWorkflows())
-          .filter((b) => b && b.orphaned && !_mine.has(String(b.appId)) && b.items.length)
-          .map((b) => ({ deskName: ((b.items.find((x) => x && x.orphanedFrom) || {}).orphanedFrom || {}).deskName || '', count: b.items.length }));
-      } catch { orphanBanks = []; }
-    }
+    // v2.74.1722 — orphaned workflows arrive ALREADY MERGED in `workflows` (_loadWorkflowsMerged): each renders as
+    // an ordinary card, tagged "from <desk>". The v1721 recovery card is gone (user ruling: no adoption ceremony).
     const def = (() => { try { return builtinApp(conv.presetId || conv.appId) || null; } catch { return null; } })();
     const spec = buildDeskLanding({
       title: conv.title || (def && def.name) || '',
       description: (def && def.description) || '',
-      isAdmin, workflows, orphanBanks,
+      isAdmin, workflows,
       connections: _boundConnections().map((c) => (c && (c.label || c.origin)) || '').filter(Boolean),
     });
     if (String(_currentConversationId || '') !== String(conv.id)) return;   // the user moved on while we read
@@ -12924,9 +12915,7 @@ async function _renderDeskLanding(conv) {
         b.innerHTML = `<div class="suggestion-card-name">${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
         b.addEventListener('click', async () => {
           _dismissDeskLanding();   // v1609 — acting from the page BEGINS the conversation; the page leaves (fill+send kinds also hit the send-entry dismiss)
-          if (c.kind === 'adopt-workflows') {
-            void _renderWorkflows();   // v1721 — the workflows view opens with the adopt banner at its top
-          } else if (c.kind === 'new-workflow') {
+          if (c.kind === 'new-workflow') {
             _promptWorkflowIntent();   // CD-3 (v2.74.1697) — the ＋ Workflow card goes INTENT-FIRST (describe → draft → wizard); "build step by step instead" reaches the blank wizard
           } else if (c.kind === 'command' && c.command === 'check-now') {
             const mm = appendMessage({ role: 'assistant', body: '' });
