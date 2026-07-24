@@ -807,10 +807,15 @@ async function _renderRailListNow() {
     const g = document.createElement('div');
     g.className = 'rail-group' + (row.expanded ? ' pinned' : '');
     g.appendChild(el);
+    // v2.74.1776 — the grid 0fr→1fr height animation needs ONE sizable child: rows append into an inner
+    // wrapper; inert/class state stays on the outer .rail-group-cases.
+    const outer = document.createElement('div');
+    outer.className = 'rail-group-cases';
+    outer.inert = !row.expanded;   // hidden cases must not be tab-reachable
     _grpCases = document.createElement('div');
-    _grpCases.className = 'rail-group-cases';
-    _grpCases.inert = !row.expanded;   // hidden cases must not be tab-reachable
-    g.appendChild(_grpCases);
+    _grpCases.className = 'rail-group-cases-inner';
+    outer.appendChild(_grpCases);
+    g.appendChild(outer);
     container.appendChild(g);
     _wireGroupPeek(g);
   };
@@ -829,7 +834,7 @@ async function _renderRailListNow() {
       _grpCases.appendChild(el);
       // the ACTIVE case must never hide inside a closed group (a spawn opens the case as current) — force the
       // group open presentationally; the pin store is untouched.
-      if (row.active) { _grpCases.parentElement.classList.add('pinned'); _grpCases.inert = false; }
+      if (row.active) { _grpCases.closest('.rail-group')?.classList.add('pinned'); _grpCases.parentElement.inert = false; }
       continue;
     }
     if (row.role === 'app' && row.hasChildren) { _startGroup(el, row); continue; }
