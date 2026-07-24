@@ -8,9 +8,10 @@
  *   · DERIVED rows — built programmatically from `INTENTS` and the v1718 confidence-disposition tables. Add an
  *     intent and rows appear; the fixture meta-test (decisionGate.test.js) then demands fixtures for them → red
  *     until covered. That IS the §5.4 tripwire, sensor #2.
- *   · SEALED rows — the normalize catch-alls and the decomposer surface are if-chain-shaped (not yet
- *     table-driven; B5-4 owes that), so their rows are hand-frozen HERE and sealed by partition:
- *     `PAYLOAD_VALIDATED ∪ PALETTE_VALIDATED ∪ TERMINAL === INTENTS` — an intent added without a validation
+ *   · SEALED rows — the decomposer/classify/router/wfmatch/judge/sweep/seeddir/stepil surfaces are
+ *     if-chain-shaped, so their rows are hand-frozen HERE, each thin-fixtured on its real functions. The
+ *     normalize-validation partition itself is code-owned since B5-4 (v2.74.1736, tables in interpret.js) and
+ *     sealed by `PAYLOAD_VALIDATED ∪ PALETTE_VALIDATED ∪ TERMINAL === INTENTS` — an intent without a validation
  *     class is unrepresentable (partition seal #2, the v1718 pattern reapplied).
  *
  * Also here: B5-1's garbage factories (HANDOFF §12). RULE ZERO — the gate REPLAYS garbage, never GENERATES it at
@@ -19,14 +20,16 @@
  * runtime bans for exactly this reason).
  */
 
-import { INTENTS, GATED_INTENTS, FLAGGED_INTENTS, UNGATED_INTENTS } from './interpret.js';
+import {
+  INTENTS, GATED_INTENTS, FLAGGED_INTENTS, UNGATED_INTENTS,
+  PAYLOAD_VALIDATED_INTENTS, PALETTE_VALIDATED_INTENTS, TERMINAL_INTENTS,
+} from './interpret.js';
 
 // ── Partition seal #2 — every intent belongs to exactly ONE normalize-validation class ─────────────────────────
-// (sealed against INTENTS by decisionGate.test.js; B5-4 will table-drive normalize itself and retire the seal
-// into true derivation)
-export const PAYLOAD_VALIDATED_INTENTS = Object.freeze(['navigate', 'decompose', 'fieldread', 'map', 'branch', 'write', 'case']);   // a malformed payload → its own clarify (:67..:119)
-export const PALETTE_VALIDATED_INTENTS = Object.freeze(['act']);                                  // validated against the OFFERED palette → teach on invention (:63)
-export const TERMINAL_INTENTS = Object.freeze(['clarify', 'teach', 'answer']);                    // no payload to validate — they ARE the degradations
+// B5-4 DONE (v2.74.1736): the three validation-class tables moved INTO Core/interpret.js — the code owns its own
+// partition now, beside the if-chain it classifies; this module re-exports them so the registry surface is
+// unchanged. What was "sealed memory" (a hand-copy here, cross-checked) is now true derivation.
+export { PAYLOAD_VALIDATED_INTENTS, PALETTE_VALIDATED_INTENTS, TERMINAL_INTENTS };
 
 /** The INTERPRET neck's reaction rows — derived from INTENTS + the disposition tables. PURE. */
 export function interpretReactions() {
@@ -68,8 +71,79 @@ export const DECOMPOSER_REACTIONS = Object.freeze([
   { id: 'cross-stage:restored-step-fires-fanout', subject: 'decomposer', kind: 'pass' },   // emitted TEXT is the next stage's ROUTING INPUT
 ]);
 
-/** Every registered reaction, both necks. PURE. */
-export function allReactions() { return [...interpretReactions(), ...DECOMPOSER_REACTIONS]; }
+/** Subject #3 — the BRANCH-CLASSIFY neck (v2.74.1734): parseClassifyOutput's finite dispositions. The live
+ *  "couldn't tell 22" vendor-explanation misclass lived here. Sealed rows; deep coverage stays in
+ *  branchClassify.test.js — these are the B5 spine's thin representatives. PURE DATA. */
+export const CLASSIFY_REACTIONS = Object.freeze([
+  { id: 'classify:valid-verdicts', subject: 'classify', kind: 'pass' },
+  { id: 'classify:invented-label→unknown', subject: 'classify', kind: 'catchall' },   // a made-up arm label downgrades, counted invalid — never routes an item
+  { id: 'classify:unknown-or-dup-id→invalid', subject: 'classify', kind: 'catchall' },
+  { id: 'classify:skipped-item→unknown+missing', subject: 'classify', kind: 'catchall' },   // silence is REPORTED — never reads as "no arm matched"
+  { id: 'classify:unparseable→all-missing', subject: 'classify', kind: 'catchall' },
+]);
+
+/** Subject #4 — the ROUTE-ASK neck (v2.74.1734): parseRouterOutput's dispositions, incl. the v963 decompose
+ *  confidence floor (a frozen live lesson). Deep coverage in routerPrompt.test.js. PURE DATA. */
+export const ROUTER_REACTIONS = Object.freeze([
+  { id: 'router:valid-tool→route', subject: 'router', kind: 'pass' },
+  { id: 'router:tool-object-forms', subject: 'router', kind: 'pass' },                // {ref|op|capabilityId|id} all accepted
+  { id: 'router:unparseable→demonstrate', subject: 'router', kind: 'catchall' },      // the fail-safe: no tool, needs_demonstration, reason 'unparseable'
+  { id: 'router:decompose-floor', subject: 'router', kind: 'gate' },                  // v963: real 2-way split at conf 0 → floored 0.5
+  { id: 'router:explicit-low-honored', subject: 'router', kind: 'gate' },             // an honest 0.2 stays 0.2 — the floor never inflates a stated doubt
+]);
+
+/** Subject #5 — the MATCH-WORKFLOW neck (v2.74.1734): a wrong match replays someone else's steps. Three pure
+ *  layers: parseWorkflowMatchOutput (proposes), resolveWorkflowMatch (the TRUST GATE — the id must name a real,
+ *  live candidate; a hallucinated/stale/suppressed id dies here), workflowSharesVocab (the cost pre-gate). PURE DATA. */
+export const WFMATCH_REACTIONS = Object.freeze([
+  { id: 'wfmatch:valid-id+confidence', subject: 'wfmatch', kind: 'pass' },
+  { id: 'wfmatch:null-id→no-match', subject: 'wfmatch', kind: 'catchall' },            // null / false / "null" all read as no-match
+  { id: 'wfmatch:unparseable→no-match', subject: 'wfmatch', kind: 'catchall' },
+  { id: 'wfmatch:resolve:real-id→record', subject: 'wfmatch', kind: 'pass' },
+  { id: 'wfmatch:resolve:hallucinated-id→null', subject: 'wfmatch', kind: 'catchall' },   // THE trust gate — proposes-only can never replay
+  { id: 'wfmatch:vocab-pregate', subject: 'wfmatch', kind: 'gate' },                   // zero shared vocabulary → no LLM round-trip at all
+]);
+
+/** Subject #6 — the JUDGE-MATCH neck (v2.74.1734): accept/reject a capability match. Fails safe to ref:null
+ *  (reject → ask) so it never runs the wrong capability. PURE DATA. */
+export const JUDGE_REACTIONS = Object.freeze([
+  { id: 'judge:valid-ref→accept', subject: 'judge', kind: 'pass' },
+  { id: 'judge:ref-object-forms', subject: 'judge', kind: 'pass' },                    // {id|ref} both accepted
+  { id: 'judge:unparseable→reject', subject: 'judge', kind: 'catchall' },              // ref:null, reason 'unparseable' → the caller asks
+]);
+
+/** Subject #7 — the SWEEP-READS neck (v2.74.1734): picks which READ legs a fleet sweep runs. parseSweepReads
+ *  is offered-only by construction (legRef membership), deduped, capped. PURE DATA. */
+export const SWEEP_REACTIONS = Object.freeze([
+  { id: 'sweep:valid-offered-reads', subject: 'sweep', kind: 'pass' },
+  { id: 'sweep:unoffered-key-dropped', subject: 'sweep', kind: 'catchall' },           // anti-hallucination — an invented read never runs
+  { id: 'sweep:dup-dropped+cap', subject: 'sweep', kind: 'pass' },
+  { id: 'sweep:unparseable→empty', subject: 'sweep', kind: 'catchall' },
+]);
+
+/** Subject #8 — the SEED-DIRECTIVES neck (v2.74.1734): proposes cadence — schedules future acts. parseSeedDirectives
+ *  (Core/fleetSchedule.js) bounds the quota (1..200), requires BOTH routine fields, fails to the none-shape. PURE DATA. */
+export const SEEDDIR_REACTIONS = Object.freeze([
+  { id: 'seeddir:valid-every+quota', subject: 'seeddir', kind: 'pass' },
+  { id: 'seeddir:quota-bounds', subject: 'seeddir', kind: 'gate' },                    // 0 / 201 / NaN / object → null, never a runaway quota
+  { id: 'seeddir:routine-requires-both', subject: 'seeddir', kind: 'catchall' },       // {every} without {ask} (or vice versa) → no routine
+  { id: 'seeddir:unparseable→none', subject: 'seeddir', kind: 'catchall' },
+]);
+
+/** Subject #9 — the STEP-IL neck (v2.74.1734): the IL step executor's per-step decision. parseStepDecision
+ *  whitelists kind + needs.kind, resolves the leg AGAINST THE PALETTE (unknown ref → leg:null; agentLoop
+ *  re-checks membership — defense in depth). PURE DATA. */
+export const STEPIL_REACTIONS = Object.freeze([
+  { id: 'stepil:act-resolves-offered-leg', subject: 'stepil', kind: 'pass' },
+  { id: 'stepil:unoffered-leg→null', subject: 'stepil', kind: 'catchall' },            // anti-hallucination — an invented leg resolves to nothing
+  { id: 'stepil:done-carries-answer', subject: 'stepil', kind: 'pass' },
+  { id: 'stepil:unknown-kind→needs-clarify', subject: 'stepil', kind: 'catchall' },
+  { id: 'stepil:needs-kind-whitelist', subject: 'stepil', kind: 'catchall' },          // an invented needs.kind degrades to clarify
+  { id: 'stepil:unparseable→needs-clarify', subject: 'stepil', kind: 'catchall' },
+]);
+
+/** Every registered reaction, all NINE gated necks. PURE. */
+export function allReactions() { return [...interpretReactions(), ...DECOMPOSER_REACTIONS, ...CLASSIFY_REACTIONS, ...ROUTER_REACTIONS, ...WFMATCH_REACTIONS, ...JUDGE_REACTIONS, ...SWEEP_REACTIONS, ...SEEDDIR_REACTIONS, ...STEPIL_REACTIONS]; }
 
 // ── B5-1 — factory 1a: the STRUCTURED garbage list (constructed, never rots; decision-gate §6) ────────────────
 // Each shape is a way a model output could be wrong that code must absorb: land in a legal reaction, never throw.

@@ -13,10 +13,18 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  interpretReactions, DECOMPOSER_REACTIONS, allReactions,
+  interpretReactions, DECOMPOSER_REACTIONS, CLASSIFY_REACTIONS, ROUTER_REACTIONS, allReactions,
   PAYLOAD_VALIDATED_INTENTS, PALETTE_VALIDATED_INTENTS, TERMINAL_INTENTS,
   GARBAGE_DECISIONS, mintGarbage,
 } from './reactionRegistry.js';
+import { parseClassifyOutput } from './branchClassify.js';   // subject #3 (v2.74.1734) — the couldn't-tell-22 neck
+import { parseRouterOutput } from './routerPrompt.js';       // subject #4 (v2.74.1734) — the pre-door router
+import { parseWorkflowMatchOutput } from './workflowMatchPrompt.js';                        // subject #5 (v2.74.1734)
+import { resolveWorkflowMatch, workflowSharesVocab } from './workflowMemory.js';            // #5's trust gate + cost pre-gate
+import { parseJudgeDecision } from './judgePrompt.js';                                      // subject #6 (v2.74.1734)
+import { parseSweepReads } from './sweepPrompt.js';                                         // subject #7 (v2.74.1734)
+import { parseSeedDirectives } from './fleetSchedule.js';                                   // subject #8 (v2.74.1734)
+import { parseStepDecision } from './stepPrompt.js';                                        // subject #9 (v2.74.1734)
 import {
   normalizeInterpretDecision, applyConfidenceGate, interpret,
   INTENTS, GATED_INTENTS, FLAGGED_INTENTS, UNGATED_INTENTS,
@@ -111,6 +119,169 @@ FIXTURES['cross-stage:restored-step-fires-fanout'] = () => {
   assert.equal(isFanoutAsk(LIVE_STEPS[1]), false, 'the un-repaired text misses — the live misroute, pinned');
 };
 
+// ── subject #3 — the BRANCH-CLASSIFY neck (thin representatives; depth lives in branchClassify.test.js) ──────
+const CX_ITEMS = [{ id: 'a' }, { id: 'b' }];
+const CX_ARMS = ['replacement', 'repair'];
+FIXTURES['classify:valid-verdicts'] = () => {
+  const { byId, invalid, missing } = parseClassifyOutput('{"verdicts":[{"id":"a","group":"replacement"},{"id":"b","group":"none"}]}', { items: CX_ITEMS, armLabels: CX_ARMS });
+  assert.equal(byId.get('a').group, 'replacement');
+  assert.equal(byId.get('b').group, 'none');
+  assert.equal(invalid, 0); assert.deepEqual(missing, []);
+};
+FIXTURES['classify:invented-label→unknown'] = () => {
+  const { byId, invalid } = parseClassifyOutput('{"verdicts":[{"id":"a","group":"Replacements!"},{"id":"b","group":"repair"}]}', { items: CX_ITEMS, armLabels: CX_ARMS });
+  assert.equal(byId.get('a').group, 'unknown', 'a made-up arm label downgrades — never routes an item');
+  assert.equal(invalid, 1);
+};
+FIXTURES['classify:unknown-or-dup-id→invalid'] = () => {
+  const { byId, invalid } = parseClassifyOutput('{"verdicts":[{"id":"ghost","group":"repair"},{"id":"a","group":"repair"},{"id":"a","group":"replacement"}]}', { items: CX_ITEMS, armLabels: CX_ARMS });
+  assert.equal(invalid, 2, 'the ghost id and the duplicate both counted');
+  assert.equal(byId.get('a').group, 'repair', 'first verdict wins; the duplicate is dropped');
+};
+FIXTURES['classify:skipped-item→unknown+missing'] = () => {
+  const { byId, missing } = parseClassifyOutput('{"verdicts":[{"id":"a","group":"repair"}]}', { items: CX_ITEMS, armLabels: CX_ARMS });
+  assert.deepEqual(missing, ['b'], 'silence is REPORTED');
+  assert.equal(byId.get('b').group, 'unknown', 'a missing verdict never reads as "no arm matched"');
+};
+FIXTURES['classify:unparseable→all-missing'] = () => {
+  const { byId, missing } = parseClassifyOutput('the model wandered off', { items: CX_ITEMS, armLabels: CX_ARMS });
+  assert.equal(missing.length, 2);
+  assert.equal(byId.get('a').group, 'unknown');
+};
+
+// ── subject #4 — the ROUTE-ASK neck (thin representatives; depth lives in routerPrompt.test.js) ──────────────
+FIXTURES['router:valid-tool→route'] = () => {
+  const r = parseRouterOutput('{"tool":"cap-search","confidence":0.9}');
+  assert.equal(r.tool, 'cap-search'); assert.equal(r.confidence, 0.9); assert.ok(!r.needs_demonstration);
+};
+FIXTURES['router:tool-object-forms'] = () => {
+  for (const form of [{ ref: 'cap-x' }, { op: 'cap-x' }, { capabilityId: 'cap-x' }, { id: 'cap-x' }]) {
+    assert.equal(parseRouterOutput({ tool: form, confidence: 0.8 }).tool, 'cap-x', JSON.stringify(form));
+  }
+};
+FIXTURES['router:unparseable→demonstrate'] = () => {
+  const r = parseRouterOutput('no json here at all');
+  assert.equal(r.tool, null); assert.equal(r.needs_demonstration, true); assert.equal(r.reason, 'unparseable');
+};
+FIXTURES['router:decompose-floor'] = () => {
+  const r = parseRouterOutput({ needs_decompose: true, subAsks: ['get the tasks', 'open each in a case'], confidence: 0 });
+  assert.equal(r.confidence, 0.5, 'a REAL 2-way split at conf 0 floors to 0.5 (v963 — "I picked no tool" is not garbage)');
+};
+FIXTURES['router:explicit-low-honored'] = () => {
+  const r = parseRouterOutput({ needs_decompose: true, subAsks: ['a', 'b'], confidence: 0.2 });
+  assert.equal(r.confidence, 0.2, 'an honest stated doubt is never inflated');
+};
+
+// ── subject #5 — the MATCH-WORKFLOW neck (parse proposes · resolve is the trust gate · vocab is the pre-gate) ──
+const WF_CANDIDATES = [
+  { id: 'wf_1', name: 'Morning triage', ask: 'get open warranty tasks and open each in a case', steps: [{ clause: 'get open warranty tasks' }, { clause: 'open each in a case' }], schema: 2, createdAt: 1, subAsks: ['a', 'b'] },
+];
+FIXTURES['wfmatch:valid-id+confidence'] = () => {
+  assert.deepEqual(parseWorkflowMatchOutput('{"id":"wf_1","confidence":0.8}'), { id: 'wf_1', confidence: 0.8 });
+  assert.equal(parseWorkflowMatchOutput('{"id":"wf_1"}').confidence, 0.6, 'omitted confidence defaults, never NaN');
+  assert.equal(parseWorkflowMatchOutput('{"id":"wf_1","confidence":7}').confidence, 1, 'clamped');
+};
+FIXTURES['wfmatch:null-id→no-match'] = () => {
+  for (const raw of ['{"id":null}', '{"id":false}', '{"id":"null"}', '{}']) {
+    assert.deepEqual(parseWorkflowMatchOutput(raw), { id: null, confidence: 0 }, raw);
+  }
+};
+FIXTURES['wfmatch:unparseable→no-match'] = () => assert.deepEqual(parseWorkflowMatchOutput('the model wandered off'), { id: null, confidence: 0 });
+FIXTURES['wfmatch:resolve:real-id→record'] = () => {
+  const w = resolveWorkflowMatch(WF_CANDIDATES, 'wf_1');
+  assert.ok(w && w.id === 'wf_1', 'a real live candidate resolves to its full record');
+};
+FIXTURES['wfmatch:resolve:hallucinated-id→null'] = () => {
+  assert.equal(resolveWorkflowMatch(WF_CANDIDATES, 'wf_ghost'), null, 'an invented id NEVER resolves — proposes-only can never replay');
+  assert.equal(resolveWorkflowMatch(WF_CANDIDATES, ''), null);
+  assert.equal(resolveWorkflowMatch(null, 'wf_1'), null);
+};
+FIXTURES['wfmatch:vocab-pregate'] = () => {
+  assert.equal(workflowSharesVocab('warranty tasks this morning', [{ id: 'wf_1', name: 'Morning triage', ask: 'get open warranty tasks' }]), true);
+  assert.equal(workflowSharesVocab('zebra xylophone', [{ id: 'wf_1', name: 'Morning triage', ask: 'get open warranty tasks' }]), false, 'zero shared vocabulary → skip the LLM round-trip entirely');
+};
+
+// ── subject #6 — the JUDGE-MATCH neck (accept/reject; fails safe to reject → ask) ────────────────────────────
+FIXTURES['judge:valid-ref→accept'] = () => {
+  const j = parseJudgeDecision('{"ref":"cap-search","reason":"exact goal match"}');
+  assert.equal(j.ref, 'cap-search'); assert.ok(j.reason);
+};
+FIXTURES['judge:ref-object-forms'] = () => {
+  assert.equal(parseJudgeDecision({ ref: { id: 'cap-x' } }).ref, 'cap-x');
+  assert.equal(parseJudgeDecision({ ref: { ref: 'cap-y' } }).ref, 'cap-y');
+};
+FIXTURES['judge:unparseable→reject'] = () => {
+  const j = parseJudgeDecision('no json at all');
+  assert.equal(j.ref, null, 'reject → the caller ASKS; the wrong capability never runs');
+  assert.equal(j.reason, 'unparseable');
+};
+
+// ── subject #7 — the SWEEP-READS neck (offered-only by construction) ─────────────────────────────────────────
+const SWEEP_LEGS = [{ key: 'me.zd.my_open_tickets@zd' }, { key: 'me.vs.vs_warranty_tasks@vs' }];
+FIXTURES['sweep:valid-offered-reads'] = () => {
+  const out = parseSweepReads('{"reads":[{"key":"me.zd.my_open_tickets@zd","params":{"status":"open"}}]}', { legs: SWEEP_LEGS });
+  assert.deepEqual(out, [{ key: 'me.zd.my_open_tickets@zd', params: { status: 'open' } }]);
+};
+FIXTURES['sweep:unoffered-key-dropped'] = () => {
+  const out = parseSweepReads('{"reads":[{"key":"me.zd.delete_ticket@zd"},{"key":"me.vs.vs_warranty_tasks@vs"}]}', { legs: SWEEP_LEGS });
+  assert.deepEqual(out.map((r) => r.key), ['me.vs.vs_warranty_tasks@vs'], 'an un-offered read NEVER runs — anti-hallucination lives with the palette');
+};
+FIXTURES['sweep:dup-dropped+cap'] = () => {
+  const raw = JSON.stringify({ reads: [{ key: 'me.zd.my_open_tickets@zd' }, { key: 'me.zd.my_open_tickets@zd' }, { key: 'me.vs.vs_warranty_tasks@vs' }] });
+  assert.equal(parseSweepReads(raw, { legs: SWEEP_LEGS }).length, 2, 'dup dropped');
+  assert.equal(parseSweepReads(raw, { legs: SWEEP_LEGS, maxReads: 1 }).length, 1, 'cap enforced');
+};
+FIXTURES['sweep:unparseable→empty'] = () => { for (const bad of ['prose', null, '{}', '{"reads":42}']) assert.deepEqual(parseSweepReads(bad, { legs: SWEEP_LEGS }), []); };
+
+// ── subject #8 — the SEED-DIRECTIVES neck (cadence proposals, bounded) ───────────────────────────────────────
+FIXTURES['seeddir:valid-every+quota'] = () => {
+  const d = parseSeedDirectives('{"every":"weekday 9am","assignQuota":25,"routine":{"every":"daily","ask":"list new warranty tasks"}}');
+  assert.equal(d.every, 'weekday 9am'); assert.equal(d.assignQuota, 25);
+  assert.deepEqual(d.routine, { every: 'daily', ask: 'list new warranty tasks' });
+};
+FIXTURES['seeddir:quota-bounds'] = () => {
+  for (const q of [0, 201, -5, 'lots', {}, NaN]) {
+    assert.equal(parseSeedDirectives(JSON.stringify({ assignQuota: q })).assignQuota, null, `quota ${String(q)} must not survive`);
+  }
+  assert.equal(parseSeedDirectives('{"assignQuota":200}').assignQuota, 200, 'the ceiling itself is legal');
+};
+FIXTURES['seeddir:routine-requires-both'] = () => {
+  assert.equal(parseSeedDirectives('{"routine":{"every":"daily"}}').routine, null, 'every without ask → no routine');
+  assert.equal(parseSeedDirectives('{"routine":{"ask":"do the thing"}}').routine, null, 'ask without every → no routine');
+  assert.equal(parseSeedDirectives('{"routine":["daily","x"]}').routine, null, 'an array is not a routine');
+};
+FIXTURES['seeddir:unparseable→none'] = () => {
+  for (const bad of ['no json', null, '']) assert.deepEqual(parseSeedDirectives(bad), { every: null, assignQuota: null, routine: null });
+};
+
+// ── subject #9 — the STEP-IL neck (kind whitelists + palette-resolved leg) ───────────────────────────────────
+const STEP_PALETTE = [{ key: 'me.zd.my_open_tickets@zd', name: 'My open tickets' }];
+FIXTURES['stepil:act-resolves-offered-leg'] = () => {
+  const d = parseStepDecision('{"kind":"act","leg":"me.zd.my_open_tickets@zd","confidence":0.9}', STEP_PALETTE);
+  assert.equal(d.kind, 'act'); assert.ok(d.leg && d.leg.key === 'me.zd.my_open_tickets@zd');
+};
+FIXTURES['stepil:unoffered-leg→null'] = () => {
+  const d = parseStepDecision('{"kind":"act","leg":"me.zd.delete_everything@zd","confidence":0.99}', STEP_PALETTE);
+  assert.equal(d.leg, null, 'an invented leg resolves to NOTHING (agentLoop re-checks membership — defense in depth)');
+};
+FIXTURES['stepil:done-carries-answer'] = () => {
+  const d = parseStepDecision('{"kind":"done","answer":"8 open tasks","confidence":0.8}', STEP_PALETTE);
+  assert.equal(d.kind, 'done'); assert.equal(d.answer, '8 open tasks');
+};
+FIXTURES['stepil:unknown-kind→needs-clarify'] = () => {
+  const d = parseStepDecision('{"kind":"frobnicate"}', STEP_PALETTE);
+  assert.equal(d.kind, 'needs'); assert.equal(d.needs.kind, 'clarify');
+};
+FIXTURES['stepil:needs-kind-whitelist'] = () => {
+  const d = parseStepDecision('{"kind":"needs","needs":{"kind":"self-destruct"}}', STEP_PALETTE);
+  assert.equal(d.needs.kind, 'clarify', 'an invented needs.kind degrades to clarify');
+  assert.equal(parseStepDecision('{"kind":"needs","needs":{"kind":"confirm"}}', STEP_PALETTE).needs.kind, 'confirm', 'the whitelist itself passes');
+};
+FIXTURES['stepil:unparseable→needs-clarify'] = () => {
+  const d = parseStepDecision('no json at all', STEP_PALETTE);
+  assert.equal(d.kind, 'needs'); assert.equal(d.needs.kind, 'clarify'); assert.equal(d.reason, 'unparseable'); assert.equal(d.confidence, 0);
+};
+
 // ── B5-0 — the coverage seal ──────────────────────────────────────────────────────────────────────────────────
 describe('decisionGate — B5-0 META-TEST: registry rows ⟷ fixtures, exact parity both directions', () => {
   it('every registered reaction has a fixture (a row with none = the forgotten reaction, red)', () => {
@@ -170,11 +341,14 @@ describe('decisionGate — B5-1 totality: the catch-alls absorb everything (neve
       assert.equal(norm({ intent: 'navigate', params: { url }, confidence: 0.99 }).intent, 'clarify', url);
     }
   });
-  it('the decomposer neck never throws on parse/sanitize/restore garbage', () => {
+  it('the decomposer, classify and router necks never throw on parse garbage', () => {
     for (const bad of ['', null, undefined, '{', '[[', '{"steps":42}', '{"steps":[{"a":1}]}', 'x'.repeat(5000)]) {
       assert.doesNotThrow(() => { const s = parseStepsOutput(bad); assert.ok(Array.isArray(s)); });
+      assert.doesNotThrow(() => { const c = parseClassifyOutput(bad, { items: CX_ITEMS, armLabels: CX_ARMS }); assert.ok(c.byId instanceof Map); });
+      assert.doesNotThrow(() => { const r = parseRouterOutput(bad); assert.ok(typeof r === 'object' && 'tool' in r); });
     }
     assert.doesNotThrow(() => { const { steps, dropped } = sanitizeSteps([null, 42, {}, 'ok fine']); assert.deepEqual(steps, ['ok fine']); assert.equal(dropped.length, 3); });
     assert.doesNotThrow(() => { assert.equal(restoreQuantifier(null, null).restored, null); assert.equal(restoreQuantifier(42, 'not-array').restored, null); });
+    assert.doesNotThrow(() => { parseClassifyOutput('{"verdicts":[null,42,{"id":null}]}', { items: CX_ITEMS, armLabels: CX_ARMS }); });
   });
 });

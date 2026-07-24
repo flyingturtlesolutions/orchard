@@ -22,8 +22,42 @@ never silently dropped. `--dry-run` proved the assembly without spending a token
 `ANTHROPIC_API_KEY` in `.env`, then `node tools/routing-scoreboard/scoreboard.mjs` (~67 calls; `--limit 10` for
 a cheap first pass). Thresholds are tuned from that first record, per spec §8.
 
-**Remaining:** Stage 5 (B5-2/3/4 fill-out, incremental) · Stage 6 (B5-5/6 — WAITS on CD-1a, cadence lane in
-flight) · Stage 7 (necks #3/#4) · the ongoing disciplines (§10; first audit item: `fieldread`).
+**Stage 7 COMPLETE (v1+v2+v3), landed v2.74.1734 — the neck registry sealed, ALL NINE routing-grade necks
+gated, the owed list EMPTY.** v3 added: **sweep-reads** (#7 — `parseSweepReads` offered-only/deduped/capped: an
+invented read never runs) · **seed-directives** (#8 — `parseSeedDirectives` bounds the quota 1..200, requires
+BOTH routine fields, fails to the none-shape: no runaway cadence) · **step-il** (#9 — `parseStepDecision` kind +
+needs whitelists, the leg resolved AGAINST THE PALETTE: an invented leg → null, agentLoop re-checks — defense in
+depth). Registry: **83 reactions across 9 necks**; the seal now asserts owed === [] — a future routing-grade
+neck starts life on the owed list by force of the seal, and this assertion forces the shrink. Gate 3153/0.
+
+Earlier slices of the same land: `Core/neckRegistry.js`: one
+graded row per `role: 'routing'` operation (15 found — and the build corrected the spec's premise: that tag is
+the MODEL-TIERING role, not a blast-radius grade — `case-brief` carries it yet is presentation by function; so
+the CANDIDATE list is derived, the GRADE is sealed judgment). Seal test derives the operations from the source
+text, exact parity both ways: a new routing-tagged call without a graded row is red; a routing-GRADE row can
+never be waived; every built row's suite file must exist. **Gated necks now SIX**: interpret · decompose-steps ·
+**branch-classify** (#3 — the couldn't-tell-22 class: invented labels downgrade, silence is reported) ·
+**route-ask** (#4 — unparseable→demonstrate fail-safe, the v963 decompose floor, honest-doubt never inflated) ·
+**match-workflow** (#5 — parse proposes, `resolveWorkflowMatch` is the trust gate: a hallucinated/stale id
+NEVER resolves, plus the `workflowSharesVocab` cost pre-gate) · **judge-match** (#6 — {id|ref} object forms,
+unparseable → ref:null → the caller ASKS; the wrong capability never runs). Owed shrink-list, tracked by the
+seal: **sweep-reads · seed-directives · step-il** (three — was five). Registry: **69 reactions across 6 necks**.
+Gate 3139/0.
+
+**Stage 5 CLOSED (v2.74.1736), by construction and by mapping.** **B5-4 DONE** — the normalize-validation
+partition (`PAYLOAD_VALIDATED / PALETTE_VALIDATED / TERMINAL`) moved INTO `Core/interpret.js` beside the
+if-chain it classifies (re-exported by the registry, surface unchanged): what was sealed memory is now true
+derivation — a new intent's arm and its class entry are one edit apart, and the ∪===INTENTS seal reddens either
+omission. **B5-3 MAPPED** — empty/null/missing/out-of-palette/at-threshold live as explicit fixtures + the two
+garbage factories; the spec's `value·bundle` axes are absorbed by the per-intent valid fixtures (each carries
+its payload shape). **B5-2 BLOCKED-HONESTLY** — true harvest needs raw-decision JSON in the trace (today only
+the `INTERPRET_ASK` summary line is logged); the enabler is a DEBUG-level raw-decision tap, owed, small, and
+adjacent to the lane's active area — deliberately not built mid-flight. Until then, harvested coverage = the
+regression fixtures already frozen (v963 · v1342 · v1650 · v1651 · v1666 · v1686 · v1714).
+
+**Remaining:** Stage 6 (B5-5/6 — WAITS on CD-1a, cadence lane in flight) · the B5-2 raw-decision tap (small,
+after the lane settles) · the ongoing disciplines (§10; first audit item: `fieldread`) · the first live
+scoreboard run (operator's call).
 **Stage 3 (B5-0/1) landed v2.74.1727** — `Core/reactionRegistry.js` (the reaction registry over BOTH frozen
 necks: interpret rows DERIVED from `INTENTS` × the v1718 disposition tables + sealed catch-all rows under
 partition seal #2 `PAYLOAD_VALIDATED ∪ PALETTE_VALIDATED ∪ TERMINAL === INTENTS`; the decomposer's 15 sealed

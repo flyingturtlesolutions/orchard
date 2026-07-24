@@ -59,9 +59,13 @@ parse/sanitize bracket, and at least FOUR are **routing-grade** — their output
 bugs entered through necks the first draft's gate never saw.
 
 The consequence is a **NECK REGISTRY**, not one wider gate: the `#call` sites self-declare `role: 'routing' | …`
-plus an `operation` label, so the routing-grade neck list is **derived from the code** (§5.1's own discipline,
-one level up) and triaged by blast radius — routing-grade necks get a gate; presentation-grade necks
-(`case-brief` et al.) do not. **This document scopes to the `interpret` neck.** The DECOMPOSER is subject #2
+plus an `operation` label — so the CANDIDATE list is **derived from the code**, while the GRADE is **sealed
+judgment**. (Built 2026-07-23, and the build corrected this paragraph's first draft: `role: 'routing'` is the
+MODEL-TIERING role, not a blast-radius grade — `case-brief` carries the tag yet is presentation by function.
+`Core/neckRegistry.js` records the grades; its seal test derives the candidates from the source and demands
+exact parity, so a new routing-tagged operation without a graded row is red. A routing-GRADE row can never be
+waived — built or owed only.) Routing-grade necks get a gate; shaping/presentation necks are waived naming the
+bracket that re-validates them. **This document scopes to the `interpret` neck.** The DECOMPOSER is subject #2
 (parent §3): same method, its own reaction space (N steps · floor · compound · dropped · quantifier-restored),
 plus the cross-stage class — one stage's TEXT is the next stage's ROUTING INPUT (`stepsPrompt.test.js` already
 freezes `isFanoutAsk(repairedStep) === true`). `route-ask` and `branch-classify` are subjects #3/#4,

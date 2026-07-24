@@ -33,6 +33,14 @@ export const UNGATED_INTENTS = Object.freeze([
   'fieldread',   // UNDECIDED (recorded 2026-07-23): fans N same-record reads (map's rationale, weakened); no gate arm and no recorded decision — owed to the partition audit (DESIGN_decision_gate.md §4)
 ]);
 
+// v2.74.1736 — B5-4: the NORMALIZE-VALIDATION partition, owned by the code it describes (moved here from
+// Core/reactionRegistry.js, where it was "sealed memory" — a hand-copy the registry cross-checked). Living
+// beside the if-chain it classifies, a new intent's arm and its class entry are one edit apart, and the
+// decisionGate seal (partition #2: these three ∪ === INTENTS) turns forgetting either into a red suite.
+export const PAYLOAD_VALIDATED_INTENTS = Object.freeze(['navigate', 'decompose', 'fieldread', 'map', 'branch', 'write', 'case']);   // a malformed payload → that intent's own clarify arm
+export const PALETTE_VALIDATED_INTENTS = Object.freeze(['act']);                 // validated against the OFFERED palette → teach on invention
+export const TERMINAL_INTENTS = Object.freeze(['clarify', 'teach', 'answer']);   // no payload to validate — they ARE the degradations
+
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
 const _idSet = (list) => new Set((Array.isArray(list) ? list : []).map((c) => _str(legRef(c))).filter(Boolean));
