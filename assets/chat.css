@@ -768,6 +768,21 @@ textarea {
 }
 .wf-ov-banner .wf-ov-actions { margin-top: var(--sp-2); justify-content: flex-end; }
 .wf-ov-parked { border-color: color-mix(in srgb, var(--c-warn, #b58a2a) 45%, var(--c-border-soft)); }
+/* PS-5 (v2.74.1767, DESIGN_panel_surfaces.md §4) — the composer MODE CHIP: whoever claims the input labels it. */
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  align-self: flex-start;
+  margin-bottom: var(--sp-1);
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--r-full, 999px);
+  background: var(--c-bg-subtle);
+  color: var(--c-text-subtle);
+  font-size: 0.78em;
+}
+.composer-chip.hidden { display: none; }
 /* v2.74.1343 (review Batch 6) — the connection / rich-intent chip MENU (setup site candidates, "what can I do here"
    intents). The chips reuse .suggestion-card styling, but here they lay out as a WRAPPING ROW under the bubble text
    (they were appended to the .message flex row with NO CSS — squeezed as a third column beside the text). */

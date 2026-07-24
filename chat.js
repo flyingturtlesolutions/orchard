@@ -213,7 +213,7 @@ async function _ensureConversation() {
 function _clearCurrentConversation() {
   // v2.74.1623 — a surface change PARKS the wizard (state intact; it revives on its desk's reopen). The one thing
   // that must not survive the park is the v1622 composer LOCK — the surface now belongs elsewhere.
-  try { if (_wfWizard) { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } } catch { /* */ }
+  try { if (_wfWizard) releaseComposer('wizard'); } catch { /* */ }   // PS-5 — the park restores via the claim (chip included)
   _currentConversationId = null;
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
@@ -615,7 +615,7 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
   // v2.74.1719 — every desk dies here, so any live wizard / pending intent prompt dies with them (see the per-row
   // delete's rationale: a wizard parked for a desk that will never reopen is a zombie holding the composer lock).
   if (_wfWizard) _wfAbandon();
-  _wfIntentPending = null;
+  if (_wfIntentPending) { _wfIntentPending = null; releaseComposer('workflow-intent'); }   // PS-5
   await ConversationStore.deleteAll();
   _clearCurrentConversation();
   _resetConversation();
@@ -1080,7 +1080,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
     // its desk will reopen): abandon it NOW — draft-keep, composer unlock, page-slot release — so its page and
     // input lock don't outlive the desk. Same for a pending intent-first prompt (CD-3).
     if (_wfWizard && (_wfWizard.convId === String(conv.id) || childIds.includes(_wfWizard.convId))) _wfAbandon();
-    if (_wfIntentPending && (_wfIntentPending === String(conv.id) || childIds.includes(_wfIntentPending))) _wfIntentPending = null;
+    if (_wfIntentPending && (_wfIntentPending === String(conv.id) || childIds.includes(_wfIntentPending))) { _wfIntentPending = null; releaseComposer('workflow-intent'); }   // PS-5
     await ConversationStore.delete(conv.id);
     _expandedApps.delete(conv.id);
     // AP-3 fix (v2.74.1220) — the cascade also removed this app's sub-conversations, so reset the panel if the ACTIVE
@@ -5591,6 +5591,39 @@ function releaseSurface(owner) {
     if (_surfaces[kind] && _surfaces[kind].owner === owner) _releaseSlot(kind);
   }
 }
+
+// PS-5 (v2.74.1767, DESIGN_panel_surfaces.md §4) — the COMPOSER claim: whoever repurposes the input (wizard
+// stages, the intent prompt) must LABEL it — a mode chip above the input row — and restore it through ONE
+// release. A locked composer without a visible mode read as "the panel is broken" (§13 report 6).
+const _COMPOSER_DEFAULT_PH = 'Message Orchard…  (type / for capabilities)';
+let _composerClaim = null;   // { owner } | null
+function _composerChip(show, text = '') {
+  try {
+    const host = document.querySelector('.input-container'); if (!host) return;
+    let chip = document.getElementById('composer-chip');
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.id = 'composer-chip';
+      chip.className = 'composer-chip hidden';
+      host.insertBefore(chip, host.querySelector('.input-row'));
+    }
+    chip.textContent = text;
+    chip.classList.toggle('hidden', !show);
+  } catch { /* the chip must never break the claimant */ }
+}
+function claimComposer(owner, { placeholder = '', chip = '', locked = false } = {}) {
+  _composerClaim = { owner };
+  try { const inp = $('chat-input'); inp.disabled = !!locked; inp.placeholder = placeholder || _COMPOSER_DEFAULT_PH; } catch { /* */ }
+  try { if (locked) $('btn-chat-send').disabled = true; } catch { /* pre-typed text could otherwise leave send live */ }
+  _composerChip(true, chip || String(owner));
+}
+function releaseComposer(owner = null) {
+  if (_composerClaim && owner && _composerClaim.owner !== owner) return;   // someone else holds it now — their release restores
+  _composerClaim = null;
+  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = _COMPOSER_DEFAULT_PH; } catch { /* */ }
+  try { $('btn-chat-send').disabled = !$('chat-input').value.trim(); } catch { /* */ }
+  _composerChip(false);
+}
 // §6.1 — ONE Escape ladder for the whole panel (there were two Escape handlers in 13k lines, neither an overlay).
 // The param-modal is the only true modal (its own trap); an open SlashPicker owns its own Escape on the input.
 try {
@@ -5692,8 +5725,7 @@ function _wfAbandon() {
 // death-condition, now structural).
 function _wfSurfaceRelease() {
   _wfReleasePageSlot();
-  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
-  try { $('btn-chat-send').disabled = !$('chat-input').value.trim(); } catch { /* */ }
+  releaseComposer('wizard');   // PS-5 — the claim-based restore (placeholder + lock + mode chip together)
 }
 function _wfEnterPage() {
   claimSurface('page', 'wizard', _wfSurfaceRelease);   // PS-0 — claiming kills whatever held the page slot
@@ -5726,10 +5758,11 @@ function _promptWorkflowIntent() {
   const m = appendMessage({ role: 'assistant', body: '' });
   _setMessageBody(m, 'What should this workflow do? Describe it in the box below (e.g. “get my open tickets and research each in a new conversation”) and I’ll draft the steps for you to review.', { markdown: true });
   const bar = _orchActionBar(m);
-  bar.appendChild(_mkBtn('Build step by step instead', () => { _wfIntentPending = null; try { bar.remove(); } catch { /* */ } void _startWorkflowWizard(); }));
-  bar.appendChild(_mkBtn('Cancel', () => { _wfIntentPending = null; try { bar.remove(); } catch { /* */ } _setMessageBody(m, 'Okay — no workflow started.'); }));
+  bar.appendChild(_mkBtn('Build step by step instead', () => { _wfIntentPending = null; releaseComposer('workflow-intent'); try { bar.remove(); } catch { /* */ } void _startWorkflowWizard(); }));
+  bar.appendChild(_mkBtn('Cancel', () => { _wfIntentPending = null; releaseComposer('workflow-intent'); try { bar.remove(); } catch { /* */ } _setMessageBody(m, 'Okay — no workflow started.'); }));
   _orchFinalize(m);
-  try { const inp = $('chat-input'); if (inp) { inp.placeholder = 'Describe the workflow…'; inp.focus(); } } catch { /* */ }
+  claimComposer('workflow-intent', { placeholder: 'Describe the workflow…', chip: 'New workflow — describe what it should do' });   // PS-5
+  try { $('chat-input').focus(); } catch { /* */ }
 }
 
 // §11.4 (v2.74.1716, DESIGN_cadence.md) — the USER-MEDIATED routine migration: rebuild a legacy fleetRoutine as a
@@ -5784,12 +5817,15 @@ function _wfRenderPage() {
   // a desk ask, flipped the surface, and stranded the wizard). The buttons are the only doors; every exit path
   // (_wfExitPage / _wfAbandon / show-me's thread borrow) unlocks.
   const _lock = (w.phase === 'running' || w.phase === 'ran' || w.phase === 'banked' || w.phase === 'cadence');   // CD-6.6 — cadence is buttons-only
-  try {
-    const inp = $('chat-input');
-    inp.disabled = _lock;
-    if (_lock) inp.placeholder = w.phase === 'running' ? 'Step running…' : (w.phase === 'ran' ? 'Review the result — use the buttons above' : (w.phase === 'cadence' ? 'Pick a schedule or save — buttons above' : 'Add the next step, save, or cancel — buttons above'));
-  } catch { /* */ }
-  try { if (_lock) $('btn-chat-send').disabled = true; } catch { /* pre-typed text could otherwise leave send live */ }
+  // PS-5 — the lock rides a labeled CLAIM (mode chip above the input): locked-means-labeled, restored by
+  // releaseComposer('wizard') from _wfSurfaceRelease on every exit.
+  claimComposer('wizard', {
+    locked: _lock,
+    chip: `Workflow setup — ${w.phase === 'running' ? 'step running' : (w.phase === 'ran' ? 'review the result' : (w.phase === 'cadence' ? 'pick a schedule' : (w.phase === 'banked' ? 'add a step or save' : 'type the next step')))}`,
+    placeholder: _lock
+      ? (w.phase === 'running' ? 'Step running…' : (w.phase === 'ran' ? 'Review the result — use the buttons above' : (w.phase === 'cadence' ? 'Pick a schedule or save — buttons above' : 'Add the next step, save, or cancel — buttons above')))
+      : 'Type the step…',
+  });
   // v2.74.1615 — the renderer ASSERTS its surface (the v1608 landing lesson): every appendMessage on the current
   // conversation calls _enterConversation(), which hides #empty-state — so a run's appendMessage flipped the user
   // to the thread and the 'ran' render then pulled the run message OUT of it into the hidden page → a blank thread
@@ -6012,7 +6048,8 @@ function _wfRenderPage() {
     mkPageBtn('Cancel', () => _wfCancel());
   } else if (w.phase === 'await-name') {
     status.innerHTML = `<div class="wf-page-sub">Name this workflow — type a short name in the message box, then send. It’ll appear as a card on your launch page.</div>`;
-    try { $('chat-input').placeholder = 'Name this workflow…'; $('chat-input').focus(); } catch { /* */ }
+    claimComposer('wizard', { placeholder: 'Name this workflow…', chip: 'Workflow setup — name it' });   // PS-5
+    try { $('chat-input').focus(); } catch { /* */ }
     mkPageBtn('← Back', () => { w.phase = 'banked'; _wfRenderPage(); });
     mkPageBtn('Cancel', () => _wfCancel());
   } else if (w.phase === 'cadence') {
@@ -6209,7 +6246,7 @@ function _wfShowMe() {
 function _wfEnterPageShowDemo(demoMsg) {
   try { $('empty-state').classList.add('hidden'); $('messages').classList.remove('hidden'); } catch { /* */ }
   try { const c = $('thread'); if (c) c.scrollTop = c.scrollHeight; } catch { /* */ }
-  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* v1622 — the demo borrows the thread; a locked composer must not ride along */ }
+  releaseComposer();   // v1622 — the demo borrows the thread; a locked composer must not ride along (PS-5: chip drops too)
 }
 
 function _wfSaveStart() {
@@ -10900,6 +10937,7 @@ async function sendChatMessage() {
   // step-drafter. One-shot + conversation-scoped — cleared here, or by Cancel / "build step by step".
   if (_wfIntentPending && _wfIntentPending === String(_currentConversationId)) {
     _wfIntentPending = null;
+    releaseComposer('workflow-intent');   // PS-5 — the intent is consumed; the wizard re-claims if it opens
     void _startWorkflowFromIntent(text);
     return;
   }
@@ -13028,7 +13066,7 @@ async function _rehydrateConversation(conv) {
   // case to REVIEW the open-case step — inspecting the result IS the review). Opening another conversation PARKS
   // the wizard (unlock the composer — the surface belongs to the conv being opened); opening the wizard's OWN
   // desk revives it at the end of this rehydrate (the page re-asserts + the phase lock re-applies).
-  try { if (_wfWizard && _wfWizard.convId !== String(conv.id)) { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } } catch { /* */ }
+  try { if (_wfWizard && _wfWizard.convId !== String(conv.id)) releaseComposer('wizard'); } catch { /* */ }   // PS-5
   // v2.74.1737 (live report: resolved presence case still in the Rail hours later) — LEAVING a vtc_ case completes
   // its deferred dismissal. The v1703 guard rightly never yanks the case being VIEWED, but its "it clears next
   // sync" assumed syncs are frequent — they are EVENT-driven, so with no later vitals event the resolved case sat
