@@ -69,7 +69,7 @@ method-identical, specced when their turn comes.
 
 The interpret neck itself:
 
-- `interpret(ask, ctx, deps)` — `Core/interpret.js:161` — takes an **injected `think`**. Feed it a frozen decision
+- `interpret(ask, ctx, deps)` — `Core/interpret.js:174` — takes an **injected `think`**. Feed it a frozen decision
   and no live model runs. (With `think` injected the ask is nearly inert — the DECISION is the real input; §6's
   fixture shape reflects that.)
 - The gate tests `decision → reaction`, **never `INVOKE_SESSION`.** This is load-bearing: 18 of the 60 curated
@@ -85,10 +85,10 @@ The interpret neck itself:
 A "reaction" is a terminal branch of the decision-handling path — the finite set of distinct things the code can
 *do* with a decision. The branch points, with anchors:
 
-- **`normalizeInterpretDecision`** (`Core/interpret.js:34`) — one arm per intent; an unrecognized intent falls to
-  the catch-all `INTENTS.includes(d.intent) ? d.intent : 'clarify'` (`:36`); an out-of-palette leg → `teach`
-  (`:50`); a malformed clause payload → `clarify` (`:54,:59,:69,:79,:87,:95,:106`).
-- **`applyConfidenceGate`** (`Core/interpret.js:120`) — a below-threshold `act`/`navigate`/`map`/`write`/`branch`
+- **`normalizeInterpretDecision`** (`Core/interpret.js:47`) — one arm per intent; an unrecognized intent falls to
+  the catch-all `INTENTS.includes(d.intent) ? d.intent : 'clarify'` (`:49`); an out-of-palette leg → `teach`
+  (`:63`); a malformed clause payload → `clarify` (`:67,:72,:82,:92,:100,:108,:119`).
+- **`applyConfidenceGate`** (`Core/interpret.js:133`) — a below-threshold `act`/`navigate`/`map`/`write`/`branch`
   → `clarify`. TWO deviations the first draft missed, both load-bearing for fixtures: a below-threshold
   `decompose` does NOT become clarify — it passes through carrying `lowConfidence: true` (v1342; the dispatch
   guard reads the flag) — and `case` is DELIBERATELY ungated (PP-3: "the absence is a decision rather than an
@@ -147,7 +147,7 @@ stale" is the honest floor.
 
 ### 5.2 Totality — the catch-alls are the bridge, not just extra rows
 The reason no output can escape into undefined behavior is that **every branch point has a fail-closed arm**: the
-`:36` intent default, the `:50` out-of-palette `teach`, the `:54…:106` malformed-payload `clarify`s. These are the
+`:36` intent default, the `:63` out-of-palette `teach`, the `:67…:119` malformed-payload `clarify`s. These are the
 mathematical bridge from an *infinite, un-enumerable input space* to a *finite, enumerable reaction set*: you can
 never list every weird thing the model might emit, but you can prove (a) anything unmatched falls to a catch-all,
 and (b) the catch-all degrades safely — and those two together handle every unlisted input **without listing it**.

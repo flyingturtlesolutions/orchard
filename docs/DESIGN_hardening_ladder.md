@@ -57,7 +57,7 @@ has actually shipped:
   Verified 2026-07-23:)
   - `Core/palette.js` self legs hand-author `safety: 'auto' | 'confirm' | 'gated'` — assert THAT enum's closure,
     and that no write-shaped self leg is `'auto'`.
-  - `CONNECTOR_RECIPES` entries carry NO safety field — the class is DERIVED (`defaultSafetyClass`: non-GET →
+  - `CONNECTOR_RECIPES` entries carry NO safety field — the class is DERIVED (`safetyClassForMethod`: non-GET →
     `'gated'`, fail-closed by construction). Unit-test the derivation's floor; there is no catalog field to sweep.
   - Per-Ground records carry `safetyClass` from `SAFETY_CLASSES = ['auto','gated','destructive']`
     (`Core/rideRecipe.js:11`) — and it is USER STATE (`mergeRecipes` preserves it), so a catalog-conformance rail
@@ -87,7 +87,7 @@ deterministically, and assert the code carries it through to the right action. I
 class of bug where the model said exactly the right thing and the plumbing dropped it (the case→Zendesk shape, the
 v1651 payload-whitelist drop).
 
-**The seam** — shared with B.5, and it already exists: `interpret(ask, ctx, deps)` (`Core/interpret.js:161`) takes
+**The seam** — shared with B.5, and it already exists: `interpret(ask, ctx, deps)` (`Core/interpret.js:174`) takes
 an injected `think`. Feed it the recorded decision; no live model runs. Frozen input → deterministic → gate.
 
 **Relationship to B.5 — read this.** Rail B is the *degenerate case* of B.5: one decision (the correct one) is one
@@ -262,7 +262,7 @@ The rails are not four separate authoring efforts. They share one corpus and one
   deferred until an ask has no single correct leg.
 - **Thresholds** — the C.1 pre-release pass-rate bar and the C.2 rot-alarm baseline are tuned from the first live
   runs, not guessed here.
-- **The confidence-gate value** (`minConfidence = 0.6`, `Core/interpret.js:120`) — C.2's calibration curve sets it;
+- **The confidence-gate value** (`minConfidence = 0.6`, `Core/interpret.js:133`) — C.2's calibration curve sets it;
   this document does not.
 - **Rail C's operational plumbing** — cost per corpus run, cadence, owner (manual runbook vs cron), and where the
   scores live (Studio card / `logs/run/` / the Forge digest) — decided at C.1 build time. One requirement is
