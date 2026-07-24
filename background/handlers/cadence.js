@@ -24,6 +24,7 @@ import { runWorkflow, makeAccumulatorReporter, makeResumeReporter } from '../../
 import { mintRunId } from '../../Core/pipelineRun.js';
 import { priorRunVerdict } from '../../Core/fleetSchedule.js';
 import { runRideStep, rideStepResolvable } from '../../Core/rideStep.js';   // CD-1a (§9.4) — the SHARED pinned-ride/nav step primitive (one impl for SW + panel)
+import { runFieldReadStep } from '../../Core/headlessClause.js';   // CD-1a phase 2, extraction 1 (v1717) — the headless banked field read
 
 const TICK_ALARM = 'cadence:tick';
 const TICK_MINUTES = 5;                    // honor the 5-min cadence floor (Core/trigger clamps below this)
@@ -241,17 +242,22 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
   return { verdict, parkedRunId: verdict === 'parked' ? parkedRunId : '' };
 }
 
-// One step, through the SHARED primitive (Core/rideStep — the SAME one the panel's tier-'sw' replay will use, so
-// the two never diverge, §9.4). The SW injects its IO: readRideRecipes + INVOKE_SESSION via _invokeSgHandler; the
-// reporter's gate decides park-vs-proceed on a write (the SW accumulator reporter returns 'park').
-function _runStep(clause, ctx) {
-  return runRideStep(clause, {
+// One step, through the SHARED primitives (§9.4 — the SAME modules the panel reads, so the two never diverge).
+// Dispatch by pin kind: a banked fieldRead runs pure over the chain state (Core/headlessClause); everything else
+// is the pinned-ride/nav path (Core/rideStep) with the SW's IO injected. A ride READ threads its value into the
+// chain state (state.lastValue) so a following fieldRead has rows to read — phase 2's composition seam.
+async function _runStep(clause, ctx) {
+  const pin = (clause && clause.pinned && typeof clause.pinned === 'object') ? clause.pinned : null;
+  if (pin && pin.kind === 'fieldRead') return runFieldReadStep(clause, { state: ctx.state });
+  const r = await runRideStep(clause, {
     readRecipes: _ctx.readRideRecipes,
     invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', payload),
     reporter: ctx.reporter,
     runId: ctx.runId,
     workflowId: ctx.wf && ctx.wf.id,
   });
+  if (r && r.ok && r.value !== undefined && r.value !== null) return { ...r, state: { ...(ctx.state || {}), lastValue: r.value } };
+  return r;
 }
 
 // The drift check (§2.1), via the same shared primitive.

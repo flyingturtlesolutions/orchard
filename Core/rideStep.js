@@ -30,8 +30,13 @@ export async function rideStepResolvable(clause, { readRecipes } = {}) {
   const pin = _pinOf(clause);
   if (!pin) return true;
   if (String(pin.kind || '').trim() === 'navigate') return true;
+  // v1717 — MIRROR chat.js `_wfReplayPlan`'s rule exactly (§9.4: the panel and SW must hold ONE notion of "a
+  // resolvable pin", or replays diverge): a KIND-ONLY pin (fieldRead / branch / map / case — no capabilityId)
+  // names no leg, so there is no leg to have drifted; its own drift check happens at RUN time (e.g. the field
+  // re-resolves against the actual rows). Only a leg-bearing pin is checked against the recipe store.
   const groundId = pin.groundId, capId = pin.capabilityId;
-  if (!groundId || !capId) return false;
+  if (!capId) return true;
+  if (!groundId) return false;   // a leg pin that lost its ground IS drift
   try {
     const recs = (typeof readRecipes === 'function' ? await readRecipes(groundId) : []) || [];
     const rec = recs.find((r) => r && r.id === capId);

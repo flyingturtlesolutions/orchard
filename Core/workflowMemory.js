@@ -52,7 +52,15 @@ function _normSteps(raw) {
     if (s.clause && typeof s.clause === 'object') {
       const kind = _str(s.clause.kind) || null;
       const capabilityId = _str(s.clause.capabilityId) || null;
-      if (kind || capabilityId) out.clause = { kind, capabilityId, ...(s.clause.groundId ? { groundId: _str(s.clause.groundId) } : {}) };
+      if (kind || capabilityId) {
+        out.clause = { kind, capabilityId, ...(s.clause.groundId ? { groundId: _str(s.clause.groundId) } : {}) };
+        // CD-1a phase 2 (v1717) — a fieldRead pin's banked field/term survive normalize (same closed-literal
+        // discipline: an unlisted field is dropped on every edit). Schema names only — §11 body-blind holds.
+        if (kind === 'fieldRead' && _str(s.clause.field)) {
+          out.clause.field = _str(s.clause.field).slice(0, 80);
+          if (_str(s.clause.term)) out.clause.term = _str(s.clause.term).slice(0, 80);
+        }
+      }
     }
     return out;
   }).filter(Boolean);

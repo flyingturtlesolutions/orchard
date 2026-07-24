@@ -29,6 +29,24 @@ describe('workflowTier — stepTier (fail closed)', () => {
   });
 });
 
+describe('workflowTier — phase 2 extraction 1: the banked field read (v1717)', () => {
+  const bankedFieldRead = { text: 'read the instructions of each', via: { kind: 'fieldRead' }, clause: { kind: 'fieldRead', field: 'instructions' } };
+  const legacyFieldRead = { text: 'read the instructions of each', via: { kind: 'fieldRead' }, clause: { kind: 'fieldRead' } };
+  it('a banked fieldRead AFTER a ride is headless; before any ride (or unbanked) it is panel', () => {
+    assert.equal(stepTier(bankedFieldRead, { priorRead: true }), 'sw');
+    assert.equal(stepTier(bankedFieldRead, { priorRead: false }), 'panel', 'no rows to read — needs the panel');
+    assert.equal(stepTier(bankedFieldRead), 'panel', 'ctx-less default stays fail-closed');
+    assert.equal(stepTier(legacyFieldRead, { priorRead: true }), 'panel', 'a legacy pin banked no field phrase');
+  });
+  it('workflowTier orders the check: ride → fieldRead is sw; fieldRead → ride is panel; nav stocks nothing', () => {
+    assert.equal(workflowTier({ steps: [pinnedRide, bankedFieldRead] }), 'sw');
+    assert.equal(workflowTier({ steps: [nav, pinnedRide, bankedFieldRead] }), 'sw');
+    assert.equal(workflowTier({ steps: [bankedFieldRead, pinnedRide] }), 'panel', 'nothing read yet when it runs');
+    assert.equal(workflowTier({ steps: [nav, bankedFieldRead] }), 'panel', 'a nav produces no rows');
+    assert.equal(workflowTier({ steps: [pinnedRide, legacyFieldRead] }), 'panel');
+  });
+});
+
 describe('workflowTier — the whole workflow', () => {
   it("'sw' only when EVERY step is headless-safe", () => {
     assert.equal(workflowTier({ steps: [nav, pinnedRide] }), 'sw');

@@ -176,6 +176,26 @@ on a later seed save (DK-8 declares it disabled; the banner would simply re-offe
 for good, same as Remove. With this, CD-0 is fully closed; the remaining CD-1 consolidation (retiring the routine
 ALARM branch wholesale) waits until live routines have actually migrated.
 
+**Progress (v2.74.1717) — CD-1a PHASE 2, extraction 1 of 5: the headless FIELD READ.** A workflow like "read
+tickets → read the Instructions of each" is now tier-'sw'. The pieces (all tested; gate 3021/0):
+- `Core/headlessClause.js` — `runFieldReadStep`: the own-record subset of `_runFieldReadClause` over the chain
+  state's prior rows (resolveFieldKey → readFieldSection → fieldReadTally + PP-1 enriched-row threading). NO DOM/
+  LLM/IO. Fails honestly on drift/ambiguity/no-rows; the per-item DRILL (fields absent from fetched rows) stays
+  panel — that's IO + teach offers.
+- The PIN carries the resolution: the panel's fieldRead ranStep now banks `field`/`term` (chat.js:~7230) →
+  `pinnedClause` carries them (fieldRead pins only) → `_normSteps` whitelists them (survives edits). Schema NAMES
+  only — §11 body-blind holds.
+- `workflowTier` judges steps IN ORDER: a banked fieldRead is 'sw' only DOWNSTREAM of a value-producing ride (a
+  nav stocks nothing); legacy pins (no banked field) stay panel. Fail-closed throughout.
+- `rideStepResolvable` now MIRRORS `_wfReplayPlan`'s kind-only rule (a pin with no capabilityId has no leg to
+  drift — its own drift check runs at execution) — the two components previously disagreed about what "a
+  resolvable pin" is, the §9.4/#165-class divergence, caught during this build.
+- `cadence.js _runStep` dispatches by pin kind, and a ride READ threads `state.lastValue` so a following
+  fieldRead has rows.
+NEXT extractions (§11.3 order): `branch` (needs CLASSIFY_BRANCH_ITEMS — already a SW handler — but the branch
+STRUCTURE derivation is LLM-shaped), `map`, `case` (PIPELINE_* are SW handlers already), `write` (parks anyway —
+its headless form is "prepare the preview, park at the gate").
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK

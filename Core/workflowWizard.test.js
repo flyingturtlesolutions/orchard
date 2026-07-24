@@ -116,6 +116,14 @@ describe('workflowWizard — PP-0c: pinnedClause + replayPlan', () => {
     assert.equal(p.text, 'get ticket 5', 'the phrasing is still authoritative as the label');
   });
 
+  it('CD-1a phase 2 (v1717) — a fieldRead ranStep banks its resolved field (+ term) on the pin; names only, never values', () => {
+    const p = pinnedClause({ kind: 'fieldRead', capabilityId: null, field: 'Instructions', term: 'DEAKO' });
+    assert.equal(p.kind, 'fieldRead');
+    assert.equal(p.field, 'Instructions');
+    assert.equal(p.term, 'DEAKO');
+    assert.equal('field' in pinnedClause({ kind: 'connector', capabilityId: 'c1', field: 'x' }), false, 'field rides fieldRead pins only');
+    assert.equal('field' in pinnedClause({ kind: 'fieldRead' }), false, 'no resolved field → nothing banked (legacy shape)');
+  });
   it('a step that engaged NOTHING pins no clause — absence is legitimate, not a failure', () => {
     assert.equal(pinnedClause(null), null);
     assert.equal(pinnedClause({}), null);

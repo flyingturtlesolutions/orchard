@@ -41,6 +41,18 @@ describe('workflowMemory — normalizeWorkflow', () => {
     assert.deepEqual(w.steps[0].clause, { kind: 'connector', capabilityId: 'cap-1', groundId: 'g-1' });
     assert.equal('clause' in w.steps[1], false, 'a step with no resolution carries no clause');
   });
+  it('CD-1a phase 2 (v1717) — a fieldRead pin\'s field/term survive normalize (the closed-literal discipline)', () => {
+    const w = normalizeWorkflow(WF('a', ['read x', 'read the instructions of each'], {
+      steps: [
+        { text: 'read x', clause: { kind: 'connector', capabilityId: 'c1', groundId: 'g1' } },
+        { text: 'read the instructions of each', clause: { kind: 'fieldRead', field: 'Instructions', term: 'DEAKO' } },
+      ],
+    }));
+    assert.equal(w.steps[1].clause.field, 'Instructions');
+    assert.equal(w.steps[1].clause.term, 'DEAKO');
+    const again = normalizeWorkflow(w);   // an edit re-normalizes — the pin must survive the round trip
+    assert.equal(again.steps[1].clause.field, 'Instructions');
+  });
   it('a clause with neither kind nor capabilityId is dropped (junk in → nothing pinned)', () => {
     const w = normalizeWorkflow(WF('a', ['step one', 'step two'], { steps: [{ text: 'step one', clause: {} }, { text: 'step two' }] }));
     assert.equal('clause' in w.steps[0], false);

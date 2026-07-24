@@ -18,8 +18,11 @@
 
 const RIDE_KINDS = new Set(['connector', 'ride']);   // a curated/harvested ride leg — the API-less read/act class
 
-/** One step's tier. PURE. A pinned ride is 'sw'; a nav is 'sw'; everything else (incl. an unpinned ride) → 'panel'. */
-export function stepTier(step) {
+/**
+ * One step's tier. PURE. A pinned ride is 'sw'; a nav is 'sw'; a banked FIELD READ is 'sw' when a value-producing
+ * ride precedes it (phase 2 extraction 1, v1717 — `ctx.priorRead` says so); everything else → 'panel'.
+ */
+export function stepTier(step, { priorRead = false } = {}) {
   const s = (step && typeof step === 'object') ? step : {};
   const via = (s.via && typeof s.via === 'object') ? s.via : {};
   const kind = String(via.kind || '').trim();
@@ -30,18 +33,31 @@ export function stepTier(step) {
     const resolvable = c && typeof c === 'object' && (c.capabilityId || c.kind) && c.groundId;
     return resolvable ? 'sw' : 'panel';
   }
-  return 'panel';   // fail closed — any kind the phase-1 SW driver can't run demotes the whole workflow
+  // CD-1a phase 2, extraction 1 (v1717) — a fieldRead step runs headless (Core/headlessClause.runFieldReadStep)
+  // ONLY when (a) its pin BANKED the field phrase (a legacy pin needs the panel's interpreter) and (b) an earlier
+  // ride step produces the rows it reads (the own-record subset; the per-item DRILL stays panel). Fail closed.
+  if (kind === 'fieldRead') {
+    const c = s.clause;
+    return (priorRead && c && typeof c === 'object' && c.field) ? 'sw' : 'panel';
+  }
+  return 'panel';   // fail closed — any kind the SW driver can't run demotes the whole workflow
 }
 
 /**
  * The workflow's tier: 'sw' only when EVERY step is headless-safe, else 'panel'. PURE. An empty step list is
  * 'panel' — no proven provenance means no promise the SW can keep. One non-sw step demotes the whole run, because
  * a workflow that runs 3 of 5 steps headless and then needs the panel is a tier-'panel' workflow that lies.
+ * Steps are judged IN ORDER: a fieldRead is headless only downstream of a value-producing ride (nav produces none).
  */
 export function workflowTier(wf) {
   const steps = Array.isArray(wf && wf.steps) ? wf.steps : [];
   if (!steps.length) return 'panel';
-  for (const s of steps) if (stepTier(s) !== 'sw') return 'panel';
+  let priorRead = false;
+  for (const s of steps) {
+    if (stepTier(s, { priorRead }) !== 'sw') return 'panel';
+    const kind = String(((s && s.via) || {}).kind || '').trim();
+    if (RIDE_KINDS.has(kind)) priorRead = true;   // a ride READ stocks the chain state a fieldRead consumes
+  }
   return 'sw';
 }
 

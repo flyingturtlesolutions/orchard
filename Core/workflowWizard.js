@@ -109,6 +109,10 @@ export function pinnedClause(ranStep) {
     kind: kind || null,
     capabilityId: capabilityId || null,
     ...(r.groundId ? { groundId: _str(r.groundId) } : {}),
+    // CD-1a phase 2 (v1717) — a fieldRead pin banks the RESOLVED field phrase (+ optional term): schema NAMES,
+    // never values, so §11's body-blind rule holds. This is what lets the step run headless — run time re-resolves
+    // the phrase against the actual rows and stops honestly on drift/ambiguity (Core/headlessClause).
+    ...(kind === 'fieldRead' && _str(r.field) ? { field: _str(r.field).slice(0, 80), ...(_str(r.term) ? { term: _str(r.term).slice(0, 80) } : {}) } : {}),
   };
 }
 

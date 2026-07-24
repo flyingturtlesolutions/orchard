@@ -74,7 +74,9 @@ describe('rideStep — rideStepResolvable (the drift check)', () => {
     assert.equal(await rideStepResolvable(readClause, { readRecipes: recipesFor([]) }), false);       // gone
     assert.equal(await rideStepResolvable(readClause, { readRecipes: recipesFor([{ ...READ, enabled: false }]) }), false); // disabled
   });
-  it('a pinned step missing its ground/cap does not resolve', async () => {
-    assert.equal(await rideStepResolvable({ pinned: { kind: 'ride' } }, { readRecipes: recipesFor([READ]) }), false);
+  it('a KIND-ONLY pin (fieldRead/branch/map — no leg) resolves; a leg pin that lost its ground does not (v1717 — mirrors _wfReplayPlan)', async () => {
+    assert.equal(await rideStepResolvable({ pinned: { kind: 'fieldRead', field: 'instructions' } }, {}), true);
+    assert.equal(await rideStepResolvable({ pinned: { kind: 'ride' } }, { readRecipes: recipesFor([READ]) }), true, 'no capabilityId → nothing to drift');
+    assert.equal(await rideStepResolvable({ pinned: { kind: 'ride', capabilityId: 'cap-1' } }, { readRecipes: recipesFor([READ]) }), false, 'a leg pin without its ground IS drift');
   });
 });

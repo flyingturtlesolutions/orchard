@@ -7227,7 +7227,10 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           // drill/joinKey declaration (the v1635 rule, same reason).
           if (frr && frr.ok && Array.isArray(frr.rows) && frr.rows.length) {
             st.lastValue = frr.rows; st.lastReadoutIdx = st.readouts.length - 1;
-            st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fieldRead', clause: clause.text, intent: clause.text });
+            // CD-1a phase 2 (v1717) — bank the RESOLVED field (+ term) on the ranStep so pinnedClause carries it:
+            // that pin is what lets this step replay HEADLESS (Core/headlessClause re-resolves it against the
+            // actual rows at run time). Schema names only — the §11 body-blind rule holds.
+            st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fieldRead', clause: clause.text, intent: clause.text, field: (cr.fieldRead && cr.fieldRead.field) || '', term: (cr.fieldRead && cr.fieldRead.term) || '' });
             try { _orchLog(`FIELD_READ ▸ composed ${frr.rows.length} enriched row(s) → prior${frr.capped ? ' (CAPPED — a following clause sees only the rows actually read)' : ''}`); } catch { /* */ }
           }
           continue;

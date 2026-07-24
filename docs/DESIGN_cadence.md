@@ -455,7 +455,7 @@ connector`, plus two open-ended sources. `workflowTier` therefore FAILS CLOSED o
 | Phase | Scope | Effect |
 |---|---|---|
 | **1** | driver + SW reporter supporting `navigate` + PINNED `connector`/`ride` steps only (as built, `Core/workflowTier.js`) | all-legs workflows go headless; **the panel path is untouched** |
-| **2** | extract the clause runners one at a time — `fieldread` → `branch` → `map` → `case` → `write` | each extraction widens the tier-`'sw'` set |
+| **2** | extract the clause runners one at a time — `fieldread` **(✓ v1717 — `Core/headlessClause.runFieldReadStep`: the own-record subset; the per-item DRILL stays panel)** → `branch` → `map` → `case` → `write` | each extraction widens the tier-`'sw'` set |
 | — | tier-`'panel'` workflows | stay on the due-on-open model until their clauses land |
 
 The tier is also the honest label §7.3 demands: a tier-`'sw'` workflow says *"runs every 4h"*, a tier-`'panel'`
