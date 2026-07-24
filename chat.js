@@ -4681,24 +4681,30 @@ async function _openCaseFromLeg(msg, params = {}) {
   try { _orchLog(`CASE   ▸ leg open "${title.slice(0, 40)}" → ${res.opened ? 'opened' : 'already open'} (${res.id})`); } catch { /* */ }
 }
 
-async function _listCasesMsg(msg) {
+// PS-7 (v2.74.1769, §2.2) — the cases list is an OVERLAY surface; the LIST_CASES leg keeps its key, only the
+// run body changed from print-bubble to open-overlay (§2.2 RULING: routing unchanged).
+async function _listCasesMsg() {
+  const ov = openPanelOverlay({ id: 'cases', title: 'Open cases' });
+  if (!ov) return;
+  ov.body.textContent = 'Loading…';
   let r = null;
   try { r = await _orchReq('PIPELINE_CASES', {}); } catch { r = null; }
+  if (!ov.body.isConnected) return;
   const all = (r && r.success && Array.isArray(r.cases)) ? r.cases : [];
   const open = all.filter((c) => c && c.state === 'open');
+  ov.body.innerHTML = '';
+  const d = document.createElement('div');
   if (!open.length) {
-    _setMessageBody(msg, all.length ? 'No open cases — everything has been closed.' : 'No cases yet.', { markdown: true });
-    _orchFinalize(msg);
-    try { _orchLog(`CASE   ▸ leg list → 0 open of ${all.length}`); } catch { /* */ }
-    return;
+    d.innerHTML = renderMarkdown(all.length ? 'No open cases — everything has been closed.' : 'No cases yet.');
+  } else {
+    const lines = open.slice(0, 24).map((c) => {
+      const peek = casePeek(c);
+      return `- **${escHtml(_str0(c.label) || _str0(c.id))}** — ${escHtml(_str0(peek && peek.line) || 'open')}`;
+    });
+    const head = `${open.length} open case${open.length === 1 ? '' : 's'}${open.length > 24 ? ' (first 24)' : ''}`;
+    d.innerHTML = renderMarkdown([head, '', ...lines].join('\n'));
   }
-  const lines = open.slice(0, 24).map((c) => {
-    const peek = casePeek(c);
-    return `- **${escHtml(_str0(c.label) || _str0(c.id))}** — ${escHtml(_str0(peek && peek.line) || 'open')}`;
-  });
-  const head = `${open.length} open case${open.length === 1 ? '' : 's'}${open.length > 24 ? ' (first 24)' : ''}`;
-  _setMessageBody(msg, [head, '', ...lines].join('\n'), { markdown: true });
-  _orchFinalize(msg);
+  ov.body.appendChild(d);
   try { _orchLog(`CASE   ▸ leg list → ${open.length} open of ${all.length}`); } catch { /* */ }
 }
 
@@ -5552,10 +5558,20 @@ async function _showGroundedReadView() {
 // the row shows the honest state: the LEARNED idle window (from observed deaths — KA-0 samples every origin,
 // opted in or not), the ping cadence, the last ping, and futility ("pinging provably doesn't extend this site's
 // session — stopped"). The header states the consent gate: pings run only while YOU are actively using Chrome.
+// PS-7 (v2.74.1769, §2.2) — keep-alive is an OVERLAY surface; a toggle re-renders the body in place (the old
+// bubble re-rendered by remove-and-reprint into the thread).
 async function _showKeepAlive() {
-  const m = appendMessage({ role: 'assistant', body: '' });
-  const r = await _orchReq('VITALS_KEEPALIVE', { op: 'list' });
-  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t read keep-alive — ${_errWord(r && r.error)}.`); _orchFinalize(m); return; }
+  const ov = openPanelOverlay({ id: 'keepalive', title: 'Keep-alive' });
+  if (!ov) return;
+  ov.body.textContent = 'Loading…';
+  await _showKeepAliveBody(ov.body);
+}
+async function _showKeepAliveBody(body) {
+  let r = null;
+  try { r = await _orchReq('VITALS_KEEPALIVE', { op: 'list' }); } catch { /* */ }
+  if (!body.isConnected) return;
+  body.innerHTML = '';
+  if (!r || r.success === false) { body.textContent = `Couldn’t read keep-alive — ${_errWord(r && r.error)}.`; return; }
   const rows = Array.isArray(r.rows) ? r.rows : [];
   const _render = (rs) => {
     const hWord = (ms) => { const h = ms / 3600e3; return h >= 1 ? `~${Math.round(h * 10) / 10}h` : `~${Math.round(ms / 60e3)}m`; };
@@ -5573,16 +5589,17 @@ async function _showKeepAlive() {
       ...(lines.length ? lines : ['No connections yet — connect a site first.']),
     ].join('\n');
   };
-  _setMessageBody(m, _render(rows), { markdown: true });
-  const bar = _orchActionBar(m);
+  const md = document.createElement('div');
+  md.innerHTML = renderMarkdown(_render(rows));
+  body.appendChild(md);
+  const bar = document.createElement('div'); bar.className = 'wf-ov-actions';
   for (const row of rows.slice(0, 6)) {
     bar.appendChild(_mkBtn(`${row.on ? 'Stop' : 'Keep'} ${row.origin.replace(/^www\./, '')}`, async () => {
-      const r2 = await _orchReq('VITALS_KEEPALIVE', { op: 'set', origin: row.origin, on: !row.on });
-      try { bar.remove(); } catch { /* */ }
-      if (r2 && r2.success !== false) { try { m.remove(); } catch { /* */ } await _showKeepAlive(); }
+      try { await _orchReq('VITALS_KEEPALIVE', { op: 'set', origin: row.origin, on: !row.on }); } catch { /* */ }
+      void _showKeepAliveBody(body);   // the overlay re-render is one call — no remove-and-reprint
     }));
   }
-  _orchFinalize(m);
+  body.appendChild(bar);
 }
 function ageWordMs(ms) { const mn = Math.floor(ms / 60e3); if (mn < 1) return 'just now'; if (mn < 60) return `${mn}m ago`; const h = Math.floor(mn / 60); return h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`; }
 
@@ -6322,11 +6339,17 @@ function _wfCancel() {
 
 // admin tab (T4 verification). A session-ride write replays only once its per-store hash is banked — so this is how
 // you confirm "do it once by hand" worked before trying the write.
+// PS-7 (v2.74.1769, §2.2) — the ops checklist is an OVERLAY surface.
 async function _showRideOps() {
-  const m = appendMessage({ role: 'assistant', body: '' });
-  const r = await _orchReq('GET_RIDE_OPS', {});
-  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t check captured operations — ${_errWord(r && r.error)}.`); _orchFinalize(m); return; }
-  if (!r.tab) { _setMessageBody(m, 'No open Shopify admin tab to check — open your store admin (a `/store/…` page) and try again.', { markdown: true }); _orchFinalize(m); return; }
+  const ov = openPanelOverlay({ id: 'ride-ops', title: 'Write operations' });
+  if (!ov) return;
+  ov.body.textContent = 'Loading…';
+  const body = ov.body;
+  const show = (text) => { if (body.isConnected) { body.innerHTML = ''; const d = document.createElement('div'); d.innerHTML = renderMarkdown(text); body.appendChild(d); } };
+  let r = null;
+  try { r = await _orchReq('GET_RIDE_OPS', {}); } catch { /* */ }
+  if (!r || r.success === false) { show(`Couldn’t check captured operations — ${_errWord(r && r.error)}.`); return; }
+  if (!r.tab) { show('No open Shopify admin tab to check — open your store admin (a `/store/…` page) and try again.'); return; }
   const ops = Array.isArray(r.ops) ? r.ops : [];
   const wanted = Array.isArray(r.wanted) ? r.wanted : [];
   // LEG-2a (v2.74.1594) — the T4 CHECKLIST: wanted-vs-banked with per-op by-hand coaching (the viewer used to
@@ -6343,16 +6366,15 @@ async function _showRideOps() {
     const foot = missing.length
       ? `\n\nDo the missing one${missing.length === 1 ? '' : 's'} in any order with this tab open, then run \`ops\` again — when everything shows ✓, the write legs go live behind their confirms.`
       : '\n\nAll banked — the write legs are live (each still asks for your confirm before sending).';
-    _setMessageBody(m, `Write operations on **${r.origin}**:\n${lines.join('\n')}${foot}`, { markdown: true });
-    _orchFinalize(m); return;
+    show(`Write operations on **${r.origin}**:\n${lines.join('\n')}${foot}`);
+    return;
   }
   if (!ops.length) {
-    _setMessageBody(m, `No write operations captured yet on **${r.origin}**.\n\nPerform the action once **by hand** in the admin (e.g. **Customers → Add customer**, Save) with this tab open — the operation is captured, then it can replay. Run \`ops\` again to confirm.`, { markdown: true });
-    _orchFinalize(m); return;
+    show(`No write operations captured yet on **${r.origin}**.\n\nPerform the action once **by hand** in the admin (e.g. **Customers → Add customer**, Save) with this tab open — the operation is captured, then it can replay. Run \`ops\` again to confirm.`);
+    return;
   }
   const lines = ops.map((o) => `• **${o.name}** — \`${o.sha8}…\`${o.handle ? ` (store ${o.handle})` : ''} — ready to replay`);
-  _setMessageBody(m, `Captured write operations on **${r.origin}**:\n${lines.join('\n')}`, { markdown: true });
-  _orchFinalize(m);
+  show(`Captured write operations on **${r.origin}**:\n${lines.join('\n')}`);
 }
 
 // ─── OV (v2.74.1417, DESIGN_overview.md) — the OVERVIEW LEG WORKBENCH ────────────────────────────────────────────
@@ -6892,34 +6914,43 @@ async function _applySeedDirectives({ quiet = false, convId = null, instanceId =
 // DK-8 (v2.74.1491) — the desk's ROUTINE surface: review the declared routine (one per desk, v1), enable/disable
 // (enabling arms the clock — the HITL-at-declaration gate), run now, remove. The record is the mechanism; the seed
 // line stays the human-readable intent.
+// PS-7 (v2.74.1769, DESIGN_panel_surfaces.md §2.2) — the routine view is an OVERLAY surface (self-re-rendering).
 async function _renderRoutines() {
   const inst = _memoryId();
-  const msg = appendMessage({ role: 'assistant', body: '' });
-  if (!inst || !_currentConversationAppId) { _setMessageBody(msg, 'Open a view first — routines are per-view.'); _orchFinalize(msg); return; }
+  if (!inst || !_currentConversationAppId) { const msg = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(msg, 'Open a view first — routines are per-view.'); _orchFinalize(msg); return; }
+  const ov = openPanelOverlay({ id: 'routines', title: 'Routine' });
+  if (!ov) return;
+  ov.body.textContent = 'Loading…';
+  await _renderRoutinesBody(ov.body, inst);
+}
+async function _renderRoutinesBody(body, inst) {
   let r = null;
   try { r = await _orchReq('FLEET_ROUTINE', { instanceId: inst }); } catch { /* */ }
+  if (!body.isConnected) return;
   const rec = r && r.routine;
-  if (!rec) { _setMessageBody(msg, 'No routine declared. Declare one in the seed — e.g. `seed: … Daily routine: for each division, list new warranty tasks.` — then enable it here.', { markdown: true }); _orchFinalize(msg); return; }
+  body.innerHTML = '';
+  const md = document.createElement('div');
+  if (!rec) {
+    md.innerHTML = renderMarkdown('No routine declared. Declare one in the seed — e.g. `seed: … Daily routine: for each division, list new warranty tasks.` — then enable it here.');
+    body.appendChild(md);
+    return;
+  }
   const next = (rec.enabled && rec.nextAt) ? ` · next ${new Date(rec.nextAt).toLocaleString()}` : '';
-  _setMessageBody(msg, `**Routine** — every **${describeEvery(rec.minutes)}**: “${rec.ask}”\nStatus: **${rec.enabled ? 'on' : 'off'}**${rec.due ? ' · **due now**' : ''}${next}${rec.lastFiredAt ? ` · last ran ${new Date(rec.lastFiredAt).toLocaleString()}` : ''}`, { markdown: true });
-  const body = msg.querySelector('.message-content') || msg;
-  const bar = document.createElement('div'); bar.className = 'orch-action-bar';
+  md.innerHTML = renderMarkdown(`**Routine** — every **${describeEvery(rec.minutes)}**: “${rec.ask}”\nStatus: **${rec.enabled ? 'on' : 'off'}**${rec.due ? ' · **due now**' : ''}${next}${rec.lastFiredAt ? ` · last ran ${new Date(rec.lastFiredAt).toLocaleString()}` : ''}`);
+  body.appendChild(md);
+  const rerender = () => { void _renderRoutinesBody(body, inst); };
+  const bar = document.createElement('div'); bar.className = 'wf-ov-actions';
   bar.appendChild(_mkBtn(rec.enabled ? 'Turn off' : '✓ Enable', async () => {
-    bar.remove();
-    const er = await _orchReq('FLEET_ROUTINE', { instanceId: inst, enable: !rec.enabled, convId: _currentConversationId });
-    _orchFinalize(appendMessage({ role: 'assistant', body: (er && er.success !== false)
-      ? (!rec.enabled ? `Routine on — every ${describeEvery(rec.minutes)}. When it comes due it runs the next time this desk is open.` : 'Routine off.')
-      : 'Couldn’t change the routine.' }));
+    try { await _orchReq('FLEET_ROUTINE', { instanceId: inst, enable: !rec.enabled, convId: _currentConversationId }); } catch { /* */ }
+    rerender();
   }));
-  bar.appendChild(_mkBtn('Run now', () => { bar.remove(); void _fireRoutine(rec, { manual: true }); }));
-  bar.appendChild(_mkBtn('⤴ Rebuild as workflow', () => { bar.remove(); void _wfRebuildFromRoutine(rec, inst); }));   // §11.4 (v1716) — the user-mediated migration door, here too
+  bar.appendChild(_mkBtn('Run now', () => { releaseSurface('routines'); void _fireRoutine(rec, { manual: true }); }));   // §9 — run output is conversation
+  bar.appendChild(_mkBtn('⤴ Rebuild as workflow', () => { releaseSurface('routines'); void _wfRebuildFromRoutine(rec, inst); }));   // §11.4 (v1716) — the user-mediated migration door, here too
   bar.appendChild(_mkBtn('Remove', async () => {
-    bar.remove();
-    await _orchReq('FLEET_ROUTINE', { instanceId: inst, off: true });
-    _orchFinalize(appendMessage({ role: 'assistant', body: 'Routine removed. (The seed still declares it — a future seed save re-proposes it; edit the seed line to drop it for good.)' }));
+    try { await _orchReq('FLEET_ROUTINE', { instanceId: inst, off: true }); } catch { /* */ }
+    rerender();   // shows the no-routine text (the seed still declares it — a future seed save re-proposes)
   }));
   body.appendChild(bar);
-  _orchFinalize(msg);
 }
 
 // DK-8 — fire the routine: dispatch its ask through the NORMAL pipeline (exactly a typed ask — the starter path),
@@ -6945,15 +6976,20 @@ async function _maybeFireDueRoutine() {
 
 // FL-1e (v1352) — "show work": render the last run's step-by-step WORKING from the ledger (reads planned/run,
 // evidence requested and whether it was served, propose rounds, park). The audit answer to "why no proposals?".
+// PS-7 (v2.74.1769, §2.2) — the work trace is an OVERLAY surface (an audit view, never conversation).
 async function _renderWorkTraceMsg() {
   const inst = _memoryId();
-  const m = appendMessage({ role: 'assistant', body: '' });
-  if (!inst) { _setMessageBody(m, 'Open a view first — the work trace is per-view.'); _orchFinalize(m); return; }
+  if (!inst) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a view first — the work trace is per-view.'); _orchFinalize(m); return; }
+  const ov = openPanelOverlay({ id: 'work-trace', title: 'Work trace', titleMeta: '(last run)' });
+  if (!ov) return;
+  ov.body.textContent = 'Loading…';
   const { lines, runId } = renderWorkTrace(await loadLedger(inst));
-  if (!lines.length) { _setMessageBody(m, 'No traced runs yet — run `sweep` first.', { markdown: true }); _orchFinalize(m); return; }
-  _setMessageBody(m, [`**Work trace** (last run):`, '', ...lines.map((l) => `- ${l}`)].join('\n'), { markdown: true });
-  try { _orchLog(`SHOW ▸ work trace — ${lines.length} step(s) (${runId})`); } catch { /* */ }
-  _orchFinalize(m);
+  if (!ov.body.isConnected) return;
+  ov.body.innerHTML = '';
+  const d = document.createElement('div');
+  d.innerHTML = renderMarkdown(lines.length ? lines.map((l) => `- ${l}`).join('\n') : 'No traced runs yet — run `sweep` first.');
+  ov.body.appendChild(d);
+  try { if (lines.length) _orchLog(`SHOW ▸ work trace — ${lines.length} step(s) (${runId})`); } catch { /* */ }
 }
 
 // v1348 — `go to origin`: focus (or open) the app's connected site itself — the app-level "take me there".
@@ -9314,7 +9350,7 @@ const IL_PANEL_LEGS = {
   // — the point of this change — by the step DECOMPOSER, which reads the same catalog); the clause is how it runs
   // over N rows.
   OPEN_CASE:                { run: async (msg, { params } = {}) => { await _openCaseFromLeg(msg, params || {}); return { rendered: true }; } },
-  LIST_CASES:               { run: async (msg) => { await _listCasesMsg(msg); return { rendered: true }; } },
+  LIST_CASES:               { run: async (msg) => { try { msg.remove(); } catch { /* */ } await _listCasesMsg(); return { rendered: true }; } },   // PS-7 — opens the overlay
   CLOSE_CASE:               { run: async (msg, { params } = {}) => { await _closeCaseFromLeg(msg, params || {}); return { rendered: true }; } },
   // CD-2 (DESIGN_cadence.md §3.2) — "show my workflows" / "what runs automatically" → the manage view (run · schedule
   // · delete per row). The leg renders its own bubbles, so it swallows msg (rendered:true) like the case legs.
