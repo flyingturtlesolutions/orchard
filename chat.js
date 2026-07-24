@@ -149,12 +149,14 @@ async function _ensureOverviewConversation() {
 // v2.74.1574 — the desk carries its ROLE as a CV-2 persona seed (live: "what can you do?" in the desk answered
 // with the ACTIVE TAB's palette — the desk didn't know it was the operator console). Healed onto existing
 // installs via patchMeta (the desk may already exist seedless).
-const _ADMIN_SEED = 'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.';
+const _ADMIN_SEED = 'You are the Admin view — Orchard’s own operator console (not a website view). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.';
 // Prior revisions of OUR seed text — heal-eligible (a seed matching one upgrades to the current text; anything
 // else is user-edited and is never touched). v1575's empty-only guard couldn't ship seed-text improvements.
+// v1733 — the pre-rename "Admin desk" revision joins the list so the desk→view vocabulary heals stored seeds too.
 const _ADMIN_SEED_PRIOR = [
   'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities.',
   'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.',
+  'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.',
 ];
 async function _ensureAdminConversation() {
   let conv = null;
@@ -894,7 +896,7 @@ function _historyAdminRow(row) {
   const chevron = row.hasChildren
     ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
     : '';
-  const subtaskBtn = `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
+  const subtaskBtn = `<button class="rail-item-subtask" title="Open a detail"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
   el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}${chevron}${subtaskBtn}`;
   void (async () => {   // the attention badge — one cheap storage read; green = nothing
     try {
@@ -919,7 +921,7 @@ function _historyAdminRow(row) {
     if (e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask')) return;
     _closeRail(); void _openAdminDesk();
   });
-  _wireRowKeyboard(el, () => el.click(), 'Admin desk — Orchard health');   // a11y (v1343 pattern)
+  _wireRowKeyboard(el, () => el.click(), 'Admin view — Orchard health');   // a11y (v1343 pattern)
   return el;
 }
 
@@ -929,7 +931,7 @@ function _historyNewAppRow() {
   el.className = 'rail-item rail-new-app';
   el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">＋</span>view</div>`;   // v2.74.1517 — "＋ desk" (the gallery's constructor card owns "New desk…")
   el.addEventListener('click', () => { _closeRail(); _renderAppGallery(); });
-  _wireRowKeyboard(el, () => el.click(), 'New desk');   // v1343 (a11y)
+  _wireRowKeyboard(el, () => el.click(), 'New view');   // v1343 (a11y)
   return el;
 }
 
@@ -939,11 +941,11 @@ function _historyNewAppRow() {
 function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
   const isDev = conv.kind === 'dev';
   const badge = isDev ? (conv.surface === 'high' ? '<span class="rail-item-badge design">design</span>' : '<span class="rail-item-badge">dev</span>')
-                      : (row.role === 'subtask' ? '<span class="rail-item-badge app">case</span>' : '<span class="rail-item-badge app">desk</span>');   // Case rename (v1492) — a spawned child badges as a CASE
+                      : (row.role === 'subtask' ? '<span class="rail-item-badge app">detail</span>' : '<span class="rail-item-badge app">view</span>');   // Case rename (v1492) — a spawned child badges as a CASE
   // FL-6c (v2.74.1357) — the pending-proposals chip: a sweep with results lights the APP row (children share the
   // instance, so only the app row carries it). `pending` is a derived count (number), never untrusted text.
   const pendingChip = (row.role === 'app' && pending > 0)
-    ? `<span class="rail-item-badge pending" title="${pending} proposal${pending === 1 ? '' : 's'} awaiting review — open the desk and say pending">⏳ ${pending}</span>`
+    ? `<span class="rail-item-badge pending" title="${pending} proposal${pending === 1 ? '' : 's'} awaiting review — open the view and say pending">⏳ ${pending}</span>`
     : '';
   const item = document.createElement('div');
   item.className = ['rail-item', row.active ? 'active' : '', isDev ? 'dev' : 'app',
@@ -965,7 +967,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
       </button>` : '';
   // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
   const subtaskBtn = row.role === 'app'
-    ? `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
+    ? `<button class="rail-item-subtask" title="Open a detail"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
     : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
@@ -1494,12 +1496,12 @@ async function renderSuggestionCards() {
     container.appendChild(card);
   };
   for (const d of desks.slice(0, asks.length ? 2 : 3)) {
-    mkCard(d.title || 'Desk', `${d.pinned ? 'pinned · ' : ''}${relTime(d.updatedAt)}`, () => { void _openConvFullTimeline(d); });
+    mkCard(d.title || 'View', `${d.pinned ? 'pinned · ' : ''}${relTime(d.updatedAt)}`, () => { void _openConvFullTimeline(d); });
   }
   for (const a of asks) {
     mkCard(`“${a.ask}”`, `tested${a.host ? ` · ${a.host}` : ''}`, () => { input.value = a.ask; void sendChatMessage(); });
   }
-  mkCard('＋ New desk', 'set up a role on its sites', () => { _renderAppGallery(); });
+  mkCard('＋ New view', 'set up a role on its sites', () => { _renderAppGallery(); });
 }
 
 function focusForAssistant(cap) {
@@ -1622,22 +1624,22 @@ async function _spawnSubTask(appConvId) {
       await ConversationStore.create({ title: `Ops case #${n}`, kind: 'agent', seed: app.seed || _ADMIN_SEED, parentId: ADMIN_ID });
       _expandedApps.add(ADMIN_ID);
       await _revealRail();
-    } catch (e) { try { console.warn('[chat] ops-case spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the case.', 'err'); }
+    } catch (e) { try { console.warn('[chat] ops-case spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the detail.', 'err'); }
     return;
   }
-  if (!app || !app.appId || app.parentId) { toast('Cases open under a desk.', 'err'); return; }
+  if (!app || !app.appId || app.parentId) { toast('Details open under a view.', 'err'); return; }
   let n = 1; let titles = new Set();
   try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === appConvId); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
   const base = app.title || 'Task';
   while (titles.has(`${base} #${n}`)) n++;     // a deletion can leave a gap — bump past any taken number
   const title = `${base} #${n}`;
   const spec = subTaskFromApp(app, '');        // blank sub-seed → the child inherits the app's seed (composeSeed)
-  if (!spec) { toast('Cases open under a desk.', 'err'); return; }
+  if (!spec) { toast('Details open under a view.', 'err'); return; }
   try {
     await ConversationStore.create({ title: title.slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
     _expandedApps.add(app.id);
     await _revealRail();   // v2.74.1249 — open the drawer (if closed) so the new sub-conversation is visible
-  } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the case.', 'err'); }
+  } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the detail.', 'err'); }
 }
 
 // CV-5 (v2.74.1173, DESIGN_conversations.md §9) — the user app catalog: user-authored AppDefinitions persisted in
@@ -1834,7 +1836,7 @@ async function _seedInstanceMemory(instanceId, presetId) {
 // CV-4 — the shared fan-out parent guard: the CURRENT conversation must be a real APP (not a sub-task / Overview /
 // non-app), since children nest ONE level under an app. Returns {app} or {error:<message>}. (One store load.)
 async function _fanoutParentApp() {
-  if (!_currentConversationId) return { error: 'Open a desk first — cases open under a desk.' };
+  if (!_currentConversationId) return { error: 'Open a view first — details open under a view.' };
   let app = null;
   try { app = await ConversationStore.load(_currentConversationId); } catch { /* */ }
   if (!app || !app.appId || app.parentId) {
