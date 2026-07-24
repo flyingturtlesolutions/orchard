@@ -1738,6 +1738,14 @@ textarea {
    attention signal lives HERE, on the app's own card — never on the extension-icon badge (app-blind, owned
    by other features). */
 .rail-item-badge.pending { margin-left: var(--sp-2); margin-right: 0; }
+/* PS-6 (v2.74.1768, DESIGN_panel_surfaces.md §7) — the parked-run badge: a DOOR to the approve strip. */
+.rail-item-badge.parked {
+  margin-left: var(--sp-2);
+  margin-right: 0;
+  cursor: pointer;
+  border-color: color-mix(in srgb, var(--c-warn, #b58a2a) 45%, var(--c-border-soft));
+}
+.rail-item-badge.parked:hover { color: var(--c-accent); }
 
 /* v1373 — a superseded action bar (an older proposals batch / feedback bar) reads as dead, not just unclickable. */
 .orch-actions.stale { opacity: 0.45; }

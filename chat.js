@@ -768,6 +768,17 @@ async function _renderRailListNow() {
   let _pendingByInst = {};
   try { _pendingByInst = await pendingCounts(all.filter((c) => c && c.kind !== 'dev' && c.instanceId).map((c) => c.instanceId)); } catch { /* */ }
 
+  // PS-6 (v2.74.1768, DESIGN_panel_surfaces.md §7) — PARKED-run counts per desk: the Rail badge is the calm
+  // notification channel (the thread nudge is retired — a transient bubble in a conversation the run doesn't
+  // belong to was the wrong surface). One cross-desk fetch, grouped by the workflow's OWN appId.
+  const _parkedByInst = {};
+  try {
+    const r = await _orchReq('WORKFLOW_PARKED', {});
+    for (const p of ((r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [])) {
+      if (p && p.appId) _parkedByInst[p.appId] = (_parkedByInst[p.appId] || 0) + 1;
+    }
+  } catch { /* badge-only — never blocks the Rail */ }
+
   // FL-6d (v2.74.1361) — next-sweep countdown per app card: ONE alarms.getAll(), keyed back to instances by the
   // alarm name. The alarm's scheduledTime is the ground truth (never derived from createdAt + periods).
   const _nextSweepByInst = {};
@@ -792,7 +803,7 @@ async function _renderRailListNow() {
     if (row.role === 'admin') { container.appendChild(_historyAdminRow(row)); continue; }   // VT-2 (v2.74.1573) — the reserved vitals fixture
     if (row.role === 'new-app') { container.appendChild(_historyNewAppRow()); continue; }
     const conv = byId.get(row.id);
-    if (conv) container.appendChild(_historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0));
+    if (conv) container.appendChild(_historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_parkedByInst[conv.instanceId] || 0) : 0));
   }
 
   // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
@@ -805,7 +816,7 @@ async function _renderRailListNow() {
 }
 
 // v2.74.1223 (message-input redesign) — a row's own action buttons; their handlers run instead of select/open.
-const _isRowActionTarget = (e) => !!(e.target.closest('.rail-item-delete') || e.target.closest('.rail-item-preview') || e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask') || e.target.closest('.rail-item-wf'));
+const _isRowActionTarget = (e) => !!(e.target.closest('.rail-item-delete') || e.target.closest('.rail-item-preview') || e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask') || e.target.closest('.rail-item-wf') || e.target.closest('.rail-item-badge.parked'));
 
 // v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
 // stays open as a live multi-conversation surface (its row highlights `active`, the input now routes here, and a reply
@@ -943,7 +954,7 @@ function _historyNewAppRow() {
 // CV-3c — a conversation row (app | sub-task | plain). Reuses the dev/app badge + preview/delete/run-status from the
 // pre-accordion list; ADDS an absolutely-positioned expand chevron (apps with children) + a leaf glyph (sub-tasks).
 // No indentation — depth is conveyed by glyph + chevron + weight, per §7. `row` carries the accordion flags.
-function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
+function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   const isDev = conv.kind === 'dev';
   const badge = isDev ? (conv.surface === 'high' ? '<span class="rail-item-badge design">design</span>' : '<span class="rail-item-badge">dev</span>')
                       : (row.role === 'subtask' ? '<span class="rail-item-badge app">case</span>' : '<span class="rail-item-badge app">view</span>');   // Case rename (v1492) — a spawned child badges as a CASE
@@ -951,6 +962,11 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
   // instance, so only the app row carries it). `pending` is a derived count (number), never untrusted text.
   const pendingChip = (row.role === 'app' && pending > 0)
     ? `<span class="rail-item-badge pending" title="${pending} proposal${pending === 1 ? '' : 's'} awaiting review — open the view and say pending">⏳ ${pending}</span>`
+    : '';
+  // PS-6 (v2.74.1768, §7) — the parked-run badge: a scheduled run stopped at a write; click opens the desk's
+  // workflows overlay (where the approve/cancel strip lives). The calm channel — no thread bubble.
+  const parkedChip = (row.role === 'app' && parkedN > 0)
+    ? `<span class="rail-item-badge parked" role="button" tabindex="0" title="${parkedN} scheduled run${parkedN === 1 ? '' : 's'} stopped at a write — click to review">✋ ${parkedN}</span>`
     : '';
   const item = document.createElement('div');
   item.className = ['rail-item', row.active ? 'active' : '', isDev ? 'dev' : 'app',
@@ -987,7 +1003,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
     ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>`
     : '';
   item.innerHTML = `
-      <div class="rail-item-title">${leaf}${badge}${escHtml(conv.title)}${pendingChip}</div>
+      <div class="rail-item-title">${leaf}${badge}${escHtml(conv.title)}${pendingChip}${parkedChip}</div>
       ${summaryLine}
       <div class="rail-item-meta">${relTime(conv.updatedAt)}</div>
       ${row.role === 'app' && nextSweep > 0 ? '<span class="rail-item-timer" title="Next sweep"></span>' : ''}
@@ -1015,12 +1031,14 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
   });
 
   // PS-3 — the workflows glyph: switch to this desk if needed (rehydrate owns _memoryId), then open the overlay.
-  item.querySelector('.rail-item-wf')?.addEventListener('click', async (e) => {
-    e.stopPropagation();
+  const _openDeskWorkflows = async () => {
     if (conv.id !== _currentConversationId) await _openConvFullTimeline(conv);
     else _closeRail();
     void _renderWorkflows();
-  });
+  };
+  item.querySelector('.rail-item-wf')?.addEventListener('click', (e) => { e.stopPropagation(); void _openDeskWorkflows(); });
+  // PS-6 — the parked badge is a DOOR to the approve strip, not just a count.
+  item.querySelector('.rail-item-badge.parked')?.addEventListener('click', (e) => { e.stopPropagation(); void _openDeskWorkflows(); });
 
   // v2.74.1223 (message-input redesign) — SINGLE-click SELECTS this conversation as the message-input target and KEEPS
   // the drawer open (the drawer is a live multi-conversation surface; a reply refreshes this row's peek). DOUBLE-click
@@ -13656,27 +13674,15 @@ try {
     else if (_currentConversationId === OVERVIEW_ID) void _maybeRenderConnCard();
   });
 } catch { /* */ }
-// CD-7 (§8) — a scheduled run PARKED at a write while the panel is open: a transient nudge (the vitals status-nudge
-// precedent — never persisted) so the user learns a write is waiting without hunting for it. Review opens the
-// cross-desk parked list (Approve & continue / Cancel run). A closed panel misses this and finds it in the
-// manage-view parked banner. Guarded so it never appends into a dev conversation.
+// CD-7 (§8) / PS-6 (v2.74.1768, DESIGN_panel_surfaces.md §7) — a scheduled run PARKED at a write: the THREAD
+// NUDGE is retired (a transient bubble in whatever conversation happened to be open was the wrong surface —
+// §7's channel table sends state to persistent indicators). The signal now lands as the Rail parked badge
+// (✋ n, a door to the approve strip) — refresh the Rail so it appears without a reopen. The workflows-overlay
+// banner (PS-2) is the acting surface either way.
 try {
   chrome.runtime.onMessage.addListener((m) => {
     if (!m || m.type !== 'WORKFLOW_PARKED_CHANGED') return;
-    if (_currentConversationKind === 'dev' || !_currentConversationId) return;
-    // Never append over a non-thread surface (the wizard page / desk landing) — that flips the surface and is the
-    // §6.4 page-slot trap. If the thread isn't the active view, the manage-view parked banner is the fallback.
-    if (_wfActive() || _wfIntentPending) return;
-    try { if (!$('messages') || $('messages').classList.contains('hidden')) return; } catch { return; }
-    const nm = m.name ? `“${escHtml(String(m.name))}”` : 'A scheduled workflow';
-    const el = appendMessage({ role: 'assistant', body: '' });
-    try { delete el.dataset.messageId; } catch { /* transient — a status nudge, not transcript history */ }
-    _setMessageBody(el, `⚠ ${nm} ran on schedule and stopped at a write that needs your approval.`, { markdown: true });
-    const bar = _orchActionBar(el);
-    bar.appendChild(_mkBtn('Review', () => {
-      try { bar.remove(); el.remove(); } catch { /* */ }
-      void _renderWorkflows();   // PS-2 — the parked strip lives at the top of the workflows overlay now
-    }));
+    void _renderRailList();
   });
 } catch { /* */ }
 // VT-2b — one reconcile at boot: incidents opened while the panel was closed still mint their cases.
