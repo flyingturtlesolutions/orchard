@@ -1967,12 +1967,16 @@ textarea {
 .rail-item:hover .rail-item-subtask { opacity: 1; }
 .rail-item-subtask:hover { background: var(--c-bg); color: var(--c-accent); }
 
-/* PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the per-app WORKFLOWS door; sits left of the "+" in the
-   bottom-right cluster, same hover-reveal idiom. */
+/* PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the per-app WORKFLOWS door; same hover-reveal idiom.
+   v2.74.1773 (live report: it sat ON the collapse-cases chevron — right:34px is the chevron's slot, and its
+   width varies with the case count so no fixed bottom-row offset is safe): the glyph takes the vertically-
+   centered slot the dev rows give .rail-item-preview (right sp-2+24) — preview is dev-only, this glyph is
+   app-only, so the slot is never contested. The bottom cluster stays chevron + "+". */
 .rail-item-wf {
   position: absolute;
-  bottom: var(--sp-2);
-  right: calc(var(--sp-2) + 26px);
+  top: 50%;
+  transform: translateY(-50%);
+  right: calc(var(--sp-2) + 24px);
   width: 22px;
   height: 22px;
   border-radius: var(--r-sm);
