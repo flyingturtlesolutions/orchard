@@ -1825,7 +1825,29 @@ textarea {
   max-height: 1000px;
   opacity: 1;
 }
-@media (prefers-reduced-motion: reduce) { .rail-group-cases { transition: none; } }
+/* v2.74.1775 (user directive) — SLIDE-OUT reveal / slide-in hide: each case row slides out from under its
+   desk row (translateX) as the group opens, with a light stagger on the first few; the hide runs all rows
+   back together (delays live only on the open-state selectors). */
+.rail-group-cases .rail-item {
+  transform: translateX(-14px);
+  opacity: 0;
+  transition: transform var(--t-med) ease, opacity var(--t-med) ease;
+}
+.rail-group.pinned .rail-group-cases .rail-item,
+.rail-group.peek .rail-group-cases .rail-item {
+  transform: translateX(0);
+  opacity: 1;
+}
+.rail-group.pinned .rail-group-cases .rail-item:nth-child(2),
+.rail-group.peek .rail-group-cases .rail-item:nth-child(2) { transition-delay: 40ms; }
+.rail-group.pinned .rail-group-cases .rail-item:nth-child(3),
+.rail-group.peek .rail-group-cases .rail-item:nth-child(3) { transition-delay: 80ms; }
+.rail-group.pinned .rail-group-cases .rail-item:nth-child(n+4),
+.rail-group.peek .rail-group-cases .rail-item:nth-child(n+4) { transition-delay: 120ms; }
+@media (prefers-reduced-motion: reduce) {
+  .rail-group-cases,
+  .rail-group-cases .rail-item { transition: none; }
+}
 
 .rail-list {
   flex: 1;
