@@ -152,6 +152,20 @@ remains NOT done — note the migration as specced ("a 1-step workflow") conflic
 ≥2-subAsks floor; resolving that (relax the floor vs. keep routines separate) is a design decision, not a
 mechanical port.
 
+**Progress (v2.74.1715) — the spec-consistency review's 15 findings, ALL APPLIED.** Code: (a) `normalizeTrigger`
+is now genuinely polymorphic — an unknown `kind` passes through UNTOUCHED and every cadence-mechanics helper
+treats it as inert (the pre-1715 normalizer coerced any kind to 'cadence' / dropped minutes-less triggers — the
+future `kind:'event'` would have been silently rewritten on the next edit); (b) `describeRun` renders BOTH §7.3
+stamps ("due 09:00 · ran 14:32"); (c) the scanner's check 4 now also tests desk LIVENESS (ConversationStore.list
+keys, fail-safe on read failure) and check 5's overlap-skip WRITES HISTORY (verdict 'running'); (d) the park
+marker carries `chainState` and resume passes it back; (e) `Core/rideStep.invokeRideRecipe` is the ONE
+resolve→plan→invoke and vitals' `_runCanary` now rides it (§12 "share the runner" — the first mechanism merge);
+(f) the LAUNCH workflow card now honors §5 — body opens run HISTORY, run is an explicit ▶ chip (`.wf-card` /
+`.wf-card-run` in chat.css). Docs: the spec's status line, §2.2/§4.2 counts (measured 62), §6.3 entry shape
+(+`ranAt`/`coalesced`, verdict-vocabulary correction), §8 as-built resume path, §10 marked FIXED, §11.3 enum
+correction, §11.4 migration RULING (user-mediated rebuild — no silent conversion, no relaxed ≥2 floor), §13
+reporter bullet resolved; CLAUDE.md's `_DECISION_RE` pointer refreshed.
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK
@@ -180,8 +194,9 @@ mechanical port.
 2. **`＋ Workflow` disappears after the first save.** `Core/deskLanding.js:65` guards it with `!cards.length`.
    There is no on-surface way to create a second workflow today. This is not a nice-to-have entry point — it is a
    dead end, and it is why CD-2 ranks where it does.
-3. **The driver extraction is ~78 reporter calls, not 723.** §4.2. The chat.js-wide figure quoted in earlier
-   drafts of the spec overstated it by an order of magnitude.
+3. **The driver extraction is ~62 reporter calls (measured v2.74.1715), not 723.** §4.2. The chat.js-wide figure
+   quoted in earlier drafts overstated it by an order of magnitude — and the per-clause counts DRIFT as the
+   runners evolve (v1690 said 78 while its own table summed 74; v1715 measures 62). Re-measure before phase 2.
 4. **`background/handlers/*.test.js` is not in the test glob.** All decision logic must live in `Core/` or it
    cannot be tested at all. §3.1.
 5. **`.rail` is already a full-surface overlay with a transform transition.** The spec's claim that the motion is
@@ -361,6 +376,10 @@ async function _runMapClause      (msg, map,{ tabId, priorValue, priorLeg, goal 
 The extraction is mechanical: **replace `msg` with `report`.**
 
 ### 4.2 The real size
+
+**(v1715 — these tables are v1690 measurements and have DRIFTED: the category total said 78 while the per-clause
+column summed 74, and a fresh v1715 measurement over the moved runners counts 62 across ~990 lines. Treat the
+DISPOSITION columns as the durable content; re-measure the counts before phase 2.)**
 
 Across all five clause runners (1,142 lines):
 
@@ -546,8 +565,11 @@ Two invariants to preserve in the replacement:
 - `fleet.js:517` — *"enabled NEVER auto-flips on a re-declare — the user's arm/disarm survives seed edits"*
 - `fleet.js:566` — *"disabled records never fire (a stale alarm self-noops)"*
 
-Migration (CD-0): each `fleetRoutine:{instanceId}` record `{minutes, ask, source, enabled, declaredAt, due,
-lastFiredAt, convId}` becomes one trigger on a 1-step workflow, so everything is workflowId-keyed.
+Migration (CD-0): ~~each `fleetRoutine:{instanceId}` record becomes one trigger on a 1-step workflow~~ —
+**SUPERSEDED (v1715, spec §11.4 ruling):** a 1-step workflow is impossible (`normalizeWorkflow` rejects <2
+sub-asks — the record would be silently dropped by the store it migrates into). Migration is USER-MEDIATED: offer
+a surviving routine through the intent-first door ("rebuild this as a workflow?"), decompose its ask to ≥2 proven
+steps, arm the trigger at save, and retire the routine record when its workflow saves.
 
 ### 5.8 `Core/pipelineRun.js` — reuse, do not reinvent
 

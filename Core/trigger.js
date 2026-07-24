@@ -32,6 +32,14 @@ function clampMinutes(n) {
 export function normalizeTrigger(raw) {
   const t = (raw && typeof raw === 'object') ? raw : null;
   if (!t) return undefined;
+  // §13 (v2.74.1715) — `kind` is POLYMORPHIC: only 'cadence' is specified, and an UNKNOWN kind passes through
+  // UNTOUCHED (shallow copy). The pre-1715 normalizer force-rewrote every kind to 'cadence' and dropped any
+  // minutes-less trigger — so a future `kind:'event'` record would have been silently coerced-or-dropped on the
+  // next edit: recurring bug-class #3 (the closed whitelist) applied to a VALUE. We cannot normalize a shape
+  // that isn't specified yet; preserving it verbatim is the only non-lossy move. The cadence-mechanics helpers
+  // below (isDue / coalescedCount / advance / recordFailure) treat a non-cadence trigger as INERT.
+  const kind = String(t.kind == null ? '' : t.kind).trim() || 'cadence';
+  if (kind !== 'cadence') return { ...t, kind };
   const minutes = clampMinutes(t.minutes);
   if (minutes == null) return undefined;
   return {
@@ -52,10 +60,13 @@ export function armTrigger(minutes, now = 0) {
   return { kind: 'cadence', minutes: m, enabled: true, nextDue: base + m * MS_PER_MIN, lastFiredAt: 0, failures: 0 };
 }
 
-/** Is this trigger due to fire at `now`? PURE — the scanner's check 2+3 (§2.1). Disabled / unarmed → never. */
+/** Is a normalized trigger the cadence kind (the only kind this module's mechanics can evaluate)? PURE. */
+const _isCadence = (t) => !!(t && t.kind === 'cadence');
+
+/** Is this trigger due to fire at `now`? PURE — the scanner's check 2+3 (§2.1). Disabled / unarmed / non-cadence → never. */
 export function isDue(trigger, now = 0) {
   const t = normalizeTrigger(trigger);
-  return !!(t && t.enabled && t.nextDue > 0 && Number.isFinite(now) && t.nextDue <= now);
+  return !!(_isCadence(t) && t.enabled && t.nextDue > 0 && Number.isFinite(now) && t.nextDue <= now);
 }
 
 /**
@@ -65,7 +76,7 @@ export function isDue(trigger, now = 0) {
  */
 export function coalescedCount(trigger, now = 0) {
   const t = normalizeTrigger(trigger);
-  if (!t || !t.enabled || t.nextDue <= 0 || !Number.isFinite(now) || now < t.nextDue) return 0;
+  if (!_isCadence(t) || !t.enabled || t.nextDue <= 0 || !Number.isFinite(now) || now < t.nextDue) return 0;
   return 1 + Math.floor((now - t.nextDue) / (t.minutes * MS_PER_MIN));
 }
 
@@ -84,6 +95,7 @@ function _nextDueAfter(t, base) {
 export function advanceTrigger(trigger, now = 0) {
   const t = normalizeTrigger(trigger);
   if (!t) return undefined;
+  if (!_isCadence(t)) return t;   // cadence mechanics don't apply to a shape we haven't specified — pass through
   const base = Number.isFinite(now) ? now : 0;
   return { ...t, nextDue: _nextDueAfter(t, base), lastFiredAt: base, failures: 0 };
 }
@@ -96,6 +108,7 @@ export function advanceTrigger(trigger, now = 0) {
 export function recordFailure(trigger, { max = MAX_FAILURES, now = 0 } = {}) {
   const t = normalizeTrigger(trigger);
   if (!t) return undefined;
+  if (!_isCadence(t)) return t;   // pass through — see advanceTrigger
   const base = Number.isFinite(now) ? now : 0;
   const failures = t.failures + 1;
   const disarmed = failures >= max;
@@ -117,6 +130,7 @@ export function setEnabled(trigger, enabled, now = 0) {
   const t = normalizeTrigger(trigger);
   if (!t) return undefined;
   if (!enabled) return { ...t, enabled: false };
+  if (!_isCadence(t)) return { ...t, enabled: true };   // the arm bit is universal; the nextDue anchor is cadence-only
   const base = Number.isFinite(now) ? now : 0;
   return { ...t, enabled: true, failures: 0, nextDue: base + t.minutes * MS_PER_MIN };
 }
@@ -137,7 +151,7 @@ export function describeMinutes(minutes) {
  */
 export function describeTrigger(trigger, { tier = 'panel' } = {}) {
   const t = normalizeTrigger(trigger);
-  if (!t) return '';
+  if (!t || !_isCadence(t)) return '';   // an unspecified kind has no honest label yet
   const every = describeMinutes(t.minutes);
   if (!t.enabled) return `paused (every ${every})`;
   return tier === 'sw' ? `runs every ${every}` : `due every ${every}`;

@@ -6052,7 +6052,7 @@ async function _wfDoSave() {
   // page over an empty thread and the confirmation would land in a hidden surface.
   const done = appendMessage({ role: 'assistant', body: '' });
   const _sched = payload.trigger ? ` It’s set to run every ${_cadenceLabel(payload.trigger.minutes)} — change or remove that from its edit icon.` : '';
-  _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now, click it to run.${_sched}` : 'Couldn’t save the workflow — try again.', { markdown: true });
+  _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now: ▶ runs it, the card opens its run history.${_sched}` : 'Couldn’t save the workflow — try again.', { markdown: true });
   _orchFinalize(done);
   // v2.74.1619 — the wizard's save is TRACE-VISIBLE (gl 194814: the whole wizard arc left zero log evidence — steps
   // never echo, runs are transient; the durable record deserves one line. WORKFLOW ▸ is already in _DECISION_RE.)
@@ -7661,7 +7661,9 @@ async function _renderWorkflowRuns(wf) {
   // newest first; each row is RUN-level (§6.3) — time · auto/manual · counts · verdict (parked → "waiting on you").
   // describeRun output is enum/number/time only (no free text), so it is safe raw; only the wf name/notice are
   // user/system values → escHtml them (the established markdown-interp pattern; renderMarkdown parses the result).
-  const lines = items.slice().reverse().map((e) => `- ${describeRun(e, _histClock(e.ranAt || e.at))}`);
+  // §7.3 (v1715) — both stamps when they differ: the entry stores ranAt ONLY when it != at, so its presence IS the
+  // "ran late" signal; describeRun renders "due 09:00 · ran 14:32".
+  const lines = items.slice().reverse().map((e) => `- ${describeRun(e, _histClock(e.ranAt || e.at), e.ranAt ? _histClock(e.at) : '')}`);
   const head = `**Run history** — “${escHtml(wf.name || wf.ask)}”${sched ? ` _(${sched})_` : ''}`;
   const notice = runs.notice ? `\n\n_${escHtml(runs.notice)}_` : '';
   _setMessageBody(m, `${head}\n\n${lines.join('\n')}${notice}`, { markdown: true });
@@ -12767,20 +12769,42 @@ async function _renderDeskLanding(conv) {
       const grid = document.createElement('div');
       grid.className = 'desk-landing-cards';
       for (const c of spec.cards) {
-        const b = document.createElement('button');
-        b.className = 'suggestion-card';
-        b.innerHTML = `<div class="suggestion-card-name">${c.kind === 'workflow' ? '▶ ' : ''}${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
-        b.addEventListener('click', async () => {
-          _dismissDeskLanding();   // v1609 — acting from the page BEGINS the conversation; the page leaves (fill+send kinds also hit the send-entry dismiss)
-          if (c.kind === 'workflow') {
-            const wf = c.wf || {};
+        // DESIGN_cadence.md §5 (v2.74.1715) — the WORKFLOW card: run is an ICON, not the card body. "Once a
+        // workflow can fire on a clock, an accidental manual run is a more expensive misclick than an accidental
+        // open" — that clause is live since v1692, so the body now opens the RUN HISTORY (§6) and only the ▶ chip
+        // runs. Non-workflow cards (command / ＋ workflow) keep run-on-click — they're deterministic doors.
+        if (c.kind === 'workflow') {
+          const wf = c.wf || {};
+          const d = document.createElement('div');
+          d.className = 'suggestion-card wf-card';
+          d.innerHTML = `<div class="suggestion-card-name">${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
+          const runBtn = document.createElement('button');
+          runBtn.className = 'wf-card-run';
+          runBtn.type = 'button';
+          runBtn.title = 'Run this workflow';
+          runBtn.textContent = '▶';
+          runBtn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();   // the body's history-open must not also fire
+            runBtn.disabled = true;   // the v1343 double-click rule
+            _dismissDeskLanding();
             const tab = await _orchActiveTab();
             bumpWorkflowRun(wf.appId || _memoryId(), wf.id).catch(() => {});
             const _p3 = _wfReplayPlan(wf);
             const _m3 = appendMessage({ role: 'assistant', body: '' });
             if (!_p3.runnable) { _wfReplayStopped(_m3, wf, _p3); return; }
             _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask });
-          } else if (c.kind === 'new-workflow') {
+          });
+          d.appendChild(runBtn);
+          d.addEventListener('click', () => { _dismissDeskLanding(); void _renderWorkflowRuns(wf); });   // §5 — body → history
+          grid.appendChild(d);
+          continue;
+        }
+        const b = document.createElement('button');
+        b.className = 'suggestion-card';
+        b.innerHTML = `<div class="suggestion-card-name">${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
+        b.addEventListener('click', async () => {
+          _dismissDeskLanding();   // v1609 — acting from the page BEGINS the conversation; the page leaves (fill+send kinds also hit the send-entry dismiss)
+          if (c.kind === 'new-workflow') {
             _promptWorkflowIntent();   // CD-3 (v2.74.1697) — the ＋ Workflow card goes INTENT-FIRST (describe → draft → wizard); "build step by step instead" reaches the blank wizard
           } else if (c.kind === 'command' && c.command === 'check-now') {
             const mm = appendMessage({ role: 'assistant', body: '' });

@@ -40,9 +40,11 @@ describe('rideStep — runRideStep', () => {
     assert.deepEqual(r.value, [1, 2, 3]);
     assert.equal(sawPayload.endpoint, '/api/tickets', 'the INVOKE_SESSION payload carried the recipe endpoint');
   });
-  it('an invoke failure surfaces as ok:false + error', async () => {
-    const r = await runRideStep(readClause, { readRecipes: recipesFor([READ]), invoke: async () => ({ success: false, error: 'http-500' }) });
-    assert.deepEqual(r, { ok: false, error: 'http-500' });
+  it('an invoke failure surfaces as ok:false + error (+ status when the reply carried one)', async () => {
+    const r = await runRideStep(readClause, { readRecipes: recipesFor([READ]), invoke: async () => ({ success: false, error: 'http-500', status: 500 }) });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'http-500');
+    assert.equal(r.status, 500);
   });
   it('a WRITE parks when the gate says park (SW), never invoking', async () => {
     let invoked = false;

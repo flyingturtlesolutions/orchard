@@ -13,6 +13,7 @@
 // rides; a write reached unattended PARKS (§8), because writePolicy has no 'auto' and nobody is watching.
 
 import { Logger } from '../../Core/Logger.js';
+import { ConversationStore } from '../../Services/ConversationStore.js';   // §2.1 check 4 (v1715) — desk LIVENESS, not just the orphan stamp
 import { listAllWorkflows, updateWorkflow } from '../../Services/Storage/WorkflowStore.js';
 import { appendRunEntry } from '../../Services/Storage/WorkflowRunStore.js';
 import { normalizeWorkflow } from '../../Core/workflowMemory.js';
@@ -88,6 +89,18 @@ async function _tick() {
   let groups = [];
   try { groups = await listAllWorkflows(); } catch { groups = []; }
   const now = Date.now();
+  // §2.1 check 4 (v1715) — "the owning desk still EXISTS", not just "was stamped orphaned": a desk deleted by any
+  // path that never stamped (pre-1640 legacy) was invisible to the stamp-only check. Build the live-key set once
+  // per tick — a workflow bank key that matches NO conversation's id/instanceId/appId has no desk. FAIL-SAFE: if
+  // the list read fails or comes back empty, skip the liveness check entirely (never disarm on missing evidence).
+  let liveKeys = null;
+  try {
+    const convs = await ConversationStore.list();
+    if (Array.isArray(convs) && convs.length) {
+      liveKeys = new Set();
+      for (const c of convs) for (const k of [c && c.id, c && c.instanceId, c && c.appId]) if (k) liveKeys.add(k);
+    }
+  } catch { liveKeys = null; }
   let scanned = 0, fired = 0, deferred = 0, parked = 0, disarmed = 0, inflight = 0, failedFire = 0;
 
   for (const g of (Array.isArray(groups) ? groups : [])) {
@@ -102,16 +115,24 @@ async function _tick() {
 
       // check 4 — the owning desk still exists. A workflow survives desk deletion stamped `orphanedFrom` (§9);
       // an orphaned trigger auto-disarms and writes history, because a person will later ask why it stopped.
-      if (raw && raw.orphanedFrom) {
-        await _autoDisarm(appId, wf, 'the owning desk was deleted', now);
+      // v1715 — the stamp OR live-key liveness (§2.1's actual wording): either signal disarms.
+      if ((raw && raw.orphanedFrom) || (liveKeys && !liveKeys.has(appId))) {
+        await _autoDisarm(appId, wf, (raw && raw.orphanedFrom) ? 'the owning desk was deleted' : 'the owning desk no longer exists', now);
         disarmed++;
         continue;
       }
 
       // check 5 — no run already in flight (§7.2 overlap: two concurrent runs corrupt each other's DOM waits).
+      // v1715 — a skip WRITES HISTORY (§2.1: "a row that fails 4 or 5 writes history, because a person will later
+      // ask why it stopped"). Verdict 'running' is the honest one — a run IS in flight; at most ~1 entry per
+      // overlap window (the in-flight marker is judged dead after 5 min, so this can't spam).
       const marker = await _readRunMarker(wf.id);
       const verdict = priorRunVerdict(marker, now);
-      if (verdict.inFlight) { inflight++; continue; }
+      if (verdict.inFlight) {
+        try { await appendRunEntry(wf.id, { at: trig.nextDue || now, ranAt: now, trigger: 'auto', verdict: 'running', why: 'skipped — a run was already in flight (overlap)' }); } catch { /* */ }
+        inflight++;
+        continue;
+      }
       if (verdict.died && marker) {
         // a mid-flight SW/browser death ran no catch — report it, then proceed.
         Logger.info('cadence', `CADENCE ▸ prior run of "${wf.name || wf.id}" died mid-flight (run ${marker.runId}) — proceeding`);
@@ -147,8 +168,9 @@ async function _tick() {
 }
 
 // ── the fire: resolve → drive → write history → advance/record (§5.5 "go through the normal executor") ────────────
-// `reporter`/`startIndex` are the CD-7 resume seam: a resume passes a makeResumeReporter() + the parked stepIndex.
-async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', reporter = null, startIndex = 0 } = {}) {
+// `reporter`/`startIndex`/`state` are the CD-7 resume seam: a resume passes a makeResumeReporter() + the parked
+// stepIndex + the parked chainState (§8's record — prior steps' values must survive the park for a later write).
+async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', reporter = null, startIndex = 0, state = null } = {}) {
   const runId = mintRunId({ now, rand: (now % 997) / 997 });   // deterministic-ish entropy (Math.random is banned in Core; fine here)
   await _stampRunMarker(wf.id, runId, now);
   const rep = reporter || makeAccumulatorReporter();
@@ -164,6 +186,7 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
         clauses: plan.clauses,
         reporter: rep,
         startIndex: Math.max(0, Number(startIndex) || 0),
+        state,
         runStep: (clause, cctx) => _runStep(clause, { ...cctx, runId, wf }),
       });
     }
@@ -197,6 +220,9 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
       await chrome.storage.local.set({ [PARK_PREFIX + parkedRunId]: {
         runId: parkedRunId, workflowId: wf.id, appId, name: wf.name || wf.ask || wf.id,
         stepIndex: out.parkedAt, at: now, preview: (snap.preview && typeof snap.preview === 'object') ? snap.preview : null,
+        // §8 (v1715) — the chainState rides the park record: phase-1 ride steps thread no state yet, but the
+        // moment a write's params come from a prior step's read, losing this would resume the write blind.
+        chainState: (out.state && typeof out.state === 'object' && Object.keys(out.state).length) ? out.state : null,
       } });
     } catch { /* */ }
     // Tell an OPEN panel a run is waiting on a human — a scheduled run that stopped silently is worse than useless
@@ -352,7 +378,8 @@ export function createCadenceHandlers() {
           await _clearParked(runId);   // this park is consumed; a re-park mints a fresh marker
           Logger.info('cadence', `TRIGGER ▸ resume "${wf.name || wf.id}" from step ${(marker.stepIndex || 0) + 1} (approved write, run ${runId})`);
           const res = await _fire(appId || marker.appId, wf, wf.trigger || normalizeTrigger({ minutes: 60 }),
-            { now: Date.now(), coalesced: 1, trigger: 'manual', reporter: makeResumeReporter(), startIndex: Number(marker.stepIndex) || 0 });
+            { now: Date.now(), coalesced: 1, trigger: 'manual', reporter: makeResumeReporter(), startIndex: Number(marker.stepIndex) || 0,
+              state: (marker.chainState && typeof marker.chainState === 'object') ? marker.chainState : null });   // §8 (v1715) — resume with the parked chainState
           sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'resume-failed' }); }
       })();

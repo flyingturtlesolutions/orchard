@@ -20,8 +20,7 @@ import { buildAdminDashboardSpec, buildDeskDashboardSpec, buildFrontDashboardSpe
 import { tickOk, tickRouteMiss } from '../../Core/routeHeal.js';
 import { heartbeatTargets } from '../../Core/connectionPresence.js';
 import { armable } from '../../Core/rideRecipe.js';
-import { recipeToLeg } from '../../Core/connectorLeg.js';
-import { planExec } from '../../Core/execPlan.js';
+import { invokeRideRecipe } from '../../Core/rideStep.js';   // DESIGN_cadence.md §12 (v1715) — share the RUNNER: one resolve→plan→invoke for the canary AND the workflow step
 
 const TICK_ALARM = 'vitals:tick';
 const CONFIRM_PREFIX = 'vitals:confirm:';
@@ -316,12 +315,12 @@ async function _hostHasTab(host) {
 // The result VALUE is discarded here (spec §6: the sweep wants the verdict, never the data).
 async function _runCanary(groundId, rec) {
   try {
-    const leg = recipeToLeg({ ...rec, groundId }, { account: 'me', trusted: true });
-    if (!leg || !leg.tool) return null;
-    const plan = planExec(leg, {}, {});
-    if (!plan || plan.ok === false || plan.channel !== 'INVOKE_SESSION') return null;
-    const r = await _ctx.invokeSgHandler('INVOKE_SESSION', plan.payload);
-    return r ? { success: r.success !== false, error: r.error || null, status: r.status || null } : null;
+    // §12 (v1715) — the canary rides the SHARED runner (Core/rideStep.invokeRideRecipe), not its own copy of
+    // recipeToLeg→planExec→INVOKE_SESSION. Contract preserved: unresolvable (no leg / no plan) → null, exactly
+    // as before; an invoke reply maps to the {success, error, status} shape the sweep callers read.
+    const r = await invokeRideRecipe(rec, groundId, { invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', payload) });
+    if (r.error === 'no-leg' || r.error === 'no-plan') return null;
+    return { success: r.ok, error: r.ok ? null : (r.error || null), status: r.status || null };
   } catch { return null; }
 }
 

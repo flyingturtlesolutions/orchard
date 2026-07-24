@@ -49,6 +49,11 @@ describe('runHistory — rendering', () => {
     assert.equal(describeRunCounts({ items: 1 }), '1 item');
     assert.equal(describeRunCounts(null), '');
   });
+  it('describeRun shows BOTH stamps when due ≠ ran (§7.3 — the surface must not claim more than it delivers)', () => {
+    assert.match(describeRun({ trigger: 'auto', verdict: 'complete' }, '14:32', '09:00'), /^due 09:00 · ran 14:32 · auto/);
+    assert.match(describeRun({ trigger: 'auto', verdict: 'complete' }, '09:00', '09:00'), /^09:00 · auto/, 'same stamp → one clock');
+    assert.match(describeRun({ trigger: 'manual', verdict: 'complete' }, '09:00'), /^09:00 · manual/, 'no dueClock → unchanged');
+  });
   it('describeRun leads with the clock + auto/manual and flags parked', () => {
     assert.equal(describeRun({ trigger: 'auto', counts: { items: 22, matched: 6, parked: 2 }, verdict: 'partial' }, '09:00'),
       '09:00 · auto · 22 items · 6 matched · 2 parked → partial');

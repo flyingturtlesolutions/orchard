@@ -1,6 +1,8 @@
 # DESIGN — Cadence (time-triggered workflows)
 
-**Status:** specced 2026-07-22, nothing built. Supersedes `DESIGN_workflow_wizard.md` §4.1/§4.4 (see §1.2).
+**Status:** specced 2026-07-22; **build in progress since v2.74.1691** — CD-0/1/1a-step/2/3/4/5/6.6/7 landed (see
+`HANDOFF_cadence.md`'s progress notes for exactly what is built, deviated, or deferred; the §10 live bugs are all
+FIXED). Supersedes `DESIGN_workflow_wizard.md` §4.1/§4.4 (see §1.2).
 
 **Thesis:** a cadence is not a thing. It is a **field on a workflow** that says when the workflow runs by itself.
 Everything else this document specifies is the workflow surface growing up to carry that field honestly — always
@@ -99,8 +101,10 @@ as though it were a limit.** It is not. The evidence is already in the tree:
   chat.js `_runFleetSweep` … candidate for a shared Core sweep-driver with **injected IO** once both are proven."*
 
 So what actually blocks it is **coupling, not capability**: the chain runner and every clause runner take a `msg`
-DOM element and write into it. The honest size is **78 reporter calls across the five clause runners** (1,142
-lines) — not the ~723 chat.js-wide figure an earlier draft quoted, which overstated it by an order of magnitude.
+DOM element and write into it. The honest size is **~62 reporter calls across the five clause runners** (~990
+lines, measured v2.74.1715) — not the ~723 chat.js-wide figure an earlier draft quoted, which overstated it by an
+order of magnitude. (Two earlier stale counts are recorded here deliberately: a draft said 78 while its own
+per-clause table summed 74 — the count DRIFTS as the runners evolve, so re-measure before starting phase 2.)
 `_orchLog` (52 more) is already host-agnostic, routing through `_orchReq('ORCH_LOG')`. Per-clause sizing and the
 full disposition table are in `docs/HANDOFF_cadence.md` §4.2.
 
@@ -249,12 +253,16 @@ shape (`DESIGN_peritem_pipeline.md` §9.3: *"real state in an owned store"*) min
 One entry per run:
 
 ```
-{ at, trigger: 'auto' | 'manual', verdict, counts, parkedRunId?, why? }
+{ at, ranAt?, trigger: 'auto' | 'manual', verdict, counts, parkedRunId?, why?, coalesced? }
 ```
 
 - `trigger` is the auto-vs-manual stamp, and it is the discriminator the whole surface exists to show.
-- `verdict` reuses `Core/pipelineRun.js`'s run verdict — which already exists and is **unused on every scheduled
-  path today**. That is most of "auditable history" already built.
+- `ranAt` (present when it differs from `at`) is §7.3's second stamp — `due 09:00 · ran 14:32`; `coalesced`
+  (present when >1) is §7.2's *"3 due-times collapsed"* record. **(v1715 — an earlier shape omitted both fields
+  its own §7.2/§7.3 rulings mandate; the shape above matches `Core/runHistory.js` as built.)**
+- `verdict` uses `Core/pipelineRun.js`'s verdict VOCABULARY plus the two states only a scheduled run reaches
+  (`parked`, `disarmed`). *(v1715 correction: the driver computes its own verdict — it is chain-shaped, not
+  item-shaped, so literally calling `runVerdict` was never possible; "reuse the vocabulary, not the function".)*
 - `parkedRunId` points at the case (§8) when a run stopped for a human.
 
 **Row granularity is RUN-level** (`09:00 · auto · 22 items · 6 matched · 2 parked`). Per-item detail already lives
@@ -324,10 +332,15 @@ workflow containing a write therefore cannot complete unattended, by constructio
 this design does not touch it.
 
 So a triggered run that reaches a write step **parks**: persist `{runId, workflowId, stepIndex, chainState,
-writePreview}` and surface it as a CASE on the workflow's own desk (`wfp_<runId>`, the VT-2b incident-case
-pattern), with the write preview and `Approve & continue` / `Cancel run`. Approve resumes through
-`_orchRunChain({startIndex, state})` — both parameters already exist. This is `DESIGN_workflow_wizard.md` §4.3,
-retained verbatim; it is the one part of RT that survives intact.
+writePreview}` and surface it with the write preview and `Approve & continue` / `Cancel run`. This is
+`DESIGN_workflow_wizard.md` §4.3, retained; it is the one part of RT that survives intact.
+
+**As built (v1695–1715):** the park record is the `cadence:parked:<runId>` marker (chainState included, v1715),
+and Approve resumes through the SW driver — `_fire({reporter: makeResumeReporter(), startIndex, state})` — not
+`_orchRunChain`: a parked SCHEDULED run resumes on the executor that parked it (§2.2), with the resume reporter
+approving exactly the one write the human saw and re-parking at any later one. The `wfp_<runId>` desk-CASE surface
+(the VT-2b pattern) remains owed — parked runs currently surface as manage-view bubbles + a live panel nudge
+(`WORKFLOW_PARKED_CHANGED`); see HANDOFF "deliberately NOT built" for why the Rail case waits on a live harness.
 
 The history entry for that run reads **parked**, with `parkedRunId` pointing at the case. Distinguishing *ran
 clean* from *ran and is waiting on you* is the single most important thing the history surface says.
@@ -350,6 +363,9 @@ record to strand.
 ---
 
 ## 10. Live bugs this depends on or found in passing
+
+**ALL FOUR ARE FIXED** — 1 at v2.74.1713 (desk delete clears the fleet clocks + the routine listener self-heals),
+2/3/4 at v2.74.1691. Kept as written below for the reasoning; do NOT re-diagnose them from this list.
 
 1. **Orphaned fleet alarms (blocks nothing, but fix with §2).** The desk-delete path clears no alarm and no
    schedule record. `fleet-routine:{instanceId}` fires forever after its desk is deleted, rewriting `due:true`
@@ -431,12 +447,14 @@ wrong.
 
 ### 11.3 CD-1a is TIERED, not a big bang
 
-`stepProvenance` already records `via.kind` as `'ride' | 'drive' | 'navigate' | 'fanout' | <capability>`, so
-`workflowTier()` is computable from data that exists today.
+`stepProvenance` records `via.kind`, so `workflowTier()` is computable from data that exists today. **(v1715
+correction — the enum this paragraph used to quote (`'ride'|'drive'|…`) came from a stale in-code comment;
+HANDOFF §4.5 has the literal set actually pushed: `navigate / fanout / fieldRead / write / case / branch / map /
+connector`, plus two open-ended sources. `workflowTier` therefore FAILS CLOSED on anything unrecognized.)**
 
 | Phase | Scope | Effect |
 |---|---|---|
-| **1** | driver + SW reporter supporting `act`/`ride` steps only | all-legs workflows go headless; **the panel path is untouched** |
+| **1** | driver + SW reporter supporting `navigate` + PINNED `connector`/`ride` steps only (as built, `Core/workflowTier.js`) | all-legs workflows go headless; **the panel path is untouched** |
 | **2** | extract the clause runners one at a time — `fieldread` → `branch` → `map` → `case` → `write` | each extraction widens the tier-`'sw'` set |
 | — | tier-`'panel'` workflows | stay on the due-on-open model until their clauses land |
 
@@ -458,10 +476,16 @@ CD-2 entry points · CD-3 intent-first · CD-4 card icons     (independent, any 
 CD-6 overlay  →  CD-7 parked writes  →  CD-8 policies
 ```
 
-- **CD-0** — the trigger field + migration (existing `fleetRoutine` records become one trigger each, bound to a
-  1-step workflow so everything is workflowId-keyed).
+- **CD-0** — the trigger field + migration. **(v1715 correction — the original migration ruling, "each
+  `fleetRoutine` record becomes one trigger on a 1-step workflow", is IMPOSSIBLE as written: `normalizeWorkflow`
+  rejects <2 sub-asks, so the migrated record would be silently dropped by the very store it migrates into —
+  the closed-whitelist class, §10.4, applied to the migration itself. RULING: migration is USER-MEDIATED, not
+  silent — a surviving `fleetRoutine` record is offered through the intent-first door ("rebuild this as a
+  workflow?"), which decomposes its ask to ≥2 proven steps and arms the trigger at save; the routine record
+  retires when its workflow saves. No silent conversion, no relaxed workflow floor.)**
 - **CD-1** — one clock owner: the scanner (§2), replacing per-desk alarm registration. Retires the fleet routine
-  alarm and its orphan class. *Ship before anything user-visible — it is the actual bug fix.*
+  alarm and its orphan class. *Ship before anything user-visible — it is the actual bug fix.* **(Orphan class
+  retired v1713 — delete-path clears + listener self-heal; the alarm-system consolidation awaits the migration.)**
 - **CD-1a** — the driver extraction (§2.2, §11.2, §11.3), phase 1.
 - **CD-5** — the history store (§6.3), written by manual and triggered runs alike; `pipelineRun` verdict reused.
 - **CD-2** — entry points: the Rail glyph (§3.1) + `OPEN_WORKFLOWS` (§3.2).
@@ -503,9 +527,9 @@ overlay MOTION is not new — `.rail` already carries it; see §6.2.)
    Same class as the `patchMeta` bug in §10.3, and the reason CD-0 is a two-line change in two places rather than
    one.
 2. `patchMeta` drops `resolvedAt` (§10.3) — CD-5's sidecar clone inherits it. Fix before CD-5, not after.
-3. The true size of CD-1a is **78 reporter calls across the five clause runners**, not the ~723 chat.js-wide
-   figure (see `docs/HANDOFF_cadence.md` §4.2 for the per-clause table). **Phase 1 touches only those on the
-   `act`/`ride` path** — that is the whole reason for tiering.
+3. The true size of CD-1a is **~62 reporter calls across the five clause runners** (measured v1715 — the count
+   drifts; re-measure), not the ~723 chat.js-wide figure (see `docs/HANDOFF_cadence.md` §4.2). **Phase 1 touches
+   only the pinned-ride/nav path** — that is the whole reason for tiering. Also fixed §10.2 first (done, v1691).
 4. SW eviction: phase-1 runs are short (the fleet sweep does 121 invokes in ~17s). Long tier-`'sw'` runs need the
    CD-7 checkpoint — which is why parked writes and resumability are one primitive, built once.
 
@@ -602,9 +626,10 @@ buildable only after CD-1a phase 1, and 12.4 is its first slice. Recorded so the
   event CONDITION looks like and how it is evaluated. There is a fair chance it resolves to "check on a clock, run
   only if X" — which is a cadence with a predicate rather than a second mechanism — and inventing the shape before
   a real case would be guessing.
-- **What the reporter interface looks like in detail** (§2.2). The two implementations and the boundary are ruled;
-  the method set is a build-time decision, and pinning it here would be specifying an interface with no second
-  caller to check it against.
+- ~~**What the reporter interface looks like in detail** (§2.2).~~ **Resolved — no longer open.** §11.2 pins the
+  five-method set, and the build confirmed it against three real implementations (`Core/runDriver.js`: the
+  normalizer, the SW accumulator, and the CD-7 resume reporter). This bullet predates the §11 rewrite and stood
+  in contradiction with it (caught in the v1715 consistency review).
 - **A cross-desk roster.** Rejected: §3's entry points make every desk's workflows one click away, and §9 removes
   the orphaning that motivated a global list. Revisit only if a real user with many desks reports that per-desk is
   not enough.

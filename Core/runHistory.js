@@ -77,10 +77,16 @@ export function describeRunCounts(counts) {
   return bits.join(' · ');
 }
 
-/** The one-line run row (§6.3). "09:00 · auto · <counts> → verdict". `clock` is the caller's formatted time. PURE. */
-export function describeRun(entry, clock = '') {
+/**
+ * The one-line run row (§6.3). "09:00 · auto · <counts> → verdict". `clock` is the caller's formatted ran-time;
+ * `dueClock` (§7.3, v1715) is the formatted DUE-time when it differs — the row then leads "due 09:00 · ran 14:32",
+ * the honesty stamp §7.3 mandates (a schedule whose first lesson is that it does not keep its word is worse than
+ * no schedule). PURE.
+ */
+export function describeRun(entry, clock = '', dueClock = '') {
   const e = (entry && typeof entry === 'object') ? entry : {};
-  const bits = [_str(clock), e.trigger || 'manual'];
+  const when = (_str(dueClock) && _str(dueClock) !== _str(clock)) ? `due ${_str(dueClock)} · ran ${_str(clock)}` : _str(clock);
+  const bits = [when, e.trigger || 'manual'];
   const counts = describeRunCounts(e.counts);
   if (counts) bits.push(counts);
   if (e.coalesced) bits.push(`${e.coalesced} due-times collapsed`);

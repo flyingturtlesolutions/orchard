@@ -75,6 +75,17 @@ export async function runRideStep(clause, { readRecipes, invoke, reporter = null
     if (decision !== true) return { park: true, parkedRunId: runId };
   }
 
+  return invokeRideRecipe(rec, groundId, { invoke });
+}
+
+/**
+ * §12 (v1715) — the ONE resolve→plan→invoke: recipe → leg (recipeToLeg) → plan (planExec, INVOKE_SESSION only) →
+ * the injected invoke. Both runRideStep AND the vitals canary ride THIS, so the runner exists once — §12.1's
+ * recurring-bug argument ("every time this codebase has held two of something that should be one, a defect lived
+ * in the gap") applied to the runner itself.
+ * @returns {Promise<{ok:boolean, value?:*, error?:string, status?:number|null}>}
+ */
+export async function invokeRideRecipe(rec, groundId, { invoke } = {}) {
   const leg = recipeToLeg({ ...rec, groundId }, { account: 'me', trusted: true });
   if (!leg || !leg.tool) return { ok: false, error: 'no-leg' };
   const plan = planExec(leg, {}, {});
@@ -82,5 +93,6 @@ export async function runRideStep(clause, { readRecipes, invoke, reporter = null
   let r = null;
   try { r = (typeof invoke === 'function') ? await invoke(plan.payload) : null; } catch (e) { return { ok: false, error: (e && e.message) || 'invoke-threw' }; }
   const ok = !!(r && r.success !== false);
-  return ok ? { ok: true, value: (r && r.value) } : { ok: false, error: (r && r.error) || 'invoke-failed' };
+  return ok ? { ok: true, value: (r && r.value), status: (r && r.status) || null }
+            : { ok: false, error: (r && r.error) || 'invoke-failed', status: (r && r.status) || null };
 }

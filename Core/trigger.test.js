@@ -17,10 +17,26 @@ describe('trigger — normalizeTrigger', () => {
     assert.equal(normalizeTrigger({ minutes: 0 }), undefined);
     assert.equal(normalizeTrigger({ minutes: 'soon' }), undefined);
   });
-  it('clamps minutes to [5, 1440] and fixes kind to cadence', () => {
+  it('clamps minutes to [5, 1440]; a missing kind defaults to cadence', () => {
     assert.equal(normalizeTrigger({ minutes: 1 }).minutes, TRIGGER_LIMITS.MIN_MINUTES);   // floored to 5
     assert.equal(normalizeTrigger({ minutes: 99999 }).minutes, TRIGGER_LIMITS.MAX_MINUTES); // capped to 1440
-    assert.equal(normalizeTrigger({ minutes: 240, kind: 'event' }).kind, 'cadence');       // only cadence today
+    assert.equal(normalizeTrigger({ minutes: 240 }).kind, 'cadence');
+  });
+  // §13 (v1715) — kind is POLYMORPHIC: an UNKNOWN kind passes through UNTOUCHED (the pre-1715 normalizer coerced
+  // every kind to 'cadence' and dropped minutes-less triggers — a future kind:'event' would have been silently
+  // rewritten or lost on the next edit: bug-class #3, the closed whitelist, applied to a VALUE).
+  it('an unknown kind passes through untouched, and the cadence mechanics treat it as inert', () => {
+    const ev = { kind: 'event', condition: 'new warranty task', enabled: true };
+    const t = normalizeTrigger(ev);
+    assert.equal(t.kind, 'event');
+    assert.equal(t.condition, 'new warranty task', 'unspecified fields survive');
+    assert.equal(isDue(t, 1e15), false, 'the cadence scanner never fires an event trigger');
+    assert.equal(coalescedCount(t, 1e15), 0);
+    assert.deepEqual(advanceTrigger(t, 1000), t, 'cadence mechanics pass an unknown kind through');
+    assert.deepEqual(recordFailure(t, { now: 1000 }), t);
+    assert.equal(disarm(t).enabled, false, 'the arm bit is universal');
+    assert.equal(setEnabled(t, true).enabled, true);
+    assert.equal(describeTrigger(t), '', 'no honest label for an unspecified shape');
   });
   it('defaults enabled/nextDue/lastFiredAt/failures and drops negatives', () => {
     const t = normalizeTrigger({ minutes: 240 });

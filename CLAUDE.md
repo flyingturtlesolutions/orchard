@@ -21,7 +21,7 @@ Three failure *families* below have each been re-diagnosed from scratch several 
 ## 1. New decision marker → add it to `_DECISION_RE`
 **Trigger:** you add or rename a decision-worthy log marker (anything a `-decisions-` download should surface — `ROUTE ▸`, `ORCH_MATCH`, `WALK ▸`, `RICH_INTENTS ▸`, `INTENT_MENU ▸`, `ACCEPT_SG_TRIAL`, `INTERACTION_OUTCOMES ▸`, etc.).
 
-**Rule:** add the new marker to `_DECISION_RE` (`studio.js:5888`). The decisions-view filter is an explicit allow-list — a marker absent from it is **structurally invisible** to a `gl -decisions-` download, so the feature it's meant to verify can only be confirmed from a FULL trace.
+**Rule:** add the new marker to `_DECISION_RE` (`studio.js:6208` as of v1715 — grep for it, the line drifts). The decisions-view filter is an explicit allow-list — a marker absent from it is **structurally invisible** to a `gl -decisions-` download, so the feature it's meant to verify can only be confirmed from a FULL trace.
 
 **Why this keeps biting (the "#165 lesson"):** missed at v2.74.818 (`MERGE_GROUNDS`), .832 (`WALK ▸`), .882 (`bindClauseParams`), .898 (four new markers at once — intent-menu / rich-intents / hetero-strategies all unverifiable from a decisions download). Same class every time. The fix is one line; the cost of forgetting is a blind verification run.
 
