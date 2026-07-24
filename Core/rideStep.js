@@ -80,7 +80,8 @@ export async function runRideStep(clause, { readRecipes, invoke, reporter = null
     if (decision !== true) return { park: true, parkedRunId: runId };
   }
 
-  return invokeRideRecipe(rec, groundId, { invoke });
+  // v1730 — the pin's banked bindings give the headless run its QUALIFIED scope (literal-safe filtered inside).
+  return invokeRideRecipe(rec, groundId, { invoke, params: (pin && pin.bindings && typeof pin.bindings === 'object') ? pin.bindings : null, literalSafeParams: true });
 }
 
 /**
@@ -90,10 +91,18 @@ export async function runRideStep(clause, { readRecipes, invoke, reporter = null
  * in the gap") applied to the runner itself.
  * @returns {Promise<{ok:boolean, value?:*, error?:string, status?:number|null}>}
  */
-export async function invokeRideRecipe(rec, groundId, { invoke } = {}) {
+export async function invokeRideRecipe(rec, groundId, { invoke, params = null, literalSafeParams = false } = {}) {
   const leg = recipeToLeg({ ...rec, groundId }, { account: 'me', trusted: true });
   if (!leg || !leg.tool) return { ok: false, error: 'no-leg' };
-  const plan = planExec(leg, {}, {});
+  // v2.74.1730 — banked bindings ride the headless run, LITERAL-SAFE only: the SW has no ID-resolve layer, so an
+  // 'each' sweep value or a resolve-marked param would go into the URL verbatim (the DK-8b http-400 class). Those
+  // stay panel-tier; dropping them falls back to the leg's default scope — the pre-1730 behavior, never worse.
+  let p = (params && typeof params === 'object' && !Array.isArray(params)) ? { ...params } : {};
+  if (literalSafeParams) {
+    const marked = (leg.tool.resolve && typeof leg.tool.resolve === 'object') ? new Set(Object.keys(leg.tool.resolve)) : new Set();
+    for (const k of Object.keys(p)) { if (p[k] === 'each' || marked.has(k)) delete p[k]; }
+  }
+  const plan = planExec(leg, p, {});
   if (!plan || plan.ok === false || plan.channel !== 'INVOKE_SESSION') return { ok: false, error: 'no-plan' };
   let r = null;
   try { r = (typeof invoke === 'function') ? await invoke(plan.payload) : null; } catch (e) { return { ok: false, error: (e && e.message) || 'invoke-threw' }; }

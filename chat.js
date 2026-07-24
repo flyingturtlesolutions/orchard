@@ -7055,7 +7055,26 @@ async function _rejectProposal(id, reason) {
 // binding the single-ask path uses — and if it picks a connector leg, RUN it and return {leg, ok, value, …}. Returns
 // null when the app has no connections OR the clause isn't a connector read → the chain falls through to ORCH_MATCH
 // unchanged. Gated by the caller on `_boundConnections().length`, so non-connector apps pay nothing.
-async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey = null, pinnedGroundId = null }) {   // DK-8c (v1494) — onEach threads chain-step progress into the each fan-out; v1728 — pinnedKey enforces a PP-0c connector pin
+async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey = null, pinnedGroundId = null, pinnedBindings = null }) {   // DK-8c (v1494) — onEach threads chain-step progress into the each fan-out; v1728 — pinnedKey enforces a PP-0c connector pin; v1730 — pinnedBindings make the replay LLM-free
+  // v2.74.1730 — BANKED BINDINGS make the pinned replay LLM-FREE. The interpret call on a pinned step existed
+  // only to re-derive the params the human already approved at qualify time; once the pin carries them, the leg
+  // resolves straight from its ground's recipe store (GET_RIDE_RECIPES merges curated — the §18 read) and runs.
+  // Falls through to the interpret path when the leg isn't in that store (broker/other-source legs) — the pin is
+  // still enforced there. This removes ~4-9s + ~13k input tokens PER PINNED STEP PER RUN, and it is what lets a
+  // scheduled fire read the scope the user qualified instead of the leg's default.
+  if (pinnedKey && pinnedGroundId && pinnedBindings && typeof pinnedBindings === 'object') {
+    try {
+      const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: pinnedGroundId });
+      const legs = harvestedRecipeLegs((rr && rr.recipes) || [], { groundId: pinnedGroundId });
+      const leg = (legs || []).find((l) => l && l.key === pinnedKey);
+      if (leg) {
+        try { _orchLog(`WORKFLOW ▸ pinned ${pinnedKey} → banked bindings, no interpret`); } catch { /* */ }
+        const bound = coerceParams(pinnedBindings, leg.paramSchema);
+        const run = await _runConnectorLeg(leg, bound, { tabId, groundId: pinnedGroundId, onEach });
+        return { leg, boundParams: bound, ...run };
+      }
+    } catch { /* fall through — the interpret path below still enforces the pin */ }
+  }
   let raw = null; let retrieved = []; let groundId = null;
   try {
     const r = await _orchReq('INTERPRET_ASK', { ask: clauseText, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
@@ -7072,8 +7091,9 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey 
     const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === pinnedKey);
     if (!leg) { try { _orchLog(`WORKFLOW ▸ pin STALE ${pinnedKey} — not in the current palette`); } catch { /* */ } return { pinnedStale: true, pinnedKey }; }
     if (d && d.capabilityId && d.capabilityId !== pinnedKey) { try { _orchLog(`WORKFLOW ▸ pin held: interpret aimed ${d.capabilityId}, running pinned ${pinnedKey}`); } catch { /* */ } }
-    const run = await _runConnectorLeg(leg, coerceParams((d && d.params) || {}, leg.paramSchema), { tabId, groundId: pinnedGroundId || groundId, onEach });
-    return { leg, ...run };
+    const bound = coerceParams((d && d.params) || {}, leg.paramSchema);
+    const run = await _runConnectorLeg(leg, bound, { tabId, groundId: pinnedGroundId || groundId, onEach });
+    return { leg, boundParams: bound, ...run };
   }
   // PM-5 (v2.74.1627) — a MAP verdict rides back to the chain, which owns the executor. This is the door a PLAIN
   // ask actually takes (live 075620: `map` fired twice at conf 0.95 and was DISCARDED here — `_tryInterpret`'s
@@ -7086,8 +7106,9 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey 
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
-  const run = await _runConnectorLeg(leg, coerceParams(d.params || {}, leg.paramSchema), { tabId, groundId, onEach });
-  return { leg, ...run };
+  const bound = coerceParams(d.params || {}, leg.paramSchema);   // v1730 — returned as boundParams: the QUALIFY run is cold, and this is what the pin banks
+  const run = await _runConnectorLeg(leg, bound, { tabId, groundId, onEach });
+  return { leg, boundParams: bound, ...run };
 }
 
 // Run a decomposed chain JIT: match EACH clause against the page state AT THAT POINT (so a clause on the
@@ -7264,7 +7285,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       if (_boundConnections().length) {
         // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
         // run's whole first clause showed one static line while 121 reads ran.
-        const cr = await _chainConnectorRun(clause.text, { tabId, pinnedKey: _pinConn ? _pin.capabilityId : null, pinnedGroundId: _pinConn ? (_pin.groundId || null) : null, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        const cr = await _chainConnectorRun(clause.text, { tabId, pinnedKey: _pinConn ? _pin.capabilityId : null, pinnedGroundId: _pinConn ? (_pin.groundId || null) : null, pinnedBindings: _pinConn ? (_pin.bindings || null) : null, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
         // v2.74.1728 — a STALE pin stops the run honestly (the §10.4 drift rule at run time — the plan-time check
         // can only see the recipe store; the palette is assembled here). Never silently re-interpret.
         if (cr && cr.pinnedStale) {
@@ -7357,7 +7378,9 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           st.lastLeg = cr.leg;   // DK-8f — the SOURCE leg rides along (its `drill` marker lets a following fan-out pull each item's FULL record)
           st.readouts.push(lines ? lines.join('\n') : `Ran “${clause.text}”.`);
           st.lastReadoutIdx = st.readouts.length - 1;   // DK-8i — this readout's slot (dropped if a spawn consumes the read)
-          st.ranSteps.push({ capabilityId: cr.leg.key, bindings: {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
+          // v1730 — the BOUND params ride the ranStep so pinnedClause can bank them (pre-resolve values —
+          // "each"/names re-resolve fresh at replay; banking resolved IDs would freeze them).
+          st.ranSteps.push({ capabilityId: cr.leg.key, bindings: (cr.boundParams && typeof cr.boundParams === 'object') ? cr.boundParams : {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
           continue;
         }
         if (cr && !cr.ok) {

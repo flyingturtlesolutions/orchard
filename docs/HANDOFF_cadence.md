@@ -196,6 +196,26 @@ NEXT extractions (§11.3 order): `branch` (needs CLASSIFY_BRANCH_ITEMS — alrea
 STRUCTURE derivation is LLM-shaped), `map`, `case` (PIPELINE_* are SW handlers already), `write` (parks anyway —
 its headless form is "prepare the preview, park at the gate").
 
+**Progress (v2.74.1730) — BANKED BINDINGS: the pinned replay is LLM-FREE and the headless run gets its qualified
+scope.** The optimization the timing analysis picked (interpret was ~4-9s + ~13k tokens + a drift vector per
+pinned step per run, pure waste on an approved decision). The thread, all tested (gate 3112/0):
+- `sanitizeBindings` (workflowWizard, ONE definition imported by workflowMemory): primitives + TOKEN-LIKE strings
+  only (≤48 chars, no '@', no URL) — 'open'/'each'/'Greensboro' bank; an email/URL never freezes into a syncable
+  record. The pre-existing §11 pins-VALUES-never test CAUGHT the first draft's looser rule and forced this shape.
+- The cold connector run returns `boundParams` (pre-resolve — names/'each' re-resolve fresh at replay); the
+  chain's ranStep carries them; `pinnedClause` banks them on connector/ride pins; `_normSteps` whitelists them.
+- `_chainConnectorRun`: a pin WITH bindings resolves its leg straight from GET_RIDE_RECIPES (+harvestedRecipeLegs)
+  and runs — NO interpret call (`WORKFLOW ▸ pinned … → banked bindings, no interpret`); falls through to the
+  v1728 interpret path (pin still enforced) when the leg isn't in the ground store.
+- `invokeRideRecipe` gains `{params, literalSafeParams}`; `runRideStep` passes the pin's bindings LITERAL-SAFE
+  ('each' values + resolve-marked params drop — no SW resolve layer, the DK-8b http-400 class; dropping falls
+  back to default scope, the pre-1730 behavior). A scheduled fire now reads the qualified scope for literal
+  params (status=open); an 'each' sweep stays panel-tier.
+- LEGACY pins (banked pre-1730, no bindings) keep the v1728 interpret path — re-qualify a step once to upgrade.
+Live-owed: replay the workflow twice — the FIRST post-1730 run still interprets (banks bindings via the ranStep →
+re-bank happens only on a re-save/re-qualify; a plain replay does NOT re-bank), so build/save one fresh workflow
+and replay it to see `banked bindings, no interpret`.
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK

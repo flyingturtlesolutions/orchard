@@ -94,6 +94,30 @@ export function stepProvenance(ranStep, stepText, host = '', now = 0) {
 }
 
 /**
+ * v2.74.1730 — the SAFE subset of a step's bound params a pin may BANK: primitives only, short values, capped
+ * count. These are plan CONFIG chosen from the user's ask at qualify time (status=open, divisionId=each) — never
+ * captured page values, so §11's body-blind rule holds. Banking them is what makes a pinned replay LLM-FREE (the
+ * interpret call existed only to re-derive these) and gives the headless run its qualified scope. PURE.
+ */
+export function sanitizeBindings(raw) {
+  const o = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : null;
+  if (!o) return undefined;
+  const out = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(o)) {
+    if (n >= 8) break;                                     // a leg's param set is small; more is a shape smell
+    const key = _str(k).slice(0, 40);
+    if (!key) continue;
+    if (typeof v === 'number' || typeof v === 'boolean') { out[key] = v; n++; continue; }
+    // Strings: TOKEN-LIKE only — short, no '@', no URL. This is what keeps the §11 guard honest: 'open', 'each',
+    // 'Greensboro', '#64775' are plan scope; an email address or a pasted URL is an identifier/value that must
+    // never freeze into a syncable record (the existing pins-VALUES-never test is the tripwire).
+    if (typeof v === 'string' && v.length > 0 && v.length <= 48 && !v.includes('@') && !/https?:\/\//i.test(v)) { out[key] = v; n++; continue; }
+  }
+  return n ? out : undefined;
+}
+
+/**
  * The resolvable half of a `ranSteps` entry — what the step RESOLVED TO, as opposed to what it was called.
  * Returns null when the step engaged nothing worth pinning (a nav, a miss), which is a legitimate absence:
  * §8.4 notes not every step type has a clause form, and the record must say WHICH rather than leave a reader
@@ -113,6 +137,10 @@ export function pinnedClause(ranStep) {
     // never values, so §11's body-blind rule holds. This is what lets the step run headless — run time re-resolves
     // the phrase against the actual rows and stops honestly on drift/ambiguity (Core/headlessClause).
     ...(kind === 'fieldRead' && _str(r.field) ? { field: _str(r.field).slice(0, 80), ...(_str(r.term) ? { term: _str(r.term).slice(0, 80) } : {}) } : {}),
+    // v2.74.1730 — a CONNECTOR pin banks its bound params (the sanitizeBindings safe subset). This removes the
+    // per-replay interpret call (~13k tokens + a drift vector) AND closes the headless scope gap: a scheduled fire
+    // reads the scope the human qualified, not the leg's default.
+    ...((kind === 'connector' || kind === 'ride') ? (() => { const b = sanitizeBindings(r.bindings); return b ? { bindings: b } : {}; })() : {}),
   };
 }
 

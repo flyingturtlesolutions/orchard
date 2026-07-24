@@ -13,6 +13,7 @@
 // the write gate) still apply; the suggestion itself is a confirm. Nothing here bypasses an effect gate.
 
 import { normalizeTrigger } from './trigger.js';
+import { sanitizeBindings } from './workflowWizard.js';   // v1730 — ONE definition of a bankable binding set (the closed-literal discipline needs the same sanitizer at both hops)
 
 const _str = (x) => String(x == null ? '' : x).trim();
 
@@ -59,6 +60,12 @@ function _normSteps(raw) {
         if (kind === 'fieldRead' && _str(s.clause.field)) {
           out.clause.field = _str(s.clause.field).slice(0, 80);
           if (_str(s.clause.term)) out.clause.term = _str(s.clause.term).slice(0, 80);
+        }
+        // v2.74.1730 — a connector pin's banked BINDINGS survive normalize too (same sanitizer as the bank side —
+        // one definition, or the two hops drift apart the way the branch/fieldRead field-name pair did pre-v1690).
+        if (kind === 'connector' || kind === 'ride') {
+          const b = sanitizeBindings(s.clause.bindings);
+          if (b) out.clause.bindings = b;
         }
       }
     }

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   classifyStepOutcome, outcomeWantsTeach, outcomeIsTransient, stepProvenance,
   targetSplitSuggestion, intentSplitSuggestion, buildWorkflowSave, wizardProgress,
-  pinnedClause, replayPlan, replayLine, isPrePinned, WORKFLOW_SCHEMA,
+  pinnedClause, replayPlan, replayLine, isPrePinned, WORKFLOW_SCHEMA, sanitizeBindings,
   stepBarClass, barWantsTeach,
 } from './workflowWizard.js';
 
@@ -116,6 +116,19 @@ describe('workflowWizard — PP-0c: pinnedClause + replayPlan', () => {
     assert.equal(p.text, 'get ticket 5', 'the phrasing is still authoritative as the label');
   });
 
+  it('v1730 — a connector pin banks its bound params (sanitized); the replay goes LLM-free on them', () => {
+    const p = pinnedClause({ kind: 'connector', capabilityId: 'me.vs.tasks', groundId: 'g1', bindings: { status: 'open', divisionId: 'each' } });
+    assert.deepEqual(p.bindings, { status: 'open', divisionId: 'each' });
+    assert.equal('bindings' in pinnedClause({ kind: 'fieldRead', field: 'x', bindings: { a: 1 } }), false, 'bindings ride connector/ride pins only');
+    assert.equal('bindings' in pinnedClause({ kind: 'connector', capabilityId: 'c', bindings: {} }), false, 'empty banks nothing');
+  });
+  it('v1730 — sanitizeBindings: primitives only, short, capped; junk → undefined', () => {
+    assert.deepEqual(sanitizeBindings({ status: 'open', n: 3, on: true }), { status: 'open', n: 3, on: true });
+    assert.equal(sanitizeBindings({ blob: 'x'.repeat(200) }), undefined, 'long values dropped');
+    assert.equal(sanitizeBindings({ o: { nested: 1 } }), undefined, 'objects dropped');
+    assert.equal(sanitizeBindings(null), undefined);
+    assert.equal(Object.keys(sanitizeBindings(Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`k${i}`, 'v'])))).length, 8, 'capped at 8');
+  });
   it('CD-1a phase 2 (v1717) — a fieldRead ranStep banks its resolved field (+ term) on the pin; names only, never values', () => {
     const p = pinnedClause({ kind: 'fieldRead', capabilityId: null, field: 'Instructions', term: 'DEAKO' });
     assert.equal(p.kind, 'fieldRead');

@@ -40,6 +40,19 @@ describe('rideStep — runRideStep', () => {
     assert.deepEqual(r.value, [1, 2, 3]);
     assert.equal(sawPayload.endpoint, '/api/tickets', 'the INVOKE_SESSION payload carried the recipe endpoint');
   });
+  it('v1730 — banked bindings reach the headless payload, LITERAL-SAFE: each-values and resolve-marked params drop', async () => {
+    let sawPayload = null;
+    const invoke = async (payload) => { sawPayload = payload; return { success: true, value: [] }; };
+    const boundClause = { text: 'read tasks', pinned: { kind: 'ride', capabilityId: 'cap-1', groundId: 'g-1', bindings: { status: 'open', divisionId: 'each' } } };
+    await runRideStep(boundClause, { readRecipes: recipesFor([READ]), invoke });
+    assert.equal(sawPayload.args.status, 'open', 'a literal binding rides');
+    assert.equal('divisionId' in sawPayload.args, false, "an 'each' sweep value drops (no SW resolve layer — the DK-8b class)");
+    const RESOLVING = { ...READ, id: 'cap-r', resolve: { marketId: '/State' } };
+    const rClause = { text: 'x', pinned: { kind: 'ride', capabilityId: 'cap-r', groundId: 'g-1', bindings: { marketId: 'Greensboro', status: 'new' } } };
+    await runRideStep(rClause, { readRecipes: recipesFor([RESOLVING]), invoke });
+    assert.equal('marketId' in sawPayload.args, false, 'a resolve-marked param drops');
+    assert.equal(sawPayload.args.status, 'new');
+  });
   it('an invoke failure surfaces as ok:false + error (+ status when the reply carried one)', async () => {
     const r = await runRideStep(readClause, { readRecipes: recipesFor([READ]), invoke: async () => ({ success: false, error: 'http-500', status: 500 }) });
     assert.equal(r.ok, false);
