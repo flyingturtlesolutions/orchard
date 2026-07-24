@@ -47,10 +47,11 @@ import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.j
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`)
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
-import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence
+import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
-import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
+import { armable as rideArmable, hostRideInventory, formatHostRideInventory } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard; v1761 — TR-1 meta host inventory
+import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 — TR-1 meta vs act split
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
@@ -69,7 +70,8 @@ import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retire
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
-import { isCsrfColdFailure } from './Core/connection.js';   // v2.74.1759 — CSRF-cold silent retry (idle Shopify after reload)import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
+import { isCsrfColdFailure } from './Core/connection.js';   // v2.74.1759 — CSRF-cold silent retry (idle Shopify after reload)
+import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
 import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
@@ -5533,6 +5535,69 @@ async function _showKeepAlive() {
 }
 function ageWordMs(ms) { const mn = Math.floor(ms / 60e3); if (mn < 1) return 'just now'; if (mn < 60) return `${mn}m ago`; const h = Math.floor(mn / 60); return h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`; }
 
+// ── PS-0/PS-1 (v2.74.1756, DESIGN_panel_surfaces.md §1-§2) — THE SURFACE MANAGER + THE OVERLAY STANDARD ────────
+// Four surface classes (transcript/page/overlay/chrome); the PAGE and OVERLAY slots each have ONE owner with a
+// registered release. Claiming a slot is what kills the previous owner — no more silent overwrites of
+// .empty-state-content (the §6.4 trap, fired live at v1615 and v1719). An overlay COVERS the page (both live);
+// a page claim closes any overlay above it. Escape closes the TOPMOST surface (overlay → rail), document-level.
+const _surfaces = { page: null, overlay: null };   // each: { owner, release } | null
+function _releaseSlot(kind) {
+  const s = _surfaces[kind];
+  _surfaces[kind] = null;
+  if (s && typeof s.release === 'function') { try { s.release(); } catch { /* a release must never break the claimant */ } }
+}
+function claimSurface(kind, owner, release = null) {
+  if (kind !== 'page' && kind !== 'overlay') return;
+  if (kind === 'page' && _surfaces.overlay) _releaseSlot('overlay');            // a page swap closes what covered it
+  const cur = _surfaces[kind];
+  if (cur && cur.owner !== owner) _releaseSlot(kind);                            // the claim kills the previous owner
+  _surfaces[kind] = { owner, release: (typeof release === 'function') ? release : null };
+}
+function releaseSurface(owner) {
+  for (const kind of ['overlay', 'page']) {
+    if (_surfaces[kind] && _surfaces[kind].owner === owner) _releaseSlot(kind);
+  }
+}
+// §6.1 — ONE Escape ladder for the whole panel (there were two Escape handlers in 13k lines, neither an overlay).
+// The param-modal is the only true modal (its own trap); an open SlashPicker owns its own Escape on the input.
+try {
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    try { if (document.querySelector('.param-modal-overlay')) return; } catch { /* */ }
+    if (_surfaces.overlay) { e.preventDefault(); _releaseSlot('overlay'); return; }
+    try { if ($('rail').classList.contains('open')) { e.preventDefault(); _closeRail(); } } catch { /* */ }
+  });
+} catch { /* */ }
+
+/**
+ * PS-1 — the ONE overlay constructor (DESIGN_panel_surfaces.md §2.1; wf-history/v1743 is the reference shape).
+ * Singleton per id; pinned head (title · meta · the collapse arrow); scrollable body via render(bodyEl); the
+ * .rail motion; focus moves in on open and RETURNS to the opener on close; Escape closes (the ladder above).
+ * Whatever is beneath (page/thread) stays INTACT — covering beats dismiss-and-rerender (the v1743 lesson).
+ */
+function openPanelOverlay({ id, title = '', titleMeta = '', render = null, onClose = null } = {}) {
+  const host = document.getElementById('app-body');
+  if (!host || !id) return null;
+  document.querySelectorAll('.wf-history-overlay').forEach((el) => { try { el.remove(); } catch { /* */ } });   // singleton class-wide
+  const opener = document.activeElement;
+  const ov = document.createElement('div');
+  ov.className = 'wf-history-overlay';
+  ov.dataset.overlayId = id;
+  ov.innerHTML = `<div class="wf-history-head"><div class="wf-history-title">${title}${titleMeta ? ` <span class="wf-history-sched">${titleMeta}</span>` : ''}</div><button class="wf-history-close" type="button" title="Close" aria-label="Close ${id}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="5 12 12 19 19 12"/></svg></button></div><div class="wf-history-list"></div>`;
+  const close = () => {
+    try { ov.classList.remove('open'); setTimeout(() => { try { ov.remove(); } catch { /* */ } }, 200); } catch { try { ov.remove(); } catch { /* */ } }
+    if (typeof onClose === 'function') { try { onClose(); } catch { /* */ } }
+    try { if (opener && opener.isConnected) opener.focus(); else $('chat-input').focus(); } catch { /* */ }
+  };
+  ov.querySelector('.wf-history-close').addEventListener('click', () => releaseSurface(id));
+  host.appendChild(ov);
+  claimSurface('overlay', id, close);
+  requestAnimationFrame(() => { try { ov.classList.add('open'); ov.querySelector('.wf-history-close').focus(); } catch { /* */ } });
+  const body = ov.querySelector('.wf-history-list');
+  if (typeof render === 'function') { try { render(body); } catch { /* */ } }
+  return { el: ov, body, close: () => releaseSurface(id) };
+}
+
 // ── WW-1 (v2.74.1611, DESIGN_workflow_wizard.md §2) — the ＋ Workflow WIZARD, as a PAGE ─────────────────────────
 // A PAGE on the empty-state surface (like the launch / choose-desk pages — NOT a timeline conversation). The
 // MESSAGE INPUT is the sole text-entry surface (no embedded fields — the setup-flow intercept precedent): a typed
@@ -5571,9 +5636,7 @@ function _wfReleasePageSlot() {
 function _wfAbandon() {
   const w = _wfWizard;
   _wfWizard = null;
-  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
-  try { $('btn-chat-send').disabled = !$('chat-input').value.trim(); } catch { /* */ }   // v1719 — the wizard's send-lock must not outlive it
-  _wfReleasePageSlot();   // v1719 — the page markup must not outlive the wizard (live: it survived a desk delete)
+  releaseSurface('wizard');   // PS-0 (v1756) — ONE registered release: page-slot restore + composer unlock (was three inline snippets)
   // no repaint — the surface on screen belongs to the conversation the user moved to.
   // WW-1b (v2.74.1620) — PROVEN steps survive the abandon as a DRAFT on the PINNED desk's key (≥2 steps, the
   // workflow floor; a single proven step is honestly lost — a workflow IS ≥2). Drafts never reach the launch
@@ -5591,15 +5654,22 @@ function _wfAbandon() {
   } catch { /* the draft keep is best-effort */ }
 }
 
+// PS-0 (v1756) — the wizard's registered surface release: page-slot restore + composer unlock, idempotent. THE
+// one teardown, called by releaseSurface('wizard') from every exit AND by any successor's claim (the v1719
+// death-condition, now structural).
+function _wfSurfaceRelease() {
+  _wfReleasePageSlot();
+  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
+  try { $('btn-chat-send').disabled = !$('chat-input').value.trim(); } catch { /* */ }
+}
 function _wfEnterPage() {
+  claimSurface('page', 'wizard', _wfSurfaceRelease);   // PS-0 — claiming kills whatever held the page slot
   try { $('messages').classList.add('hidden'); } catch { /* */ }
   try { $('empty-state').classList.remove('hidden'); } catch { /* */ }
 }
 function _wfExitPage() {
   _wfWizard = null;
-  try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
-  try { $('btn-chat-send').disabled = !$('chat-input').value.trim(); } catch { /* */ }   // v1719 — release the send-lock with the wizard
-  _wfReleasePageSlot();   // v1719 — restore the skeleton BEFORE the surface-restore below repaints into it
+  releaseSurface('wizard');   // PS-0 (v1756) — the ONE registered release, BEFORE the surface-restore below repaints
   // restore the surface (v1620 — the v1611 exit fell to the FRONT page on a fresh desk): a desk shows its thread
   // (if any) and its LAUNCH page comes back when still in launch state — the landing self-gates on no-user-messages,
   // self-replaces, asserts its own visibility (v1608), and now shows the just-saved workflow card. No conversation
@@ -7840,21 +7910,19 @@ function _histClock(at) {
 // timeline (the .rail pattern — absolute, inset 0, covering the thread/launch page, which stays INTACT beneath).
 // The ⌄ chevron top-right closes it, revealing whatever was underneath — no re-render, no thread residue.
 async function _renderWorkflowRuns(wf) {
-  const host = document.getElementById('app-body');
-  if (!host) return;
-  document.querySelectorAll('.wf-history-overlay').forEach((el) => { try { el.remove(); } catch { /* */ } });   // singleton
-  const ov = document.createElement('div');
-  ov.className = 'wf-history-overlay';
+  // PS-1 (v1756) — retrofit onto the ONE overlay constructor: singleton/claim/Escape/focus arrive from the
+  // helper; this function only supplies title + body.
   const sched = _wfScheduleLabel(wf);
-  ov.innerHTML = `<div class="wf-history-head"><div class="wf-history-title">Run history — “${escHtml(wf.name || wf.ask)}”${sched ? ` <span class="wf-history-sched">(${escHtml(sched)})</span>` : ''}</div><button class="wf-history-close" type="button" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="5 12 12 19 19 12"/></svg></button></div><div class="wf-history-list">Loading…</div>`;   // v1745 — a DOWN-ARROW icon (the codebase's inline-SVG idiom), not a text glyph
-  ov.querySelector('.wf-history-close').addEventListener('click', () => {
-    try { ov.classList.remove('open'); setTimeout(() => { try { ov.remove(); } catch { /* */ } }, 200); } catch { try { ov.remove(); } catch { /* */ } }
+  const ov = openPanelOverlay({
+    id: 'wf-history',
+    title: `Run history — “${escHtml(wf.name || wf.ask)}”`,
+    titleMeta: sched ? `(${escHtml(sched)})` : '',
   });
-  host.appendChild(ov);
-  requestAnimationFrame(() => { try { ov.classList.add('open'); } catch { /* */ } });
+  if (!ov) return;
+  ov.body.textContent = 'Loading…';
   let runs = null;
   try { runs = await _orchReq('WORKFLOW_RUNS', { workflowId: wf.id }); } catch { /* */ }
-  const list = ov.querySelector('.wf-history-list'); if (!list) return;
+  const list = ov.body; if (!list || !list.isConnected) return;
   if (!runs || runs.success === false) { list.textContent = 'Couldn’t load the run history — try again.'; return; }
   const items = Array.isArray(runs.items) ? runs.items : [];
   if (!items.length) {
@@ -10144,7 +10212,7 @@ function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null) {
   if (!item) return;
   try { recordGoalItem(appId, item).catch(() => { /* best-effort */ }); } catch { /* */ }
 }
-async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
+async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = null, connectionsOverride = null } = {}) {
   const goal = String(ask || '').trim();
   if (!goal) { _orchFinalize(appendMessage({ role: 'assistant', body: 'usage: `i: <ask>` — the interpret front door (F-2 test).' })); return true; }
   // WF-1 — RECALL: a saved workflow strongly matches this ask → SUGGEST-and-confirm before interpreting. The "No"
@@ -10160,8 +10228,11 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // v2.74.1338 (review theme 1) — the TURN SNAPSHOT: capture the origin conversation's identity ONCE, before any
   // await. Every use below reads the snapshot, so a mid-flight app switch can't misroute the reply, mis-key the
   // outcome bank, or re-aim the compose anchor (the globals move with the UI; the turn does not).
+  // v2.74.1761 — TR-1 act fallthrough may override target + connections so interpret stays host-fenced.
   const turn = { convId: _currentConversationId, appId: _currentConversationAppId, seed: _currentConversationSeed,
-                 memoryId: _memoryId(), connections: _boundConnections(), target: _boundTarget() };
+                 memoryId: _memoryId(),
+                 connections: Array.isArray(connectionsOverride) ? connectionsOverride : _boundConnections(),
+                 target: (targetOverride && targetOverride.origin) ? targetOverride : _boundTarget() };
   const msg = appendMessage({ role: 'assistant', body: 'interpreting…', convId: turn.convId });
   _ilBusy(msg, true);   // v1505 — the glyph thinks while the interpret runs
   const tab = await _orchActiveTab();
@@ -11572,9 +11643,9 @@ async function sendChatMessage() {
     // ── TRT-3/4 (v2.74.1546, DESIGN_target_routing.md §3/§8) — the TARGET resolver, ahead of the LLM door.
     // Every turn resolves + logs ONE `TARGET ▸` line (the observability that would have made this week's three
     // mis-routes one-glance diagnoses). ENFORCED here are only the tiers the ladder is CERTAIN about:
-    //   • TR-1 explicit named ground ≠ this tab (non-nav): match ON THAT GROUND ONLY — hit → confirm-run there
-    //     (the proven _orchRunOnGround path); no hit → the §3 HONEST GAP + Show me (never silent re-targeting,
-    //     never an interpret guess — the misread class of this week).
+    //   • TR-1 explicit named ground ≠ this tab (non-nav): match ON THAT GROUND ONLY — hit → confirm-run there.
+    //     v2.74.1761 — miss is NOT always honest-gap: meta → host ride inventory; act → interpret (host-fenced)
+    //     then teach last. Never silent re-target to another system.
     //   • TR-3 exact alias on another ground: the proven _tryGlobalMatch (its v1525 alias bypass finds it;
     //     1 hit → confirm-run there). Falls through untouched when it finds nothing.
     // Everything else (conversation/tab/live/global/teach) proceeds to interpret UNCHANGED — the decision line
@@ -11590,14 +11661,43 @@ async function sendChatMessage() {
       if (_tgt.tier === 'explicit' && _tgt.groundId && _tgt.groundId !== _tgt.tabGroundId && !_NAV_RE.test(ask)) {
         let em = null;
         try { em = await _orchReq('ORCH_MATCH', { groundId: _tgt.groundId, ask, includeActions: true }); } catch { em = null; }
-        const msg = appendMessage({ role: 'assistant', body: '' });
         if (em && em.success !== false && em.capabilityId && em.decision !== 'miss') {
+          const msg = appendMessage({ role: 'assistant', body: '' });
           _setMessageBody(msg, `I can do that on ${_tgt.host}. Run it there?`);
           const bar = _orchActionBar(msg);
           bar.appendChild(_mkBtn(`▶ Run on ${_tgt.host}`, () => { bar.remove(); _orchRunOnGround(appendMessage({ role: 'assistant', body: '' }), { ask, hit: { groundId: _tgt.groundId, capabilityId: em.capabilityId, groundName: _tgt.host } }); }));
           bar.appendChild(_mkBtn('Not now', () => { bar.remove(); _setMessageBody(msg, 'Okay.'); }));
           return;
         }
+        // v2.74.1761 — META: list armed rides for that host (deterministic). Teach only if inventory is empty.
+        if (isCapabilityMetaAsk(ask) && !isCompoundAsk(ask)) {
+          const msg = appendMessage({ role: 'assistant', body: '' });
+          let recs = [];
+          try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: _tgt.groundId, origin: _tgt.host }); recs = (rr && rr.recipes) || []; } catch { recs = []; }
+          const items = hostRideInventory(recs, { host: _tgt.host, catalog: CONNECTOR_RECIPES });
+          const body = formatHostRideInventory(_tgt.host, items);
+          try { _orchLog(`TARGET ▸ tr-1 meta inventory ${_tgt.host} × ${items.length}`); } catch { /* */ }
+          if (body) {
+            _setMessageBody(msg, `${body}\n\nWant to teach a page walk too?`, { markdown: true });
+            _orchFinalize(msg);
+            _orchOfferRecord(msg, { groundId: _tgt.groundId, tabId: null, ask, label: '● Show me' });
+            return;
+          }
+          _setMessageBody(msg, `I don’t have a way to do that on ${_tgt.host} yet — want to show me?`);
+          _orchFinalize(msg);
+          _orchOfferRecord(msg, { groundId: _tgt.groundId, tabId: null, ask, label: '● Show me' });
+          return;
+        }
+        // v2.74.1761 — ACT: host-fenced interpret (rides) before honest-gap teach.
+        try {
+          const host = String(_tgt.host || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          const conns = _boundConnections();
+          const withHost = host && !conns.some((c) => String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase() === host.toLowerCase())
+            ? [...conns, { origin: host, label: host }] : conns;
+          try { _orchLog(`TARGET ▸ tr-1 act → interpret ${host}`); } catch { /* */ }
+          if (await _tryInterpret(ask, { targetOverride: host ? { origin: host, label: host } : null, connectionsOverride: withHost })) return;
+        } catch (e) { try { console.warn('[chat] TR-1 act fallthrough failed:', e?.message); } catch { /* */ } }
+        const msg = appendMessage({ role: 'assistant', body: '' });
         _setMessageBody(msg, `I don’t have a way to do that on ${_tgt.host} yet — want to show me?`);
         _orchFinalize(msg);
         _orchOfferRecord(msg, { groundId: _tgt.groundId, tabId: null, ask, label: '● Show me' });
