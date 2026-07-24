@@ -294,8 +294,8 @@ export const CONNECTOR_RECIPES = [
     params: [
       { name: 'subject', type: 'string', required: true },
       { name: 'comment', type: 'string', required: true },
-      { name: 'priority', type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
-      { name: 'requester_id', type: 'integer' },
+      { name: 'priority', type: 'string', required: false, enum: ['low', 'normal', 'high', 'urgent'] },
+      { name: 'requester_id', type: 'integer', required: false },
     ] },
   { ...ZD, id: 'add_comment', name: 'Comment on a Zendesk ticket', write: true, reversible: false, outward: false, method: 'PUT',
     does: 'add a comment to a Zendesk ticket — public=true REPLIES to the customer, public=false adds an INTERNAL note — riding your login',
@@ -372,8 +372,8 @@ export const CONNECTOR_RECIPES = [
     params: [
       { name: 'id', type: 'integer', required: true },        // the TARGET ticket (survives)
       { name: 'source_ids', type: 'array', required: true },  // tickets merged into the target, then closed
-      { name: 'target_comment', type: 'string' },
-      { name: 'source_comment', type: 'string' },
+      { name: 'target_comment', type: 'string', required: false },
+      { name: 'source_comment', type: 'string', required: false },
     ] },
   { ...ZD, id: 'mark_as_spam', name: 'Mark a Zendesk ticket as spam', write: true, reversible: false, outward: false, destructive: true, method: 'PUT',
     does: 'mark a Zendesk ticket as spam AND suspend its requester (hard to undo), riding your login',
@@ -445,7 +445,7 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
     body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'status:open fulfillment_status:unfulfilled', n: 10 } },
     params: [
-      { name: 'order', type: 'string', hint: 'an ORDER NUMBER — set ONLY when the user names one specific order to drill into' },   // NOT in the body — the drill join's filter, like vs_warranty_tasks' `address`
+      { name: 'order', type: 'string', required: false, hint: 'an ORDER NUMBER — set ONLY when the user names one specific order to drill into' },   // NOT in the body — the drill join's filter, like vs_warranty_tasks' `address`
     ] },
 
   // ── Shopify write (CX-7b, v2.74.1387) — the spec's ALLOWED mutation class (customer create is NOT money; the
@@ -481,16 +481,16 @@ export const CONNECTOR_RECIPES = [
     params: [
       { name: 'first_name', type: 'string', required: true },
       { name: 'last_name', type: 'string', required: true },
-      { name: 'email', type: 'string' },      // email OR phone — unfilled optionals drop from the body (fillBody);
-      { name: 'phone', type: 'string' },      // Shopify rejects a contactless input with userErrors (surfaced honestly)
-      { name: 'note', type: 'string' },
-      { name: 'address1', type: 'string' },   // street — the presence of any address field builds addresses[0]
-      { name: 'address2', type: 'string' },
-      { name: 'city', type: 'string' },
-      { name: 'province', type: 'string' },   // → provinceCode, e.g. "WA"
-      { name: 'country', type: 'string' },    // → countryCode, e.g. "US"
-      { name: 'zip', type: 'string' },
-      { name: 'company', type: 'string' },
+      { name: 'email', type: 'string', required: false },      // email OR phone — unfilled optionals drop from the body (fillBody);
+      { name: 'phone', type: 'string', required: false },      // Shopify rejects a contactless input with userErrors (surfaced honestly)
+      { name: 'note', type: 'string', required: false },
+      { name: 'address1', type: 'string', required: false },   // street — the presence of any address field builds addresses[0]
+      { name: 'address2', type: 'string', required: false },
+      { name: 'city', type: 'string', required: false },
+      { name: 'province', type: 'string', required: false },   // → provinceCode, e.g. "WA"
+      { name: 'country', type: 'string', required: false },    // → countryCode, e.g. "US"
+      { name: 'zip', type: 'string', required: false },
+      { name: 'company', type: 'string', required: false },
     ] },
   // CX-7c (v2.74.1388) — EDIT an existing customer (spec's ALLOWED EditCustomer op). Partial: only filled fields
   // ride the body (fillBody drops unfilled optionals). `customer_gid` gid-coerces (bare id → gid) — it's the `id`
@@ -501,12 +501,12 @@ export const CONNECTOR_RECIPES = [
     body: { operationName: 'EditCustomer', variables: { input: { id: '{customer_gid}', firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}', tags: '{tags}' } } },
     params: [
       { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },
-      { name: 'first_name', type: 'string' },
-      { name: 'last_name', type: 'string' },
-      { name: 'email', type: 'string' },
-      { name: 'phone', type: 'string' },
-      { name: 'note', type: 'string' },
-      { name: 'tags', type: 'array' },
+      { name: 'first_name', type: 'string', required: false },
+      { name: 'last_name', type: 'string', required: false },
+      { name: 'email', type: 'string', required: false },
+      { name: 'phone', type: 'string', required: false },
+      { name: 'note', type: 'string', required: false },
+      { name: 'tags', type: 'array', required: false },
     ] },
   // CX-7c (v2.74.1388) — create a DRAFT order (spec: "safe/reversible" — a draft is NOT a charge; completing it is
   // the money step and stays HUMAN-CLICK, never a recipe). The FOC/warranty-replacement path: pass a 100%
@@ -521,11 +521,11 @@ export const CONNECTOR_RECIPES = [
     params: [
       { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },   // purchasingEntity.customerId — the customer's id from a lookup
       { name: 'line_items', type: 'array', required: true },   // [{ variantId: 'gid://shopify/ProductVariant/…', quantity: 1 }] — variant ids from a product search
-      { name: 'note', type: 'string' },
-      { name: 'po_number', type: 'string' },
-      { name: 'tags', type: 'array' },
-      { name: 'applied_discount', type: 'object' },   // { value, valueType: 'PERCENTAGE'|'FIXED_AMOUNT', title } — 100% PERCENTAGE for a warranty replacement
-      { name: 'shipping_line', type: 'object' },       // { title, price } — { price: '0.00' } for free shipping
+      { name: 'note', type: 'string', required: false },
+      { name: 'po_number', type: 'string', required: false },
+      { name: 'tags', type: 'array', required: false },
+      { name: 'applied_discount', type: 'object', required: false },   // { value, valueType: 'PERCENTAGE'|'FIXED_AMOUNT', title } — 100% PERCENTAGE for a warranty replacement
+      { name: 'shipping_line', type: 'object', required: false },       // { title, price } — { price: '0.00' } for free shipping
     ] },
   // ── VendorSuite (CX-9) — the curated cookie-ride READS. {divisionId}/{status}/{taskId} are explicit params for now;
   // the convivial auto-fill of {divisionId} from VendorSuite/State (access.DefaultDivision.Id) is the next slice.
@@ -597,7 +597,7 @@ export const CONNECTOR_RECIPES = [
     params: [
       { name: 'divisionId', type: 'string', required: true, hint: 'the DIVISION — a name ("Atlanta West"), a market number ("210"), or exactly "each" for every accessible division; never a street' },
       { name: 'status', type: 'string', enum: ['new', 'open', 'fixed', 'closed'], required: true },
-      { name: 'address', type: 'string', hint: 'a STREET address or task number — set ONLY when the user names one specific property/task to drill into' },   // NOT in the endpoint — the drill join's filter
+      { name: 'address', type: 'string', required: false, hint: 'a STREET address or task number — set ONLY when the user names one specific property/task to drill into' },   // NOT in the endpoint — the drill join's filter
     ] },
   { ...VS, id: 'vs_warranty_task', name: 'Warranty task details', itemUrl: '/#warranty',
     displayId: ['TicketId', 'TaskNumber'],   // CX-9k — the detail head's "#id" shows the human number too
