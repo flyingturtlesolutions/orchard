@@ -74,7 +74,7 @@ describe('panelConformance — §8.2 row actions are derived, not enumerated', (
     assert.ok(!m[0].includes('.rail-item-delete'), 'the class allowlist crept back — stamp data-row-action instead');
   });
   it('the known Rail action classes all stamp data-row-action', () => {
-    for (const cls of ['rail-chevron', 'rail-item-subtask', 'rail-item-wf', 'rail-item-preview', 'rail-item-delete']) {
+    for (const cls of ['rail-item-cases', 'rail-item-subtask', 'rail-item-wf', 'rail-item-preview', 'rail-item-delete']) {
       for (const m of [...chat.matchAll(new RegExp(`<button class="${cls}[" ]`, 'g'))]) {
         const tag = chat.slice(m.index, chat.indexOf('>', m.index));
         assert.ok(tag.includes('data-row-action'), `<button class="${cls}"> without data-row-action — it will also select the row`);

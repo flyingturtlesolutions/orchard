@@ -21,4 +21,5 @@ export const Icons = {
   workflow:    (s) => _svg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h7a1 1 0 0 1 1 1V14"/><path d="M14 17.5H7a1 1 0 0 1-1-1V10"/>', s),
   home:        (s) => _svg('<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>', s),
   rebuild:     (s) => _svg('<path d="M21 12a9 9 0 1 1-2.6-6.4"/><polyline points="21 3 21 9 15 9"/>', s),
+  cases:       (s) => _svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>', s),
 };

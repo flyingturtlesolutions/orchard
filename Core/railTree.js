@@ -92,15 +92,17 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
         count: subs.length, kind: c.kind || 'agent', appId: c.appId, pinned: !!c.pinned,   // AP-1 — drives the pin toggle's state
         summary: c.summary || null,   // v2.74.1217 — the under-the-name "quick peek" (index-mirrored; rendered ≤3 lines)
       });
-      if (open) {
-        for (const s of subs) {
-          rows.push({
-            id: s.id, role: 'subtask', title: s.title, icon: s.icon || null, depth: 1,
-            hasChildren: false, expanded: false, active: activeId === s.id, count: 0,
-            kind: s.kind || 'agent', parentId: c.id, appId: c.appId,
-            summary: s.summary || null,   // CV-4-map — a sub-task's peek (its latest result / "⏳ Working…") so the parent's auto-run is visible per child
-          });
-        }
+      // Rail peek/pin (v2.74.1774, DESIGN_panel_surfaces.md §8) — sub-task rows ALWAYS emit: the renderer
+      // groups them under their app and hides them with a class, so a hover-peek never rebuilds the DOM
+      // (a hover-driven re-render would destroy the node under the pointer — an instant open/close flicker
+      // loop). `expanded` now means PINNED-open, not emitted-vs-not.
+      for (const s of subs) {
+        rows.push({
+          id: s.id, role: 'subtask', title: s.title, icon: s.icon || null, depth: 1,
+          hasChildren: false, expanded: false, active: activeId === s.id, count: 0,
+          kind: s.kind || 'agent', parentId: c.id, appId: c.appId,
+          summary: s.summary || null,   // CV-4-map — a sub-task's peek (its latest result / "⏳ Working…") so the parent's auto-run is visible per child
+        });
       }
     } else {
       rows.push({
@@ -128,15 +130,14 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
     count: adminSubs.length, kind: 'agent',
     summary: (adminConv && adminConv.summary) ? adminConv.summary : null,
   });
-  if (adminOpen) {
-    for (const s of adminSubs) {
-      rows.push({
-        id: s.id, role: 'subtask', title: s.title, icon: s.icon || null, depth: 1,
-        hasChildren: false, expanded: false, active: activeId === s.id, count: 0,
-        kind: s.kind || 'agent', parentId: ADMIN_ID,
-        summary: s.summary || null,
-      });
-    }
+  // v2.74.1774 — same always-emit rule as app sub-tasks (`adminOpen` above = pinned).
+  for (const s of adminSubs) {
+    rows.push({
+      id: s.id, role: 'subtask', title: s.title, icon: s.icon || null, depth: 1,
+      hasChildren: false, expanded: false, active: activeId === s.id, count: 0,
+      kind: s.kind || 'agent', parentId: ADMIN_ID,
+      summary: s.summary || null,
+    });
   }
 
   // 4) New app — always last.

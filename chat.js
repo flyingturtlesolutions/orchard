@@ -798,12 +798,43 @@ async function _renderRailListNow() {
     container.appendChild(bar);
   }
 
+  // Rail peek/pin (v2.74.1774, DESIGN_panel_surfaces.md §8) — a row with cases and its case rows render into ONE
+  // .rail-group (the case rows are ALWAYS in the DOM; a class hides them). Hover on the cases button PEEKS the
+  // group open; mouse-away (with grace) closes it; click PINS (persists in _expandedApps). No re-render on hover —
+  // a hover-driven rebuild would destroy the node under the pointer and flicker-loop.
+  let _grpCases = null;
+  const _startGroup = (el, row) => {
+    const g = document.createElement('div');
+    g.className = 'rail-group' + (row.expanded ? ' pinned' : '');
+    g.appendChild(el);
+    _grpCases = document.createElement('div');
+    _grpCases.className = 'rail-group-cases';
+    _grpCases.inert = !row.expanded;   // hidden cases must not be tab-reachable
+    g.appendChild(_grpCases);
+    container.appendChild(g);
+    _wireGroupPeek(g);
+  };
   for (const row of rows) {
-    if (row.role === 'overview') { container.appendChild(_historyPinRow(row)); continue; }
-    if (row.role === 'admin') { container.appendChild(_historyAdminRow(row)); continue; }   // VT-2 (v2.74.1573) — the reserved vitals fixture
-    if (row.role === 'new-app') { container.appendChild(_historyNewAppRow()); continue; }
+    if (row.role === 'overview') { _grpCases = null; container.appendChild(_historyPinRow(row)); continue; }
+    if (row.role === 'admin') {   // VT-2 (v2.74.1573) — the reserved vitals fixture
+      const el = _historyAdminRow(row);
+      if (row.hasChildren) _startGroup(el, row); else { _grpCases = null; container.appendChild(el); }
+      continue;
+    }
+    if (row.role === 'new-app') { _grpCases = null; container.appendChild(_historyNewAppRow()); continue; }
     const conv = byId.get(row.id);
-    if (conv) container.appendChild(_historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_parkedByInst[conv.instanceId] || 0) : 0));
+    if (!conv) continue;
+    const el = _historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_parkedByInst[conv.instanceId] || 0) : 0);
+    if (row.role === 'subtask' && _grpCases) {
+      _grpCases.appendChild(el);
+      // the ACTIVE case must never hide inside a closed group (a spawn opens the case as current) — force the
+      // group open presentationally; the pin store is untouched.
+      if (row.active) { _grpCases.parentElement.classList.add('pinned'); _grpCases.inert = false; }
+      continue;
+    }
+    if (row.role === 'app' && row.hasChildren) { _startGroup(el, row); continue; }
+    _grpCases = null;
+    container.appendChild(el);
   }
 
   // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
@@ -820,6 +851,26 @@ async function _renderRailListNow() {
 // data-row-action; the row's select/dblclick ignores anything inside one. The hand-list (the _DECISION_RE
 // invariant class — forget the entry, the button also selects the row) is deleted, not extended.
 const _isRowActionTarget = (e) => !!e.target.closest('[data-row-action]');
+
+// v2.74.1774 — the group's PEEK behavior: hover the cases button (150ms intent delay) reveals the case rows;
+// leaving the GROUP (row + revealed cases — so moving down into them keeps them open) closes after a 300ms
+// grace. A pinned group ignores all of it. inert tracks visibility so hidden rows are never tab-reachable.
+function _wireGroupPeek(group) {
+  const btn = group.querySelector('.rail-item-cases');
+  const cases = group.querySelector('.rail-group-cases');
+  if (!btn || !cases) return;
+  let openT = null, closeT = null;
+  const syncInert = () => { cases.inert = !(group.classList.contains('pinned') || group.classList.contains('peek')); };
+  btn.addEventListener('pointerenter', () => {
+    clearTimeout(closeT);
+    openT = setTimeout(() => { group.classList.add('peek'); syncInert(); }, 150);
+  });
+  group.addEventListener('pointerenter', () => { clearTimeout(closeT); });
+  group.addEventListener('pointerleave', () => {
+    clearTimeout(openT);
+    closeT = setTimeout(() => { group.classList.remove('peek'); syncInert(); }, 300);
+  });
+}
 
 // v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
 // stays open as a live multi-conversation surface (its row highlights `active`, the input now routes here, and a reply
@@ -912,11 +963,12 @@ function _historyAdminRow(row) {
   // chevron (collapse/expand its incident cases, with count) and the same "+" (open a case by hand — an operator
   // scratch case via the normal spawn) that every app row carries. Same classes → same styling + hover behavior.
   if (row.hasChildren) el.classList.add('has-children');
-  const chevron = row.hasChildren
-    ? `<button class="rail-chevron" data-row-action title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+  // v2.74.1774 — app-row parity for the redesign: case icon + count (peek/pin) and "Add case", in the cluster.
+  const casesBtn = row.hasChildren
+    ? `<button class="rail-item-cases" data-row-action title="Cases — hover to peek, click to pin open" aria-label="Cases (${row.count}) — click to pin open" aria-pressed="${row.expanded}">${Icons.cases(14)}<span class="rail-case-count">${row.count}</span></button>`
     : '';
-  const subtaskBtn = `<button class="rail-item-subtask" data-row-action title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}${chevron}${subtaskBtn}`;
+  const subtaskBtn = `<button class="rail-item-subtask" data-row-action title="Add case" aria-label="Add case">${Icons.plus(14)}</button>`;
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}<div class="rail-item-actions">${casesBtn}${subtaskBtn}</div>`;
   void (async () => {   // the attention badge — one cheap storage read; green = nothing
     try {
       const r = await _orchReq('VITALS_BADGE', {});
@@ -925,10 +977,18 @@ function _historyAdminRow(row) {
       if (b && n > 0) { b.textContent = ` ⚠ ${n}`; b.hidden = false; }
     } catch { /* */ }
   })();
-  el.querySelector('.rail-chevron')?.addEventListener('click', async (e) => {
+  el.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {   // v2.74.1774 — pin toggle, in place
     e.stopPropagation();
-    if (_expandedApps.has(ADMIN_ID)) _expandedApps.delete(ADMIN_ID); else _expandedApps.add(ADMIN_ID);
-    await _renderRailList();
+    const nowPinned = !_expandedApps.has(ADMIN_ID);
+    if (nowPinned) _expandedApps.add(ADMIN_ID); else _expandedApps.delete(ADMIN_ID);
+    const g = el.closest('.rail-group');
+    if (g) {
+      g.classList.toggle('pinned', nowPinned);
+      if (!nowPinned) g.classList.remove('peek');
+      const cw = g.querySelector('.rail-group-cases');
+      if (cw) cw.inert = !nowPinned && !g.classList.contains('peek');
+    }
+    e.currentTarget.setAttribute('aria-pressed', String(nowPinned));
   });
   el.querySelector('.rail-item-subtask')?.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -981,8 +1041,9 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   if (row.role === 'app' && nextSweep > 0) item.dataset.nextSweep = String(nextSweep);   // FL-6d — _setItemMeta renders the countdown
 
   const leaf = row.role === 'subtask' ? '<span class="rail-glyph leaf" aria-hidden="true">•</span>' : '';
-  const chevron = (row.role === 'app' && row.hasChildren)
-    ? `<button class="rail-chevron" data-row-action title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+  // v2.74.1774 (user redesign) — the chevron+count becomes a CASE icon + count chip: hover peeks, click pins.
+  const casesBtn = (row.role === 'app' && row.hasChildren)
+    ? `<button class="rail-item-cases" data-row-action title="Cases — hover to peek, click to pin open" aria-label="Cases (${row.count}) — click to pin open" aria-pressed="${row.expanded}">${Icons.cases(14)}<span class="rail-case-count">${row.count}</span></button>`
     : '';
   const previewBtn = isDev ? `<button class="rail-item-preview" data-row-action title="Load this branch into the live build (reloads the panel)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -991,7 +1052,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
       </button>` : '';
   // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
   const subtaskBtn = row.role === 'app'
-    ? `<button class="rail-item-subtask" data-row-action title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
+    ? `<button class="rail-item-subtask" data-row-action title="Add case" aria-label="Add case">${Icons.plus(14)}</button>`
     : '';
   // PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the workflows DOOR on every app row: saved workflows get a
   // visible glyph (they were only reachable by typing `workflows` — an alias, never the sole door). Opens THAT
@@ -1010,9 +1071,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
       ${summaryLine}
       <div class="rail-item-meta">${relTime(conv.updatedAt)}</div>
       ${row.role === 'app' && nextSweep > 0 ? '<span class="rail-item-timer" title="Next sweep"></span>' : ''}
-      ${chevron}
-      ${wfBtn}
-      ${subtaskBtn}
+      ${(wfBtn || casesBtn || subtaskBtn) ? `<div class="rail-item-actions">${wfBtn}${casesBtn}${subtaskBtn}</div>` : ''}
       ${previewBtn}
       <button class="rail-item-delete" data-row-action title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1020,11 +1079,20 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
         </svg>
       </button>`;
 
-  // chevron → toggle THIS app's expansion (re-render); never loads the app.
-  item.querySelector('.rail-chevron')?.addEventListener('click', async (e) => {
+  // v2.74.1774 — cases click = PIN toggle (persists in _expandedApps; the group class flips in place — no
+  // re-render, so the peek state under the pointer survives). Never loads the app.
+  item.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (_expandedApps.has(conv.id)) _expandedApps.delete(conv.id); else _expandedApps.add(conv.id);
-    await _renderRailList();
+    const nowPinned = !_expandedApps.has(conv.id);
+    if (nowPinned) _expandedApps.add(conv.id); else _expandedApps.delete(conv.id);
+    const g = item.closest('.rail-group');
+    if (g) {
+      g.classList.toggle('pinned', nowPinned);
+      if (!nowPinned) g.classList.remove('peek');
+      const cw = g.querySelector('.rail-group-cases');
+      if (cw) cw.inert = !nowPinned && !g.classList.contains('peek');
+    }
+    e.currentTarget.setAttribute('aria-pressed', String(nowPinned));
   });
 
   // AP-2 — "+" → start a sub-conversation under this app, AUTO-NAMED `<parent> #N` (no prompt; v2.74.1216).

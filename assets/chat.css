@@ -1772,24 +1772,60 @@ textarea {
 .rail-new-app { color: var(--c-text-subtle); }
 .rail-new-app:hover .rail-item-title { color: var(--c-text); }
 .rail-item.is-subtask .rail-item-title { font-weight: 400; color: var(--c-text-subtle); }
-.rail-item.has-children { padding-right: 64px; }   /* clear the chevron, which sits left of the delete button */
-.rail-chevron {
+.rail-item.has-children { padding-right: 64px; }   /* clear the action cluster, which sits left of the delete button */
+
+/* ── Rail peek/pin (v2.74.1774, DESIGN_panel_surfaces.md §8) ─────────────────────────────────────────────
+   The bottom-right ACTION CLUSTER — one flex container (workflows · cases · add case), replacing three
+   hand-tuned absolute offsets (the v1773 collision class dies here). Sits left of the delete column. */
+.rail-item-actions {
   position: absolute;
-  bottom: var(--sp-2);          /* v2.74.1229 — sit at the bottom-right, just LEFT of the "+" (was vertically centered) */
-  right: 34px;
-  height: 20px;
+  bottom: var(--sp-2);
+  right: calc(var(--sp-2) + 24px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* cluster members are static flex items — the standalone absolute rules below don't apply inside it */
+.rail-item-actions .rail-item-wf,
+.rail-item-actions .rail-item-subtask {
+  position: static;
+  top: auto; bottom: auto; right: auto;
+  transform: none;
+}
+/* the CASES button — icon + count chip; always visible (the count is workload signal). Hover peeks the
+   group's case rows; click pins (aria-pressed). Pinned state shows as accent. */
+.rail-item-cases {
+  height: 22px;
   min-width: 28px;
-  padding: 0 6px;
+  padding: 0 5px;
   border-radius: var(--r-sm);
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 3px;
   color: var(--c-text-subtle);
   font-size: 11px;
   font-weight: 600;
   transition: background var(--t-fast), color var(--t-fast);
 }
-.rail-chevron:hover { background: var(--c-bg); color: var(--c-text); }
+.rail-item-cases:hover { background: var(--c-bg); color: var(--c-text); }
+.rail-group.pinned .rail-item-cases { color: var(--c-accent); }
+.rail-case-count { font-variant-numeric: tabular-nums; }
+
+/* the GROUP — an app/admin row + its case rows, one hover zone. Case rows are ALWAYS in the DOM; peek/pin
+   reveal them with a max-height transition (the card-expand feel). inert is managed in JS for focus safety. */
+.rail-group-cases {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height var(--t-med) ease, opacity var(--t-med) ease;
+}
+.rail-group.pinned .rail-group-cases,
+.rail-group.peek .rail-group-cases {
+  max-height: 1000px;
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) { .rail-group-cases { transition: none; } }
 
 .rail-list {
   flex: 1;
@@ -1949,11 +1985,9 @@ textarea {
 .rail-item.is-app:has(.rail-item-timer) { padding-right: var(--sp-3); }
 .rail-item.is-app:has(.rail-item-timer) .rail-item-title { padding-right: 72px; }
 
-/* AP-2 (v2.74.1213) — the per-app "new sub-conversation" + button; hover-revealed, sat left of the chevron/delete cluster. */
+/* AP-2 (v2.74.1213) — the per-app "Add case" + button; hover-revealed. v2.74.1774 — lives in the
+   .rail-item-actions flex cluster, no absolute positioning of its own. */
 .rail-item-subtask {
-  position: absolute;
-  bottom: var(--sp-2);          /* v2.74.1228 (App card UI) — the "+" sits in the BOTTOM-RIGHT corner */
-  right: var(--sp-2);
   width: 22px;
   height: 22px;
   border-radius: var(--r-sm);
@@ -1968,15 +2002,9 @@ textarea {
 .rail-item-subtask:hover { background: var(--c-bg); color: var(--c-accent); }
 
 /* PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the per-app WORKFLOWS door; same hover-reveal idiom.
-   v2.74.1773 (live report: it sat ON the collapse-cases chevron — right:34px is the chevron's slot, and its
-   width varies with the case count so no fixed bottom-row offset is safe): the glyph takes the vertically-
-   centered slot the dev rows give .rail-item-preview (right sp-2+24) — preview is dev-only, this glyph is
-   app-only, so the slot is never contested. The bottom cluster stays chevron + "+". */
+   v2.74.1774 — lives in the .rail-item-actions flex cluster (workflows · cases · add case), so no absolute
+   positioning of its own (the v1773 slot-collision class is dead). */
 .rail-item-wf {
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  right: calc(var(--sp-2) + 24px);
   width: 22px;
   height: 22px;
   border-radius: var(--r-sm);

@@ -37,40 +37,41 @@ describe('railTree — buildRailTree', () => {
     const fix = collapsed.find((r) => r.role === 'admin');
     assert.equal(fix.count, 2, 'the fixture carries the case count');
     assert.equal(fix.hasChildren, true);
-    assert.equal(fix.expanded, false, 'collapsed by default — the chevron is the door (app-row parity)');
-    assert.equal(collapsed.some((r) => String(r.id).startsWith('vtc_')), false, 'collapsed hides the cases');
+    assert.equal(fix.expanded, false, 'not pinned by default — the cases button is the door (app-row parity)');
+    // v2.74.1774 (peek/pin) — cases ALWAYS emit (the renderer hides them; hover-peek must not rebuild the DOM)
+    const fixIdx = collapsed.findIndex((r) => r.role === 'admin');
+    assert.deepEqual([collapsed[fixIdx + 1].id, collapsed[fixIdx + 2].id], ['vtc_b', 'vtc_a'], 'cases sit under the fixture, newest first, even unpinned');
+    assert.equal(collapsed[fixIdx + 1].role, 'subtask');
     const open = buildRailTree(summaries, { expanded: [ADMIN_ID] });
     const adminIdx = open.findIndex((r) => r.role === 'admin');
-    assert.equal(open[adminIdx].expanded, true);
-    assert.deepEqual([open[adminIdx + 1].id, open[adminIdx + 2].id], ['vtc_b', 'vtc_a'], 'expanded cases sit under the fixture, newest first');
-    assert.equal(open[adminIdx + 1].role, 'subtask');
+    assert.equal(open[adminIdx].expanded, true, 'expanded now means PINNED-open');
     assert.equal(open[open.length - 1].role, 'new-app', 'the constructor entry stays last');
     assert.equal(open.filter((r) => r.role === 'plain' && String(r.id).startsWith('vtc_')).length, 0, 'a case never leaks as a plain row');
   });
 
-  it('an app collapsed shows a count + chevron but hides its sub-tasks; expanded reveals them after it', () => {
+  it('an app row carries count + pin state; sub-tasks ALWAYS emit right after it (v1774 peek/pin)', () => {
     const summaries = [
       { id: 'app1', title: 'Support', kind: 'agent', appId: 'support', icon: 'headset', updatedAt: 100 },
       { id: 't1', title: 'Ticket #1', kind: 'agent', parentId: 'app1', updatedAt: 90 },
       { id: 't2', title: 'Ticket #2', kind: 'agent', parentId: 'app1', updatedAt: 95 },
     ];
 
-    const collapsed = buildRailTree(summaries);
-    const appRow = collapsed.find((r) => r.id === 'app1');
+    const unpinned = buildRailTree(summaries);
+    const appRow = unpinned.find((r) => r.id === 'app1');
     assert.equal(appRow.role, 'app');
     assert.equal(appRow.hasChildren, true);
     assert.equal(appRow.count, 2);
-    assert.equal(appRow.expanded, false);
-    assert.equal(collapsed.some((r) => r.role === 'subtask'), false, 'collapsed app hides sub-tasks');
-
-    const open = buildRailTree(summaries, { expanded: ['app1'] });
-    const subs = open.filter((r) => r.role === 'subtask');
-    assert.equal(subs.length, 2);
+    assert.equal(appRow.expanded, false, 'expanded = pinned; hiding is the RENDERER\'s job (hover-peek must not rebuild)');
+    const subs = unpinned.filter((r) => r.role === 'subtask');
+    assert.equal(subs.length, 2, 'sub-task rows emit even unpinned');
     assert.equal(subs[0].depth, 1);
     // newest sub first (t2 updatedAt 95 > t1 90), and they sit immediately after the app row
     assert.deepEqual(subs.map((s) => s.id), ['t2', 't1']);
-    const appIdx = open.findIndex((r) => r.id === 'app1');
-    assert.equal(open[appIdx + 1].role, 'subtask');
+    const appIdx = unpinned.findIndex((r) => r.id === 'app1');
+    assert.equal(unpinned[appIdx + 1].role, 'subtask');
+
+    const open = buildRailTree(summaries, { expanded: ['app1'] });
+    assert.equal(open.find((r) => r.id === 'app1').expanded, true, 'the pin flows through');
   });
 
   it('dev mode off hides dev conversations; on shows them as plain rows', () => {
