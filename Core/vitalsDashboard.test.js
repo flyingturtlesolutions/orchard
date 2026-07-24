@@ -78,7 +78,7 @@ function assertRenderable(spec) {
 describe('vitalsDashboard — buildAdminDashboardSpec (the full vitals view)', () => {
   it('carries metrics + trend + grounds table + presence + incidents + asks + the body-blind foot', () => {
     const spec = buildAdminDashboardSpec(MODEL);
-    assert.equal(spec.title, 'Ground vitals — Admin desk');
+    assert.equal(spec.title, 'Ground vitals — Admin view');
     const ids = spec.blocks.map((b) => b.id);
     for (const id of ['m-succ', 'm-runs', 'm-inc', 'm-heal', 'm-canary', 'ch-trend', 't-grounds', 'md-presence', 'cd-incidents', 'md-asks', 'md-foot']) {
       assert.ok(ids.includes(id), `block ${id} present`);

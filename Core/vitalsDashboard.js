@@ -70,17 +70,17 @@ export function ageWord(at, now) {
 const HELP = {
   succ: 'Share of ride runs that succeeded across these grounds, last 7 days — counted once per leg at the outcome funnel. A dip here is the earliest warning, before any incident opens.',
   runs: 'Total leg runs in the 7-day window — organic use plus daily canaries.',
-  inc: 'Unresolved problems the desk is tracking — one per kind and subject. Opened by the vitals funnel (sign-outs, drift suspects); closed automatically when a verify passes or presence returns.',
+  inc: 'Unresolved problems the view is tracking — one per kind and subject. Opened by the vitals funnel (sign-outs, drift suspects); closed automatically when a verify passes or presence returns.',
   heal: 'Median time from an incident opening to its close, last 30 days — how fast detect → relearn → apply → verify (plus you, for sign-ins) restores service.',
   canary: 'Grounds with a safe daily probe: a proven, parameter-free read the sweep can run without touching your data. A ground without one is drift-blind between real uses.',
   trend: 'Daily success rate across these grounds, from the same outcome tally — days with runs only.',
   grounds: 'One row per learned ground. Success and failure mix come from the outcome funnel — auth vs route is its own classification. Drift chips come from route-heal, proven/armed from recipe records.',
   incidents: 'The incident store, newest first. Open items need a human — usually a sign-in; Orchard never enters credentials. Healed items show the relearn loop’s work.',
-  asks: 'Taught phrases that have RUN successfully before, verbatim — the only example asks the desk will ever suggest.',
+  asks: 'Taught phrases that have RUN successfully before, verbatim — the only example asks the view will ever suggest.',
   presence: 'Sign-in status per origin, from real evidence (rides, probes, setup checks) — never assumed.',
-  desks: 'Your desks, newest activity first — cases are their sub-task conversations.',
+  desks: 'Your views, newest activity first — details are their sub-task conversations.',
   proven: 'Reads that have succeeded at least once (or shipped curated) vs everything armed. An unproven read carries no evidence — prove it with one run, or prune.',
-  cases: 'This desk’s sub-task conversations.',
+  cases: 'This view’s sub-task conversations.',
   conn: 'Origins with live sign-in evidence vs all known origins.',
 };
 
@@ -208,7 +208,7 @@ export function buildAdminDashboardSpec(model) {
     _asksMd(m.asks),
     _footMd(m),
   ].filter(Boolean);
-  return { title: 'Ground vitals — Admin desk', blocks };
+  return { title: 'Ground vitals — Admin view', blocks };
 }
 
 /** A WORK DESK's dashboard — the same vitals, scoped to ITS origins, plus its cases. model adds: { deskName,
@@ -228,17 +228,17 @@ export function buildDeskDashboardSpec(model) {
       sub: open.length ? _s(open[0].subject).slice(0, 40) : 'silence when green', help: HELP.inc },
     { id: 'm-proven', kind: 'metric', label: 'Proven reads', value: `${proven}/${armed}`,
       sub: armed ? (proven < armed ? `${armed - proven} unproven` : 'all proven') : 'none armed', help: HELP.proven },
-    ...(m.cases && m.cases.count ? [{ id: 'm-cases', kind: 'metric', label: 'Cases', value: m.cases.count, help: HELP.cases }] : []),
+    ...(m.cases && m.cases.count ? [{ id: 'm-cases', kind: 'metric', label: 'Details', value: m.cases.count, help: HELP.cases }] : []),
     _trendChart(m.byDay),
     _groundsTable(m.grounds),
     _presenceMd(m.registry, { origins: m.origins, now: m.now }),
     _incidentsBlock(incidents, { now: m.now }),
     _asksMd(m.asks),
     ...(!(Array.isArray(m.grounds) && m.grounds.length)
-      ? [{ id: 'md-empty', kind: 'markdown', text: '_No learned reads are bound to this desk yet — run one from chat (or bank a capture) and this dashboard fills in._' }] : []),
+      ? [{ id: 'md-empty', kind: 'markdown', text: '_No learned reads are bound to this view yet — run one from chat (or bank a capture) and this dashboard fills in._' }] : []),
     _footMd(m),
   ].filter(Boolean);
-  return { title: `${_s(m.deskName) || 'Desk'} — dashboard`, blocks };
+  return { title: `${_s(m.deskName) || 'View'} — dashboard`, blocks };
 }
 
 /** The FRONT DESK overview — the cross-desk roster, not the vitals detail (that lives on the Admin desk). model

@@ -118,7 +118,7 @@ async function _tick() {
       // an orphaned trigger auto-disarms and writes history, because a person will later ask why it stopped.
       // v1715 — the stamp OR live-key liveness (§2.1's actual wording): either signal disarms.
       if ((raw && raw.orphanedFrom) || (liveKeys && !liveKeys.has(appId))) {
-        await _autoDisarm(appId, wf, (raw && raw.orphanedFrom) ? 'the owning desk was deleted' : 'the owning desk no longer exists', now);
+        await _autoDisarm(appId, wf, (raw && raw.orphanedFrom) ? 'the owning view was deleted' : 'the owning view no longer exists', now);
         disarmed++;
         continue;
       }

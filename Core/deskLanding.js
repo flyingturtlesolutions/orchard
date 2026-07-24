@@ -44,11 +44,11 @@ function _landingCadence(w) {
   return `${workflowTier(w) === 'sw' ? 'runs' : 'due'} every ${describeMinutes(t.minutes)}`;
 }
 export function buildDeskLanding({ title = '', description = '', isAdmin = false, workflows = [], connections = [] } = {}) {
-  const name = String(title || '').trim() || (isAdmin ? 'Admin desk' : '');
+  const name = String(title || '').trim() || (isAdmin ? 'Admin view' : '');
   // v1603 (live: "sub header has no description") — the Admin desk is not a catalog desk, so it has no
   // description SOURCE; it owns its operator description here.
   const desc = String(description || '').trim()
-    || (isAdmin ? 'watches your connections, ride health, and open cases across every connected site.' : '');
+    || (isAdmin ? 'watches your connections, ride health, and open details across every connected site.' : '');
   const labels = (Array.isArray(connections) ? connections : []).map((c) => String(c || '').trim()).filter(Boolean);
 
   // The SUBHEADER: "<Name> — <description>" (the desk, described); connections join it as a second line only
