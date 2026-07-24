@@ -97,6 +97,7 @@ import { Scope, scalar, record as scopeRecord, document as scopeDocument } from 
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate, INTENTS } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
+import { Icons } from './assets/icons.js';   // PS-4 (v2.74.1765) — the ONE icon registry (SVG/currentColor; emoji banned from chrome)
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -2999,6 +3000,23 @@ function _orchFinalize(msg, { outcome = null } = {}) {
 // should be Vectors") and the 👎 controls know WHAT to correct. Set on every confirm/run; cleared after retract.
 let _lastOrch = null;
 const _mkBtn = (label, fn) => { const b = document.createElement('button'); b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = label; b.addEventListener('click', fn); return b; };
+
+// PS-4 (v2.74.1765, DESIGN_panel_surfaces.md §5) — the ONLY way to mint an icon-only button: the aria-label is a
+// REQUIRED positional (no label, no button). Icons come from the assets/icons.js registry (SVG, currentColor) —
+// emoji are banned from chrome. `once` gives the _mkOnceBtn double-fire guard.
+function _mkIconBtn(iconName, ariaLabel, fn, { title = '', size = 16, once = false } = {}) {
+  const b = document.createElement('button');
+  b.className = 'wf-card-act';
+  b.type = 'button';
+  b.setAttribute('aria-label', String(ariaLabel || iconName));
+  b.title = title || String(ariaLabel || '');
+  b.innerHTML = (Icons[iconName] || Icons.x)(size);
+  b.addEventListener('click', (e) => {
+    if (once) { if (b.disabled) return; b.disabled = true; }
+    try { fn(b, e); } catch { /* */ }
+  });
+  return b;
+}
 
 // v2.74.1343 (review Batch 6, J) — a button that fires AT MOST ONCE. On the first click it self-disables (and, with
 // `lockBar`, disables every button in the same action bar), synchronously, BEFORE `fn` runs — so a double-click /
@@ -7745,8 +7763,8 @@ function _offerWorkflowReplay(goal, wf) {
   }));
 }
 
-// WF-2 — the manage view (`workflows` command): list THIS instance's saved workflows with ▶ Run / 🗑 Delete per row.
-// A transient menu (DOM-only, not persisted) — re-type `workflows` to refresh. Run replays through the chain runner.
+// WF-2 — the manage view (`workflows` command / the Rail glyph): THIS instance's saved workflows, as the PS-2
+// overlay surface (self-re-rendering — the "re-type to refresh" era is over). Run replays through the chain runner.
 // §10.2 distill-up — `distill` lists THIS app's CONFIRMED learned rules and offers to TEACH each, abstracted + HITL,
 // to its app-TYPE preset, so new apps of that type start smarter. Per row: ⬆ Teach preset → generalize (the LLM strips
 // anything specific to this app — the privacy boundary) → confirm the generalized rule → it lands in the preset store
@@ -7792,108 +7810,133 @@ async function _renderDistill() {
   }
 }
 
+// PS-2 (v2.74.1765, DESIGN_panel_surfaces.md §2.2) — the FLAGSHIP migration: workflows is an OVERLAY SURFACE,
+// never chat bubbles. Needs-action strips (parked runs · the §11.4 legacy-routine rebuild) render at the TOP of
+// the surface that owns the action (§7); rows carry icon-chip actions (§5). RUNNING closes the overlay first —
+// run output is conversation and belongs to the thread (§9). The "re-type `workflows`" era ends here.
 async function _renderWorkflows() {
-  const m = appendMessage({ role: 'assistant', body: '' });
   const appId = _memoryId();
-  if (!appId) { _setMessageBody(m, 'Open a view — workflows are saved per view.'); return; }
+  if (!appId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a view — workflows are saved per view.'); _orchFinalize(m); return; }
+  const ov = openPanelOverlay({ id: 'workflows', title: 'Workflows' });
+  if (!ov) return;
+  ov.body.textContent = 'Loading…';
+  await _renderWorkflowsBody(ov.body, appId);
+}
+async function _renderWorkflowsBody(body, appId) {
   let wfs = [];
-  try { wfs = await _loadWorkflowsMerged(); } catch { /* */ }   // DK-8k — the manage view sweeps every candidate key too
-  await _renderParkedRuns(appId);   // CD-7 (§8) — surface any scheduled run that stopped at a write, needing approval, ABOVE the list
-  // §11.4 (v1716) — the migration OFFER: a desk still holding a legacy fleetRoutine gets a rebuild banner here (the
-  // workflows surface is where its replacement lives). Never a silent conversion — the rebuild walks the intent
-  // door + per-step approval and the routine retires only when the workflow SAVES. Best-effort, never blocks.
+  try { wfs = await _loadWorkflowsMerged(); } catch { /* */ }   // DK-8k — sweeps every candidate key (+ the v1722 orphan merge)
+  if (!body.isConnected) return;
+  body.innerHTML = '';
+  const rerender = () => { void _renderWorkflowsBody(body, appId); };
+  // needs-action strip 1 — PARKED runs (§7: the banner lives in the surface that owns the action)
+  try { await _renderParkedRuns(body, appId, rerender); } catch { /* */ }
+  // needs-action strip 2 — the §11.4 legacy-routine rebuild offer
   try {
-    const _inst = _memoryId();
-    const _rr = _inst ? await _orchReq('FLEET_ROUTINE', { instanceId: _inst }) : null;
+    const _rr = await _orchReq('FLEET_ROUTINE', { instanceId: appId });
     const _rt = _rr && _rr.routine;
-    if (_rt && _rt.ask) {
-      const row = appendMessage({ role: 'assistant', body: '' });
-      _setMessageBody(row, `This view still has a **legacy routine** — every **${describeEvery(_rt.minutes)}**: “${escHtml(String(_rt.ask))}” (${_rt.enabled ? 'on' : 'off'}). Routines are retiring in favour of scheduled workflows: rebuild it once — each step gets run and approved — and it keeps the same schedule.`, { markdown: true });
-      const bar = _orchActionBar(row);
-      bar.appendChild(_mkOnceBtn('⤴ Rebuild as workflow', () => { try { bar.remove(); } catch { /* */ } void _wfRebuildFromRoutine(_rt, _inst); }));
-      bar.appendChild(_mkBtn('Not now', () => { try { bar.remove(); } catch { /* */ } }));
+    if (_rt && _rt.ask && body.isConnected) {
+      const ban = document.createElement('div'); ban.className = 'wf-ov-banner';
+      ban.innerHTML = '<div>This view still has a <strong>legacy routine</strong> — every <strong>' + escHtml(describeEvery(_rt.minutes)) + '</strong>: “' + escHtml(String(_rt.ask)) + '” (' + (_rt.enabled ? 'on' : 'off') + '). Rebuild it once — each step gets run and approved — and it keeps the same schedule.</div>';
+      const acts = document.createElement('div'); acts.className = 'wf-ov-actions';
+      acts.appendChild(_mkOnceBtn('Rebuild as workflow', () => { releaseSurface('workflows'); void _wfRebuildFromRoutine(_rt, appId); }));
+      acts.appendChild(_mkBtn('Not now', () => { try { ban.remove(); } catch { /* */ } }));
+      ban.appendChild(acts);
+      body.appendChild(ban);
     }
   } catch { /* the offer must never block the list */ }
-  // v2.74.1722 — the v1720 adopt BANNER is gone (user ruling): orphaned workflows now merge straight into the
-  // list via _loadWorkflowsMerged, as ordinary rows tagged "from <desk>". Ownership re-keys lazily on ⏱ schedule.
-  if (!wfs.length) { _setMessageBody(m, 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.'); return; }
-  _setMessageBody(m, `${wfs.length} saved workflow${wfs.length === 1 ? '' : 's'} :`);
+  if (!wfs.length) {
+    const empty = document.createElement('div'); empty.className = 'wf-history-notice';
+    empty.textContent = 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.';
+    body.appendChild(empty);
+    return;
+  }
   for (const wf of wfs) {
     const wfKey = wf.appId || appId;   // DK-8k — operate on the record's OWN store
     const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
-    // CD-1a/CD-4 — the honest cadence line: a tier-'sw' workflow RUNS on the clock, a tier-'panel' one is DUE and
-    // runs in the panel (§7.3). A tier-'panel' workflow whose nextDue has passed is "⏰ due now" — the scanner
-    // can't run it, so the panel offers it here and advances the clock when it runs.
     const _sched = _wfScheduleLabel(wf);
     const _t = workflowTier(wf);
     const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
-    const _from = (wf.orphanedFrom && wf.orphanedFrom.deskName) ? ` · from “${String(wf.orphanedFrom.deskName).slice(0, 40)}”` : '';   // v1722 — a deleted desk's workflow, tagged, otherwise ordinary
-    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''}${_sched ? ` · ⏱ ${_sched}` : ''}${_due ? ' · ⏰ due now' : ''}${_from})` });
-    const bar = _orchActionBar(row);
-    bar.appendChild(_mkOnceBtn(_due ? '▶ Run now (due)' : '▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
+    const _from = (wf.orphanedFrom && wf.orphanedFrom.deskName) ? ' · from “' + String(wf.orphanedFrom.deskName).slice(0, 40) + '”' : '';
+    const row = document.createElement('div'); row.className = 'wf-ov-row';
+    row.innerHTML = '<div class="wf-ov-main"><div class="wf-ov-title">' + escHtml(wf.name || wf.ask) + '</div><div class="wf-ov-meta">' + escHtml(steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '') + _from) + '</div></div>';
+    const acts = document.createElement('div'); acts.className = 'wf-ov-actions';
+    acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async () => {
+      releaseSurface('workflows');   // §9 — run output is conversation; reveal the thread it streams into
       const tab = await _orchActiveTab();
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
       bumpWorkflowRun(wfKey, wf.id).catch(() => {});
-      // CD-1a — a due tier-'panel' run fulfills the schedule: advance its clock (the scanner deliberately didn't).
-      if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }
+      if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }   // CD-1a — a due tier-'panel' run fulfills the schedule
       const _p2 = _wfReplayPlan(wf);
       const _m2 = appendMessage({ role: 'assistant', body: '' });
       if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
-      const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 (v1746) — the panel run writes its history entry
-      _walkAbortFlag.requested = false;   // passing state skips the chain's own stale-stop clear — do it here
+      const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
+      _walkAbortFlag.requested = false;
       _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 }).then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2)).catch(() => { /* */ });
-    }));
-    // CD-1a — a tier-'sw' workflow can run WITHOUT the panel (the same path the scheduler fires): run it now,
-    // headless, through the SW. Useful on its own, and the on-demand way to confirm the scanner's fire path
-    // (watch for the CADENCE ▸ line in a decisions download).
-    if (_t === 'sw') bar.appendChild(_mkOnceBtn('⚡ Headless', async () => {
+    }, { once: true }));
+    if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
+      releaseSurface('workflows');
       const _mh = appendMessage({ role: 'assistant', body: '' });
-      _setMessageBody(_mh, `Running “${escHtml(wf.name || wf.ask)}” in the background…`, { markdown: true });
+      _setMessageBody(_mh, 'Running “' + escHtml(wf.name || wf.ask) + '” in the background…', { markdown: true });
       let res = null;
       try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
       const v = res && res.verdict;
       _setMessageBody(_mh, (res && res.success !== false)
-        ? (v === 'parked' ? '⚠ Stopped at a write — re-type `workflows` to approve it.' : `Ran headless → ${v === 'complete' ? 'completed' : (v || 'finished')}. Its run shows in 📜 History.`)
-        : `Couldn’t run headless — ${_errWord(res && res.error)}.`, { markdown: true });
-    }));
-    bar.appendChild(_mkBtn('⏱ Schedule', () => _wfScheduleBar(row, wf, wfKey)));   // CD-4 — arm / change / remove the cadence
-    bar.appendChild(_mkBtn('📜 History', () => { void _renderWorkflowRuns(wf); }));   // CD-6 — the run-history view (auto + manual runs)
-    bar.appendChild(_mkBtn('🗑 Delete', async () => {
-      bar.remove();
+        ? (v === 'parked' ? '⚠ Stopped at a write — open Workflows to approve it.' : 'Ran headless → ' + (v === 'complete' ? 'completed' : (v || 'finished')) + '. Its run shows in the workflow’s history.')
+        : 'Couldn’t run headless — ' + _errWord(res && res.error) + '.', { markdown: true });
+    }, { once: true }));
+    acts.appendChild(_mkIconBtn('schedule', (wf.trigger && wf.trigger.enabled) ? 'Change or remove the schedule' : 'Run this on a schedule', () => _wfScheduleInline(row, wf, wfKey, rerender)));
+    acts.appendChild(_mkIconBtn('history', 'Run history', () => { void _renderWorkflowRuns(wf); }));
+    acts.appendChild(_mkIconBtn('trash', 'Delete this workflow', async () => {
+      if (!confirm('Delete “' + (wf.name || wf.ask) + '”? This can’t be undone.')) return;   // §5 — confirmation required
       try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
-      _setMessageBody(row, `Deleted${wf.name ? ` “${wf.name}”` : ''}.`);
+      rerender();
     }));
+    row.appendChild(acts);
+    body.appendChild(row);
   }
 }
 
-// CD-7 (DESIGN_cadence.md §8) — surface PARKED runs: a scheduled run that reached a write and stopped (writePolicy
-// has no 'auto' — an unattended write always parks). Each is shown with the write preview + Approve & continue /
-// Cancel run. Approve re-fires from the parked step, approving that write; a LATER write re-parks (one per write).
-async function _renderParkedRuns(appId) {
+// PS-2 — the inline schedule picker for an overlay row (the message-row _wfScheduleBar stays for the launch card).
+function _wfScheduleInline(row, wf, wfKey, rerender) {
+  const old = row.querySelector('.wf-ov-actions'); if (!old) return;
+  const cur = (wf.trigger && wf.trigger.minutes && wf.trigger.enabled) ? wf.trigger.minutes : 0;
+  const pick = document.createElement('div'); pick.className = 'wf-ov-actions';
+  const set = (minutes) => { void _wfSetSchedule(wf, wfKey, minutes).then(rerender); };
+  for (const [label, mins] of [['Hourly', 60], ['4h', 240], ['Daily', 1440]]) pick.appendChild(_mkBtn((cur === mins ? '● ' : '') + label, () => set(mins)));
+  pick.appendChild(_mkBtn(cur ? 'Off' : 'None', () => set(0)));
+  old.replaceWith(pick);
+}
+
+// CD-7 (§8) / PS-2+§7 — PARKED runs render as a needs-action STRIP inside the workflows overlay (they were
+// thread bubbles). Approve re-fires from the parked step (one approval per write — a later write re-parks);
+// Cancel drops the run. Both re-render the surface so the strip is always current.
+async function _renderParkedRuns(container, appId, rerender = null) {
   let r = null;
   try { r = await _orchReq('WORKFLOW_PARKED', { appId }); } catch { /* */ }
   const parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [];
-  if (!parked.length) return 0;
+  if (!parked.length || !container || !container.isConnected) return 0;
   for (const p of parked) {
     const prev = (p.preview && typeof p.preview === 'object') ? p.preview : {};
     const what = prev.recipe || prev.step || 'a write step';
-    const row = appendMessage({ role: 'assistant', body: '' });
-    _setMessageBody(row, `⚠ **“${escHtml(p.name || p.workflowId)}”** ran on schedule and stopped — **${escHtml(String(what))}** is a write that needs your approval before it sends.`, { markdown: true });
-    const bar = _orchActionBar(row);
-    bar.appendChild(_mkOnceBtn('✓ Approve & continue', async () => {
-      _setMessageBody(row, `Approving “${escHtml(String(what))}” and continuing the run…`, { markdown: true });
+    const ban = document.createElement('div'); ban.className = 'wf-ov-banner wf-ov-parked';
+    ban.innerHTML = '<div>⚠ <strong>“' + escHtml(p.name || p.workflowId) + '”</strong> ran on schedule and stopped — <strong>' + escHtml(String(what)) + '</strong> is a write that needs your approval before it sends.</div>';
+    const acts = document.createElement('div'); acts.className = 'wf-ov-actions';
+    acts.appendChild(_mkOnceBtn('✓ Approve & continue', async () => {
       let res = null;
       try { res = await _orchReq('WORKFLOW_RESUME_PARKED', { runId: p.runId }); } catch { /* */ }
       const v = res && res.verdict;
-      _setMessageBody(row, (res && res.success !== false)
-        ? (v === 'parked' ? 'Sent — the run continued and stopped at the NEXT write. Re-type `workflows` to approve it.' : `Done — the run ${v === 'complete' ? 'completed' : (v || 'finished')}.`)
-        : `Couldn’t resume — ${_errWord(res && res.error)}.`, { markdown: true });
+      ban.querySelector('div').textContent = (res && res.success !== false)
+        ? (v === 'parked' ? 'Sent — the run continued and stopped at the NEXT write.' : 'Done — the run ' + (v === 'complete' ? 'completed' : (v || 'finished')) + '.')
+        : 'Couldn’t resume — ' + _errWord(res && res.error) + '.';
+      if (rerender) setTimeout(rerender, 900);
     }));
-    bar.appendChild(_mkBtn('✕ Cancel run', async () => {
-      try { bar.remove(); } catch { /* */ }
+    acts.appendChild(_mkBtn('✕ Cancel run', async () => {
       try { await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
-      _setMessageBody(row, 'Cancelled — the write was not sent.', { markdown: true });
+      ban.querySelector('div').textContent = 'Cancelled — the write was not sent.';
+      if (rerender) setTimeout(rerender, 900);
     }));
+    ban.appendChild(acts);
+    container.appendChild(ban);
   }
   return parked.length;
 }
@@ -7962,32 +8005,41 @@ function _wfScheduleLabel(wf) {
   return workflowTier(wf) === 'sw' ? `runs every ${every}` : `due every ${every}`;
 }
 
-// CD-4 — the arm/change/remove-cadence control: replace the row's bar with the interval picker; each choice writes
-// through WORKFLOW_TRIGGER_SET (the SW normalizes + persists). "Off" clears the cadence.
+// CD-4 — the ONE schedule writer (PS-2 extraction: the overlay picker and the launch-card bar share it): re-key
+// an orphaned bank if needed, then write through WORKFLOW_TRIGGER_SET (the SW normalizes + persists). Mutates
+// wf.trigger/orphanedFrom in place; returns { ok, wfKey } (wfKey may have changed on re-key).
+async function _wfSetSchedule(wf, wfKey, minutes) {
+  const trigger = minutes > 0 ? { kind: 'cadence', minutes, enabled: true } : null;
+  let ok = false;
+  // v2.74.1722 — scheduling is the ONE moment an orphaned (deleted-desk) workflow must change owner: the
+  // scanner's desk-liveness check auto-disarms any trigger living on a dead key, so a schedule set there would
+  // silently die on the next tick. Re-key to THIS desk first (surrogate id preserved → history travels; the
+  // orphan tag drops); everything else (run/history/delete) works fine against the old bank and never re-keys.
+  try {
+    if (!_workflowKeys().includes(String(wfKey))) {
+      const dest = _memoryId();
+      await saveWorkflow(dest, { ...wf, orphanedFrom: undefined });
+      await deleteWorkflow(wfKey, wf.id);
+      wfKey = dest; wf.orphanedFrom = undefined;
+      try { _orchLog(`WORKFLOW ▸ re-keyed "${String(wf.name || wf.ask).slice(0, 40)}" to this desk (scheduled from an orphaned bank)`); } catch { /* */ }
+    }
+  } catch { /* a failed re-key falls through — the set below still applies to the old key */ }
+  try { const r = await _orchReq('WORKFLOW_TRIGGER_SET', { appId: wfKey, workflowId: wf.id, trigger }); ok = !!(r && r.success !== false); wf.trigger = r && r.trigger ? r.trigger : (trigger || undefined); } catch { /* */ }
+  return { ok, wfKey };
+}
+
+// CD-4 — the launch-card schedule bar: replace the row's bar with the interval picker; each choice writes
+// through _wfSetSchedule. "Off" clears the cadence.
 function _wfScheduleBar(row, wf, wfKey) {
   try { const old = row.querySelector('.orch-actions'); if (old) old.remove(); } catch { /* */ }
   const bar = _orchActionBar(row);
   const cur = (wf.trigger && wf.trigger.minutes && wf.trigger.enabled) ? wf.trigger.minutes : 0;
   const set = async (minutes) => {
-    const trigger = minutes > 0 ? { kind: 'cadence', minutes, enabled: true } : null;
-    let ok = false;
-    // v2.74.1722 — scheduling is the ONE moment an orphaned (deleted-desk) workflow must change owner: the
-    // scanner's desk-liveness check auto-disarms any trigger living on a dead key, so a schedule set there would
-    // silently die on the next tick. Re-key to THIS desk first (surrogate id preserved → history travels; the
-    // orphan tag drops); everything else (run/history/delete) works fine against the old bank and never re-keys.
-    try {
-      if (!_workflowKeys().includes(String(wfKey))) {
-        const dest = _memoryId();
-        await saveWorkflow(dest, { ...wf, orphanedFrom: undefined });
-        await deleteWorkflow(wfKey, wf.id);
-        wfKey = dest; wf.orphanedFrom = undefined;
-        try { _orchLog(`WORKFLOW ▸ re-keyed "${String(wf.name || wf.ask).slice(0, 40)}" to this desk (scheduled from an orphaned bank)`); } catch { /* */ }
-      }
-    } catch { /* a failed re-key falls through — the set below still applies to the old key */ }
-    try { const r = await _orchReq('WORKFLOW_TRIGGER_SET', { appId: wfKey, workflowId: wf.id, trigger }); ok = !!(r && r.success !== false); wf.trigger = r && r.trigger ? r.trigger : (trigger || undefined); } catch { /* */ }
+    const r = await _wfSetSchedule(wf, wfKey, minutes);
+    wfKey = r.wfKey;
     try { bar.remove(); } catch { /* */ }
-    _setMessageBody(row, ok
-      ? `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  ${minutes > 0 ? `— now ${_wfScheduleLabel(wf)}. Re-type \`workflows\` to manage.` : '— schedule removed.'}`
+    _setMessageBody(row, r.ok
+      ? `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  ${minutes > 0 ? `— now ${_wfScheduleLabel(wf)}.` : '— schedule removed.'}`
       : 'Couldn’t update the schedule — try again.');
   };
   for (const [label, mins] of [['Every hour', 60], ['Every 4h', 240], ['Every day', 1440]]) {
@@ -13568,10 +13620,9 @@ try {
     try { delete el.dataset.messageId; } catch { /* transient — a status nudge, not transcript history */ }
     _setMessageBody(el, `⚠ ${nm} ran on schedule and stopped at a write that needs your approval.`, { markdown: true });
     const bar = _orchActionBar(el);
-    bar.appendChild(_mkBtn('Review', async () => {
-      try { bar.remove(); } catch { /* */ }
-      const n = await _renderParkedRuns(null);
-      if (!n) { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, 'No parked runs right now — it may have been handled already.'); _orchFinalize(mm); }
+    bar.appendChild(_mkBtn('Review', () => {
+      try { bar.remove(); el.remove(); } catch { /* */ }
+      void _renderWorkflows();   // PS-2 — the parked strip lives at the top of the workflows overlay now
     }));
   });
 } catch { /* */ }

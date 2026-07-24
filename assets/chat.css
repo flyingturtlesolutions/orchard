@@ -690,6 +690,10 @@ textarea {
   color: var(--c-text);
   cursor: pointer;
   line-height: 1;
+  display: inline-flex;              /* PS-4 — the registry SVGs center like the v1745 history arrow */
+  align-items: center;
+  justify-content: center;
+  flex: none;
 }
 .wf-card-act:hover:not(:disabled) { border-color: var(--c-border); background: var(--c-bg-subtle); }
 .wf-card-act:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -742,6 +746,28 @@ textarea {
 .wf-history-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--c-border-soft); }
 .wf-history-row:last-of-type { border-bottom: none; }
 .wf-history-notice { padding-top: var(--sp-2); opacity: 0.7; font-style: italic; }
+/* PS-2 (v2.74.1765, DESIGN_panel_surfaces.md §2.2) — the workflows OVERLAY: list rows + needs-action banners. */
+.wf-ov-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+.wf-ov-row:last-of-type { border-bottom: none; }
+.wf-ov-main { flex: 1; min-width: 0; }
+.wf-ov-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-ov-meta { font-size: 0.85em; opacity: 0.7; margin-top: 2px; }
+.wf-ov-actions { display: flex; align-items: center; gap: var(--sp-1); flex: none; }
+.wf-ov-banner {
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--r-md);
+  background: var(--c-bg-subtle);
+  padding: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.wf-ov-banner .wf-ov-actions { margin-top: var(--sp-2); justify-content: flex-end; }
+.wf-ov-parked { border-color: color-mix(in srgb, var(--c-warn, #b58a2a) 45%, var(--c-border-soft)); }
 /* v2.74.1343 (review Batch 6) — the connection / rich-intent chip MENU (setup site candidates, "what can I do here"
    intents). The chips reuse .suggestion-card styling, but here they lay out as a WRAPPING ROW under the bubble text
    (they were appended to the .message flex row with NO CSS — squeezed as a third column beside the text). */
