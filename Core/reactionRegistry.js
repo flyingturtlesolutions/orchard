@@ -142,8 +142,26 @@ export const STEPIL_REACTIONS = Object.freeze([
   { id: 'stepil:unparseable→needs-clarify', subject: 'stepil', kind: 'catchall' },
 ]);
 
-/** Every registered reaction, all NINE gated necks. PURE. */
-export function allReactions() { return [...interpretReactions(), ...DECOMPOSER_REACTIONS, ...CLASSIFY_REACTIONS, ...ROUTER_REACTIONS, ...WFMATCH_REACTIONS, ...JUDGE_REACTIONS, ...SWEEP_REACTIONS, ...SEEDDIR_REACTIONS, ...STEPIL_REACTIONS]; }
+/** THE EFFECT HALF, slice 1 (v2.74.1754 — B5-5 opens): Core/runDriver landed via CD-1a (extraction 1 of 5),
+ *  so the DISPATCH loop's reactions are pure and gate-able — the half the spec said had to wait. These rows
+ *  cover the DRIVER CORE (verdicts · park/resume · the reporter contract · the fail-safes); per-CLAUSE effect
+ *  reactions accrue as extractions 2–5 land. Depth stays in runDriver.test.js — thin representatives here. */
+export const DRIVER_REACTIONS = Object.freeze([
+  { id: 'driver:complete', subject: 'driver', kind: 'pass' },
+  { id: 'driver:loose-chain→partial', subject: 'driver', kind: 'pass' },               // one flaky step never sinks the rest; firstFailure is the audit story
+  { id: 'driver:hard-stop→failed|partial', subject: 'driver', kind: 'catchall' },
+  { id: 'driver:step-throw→soft-fail', subject: 'driver', kind: 'catchall' },          // a throwing step becomes {ok:false}; the loop never dies
+  { id: 'driver:no-reporter→gate-parks', subject: 'driver', kind: 'catchall' },        // THE §11.2 row: no surface ⇒ nobody watching ⇒ never auto-write
+  { id: 'driver:reporter-throw-never-changes-verdict', subject: 'driver', kind: 'catchall' },
+  { id: 'driver:park→resumable', subject: 'driver', kind: 'gate' },                    // parkedAt + carried state = the §8 resume seam
+  { id: 'driver:resume-one-approval', subject: 'driver', kind: 'gate' },               // the approved write proceeds; the NEXT write re-parks
+  { id: 'driver:empty→empty', subject: 'driver', kind: 'catchall' },
+  { id: 'driver:verdict-enum-sealed', subject: 'driver', kind: 'gate' },
+  { id: 'driver:differential-oracle-seed', subject: 'driver', kind: 'pass' },          // panel ≡ SW per reaction — B5-5's double duty, seeded at the driver core
+]);
+
+/** Every registered reaction: nine gated necks + the effect half's first slice. PURE. */
+export function allReactions() { return [...interpretReactions(), ...DECOMPOSER_REACTIONS, ...CLASSIFY_REACTIONS, ...ROUTER_REACTIONS, ...WFMATCH_REACTIONS, ...JUDGE_REACTIONS, ...SWEEP_REACTIONS, ...SEEDDIR_REACTIONS, ...STEPIL_REACTIONS, ...DRIVER_REACTIONS]; }
 
 // ── B5-1 — factory 1a: the STRUCTURED garbage list (constructed, never rots; decision-gate §6) ────────────────
 // Each shape is a way a model output could be wrong that code must absorb: land in a legal reaction, never throw.

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   STATUS, probedUser, isAnonUser, identityMatches, assessProbe, rideAction,
-  connectionFromProbe, connectionFreshness, pickRideTab, looksLikeLogin, classifyReachProbe,
+  connectionFromProbe, connectionFreshness, pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, looksLikeLogin, classifyReachProbe,
 } from './connection.js';
 
 const reply = (user) => ({ success: true, value: { user } });          // a SESSION_FETCH probe reply
@@ -162,5 +162,43 @@ describe('pickRideTab — the entry tab (live, active-then-MRU), or null → ope
     assert.equal(pickRideTab([{ id: 1, discarded: true, lastAccessed: 999 }]), null);
     assert.equal(pickRideTab([]), null);
     assert.equal(pickRideTab(null), null);
+  });
+  it('urlParam pattern prefers a workspace tab over an active bare-root admin tab (v2.74.1758)', () => {
+    const urlParam = { name: 'handle', pattern: '\\/store\\/([^\\/]+)' };
+    const tabs = [
+      { id: 1, active: true, discarded: false, lastAccessed: 999, url: 'https://admin.shopify.com/' },
+      { id: 2, active: false, discarded: false, lastAccessed: 50, url: 'https://admin.shopify.com/store/deako/customers' },
+    ];
+    assert.equal(pickRideTab(tabs, { urlParam }).id, 2, 'store tab wins even when root is active/MRU');
+    assert.equal(pickRideTab(tabs).id, 1, 'without urlParam, active still wins');
+  });
+});
+
+describe('rideTabUrlPatterns — Chrome match patterns for session-ride tab discovery (v2.74.1758)', () => {
+  it('concrete origin → exact host only', () => {
+    assert.deepEqual(rideTabUrlPatterns('admin.shopify.com', 'admin.shopify.com'), ['*://admin.shopify.com/*']);
+    assert.deepEqual(rideTabUrlPatterns('deako.zendesk.com', 'zendesk.com'), ['*://deako.zendesk.com/*']);
+  });
+  it('appHost-only → bare host AND subdomain wildcard (Chrome *.host misses bare host)', () => {
+    assert.deepEqual(rideTabUrlPatterns('', 'admin.shopify.com'),
+      ['*://admin.shopify.com/*', '*://*.admin.shopify.com/*']);
+    assert.deepEqual(rideTabUrlPatterns(null, 'zendesk.com'),
+      ['*://zendesk.com/*', '*://*.zendesk.com/*']);
+  });
+  it('empty inputs → no patterns', () => {
+    assert.deepEqual(rideTabUrlPatterns('', ''), []);
+    assert.deepEqual(rideTabUrlPatterns(null, null), []);
+  });
+});
+
+describe('isCsrfColdFailure — idle-admin CSRF warm vs real signed-out (v2.74.1759)', () => {
+  it('no-csrf and sniff 403s are cold; bare 403 without sniff/hint is not', () => {
+    assert.equal(isCsrfColdFailure({ error: 'no-csrf' }), true);
+    assert.equal(isCsrfColdFailure({ error: 'http-403', csrf: 'sniff' }), true);
+    assert.equal(isCsrfColdFailure({ error: 'http-401', csrf: 'sniff' }), true);
+    assert.equal(isCsrfColdFailure({ error: 'http-403', hint: 'no CSRF token yet — click' }), true);
+    assert.equal(isCsrfColdFailure({ error: 'http-403' }), false);
+    assert.equal(isCsrfColdFailure({ error: 'http-500', csrf: 'sniff' }), false);
+    assert.equal(isCsrfColdFailure({ error: 'session-expired', csrf: 'sniff' }), false);
   });
 });

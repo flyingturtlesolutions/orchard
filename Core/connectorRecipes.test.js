@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath} from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
@@ -310,6 +310,16 @@ describe('recipeForOrigin — pick the strong-probe recipe for a host (AS-4 veri
     assert.equal(recipeForOrigin('zendesk.com').app, 'zendesk');                 // exact host
     assert.equal(recipeForOrigin('https://support.deako.com'), null);            // no recipe → generic verify path
     assert.equal(recipeForOrigin(''), null);
+  });
+});
+
+describe('csrfSniffHosts — sniff-class appHosts for background pre-warm (v2.74.1760)', () => {
+  it('lists each csrf:sniff appHost once; Shopify is the curated case', () => {
+    const hosts = csrfSniffHosts();
+    assert.ok(hosts.includes('admin.shopify.com'));
+    assert.equal(hosts.length, new Set(hosts).size);
+    assert.deepEqual(csrfSniffHosts([{ csrf: 'sniff', appHost: 'a.com' }, { csrf: 'sniff', appHost: 'a.com' }, { appHost: 'b.com' }]), ['a.com']);
+    assert.deepEqual(csrfSniffHosts([]), []);
   });
 });
 

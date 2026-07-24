@@ -69,13 +69,13 @@ import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retire
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
-import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
+import { isCsrfColdFailure } from './Core/connection.js';   // v2.74.1759 — CSRF-cold silent retry (idle Shopify after reload)import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
 import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
-import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
+import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -4676,7 +4676,21 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // exactly this: "the SOURCE leg rides along — its drill marker lets a following step pull each item's FULL
   // record"). Without this the v1630 'prior' path bypassed the v1628 enrich entirely: two fixes, one dead seam.
   let srcLeg = null;
-  if (map.collection === 'prior' && priorValue != null) { rows = primaryList(priorValue) || []; srcLeg = priorLeg || null; }
+  let _priorMode = 'plain';   // v2.74.1757 — 'plain' | 'source' | 'match' after unwrapMapPrior (gl 133556 map→map seam)
+  if (map.collection === 'prior' && priorValue != null) {
+    rows = primaryList(priorValue) || [];
+    srcLeg = priorLeg || null;
+    // v2.74.1757 (gl 133556) — a prior MAP stores table-join envelopes as lastValue. Resolving VS joinKey
+    // paths against the envelope top-level always misses (`MAP ▸ no field — ""`). Unwrap: same-system
+    // follow-ups use the matched records; otherwise source.row so the origin ladder still works.
+    const uw = unwrapMapPrior(rows, { targetSystem: system, itemField: map.itemField });
+    if (uw.mode !== 'plain') {
+      rows = uw.rows;
+      _priorMode = uw.mode;
+      if (uw.mode === 'match') srcLeg = null;   // matched records are already the other system — no VS drill/joinKey
+      try { _orchLog(`MAP ▸ unwrapped prior join → ${uw.mode} (${rows.length} row(s)${uw.priorSystem ? `, was ${uw.priorSystem}` : ''})`); } catch { /* */ }
+    }
+  }
   else {
     const readAsk = (map.collection && map.collection.readAsk) || goal;
     _setMessageBody(msg, `Reading the list to map…`);
@@ -4687,6 +4701,12 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
       if (_prior.length) {
         rows = _prior; srcLeg = priorLeg || null;   // v1632 — the fallback keeps the enrich door open too
+        const uw = unwrapMapPrior(rows, { targetSystem: system, itemField: map.itemField });
+        if (uw.mode !== 'plain') {
+          rows = uw.rows; _priorMode = uw.mode;
+          if (uw.mode === 'match') srcLeg = null;
+          try { _orchLog(`MAP ▸ unwrapped prior join → ${uw.mode} (${rows.length} row(s)${uw.priorSystem ? `, was ${uw.priorSystem}` : ''})`); } catch { /* */ }
+        }
         try { _orchLog(`MAP ▸ collection "${String(readAsk).slice(0, 40)}" unresolved → fell back to the prior read (${rows.length} row(s))`); } catch { /* */ } }
       else {
         _setMessageBody(msg, `Couldn’t read the list to map over${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr && cr.hint ? `  ${cr.hint}.` : ''}  Name the list explicitly (e.g. “for each open warranty task…”).`);
@@ -4700,6 +4720,8 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // 2) the FIELD — deterministic path resolution; a miss asks honestly (never a per-row guess).
   const _declared = (srcLeg && srcLeg.tool && Array.isArray(srcLeg.tool.joinKey)) ? srcLeg.tool.joinKey : null;
   let fp = resolveJoinField(rows, map.itemField, _declared);
+  // v2.74.1757 — same-system follow-up over matched records has no joinKey declaration; pick email/phone/id.
+  if (!fp && _priorMode === 'match' && !map.itemField) fp = resolveIdentityField(rows);
   // v2.74.1628 (live 080343) — the field often lives BEHIND THE DRILL: a vs_warranty_tasks LIST row carries
   // address/project/claim, while the homeowner EMAIL lives in the task DETAIL + its contacts sidecar (the same
   // drill the case fan-out runs at spawn). When the row can't answer and the source leg DECLARES a drill, enrich
@@ -4782,8 +4804,11 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
     // routinely thrown away and replaced with a hardcoded CUSTOMER search, silently looking up the wrong thing
     // and reporting an honest-looking no-match. Contact rungs still synthesize (the by-email/by-phone legs are
     // type-routed), but the primary rung now honors what was actually asked for.
+    // v2.74.1757 — match-mode follow-up already HAS the customer; contact-type synthesis would re-find the
+    // profile and drop "get the last order" (gl 133556 step 3). Always honor readAsk in that mode.
     const _isContactRung = (type === 'email' || type === 'phone');
-    const ask = (map.target.readAsk && !_isContactRung) ? map.target.readAsk
+    const ask = (_priorMode === 'match' && map.target.readAsk) ? map.target.readAsk
+      : (map.target.readAsk && !_isContactRung) ? map.target.readAsk
       : _isContactRung ? `find ${system} customer by ${type} {value}`
       : `search ${system} customers for {value}`;
     _setMessageBody(msg, `Finding the ${escHtml(system)} ${escHtml(type)} lookup...`);
@@ -5008,6 +5033,13 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
   if (!plan || !plan.ok || !plan.channel) return { ok: false, error: 'no executor' };
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
+  // v2.74.1759 — CSRF-cold (idle admin after reload): one silent retry after a short pause. The executor already
+  // soft-wakes + re-sniffs; this covers the race where the SPA's token landed just after the first reply.
+  if (res && res.success === false && isCsrfColdFailure({ error: res.error, hint: res.hint, csrf: leg.tool && leg.tool.csrf })) {
+    try { _orchLog(`INVOKE ▸ csrf-cold retry ${(leg.tool && leg.tool.recipeId) || leg.key || ''}`); } catch { /* */ }
+    await new Promise((r) => setTimeout(r, 600));
+    try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
+  }
   if (!res || res.success === false) return { ok: false, error: res && res.error, hint: res && res.hint, detail: res && res.detail };
   return { ok: true, value: res.value };
 }
@@ -9928,6 +9960,13 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
+  // v2.74.1759 — CSRF-cold: keep the turn, show a warming line, one silent retry (don't ask the user to retype).
+  if (res && res.success === false && isCsrfColdFailure({ error: res.error, hint: res.hint, csrf: leg.tool && leg.tool.csrf })) {
+    _setMessageBody(msg, 'Warming the session…');
+    try { _orchLog(`IL ▸ csrf-cold retry ${leg.key || (leg.tool && leg.tool.recipeId) || ''}`); } catch { /* */ }
+    await new Promise((r) => setTimeout(r, 600));
+    try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
+  }
   if (!res || res.success === false) {
     const hint = (res && res.hint) ? `  ${res.hint}.` : '';   // CX-4a.1 — surface "open <app> and sign in" on a connector auth miss
     _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${res && res.error ? ` — ${_errWord(res.error)}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);

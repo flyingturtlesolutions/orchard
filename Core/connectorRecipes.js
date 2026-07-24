@@ -883,6 +883,20 @@ export function recipeForOrigin(origin) {
 }
 
 /**
+ * Hosts whose curated rides need a sniffed CSRF (`csrf:'sniff'` — Shopify class). PURE.
+ * Used by the vitals/boot pre-warm (v2.74.1760): bank a token from an ALREADY-OPEN tab before the first ask.
+ */
+export function csrfSniffHosts(catalog = CONNECTOR_RECIPES) {
+  const out = [];
+  for (const r of (Array.isArray(catalog) ? catalog : [])) {
+    if (!r || r.csrf !== 'sniff') continue;
+    const h = String(r.appHost || r.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+    if (h && !out.includes(h)) out.push(h);
+  }
+  return out;
+}
+
+/**
  * The path a signed-out human should be sent to in order to trigger THIS connector's real sign-in. PURE.
  * v2.74.1704 — DEFAULT `/`, explicit `console` for the exceptions. (Superseded the v1701 itemUrl derivation.)
  *

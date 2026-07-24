@@ -102,15 +102,57 @@ export function connectionFreshness(connection, now = 0, ttlMs = 5 * 60 * 1000) 
 }
 
 /**
- * Pick the best existing ride tab on the origin, or null. PURE — lifts the INVOKE_SESSION selection: live
- * (non-discarded), prefer the active tab, then the most-recently-used ("the connection the user is looking at",
- * §13/CX-7). Null → the handler opens an ephemeral managed tab (§16).
+ * Chrome `tabs.query` URL patterns for a session-ride host. PURE.
+ *
+ * Chrome match patterns: `*://*.example.com/*` matches SUBDOMAINS only — NOT bare `example.com`.
+ * Zendesk needs the wildcard (`*.zendesk.com` → `deako.zendesk.com`); Shopify/HubSpot author the CONCRETE
+ * admin host as `appHost` (`admin.shopify.com`), so a wildcard-only query silently misses the open store tab
+ * and cold-opens a useless root tab (no `/store/{handle}` → `no-url-param`). When only `appHost` is known,
+ * query BOTH bare + wildcard. A concrete `origin` stays exact-only.
  */
-export function pickRideTab(tabs) {
+export function rideTabUrlPatterns(origin, appHost) {
+  const o = _str(origin).replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  const a = _str(appHost).replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  const out = [];
+  const add = (host) => { if (host && !out.includes(`*://${host}/*`)) out.push(`*://${host}/*`); };
+  if (o) add(o);
+  else if (a) { add(a); add(`*.${a}`); }
+  return out;
+}
+
+/**
+ * Pick the best existing ride tab on the origin, or null. PURE — lifts the INVOKE_SESSION selection: live
+ * (non-discarded). Optional `urlParam.pattern` (e.g. Shopify `/store/<handle>/`) ranks matching tabs first so a
+ * bare admin root doesn't win over a workspace tab (active/MRU still break ties within each class). Null → the
+ * handler opens an ephemeral managed tab (§16).
+ */
+export function pickRideTab(tabs, opts) {
   const live = (Array.isArray(tabs) ? tabs : []).filter((t) => t && t.id != null && !t.discarded);
-  live.sort((a, b) => (Number(b.active === true) - Number(a.active === true)) || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
+  let re = null;
+  const pat = opts && opts.urlParam && opts.urlParam.pattern;
+  if (pat) { try { re = new RegExp(String(pat)); } catch { re = null; } }
+  const rank = (t) => (re && re.test(String(t.url || ''))) ? 1 : 0;
+  live.sort((a, b) => (rank(b) - rank(a))
+    || (Number(b.active === true) - Number(a.active === true))
+    || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
   return live[0] || null;
 }
+
+/**
+ * Is this ride failure the CSRF-cold class (idle admin after reload) rather than a real signed-out?
+ * PURE. Used by INVOKE_SESSION warm retries and the chat single-ask silent retry so the first ask isn't lost.
+ *   · `no-csrf` — content-script belt hard-reject (no token at all)
+ *   · http-401/403 + csrf:'sniff' — Shopify-class POST without a fresh sniffed token
+ *   · http-401/403 + hint mentioning CSRF — same, when the recipe flag isn't threaded
+ */
+export function isCsrfColdFailure({ error = null, hint = null, csrf = null } = {}) {
+  const err = _str(error);
+  if (err === 'no-csrf') return true;
+  if (!/^http-40[13]$/.test(err)) return false;
+  if (csrf === 'sniff') return true;
+  return /csrf/i.test(_str(hint));
+}
+
 
 // ── Setup-time connection verify (AS-4) — the GENERIC, recipe-free check ─────────────────────────────────────────────
 // A site with a connector recipe verifies via the strong identity probe (assessProbe). A generic site has no identity

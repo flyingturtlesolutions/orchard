@@ -265,6 +265,49 @@ export function extractValue(row, path) {
   return String(cur);
 }
 
+// v2.74.1757 — a table-join envelope from buildJoinRows({join:'table'}). Follow-up maps must NOT resolve
+// join fields against the envelope top-level (source / match / via) — that is the gl 133556 seam:
+// map→map over lastValue died with `MAP ▸ no field — ""` because VS joinKey paths live under source.row.
+export function isMapJoinEnvelope(row) {
+  return !!(row && typeof row === 'object' && !Array.isArray(row)
+    && row.source && typeof row.source === 'object'
+    && ('matched' in row || 'match' in row || (row.via && typeof row.via === 'object')));
+}
+
+/**
+ * v2.74.1757 — unwrap a prior map's table-join output for a FOLLOW-UP map. PURE.
+ * - same target system + no named itemField → prefer matched records (the identity the prior map proved)
+ * - otherwise → source.row (re-ladder / cross-system / named field on the origin row)
+ * Plain lists pass through unchanged ({ mode:'plain' }).
+ */
+export function unwrapMapPrior(prior, { targetSystem = '', itemField = '' } = {}) {
+  const list = (Array.isArray(prior) ? prior : []).filter((r) => r && typeof r === 'object');
+  if (!list.length || !isMapJoinEnvelope(list[0])) {
+    return { rows: list, mode: 'plain', priorSystem: '' };
+  }
+  const priorSystem = _str(list[0].via && list[0].via.system);
+  const same = !!(priorSystem && targetSystem && _norm(priorSystem) === _norm(targetSystem));
+  if (same && !_str(itemField)) {
+    const matches = list
+      .filter((e) => e && e.matched && e.match && typeof e.match === 'object' && !Array.isArray(e.match))
+      .map((e) => e.match);
+    if (matches.length) return { rows: matches, mode: 'match', priorSystem };
+  }
+  const sources = list
+    .map((e) => (e && e.source && e.source.row && typeof e.source.row === 'object') ? e.source.row : null)
+    .filter(Boolean);
+  return { rows: sources.length ? sources : list, mode: 'source', priorSystem };
+}
+
+/** v2.74.1757 — identity field on matched-record rows when itemField was omitted (email → phone → id-shaped). */
+export function resolveIdentityField(rows) {
+  for (const phrase of ['email', 'phone', 'id']) {
+    const hit = pickFieldPath(rows, phrase);
+    if (hit && hit.path) return { path: hit.path, matchedBy: 'identity' };
+  }
+  return null;
+}
+
 // PM-0 — build the JOIN output rows from the source rows + their per-row match results. PURE.
 //   results[i] = { value, match, ok, error } | null   (aligned to sourceRows by index; null = the row was skipped)
 //   'table'  → [{ source:{id,label,row}, value, match, matched, via }]  (one row per source item)

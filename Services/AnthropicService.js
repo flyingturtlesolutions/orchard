@@ -5359,7 +5359,16 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     });
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
     if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };
-    return parseInterpretOutput(res.text);
+    const raw = parseInterpretOutput(res.text);
+    // v2.74.1756 — B5-2's HARVEST TAP: the raw decision as replayable JSON. Until now traces carried only the
+    // INTERPRET_ASK summary line, which cannot be replayed as a fixture — every frozen regression (v1342/v1650/
+    // v1651/…) had to be reconstructed by hand. DEBUG level = FULL traces only (gl), and the marker is
+    // DELIBERATELY absent from _DECISION_RE — this is harvest material, not a decision line (invariant #1 is
+    // about decision-worthy markers; this one must never clutter a -decisions- download). Same PII class as the
+    // INTERPRET_ASK lines already in full traces (asks/params; traces are pre-scrubbed per the gl discipline).
+    // Harvest use: copy the JSON straight into a decisionGate FIXTURE or a goldenAsks freeze.
+    try { Logger.debug('route', `INTERPRET_RAW ▸ ${JSON.stringify(raw).slice(0, 600)}`); } catch { /* the tap never changes the decision */ }
+    return raw;
   }
 
   /**

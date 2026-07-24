@@ -13,8 +13,8 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost } from '../../Core/connectorRecipes.js';   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist
-import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill
+import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts } from '../../Core/connectorRecipes.js';   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm
+import { pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill; v1758 — rideTabUrlPatterns; v1759 — isCsrfColdFailure
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
@@ -430,6 +430,29 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   async function _bankedCsrf(origin) {
     try { const got = await chrome.storage.local.get(_CSRF_KEY(origin)); const c = got[_CSRF_KEY(origin)]; return (c && c.token && (Date.now() - (c.at || 0)) < CSRF_TTL_MS) ? c.token : null; } catch { return null; }
   }
+  async function _clearBankedCsrf(origin) {
+    try { await chrome.storage.local.remove(_CSRF_KEY(origin)); } catch { /* */ }
+    _sniffedCsrf.delete(origin);
+  }
+
+  // v2.74.1759 — soft-wake an idle ride tab so the SPA fires a request the CSRF tee can sniff. Briefly activates
+  // the tab (does NOT focus the window — stays background-ish if the window isn't front), waits for traffic,
+  // then restores the previously-active tab in that window so the user's chat surface isn't stolen.
+  async function _softWakeRideTab(tabId) {
+    let prevId = null;
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (!t || t.id == null) return;
+      if (t.discarded === true) { try { await chrome.tabs.reload(tabId); await _waitTabComplete(tabId); } catch { /* */ } }
+      try {
+        const actives = await chrome.tabs.query({ active: true, windowId: t.windowId });
+        if (actives[0] && actives[0].id != null && actives[0].id !== tabId) prevId = actives[0].id;
+      } catch { /* */ }
+      if (t.active !== true) { try { await chrome.tabs.update(tabId, { active: true }); } catch { /* */ } }
+      await new Promise((r) => setTimeout(r, 2000));
+    } catch { /* */ }
+    if (prevId != null) { try { await chrome.tabs.update(prevId, { active: true }); } catch { /* */ } }
+  }
 
   // ── CX-7c (v2.74.1388) — the SHOPIFY LIVENESS PROBE (spec §2 probeShopify): a GraphQL `{ shop { name } }` before
   // the real call, so a signed-out session fails FAST + honest instead of mid-write. Cached 60s per origin (a burst
@@ -455,7 +478,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     _shopLive.set(origin, { name, at: Date.now() });
     return { live: true, name };
   }
-  async function _acquireSniffedCsrf(tabId, origin, { force = false } = {}) {
+  async function _acquireSniffedCsrf(tabId, origin, { force = false, wake = false } = {}) {
     let c = _sniffedCsrf.get(origin);
     // v1401 — seed the in-memory cache from the PERSISTED bank when memory is cold/stale (SW restart cleared it): a
     // token captured during an earlier admin interaction is reused, so an idle tab needn't re-fire a request first.
@@ -475,6 +498,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     let tok = await ask();                       // ORDER MATTERS: the first ask wires the page's message listener…
     if (!tok || force) {
       try { await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: _csrfSnifferFunc }); } catch { /* CSP-proof: MAIN-world exec needs no page <script> */ }
+      // v2.74.1759 — soft-wake BEFORE the long poll when idle (don't burn 8s waiting for traffic that won't come).
+      if (wake && !tok) {
+        try { Logger.info('ride', `INVOKE ▸ csrf soft-wake ${origin}`); } catch { /* */ }
+        await _softWakeRideTab(tabId);
+        try { await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: _csrfSnifferFunc }); } catch { /* */ }
+      }
       const deadline = Date.now() + 8000;        // …so the tee (injected after) can never post into the void
       while (!tok && Date.now() < deadline) { await new Promise((r) => setTimeout(r, 500)); tok = await ask(); }
     }
@@ -499,6 +528,38 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     await _writeLiveTools(map);
     try { Logger.info('connector', `CONNECTOR_TOOLS ▸ ${linked.length} linked · ${Object.keys(map).length} live server(s) · ${toolCount} tool(s)${errCount ? ` · ${errCount} error(s)` : ''}`); } catch { /* */ }
     return { linked, liveServers: Object.keys(map).length, liveToolCount: toolCount };
+  }
+
+  // v2.74.1760 — background CSRF pre-warm for sniff-class hosts (Shopify): when a tab is ALREADY open and the
+  // bank is empty, soft-wake + sniff so the first ask doesn't pay the cold-403. Never opens a tab (§16b).
+  const _prewarmAt = new Map();   // host → last attempt ms (throttle misses)
+  const PREWARM_GAP_MS = 10 * 60e3;
+  async function _prewarmCsrfOpenTabs() {
+    const hosts = csrfSniffHosts();
+    const summary = [];
+    for (const host of hosts) {
+      try {
+        if (await _bankedCsrf(host)) { summary.push(`${host}:banked`); continue; }
+        const last = _prewarmAt.get(host) || 0;
+        if (Date.now() - last < PREWARM_GAP_MS) { summary.push(`${host}:throttled`); continue; }
+        _prewarmAt.set(host, Date.now());
+        const rec = recipeForOrigin(host);
+        const patterns = rideTabUrlPatterns(host, (rec && rec.appHost) || host);
+        let tabs = [];
+        try { tabs = await chrome.tabs.query({ url: patterns }); } catch { tabs = []; }
+        const tab = pickRideTab(tabs, { urlParam: (rec && rec.urlParam) || null });
+        if (!tab) { summary.push(`${host}:no-tab`); continue; }
+        if (typeof ensureContentScript === 'function') {
+          try { await ensureContentScript(tab.id); } catch { /* */ }
+        }
+        const tok = await _acquireSniffedCsrf(tab.id, host, { wake: true });
+        summary.push(`${host}:${tok ? 'ok' : 'miss'}`);
+      } catch { summary.push(`${host}:err`); }
+    }
+    if (summary.length) {
+      try { Logger.info('conn', `VITALS ▸ csrf prewarm ${summary.join(' · ')}`); } catch { /* */ }
+    }
+    return { hosts: summary };
   }
 
   return {
@@ -660,14 +721,16 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
 
           let origin = fillEndpoint(String((payload && payload.origin) || ''), args).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const appHost = String((payload && payload.appHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-          const queryHost = origin || (appHost ? `*.${appHost}` : '');
-          if (!queryHost) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
+          // v2.74.1758 — bare host + `*.` wildcard (Chrome's `*.host` misses the bare host; Shopify appHost IS the host).
+          const urlPatterns = rideTabUrlPatterns(origin, appHost);
+          if (!urlPatterns.length) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const expectedAccount = (payload && payload.account) || null;
 
           // 1) Prefer an already-open, live, logged-in tab (the user's real context) — §16 default path.
+          //    Prefer a tab whose URL already carries urlParam (e.g. /store/<handle>/) over a bare admin root.
           let tabs = [];
-          try { tabs = await chrome.tabs.query({ url: `*://${queryHost}/*` }); } catch { tabs = []; }
-          let tab = pickRideTab(tabs);
+          try { tabs = await chrome.tabs.query({ url: urlPatterns }); } catch { tabs = []; }
+          let tab = pickRideTab(tabs, { urlParam: (payload && payload.urlParam) || null });
           let ephemeral = false;
 
           // 2) Cold start (§16): no open tab → open an ephemeral managed tab — IF we know a concrete origin to open.
@@ -732,8 +795,9 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
 
           // CX-7 — acquire the sniffed CSRF ONCE here (the liveness probe + the main call both ride it), so we don't
           // double-sniff. Cached per-origin inside _acquireSniffedCsrf; null is fine (a gql read may go cookie-only).
+          // v2.74.1759 — wake:true soft-wakes an idle admin when nothing is banked yet (pre-warm after reload).
           let csrfTok = null;
-          if (payload && payload.csrf === 'sniff') { csrfTok = await _acquireSniffedCsrf(tab.id, origin); }
+          if (payload && payload.csrf === 'sniff') { csrfTok = await _acquireSniffedCsrf(tab.id, origin, { wake: true }); }
 
           // CX-7c (ADVISORY since v2.74.1389) — the liveness probe NEVER blocks the call. The first cut hard-gated
           // on it and BLOCKED a signed-in user: the probe needs the sniffed CSRF, and a cold/idle admin tab hasn't
@@ -823,7 +887,8 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             else body = fillBody(payload && payload.body, args);
           }
           // CX-7 — sniffed-CSRF transport: ride the token acquired above (the liveness probe already sniffed it);
-          // a 403 = stale/missing token → one forced re-mint + retry, then surface honestly with the interact-once hint.
+          // a 403 = stale/missing token → clear bank, soft-wake the idle SPA, force re-mint + retry (v1759), then
+          // surface honestly with the interact-once hint only if warm still failed.
           let extra = isGqlRead ? { gqlRead: true } : null;
           const _rideHdrs = (payload && payload.requestHeaders && typeof payload.requestHeaders === 'object') ? payload.requestHeaders : null;
           if (_rideHdrs) extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ..._rideHdrs } };
@@ -831,12 +896,18 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { 'x-csrf-token': csrfTok } : {}) } };
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
-          // v1401 — a cold write hits the content-script belt's `no-csrf` HARD reject (not an http-40x), so include it
-          // in the re-mint predicate: force-reacquire (inject the tee + poll) and retry once with a fresh token.
-          if (reply && reply.success === false && (/^http-40[13]$/.test(String(reply.error || '')) || reply.error === 'no-csrf') && payload && payload.csrf === 'sniff') {
-            const tok2 = await _acquireSniffedCsrf(tab.id, origin, { force: true });
-            if (tok2) reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, { ...(extra || {}), headers: { 'x-csrf-token': tok2 } });
-            if (reply && reply.success === false && (/^http-40[13]$/.test(String(reply.error || '')) || reply.error === 'no-csrf')) reply = { ...reply, hint: 'no CSRF token yet — click anywhere in the admin tab once (it fires a request Orchard reads), then retry' };
+          // v1401 / v1759 — cold `no-csrf` or http-40x with sniff: drop stale bank, soft-wake, force re-mint, retry once.
+          if (reply && reply.success === false && isCsrfColdFailure({ error: reply.error, hint: reply.hint, csrf: payload && payload.csrf })) {
+            await _clearBankedCsrf(origin);
+            try { Logger.info('ride', `INVOKE ▸ csrf-cold warm → retry [${payload.recipeId || ''}]`); } catch { /* */ }
+            const tok2 = await _acquireSniffedCsrf(tab.id, origin, { force: true, wake: true });
+            if (tok2) {
+              csrfTok = tok2;
+              reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), 'x-csrf-token': tok2 } });
+            }
+            if (reply && reply.success === false && isCsrfColdFailure({ error: reply.error, hint: reply.hint, csrf: payload && payload.csrf })) {
+              reply = { ...reply, hint: 'no CSRF token yet — click anywhere in the admin tab once (it fires a request Orchard reads), then retry' };
+            }
           }
           // CX-7b — HASH_STALE (the spec's deploy-rotation trap): a persisted-op 404/406 means the store's op hash
           // changed — clear the banked op so the next attempt re-captures, and say so honestly.
@@ -1294,6 +1365,18 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
         } finally {
           if (ephemeralOrigin) _releaseEphemeralTab(ephemeralOrigin);
         }
+      })();
+      return true;
+    },
+
+    // v2.74.1760 — CSRF_PREWARM: bank sniffed CSRF from already-open sniff-class tabs (Shopify) before the first ask.
+    // Called from the vitals tick; never opens a tab. → { success, hosts:['admin.shopify.com:ok', …] }.
+    'CSRF_PREWARM': (_payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const r = await _prewarmCsrfOpenTabs();
+          sendResponse({ success: true, ...(r || {}) });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'prewarm-failed' }); }
       })();
       return true;
     },

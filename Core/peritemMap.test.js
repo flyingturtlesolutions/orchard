@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeMapVerdict, pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, resolveJoinField, normalizeRungs, ladderValues,
+  isMapJoinEnvelope, unwrapMapPrior, resolveIdentityField,
 } from './peritemMap.js';
 
 describe('peritemMap — normalizeMapVerdict (the clause contract, §1)', () => {
@@ -202,5 +203,67 @@ describe('peritemMap — PM-7 the LOOKUP LADDER (v1634)', () => {
     const rowStr = { __contacts: [{ ContactType: 'Secondary', Email: 's@x.com' }, { ContactType: 'Primary Homeowner', Email: 'p@x.com' }] };
     const v = ladderValues(rowStr, normalizeRungs([{ contact: 'primary', type: 'email' }, { contact: 'other', type: 'email' }]));
     assert.deepEqual(v.map((x) => x.value), ['p@x.com', 's@x.com']);
+  });
+});
+
+describe('peritemMap — v1757 unwrapMapPrior (gl 133556 map→map seam)', () => {
+  const src = [
+    { TaskNumber: '01', AddressLine1: '1 Main' },
+    { TaskNumber: '02', AddressLine1: '2 Oak' },
+  ];
+  const results = [
+    { value: 'a@b.com', ok: true, match: { id: 'gid://shopify/Customer/1', email: 'a@b.com', displayName: 'Alice' } },
+    { value: 'c@d.com', ok: true, match: { id: 'gid://shopify/Customer/2', email: 'c@d.com', displayName: 'Bob' } },
+  ];
+  const joined = buildJoinRows(src, results, {
+    join: 'table',
+    identify: (r) => ({ id: r.TaskNumber, label: `task ${r.TaskNumber}` }),
+    system: 'shopify',
+  });
+
+  it('detects table-join envelopes; plain rows are not envelopes', () => {
+    assert.equal(isMapJoinEnvelope(joined[0]), true);
+    assert.equal(isMapJoinEnvelope(src[0]), false);
+    assert.equal(isMapJoinEnvelope(null), false);
+  });
+
+  it('plain prior passes through unchanged', () => {
+    const u = unwrapMapPrior(src, { targetSystem: 'shopify' });
+    assert.equal(u.mode, 'plain');
+    assert.deepEqual(u.rows, src);
+  });
+
+  it('same-system follow-up with no itemField → matched records (the gl 133556 fix)', () => {
+    const u = unwrapMapPrior(joined, { targetSystem: 'shopify' });
+    assert.equal(u.mode, 'match');
+    assert.equal(u.priorSystem, 'shopify');
+    assert.equal(u.rows.length, 2);
+    assert.equal(u.rows[0].email, 'a@b.com');
+    assert.equal(u.rows[1].displayName, 'Bob');
+    // Envelope top-level must NOT be what resolveJoinField sees — that was the live miss.
+    assert.equal(resolveJoinField(joined, '', ['AddressLine1']), null);
+    assert.ok(resolveJoinField(u.rows, '', null) === null);   // no declaration on matches
+    assert.deepEqual(resolveIdentityField(u.rows), { path: 'email', matchedBy: 'identity' });
+  });
+
+  it('cross-system / named itemField → source.row so the origin ladder still works', () => {
+    const cross = unwrapMapPrior(joined, { targetSystem: 'hubspot' });
+    assert.equal(cross.mode, 'source');
+    assert.deepEqual(cross.rows, src);
+    assert.deepEqual(resolveJoinField(cross.rows, '', ['AddressLine1']), { path: 'AddressLine1', matchedBy: 'declared' });
+
+    const named = unwrapMapPrior(joined, { targetSystem: 'shopify', itemField: 'AddressLine1' });
+    assert.equal(named.mode, 'source');
+    assert.deepEqual(named.rows, src);
+  });
+
+  it('unmatched envelopes do not invent matches — fall back to source.row', () => {
+    const miss = buildJoinRows(src, [
+      { value: 'x@y.com', ok: true, match: null },
+      { value: null },
+    ], { join: 'table', system: 'shopify' });
+    const u = unwrapMapPrior(miss, { targetSystem: 'shopify' });
+    assert.equal(u.mode, 'source');
+    assert.deepEqual(u.rows, src);
   });
 });

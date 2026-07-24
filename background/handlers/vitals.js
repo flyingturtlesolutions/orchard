@@ -260,6 +260,8 @@ async function _tick() {
   if (!_ctx) return;
   const s = await _settings(); if (!s.enabled) return;
   await _presenceSweep(s);
+  // v2.74.1760 — after presence: pre-warm sniffed CSRF on open Shopify-class tabs so the first ask isn't cold-403.
+  try { await _ctx.invokeSgHandler('CSRF_PREWARM', {}); } catch { /* best-effort — never block the tick */ }
   await _keepAliveSweep(s);   // KA-1 — after presence: an opted-in FRESH origin past its cadence gets its ping
   let last = 0;
   try { last = Number((await chrome.storage.local.get(LAST_DAILY_KEY))?.[LAST_DAILY_KEY] || 0); } catch { /* */ }

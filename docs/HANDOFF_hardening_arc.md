@@ -55,9 +55,21 @@ the `INTERPRET_ASK` summary line is logged); the enabler is a DEBUG-level raw-de
 adjacent to the lane's active area — deliberately not built mid-flight. Until then, harvested coverage = the
 regression fixtures already frozen (v963 · v1342 · v1650 · v1651 · v1666 · v1686 · v1714).
 
-**Remaining:** Stage 6 (B5-5/6 — WAITS on CD-1a, cadence lane in flight) · the B5-2 raw-decision tap (small,
-after the lane settles) · the ongoing disciplines (§10; first audit item: `fieldread`) · the first live
-scoreboard run (operator's call).
+**Stage 6 OPENED (v2.74.1754) — B5-5 slice 1: the DRIVER CORE gated.** CD-1a's extraction landed
+`Core/runDriver.js` (the chain loop as pure control flow over an injected reporter + runStep), so the effect
+half's first reactions are registered and sealed: the five-verdict enum · loose-chain vs hard-stop · the
+step-throw soft-fail · **no-reporter ⇒ gate parks** (the §11.2 never-auto-write row) · a throwing reporter
+never changes a verdict (and a throwing GATE fails safe to park) · park→resumable with carried state · the
+resume reporter's one-approval-per-write rule · the DIFFERENTIAL-ORACLE seed (panel-like ≡ SW reporter on the
+same workflow — B5-5's double duty, growing per extraction). Registry: **94 reactions**. Depth stays in the
+lane's runDriver.test.js; these are thin representatives under the two-direction meta-test. Per-CLAUSE effect
+slices accrue as extractions 2–5 land (branch next, per the cadence HANDOFF). The C-rail loop's three measured
+runs (77.6% → 83.1%, records in logs/run/) landed as v2.74.1753.
+
+**Remaining:** Stage 6 slices 2+ (per-clause effects, as each extraction lands) · B5-6 composition fixtures
+(after the extractions) · the B5-2 tap: BUILT v2.74.1756 (INTERPRET_RAW ▸ in full traces — copy the JSON into a fixture) · the ongoing disciplines
+(§10; first audit item: `fieldread`) · scoreboard run 4 whenever a pulse is wanted (baseline 83.1%, sha
+14b28e576852).
 **Stage 3 (B5-0/1) landed v2.74.1727** — `Core/reactionRegistry.js` (the reaction registry over BOTH frozen
 necks: interpret rows DERIVED from `INTENTS` × the v1718 disposition tables + sealed catch-all rows under
 partition seal #2 `PAYLOAD_VALIDATED ∪ PALETTE_VALIDATED ∪ TERMINAL === INTENTS`; the decomposer's 15 sealed

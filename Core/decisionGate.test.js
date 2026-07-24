@@ -25,6 +25,7 @@ import { parseJudgeDecision } from './judgePrompt.js';                          
 import { parseSweepReads } from './sweepPrompt.js';                                         // subject #7 (v2.74.1734)
 import { parseSeedDirectives } from './fleetSchedule.js';                                   // subject #8 (v2.74.1734)
 import { parseStepDecision } from './stepPrompt.js';                                        // subject #9 (v2.74.1734)
+import { runWorkflow, normalizeReporter, makeAccumulatorReporter, makeResumeReporter, DRIVER_VERDICTS } from './runDriver.js';   // THE EFFECT HALF, slice 1 (v2.74.1754 — CD-1a landed the driver core)
 import {
   normalizeInterpretDecision, applyConfidenceGate, interpret,
   INTENTS, GATED_INTENTS, FLAGGED_INTENTS, UNGATED_INTENTS,
@@ -280,6 +281,70 @@ FIXTURES['stepil:needs-kind-whitelist'] = () => {
 FIXTURES['stepil:unparseable→needs-clarify'] = () => {
   const d = parseStepDecision('no json at all', STEP_PALETTE);
   assert.equal(d.kind, 'needs'); assert.equal(d.needs.kind, 'clarify'); assert.equal(d.reason, 'unparseable'); assert.equal(d.confidence, 0);
+};
+
+// ── THE EFFECT HALF, slice 1 — the driver core (thin representatives; depth in runDriver.test.js) ────────────
+const CL = (n) => Array.from({ length: n }, (_, i) => ({ text: `step ${i + 1}` }));
+const OK = async () => ({ ok: true, value: 'v' });
+FIXTURES['driver:complete'] = async () => {
+  const acc = makeAccumulatorReporter();
+  const r = await runWorkflow({ clauses: CL(3), reporter: acc, runStep: OK });
+  assert.equal(r.verdict, 'complete'); assert.equal(r.ranSteps, 3); assert.equal(acc.snapshot().results.length, 3);
+};
+FIXTURES['driver:loose-chain→partial'] = async () => {
+  const r = await runWorkflow({ clauses: CL(3), reporter: null, runStep: async (c, { index }) => (index === 1 ? { ok: false, error: 'flaky' } : { ok: true }) });
+  assert.equal(r.verdict, 'partial'); assert.equal(r.ranSteps, 2); assert.equal(r.failedStep.i, 1, 'the FIRST failure is the audit story');
+};
+FIXTURES['driver:hard-stop→failed|partial'] = async () => {
+  const stopAt0 = await runWorkflow({ clauses: CL(2), runStep: async () => ({ ok: false, stop: true, error: 'auth' }) });
+  assert.equal(stopAt0.verdict, 'failed', 'nothing ran → failed');
+  const stopAt1 = await runWorkflow({ clauses: CL(2), runStep: async (c, { index }) => (index === 0 ? { ok: true } : { ok: false, stop: true }) });
+  assert.equal(stopAt1.verdict, 'partial', 'something ran → partial');
+};
+FIXTURES['driver:step-throw→soft-fail'] = async () => {
+  const r = await runWorkflow({ clauses: CL(2), runStep: async (c, { index }) => { if (index === 0) throw new Error('boom'); return { ok: true }; } });
+  assert.equal(r.verdict, 'partial', 'the throw became a soft fail; the chain continued');
+};
+FIXTURES['driver:no-reporter→gate-parks'] = async () => {
+  const rep = normalizeReporter(null);
+  assert.equal(await rep.gate({ preview: 'send email' }), 'park', 'no surface ⇒ nobody watching ⇒ NEVER auto-write');
+  assert.equal(await normalizeReporter({}).gate(), 'park', 'a reporter without gate parks too');
+};
+FIXTURES['driver:reporter-throw-never-changes-verdict'] = async () => {
+  const evil = { step() { throw new Error('x'); }, result() { throw new Error('x'); }, done() { throw new Error('x'); }, gate() { throw new Error('x'); } };
+  const r = await runWorkflow({ clauses: CL(2), reporter: evil, runStep: OK });
+  assert.equal(r.verdict, 'complete', 'a throwing reporter is swallowed');
+  assert.equal(await normalizeReporter(evil).gate(), 'park', 'a THROWING gate fails safe to park');
+};
+FIXTURES['driver:park→resumable'] = async () => {
+  const r = await runWorkflow({ clauses: CL(3), runStep: async (c, { index, state }) => (index === 1 ? { park: true, parkedRunId: 'run_1', state: { ...state, mark: 1 } } : { ok: true, state }) });
+  assert.equal(r.verdict, 'parked'); assert.equal(r.parkedAt, 1); assert.equal(r.parkedRunId, 'run_1'); assert.equal(r.state.mark, 1, 'state carries across the park');
+};
+FIXTURES['driver:resume-one-approval'] = async () => {
+  const rep = makeResumeReporter();
+  assert.equal(await rep.gate('the approved write'), true, 'the write the human saw proceeds');
+  assert.equal(await rep.gate('a SECOND write'), 'park', 'one approval per write — never blanket');
+  assert.equal(rep.snapshot().approvedWrite, true);
+};
+FIXTURES['driver:empty→empty'] = async () => {
+  assert.equal((await runWorkflow({ clauses: [], runStep: OK })).verdict, 'empty');
+  assert.equal((await runWorkflow({ clauses: CL(1) })).verdict, 'failed', 'no runStep at all is a failure, not a crash');
+};
+FIXTURES['driver:verdict-enum-sealed'] = async () => {
+  assert.deepEqual([...DRIVER_VERDICTS], ['complete', 'partial', 'failed', 'empty', 'parked']);
+  assert.ok(Object.isFrozen(DRIVER_VERDICTS));
+  for (const v of ['complete', 'partial', 'failed', 'empty', 'parked']) assert.ok(DRIVER_VERDICTS.includes(v));
+};
+FIXTURES['driver:differential-oracle-seed'] = async () => {
+  // B5-5's double duty: the SAME workflow through the SW reporter and a DOM-like recording reporter must agree
+  // on verdict + step count — panel ≡ SW, per reaction. Seeded at the driver core; grows per extraction.
+  const mk = () => async (c, { index }) => (index === 2 ? { ok: false, error: 'x' } : { ok: true, value: index });
+  const acc = makeAccumulatorReporter();
+  const domish = []; const dom = { step: (i) => domish.push(`s${i}`), result: (v) => domish.push(`r${v}`), done: (v) => domish.push(`d${v}`) };
+  const a = await runWorkflow({ clauses: CL(4), reporter: acc, runStep: mk() });
+  const b = await runWorkflow({ clauses: CL(4), reporter: dom, runStep: mk() });
+  assert.equal(a.verdict, b.verdict); assert.equal(a.ranSteps, b.ranSteps); assert.equal(a.failedSteps, b.failedSteps);
+  assert.equal(acc.snapshot().verdict, 'partial'); assert.ok(domish.includes('dpartial'));
 };
 
 // ── B5-0 — the coverage seal ──────────────────────────────────────────────────────────────────────────────────
