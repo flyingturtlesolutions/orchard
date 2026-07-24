@@ -15,7 +15,7 @@
 import { Logger } from '../../Core/Logger.js';
 import { ConversationStore } from '../../Services/ConversationStore.js';   // §2.1 check 4 (v1715) — desk LIVENESS, not just the orphan stamp
 import { listAllWorkflows, updateWorkflow } from '../../Services/Storage/WorkflowStore.js';
-import { appendRunEntry } from '../../Services/Storage/WorkflowRunStore.js';
+import { appendRunEntry, loadRuns } from '../../Services/Storage/WorkflowRunStore.js';   // v1739 — loadRuns STATIC: MV3 SWs disallow dynamic import() at runtime (the WORKFLOW_RUNS lazy-load threw on every call — background.js:77 records the same purge once before)
 import { normalizeWorkflow } from '../../Core/workflowMemory.js';
 import { isDue, coalescedCount, advanceTrigger, recordFailure, disarm, normalizeTrigger, armTrigger } from '../../Core/trigger.js';
 import { runsHeadless } from '../../Core/workflowTier.js';
@@ -314,7 +314,6 @@ export function createCadenceHandlers() {
         try {
           const workflowId = payload && payload.workflowId;
           if (!workflowId) { sendResponse({ success: false, error: 'workflowId required' }); return; }
-          const { loadRuns } = await import('../../Services/Storage/WorkflowRunStore.js');
           const runs = await loadRuns(workflowId);
           sendResponse({ success: true, ...runs });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'runs-failed' }); }

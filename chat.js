@@ -7798,14 +7798,20 @@ function _histClock(at) {
 }
 async function _renderWorkflowRuns(wf) {
   const m = appendMessage({ role: 'assistant', body: '' });
+  // v2.74.1739 (live report) — the history view is TRANSIENT (a lookup, not conversation) and CLOSEABLE: it was
+  // persisting into the desk thread with no way to dismiss it. The delete-messageId trick makes finalize/persist
+  // no-op (the wizard-run precedent); ✕ Close removes the bubble.
+  try { delete m.dataset.messageId; } catch { /* */ }
+  const _close = () => { const bar = _orchActionBar(m); bar.appendChild(_mkBtn('✕ Close', () => { try { m.remove(); } catch { /* */ } })); };
   _setMessageBody(m, `Loading run history for “${wf.name || wf.ask}”…`);
   let runs = null;
   try { runs = await _orchReq('WORKFLOW_RUNS', { workflowId: wf.id }); } catch { /* */ }
-  if (!runs || runs.success === false) { _setMessageBody(m, 'Couldn’t load the run history — try again.'); return; }
+  if (!runs || runs.success === false) { _setMessageBody(m, 'Couldn’t load the run history — try again.'); _close(); return; }
   const items = Array.isArray(runs.items) ? runs.items : [];
   const sched = _wfScheduleLabel(wf);
   if (!items.length) {
     _setMessageBody(m, `No runs yet for “${escHtml(wf.name || wf.ask)}”.${sched ? ` It ${sched}${/^runs/.test(sched) ? '' : ' — a tier-panel workflow runs when you next open its view'}.` : ' Give it a schedule (⏱ Schedule) or run it (▶ Run) and its history shows here.'}`, { markdown: true });
+    _close();
     return;
   }
   // newest first; each row is RUN-level (§6.3) — time · auto/manual · counts · verdict (parked → "waiting on you").
@@ -7817,6 +7823,7 @@ async function _renderWorkflowRuns(wf) {
   const head = `**Run history** — “${escHtml(wf.name || wf.ask)}”${sched ? ` _(${sched})_` : ''}`;
   const notice = runs.notice ? `\n\n_${escHtml(runs.notice)}_` : '';
   _setMessageBody(m, `${head}\n\n${lines.join('\n')}${notice}`, { markdown: true });
+  _close();   // v1739 — the ✕ the live report asked for
 }
 
 // CD-1a/CD-4 — the honest schedule label for a saved workflow (§7.3): "runs every 4h" (tier-'sw', fires headless)
