@@ -726,6 +726,9 @@ textarea {
   width: 28px;
   height: 28px;
   padding: 0;
+  display: inline-flex;
+  align-items: center;      /* v1744 — the ⌄ glyph sits on a low baseline; flex-center it optically */
+  justify-content: center;
   line-height: 1;
   font-size: 18px;
   border: 1px solid var(--c-border-soft);
