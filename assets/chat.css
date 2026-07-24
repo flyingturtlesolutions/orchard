@@ -1935,6 +1935,26 @@ textarea {
 .rail-item:hover .rail-item-subtask { opacity: 1; }
 .rail-item-subtask:hover { background: var(--c-bg); color: var(--c-accent); }
 
+/* PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the per-app WORKFLOWS door; sits left of the "+" in the
+   bottom-right cluster, same hover-reveal idiom. */
+.rail-item-wf {
+  position: absolute;
+  bottom: var(--sp-2);
+  right: calc(var(--sp-2) + 26px);
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-text-subtle);
+  opacity: 0;
+  transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
+}
+.rail-item:hover .rail-item-wf,
+.rail-item-wf:focus-visible { opacity: 1; }
+.rail-item-wf:hover { background: var(--c-bg); color: var(--c-accent); }
+
 /* surfaces-§4.5 (preview-as-selection) — the per-dev-row "load this branch into the live build" button (sat just left
    of delete) + the drawer's "Preview main" control. Mirrors the delete button: hover-revealed icon; amber on hover. */
 .rail-item-preview {

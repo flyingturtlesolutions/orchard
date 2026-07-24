@@ -805,7 +805,7 @@ async function _renderRailListNow() {
 }
 
 // v2.74.1223 (message-input redesign) — a row's own action buttons; their handlers run instead of select/open.
-const _isRowActionTarget = (e) => !!(e.target.closest('.rail-item-delete') || e.target.closest('.rail-item-preview') || e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask'));
+const _isRowActionTarget = (e) => !!(e.target.closest('.rail-item-delete') || e.target.closest('.rail-item-preview') || e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask') || e.target.closest('.rail-item-wf'));
 
 // v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
 // stays open as a live multi-conversation surface (its row highlights `active`, the input now routes here, and a reply
@@ -974,6 +974,12 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
   const subtaskBtn = row.role === 'app'
     ? `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
     : '';
+  // PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the workflows DOOR on every app row: saved workflows get a
+  // visible glyph (they were only reachable by typing `workflows` — an alias, never the sole door). Opens THAT
+  // desk's workflows overlay (switching to the desk first when it isn't the current one).
+  const wfBtn = (row.role === 'app' && !isDev)
+    ? `<button class="rail-item-wf" title="Workflows" aria-label="Workflows — ${escHtml(conv.title)}">${Icons.workflow(14)}</button>`
+    : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
   // on SUB-TASK rows, so the parent's headless auto-run shows live per child ("Working…" → the result).
@@ -986,6 +992,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
       <div class="rail-item-meta">${relTime(conv.updatedAt)}</div>
       ${row.role === 'app' && nextSweep > 0 ? '<span class="rail-item-timer" title="Next sweep"></span>' : ''}
       ${chevron}
+      ${wfBtn}
       ${subtaskBtn}
       ${previewBtn}
       <button class="rail-item-delete" title="Delete">
@@ -1005,6 +1012,14 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
   item.querySelector('.rail-item-subtask')?.addEventListener('click', async (e) => {
     e.stopPropagation();
     await _spawnSubTask(conv.id);
+  });
+
+  // PS-3 — the workflows glyph: switch to this desk if needed (rehydrate owns _memoryId), then open the overlay.
+  item.querySelector('.rail-item-wf')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (conv.id !== _currentConversationId) await _openConvFullTimeline(conv);
+    else _closeRail();
+    void _renderWorkflows();
   });
 
   // v2.74.1223 (message-input redesign) — SINGLE-click SELECTS this conversation as the message-input target and KEEPS
