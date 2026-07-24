@@ -7788,56 +7788,40 @@ async function _renderParkedRuns(appId) {
 
 // CD-6 (DESIGN_cadence.md §6) — the RUN HISTORY view. History is its OWN store (wfruns:<workflowId>), never the
 // desk timeline (§6.1: the timeline is deletable and would interleave triggered output with a live conversation).
-// Rendered as a bubble list here rather than the §6.2 overlay — the overlay MOTION is polish; §6's requirement is
-// that a person can READ the history, and the auto-vs-manual + parked stamps are what it exists to show.
 function _histClock(at) {
   const t = Number(at) || 0;
   if (!t) return '—';
   try { const d = new Date(t); return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`; }
   catch { return '—'; }
 }
+// CD-6 §6.2 (v2.74.1743, user directive) — run history is a SURFACE, never a chat entry: an overlay above the
+// timeline (the .rail pattern — absolute, inset 0, covering the thread/launch page, which stays INTACT beneath).
+// The ⌄ chevron top-right closes it, revealing whatever was underneath — no re-render, no thread residue.
 async function _renderWorkflowRuns(wf) {
-  const m = appendMessage({ role: 'assistant', body: '' });
-  // v2.74.1739 — the history view is TRANSIENT (a lookup, not conversation; delete-messageId = the wizard-run
-  // precedent). v2.74.1742 (user directive) — dismissal is a CHEVRON in the top-left corner, not a ✕ button:
-  // clicking it closes the history and RETURNS TO THE LAUNCH PAGE (the landing self-gates on launch state — on a
-  // desk mid-conversation it simply closes back to the thread, which is the honest equivalent there).
-  try { delete m.dataset.messageId; } catch { /* */ }
-  try { m.classList.add('wf-history'); } catch { /* */ }
-  const _close = () => {
-    try {
-      const c = m.querySelector('.message-content'); if (!c || c.querySelector('.wf-history-back')) return;
-      const b = document.createElement('button');
-      b.className = 'wf-history-back'; b.type = 'button'; b.title = 'Back to workflows';
-      b.textContent = '‹';
-      b.addEventListener('click', async () => {
-        try { m.remove(); } catch { /* */ }
-        try { const conv = await ConversationStore.load(_currentConversationId); if (conv) void _renderDeskLanding(conv); } catch { /* */ }
-      });
-      c.prepend(b);
-    } catch { /* */ }
-  };
-  _setMessageBody(m, `Loading run history for “${wf.name || wf.ask}”…`);
+  const host = document.getElementById('app-body');
+  if (!host) return;
+  document.querySelectorAll('.wf-history-overlay').forEach((el) => { try { el.remove(); } catch { /* */ } });   // singleton
+  const ov = document.createElement('div');
+  ov.className = 'wf-history-overlay';
+  const sched = _wfScheduleLabel(wf);
+  ov.innerHTML = `<div class="wf-history-head"><div class="wf-history-title">Run history — “${escHtml(wf.name || wf.ask)}”${sched ? ` <span class="wf-history-sched">(${escHtml(sched)})</span>` : ''}</div><button class="wf-history-close" type="button" title="Close">⌄</button></div><div class="wf-history-list">Loading…</div>`;
+  ov.querySelector('.wf-history-close').addEventListener('click', () => {
+    try { ov.classList.remove('open'); setTimeout(() => { try { ov.remove(); } catch { /* */ } }, 200); } catch { try { ov.remove(); } catch { /* */ } }
+  });
+  host.appendChild(ov);
+  requestAnimationFrame(() => { try { ov.classList.add('open'); } catch { /* */ } });
   let runs = null;
   try { runs = await _orchReq('WORKFLOW_RUNS', { workflowId: wf.id }); } catch { /* */ }
-  if (!runs || runs.success === false) { _setMessageBody(m, 'Couldn’t load the run history — try again.'); _close(); return; }
+  const list = ov.querySelector('.wf-history-list'); if (!list) return;
+  if (!runs || runs.success === false) { list.textContent = 'Couldn’t load the run history — try again.'; return; }
   const items = Array.isArray(runs.items) ? runs.items : [];
-  const sched = _wfScheduleLabel(wf);
   if (!items.length) {
-    _setMessageBody(m, `No runs yet for “${escHtml(wf.name || wf.ask)}”.${sched ? ` It ${sched}${/^runs/.test(sched) ? '' : ' — a tier-panel workflow runs when you next open its view'}.` : ' Give it a schedule (⏱ Schedule) or run it (▶ Run) and its history shows here.'}`, { markdown: true });
-    _close();
+    list.textContent = `No runs yet.${sched ? ` It ${sched}.` : ' Give it a schedule (⏱) or run it (▶) and its history shows here.'}`;
     return;
   }
-  // newest first; each row is RUN-level (§6.3) — time · auto/manual · counts · verdict (parked → "waiting on you").
-  // describeRun output is enum/number/time only (no free text), so it is safe raw; only the wf name/notice are
-  // user/system values → escHtml them (the established markdown-interp pattern; renderMarkdown parses the result).
-  // §7.3 (v1715) — both stamps when they differ: the entry stores ranAt ONLY when it != at, so its presence IS the
-  // "ran late" signal; describeRun renders "due 09:00 · ran 14:32".
-  const lines = items.slice().reverse().map((e) => `- ${describeRun(e, _histClock(e.ranAt || e.at), e.ranAt ? _histClock(e.at) : '')}`);
-  const head = `**Run history** — “${escHtml(wf.name || wf.ask)}”${sched ? ` _(${sched})_` : ''}`;
-  const notice = runs.notice ? `\n\n_${escHtml(runs.notice)}_` : '';
-  _setMessageBody(m, `${head}\n\n${lines.join('\n')}${notice}`, { markdown: true });
-  _close();   // v1739 — the ✕ the live report asked for
+  // newest first; RUN-level rows (§6.3) — time · auto/manual · counts · verdict; both stamps when due ≠ ran (§7.3).
+  list.innerHTML = items.slice().reverse().map((e) => `<div class="wf-history-row">${escHtml(describeRun(e, _histClock(e.ranAt || e.at), e.ranAt ? _histClock(e.at) : ''))}</div>`).join('')
+    + (runs.notice ? `<div class="wf-history-notice">${escHtml(runs.notice)}</div>` : '');
 }
 
 // CD-1a/CD-4 — the honest schedule label for a saved workflow (§7.3): "runs every 4h" (tier-'sw', fires headless)
@@ -13022,7 +13006,7 @@ async function _renderDeskLanding(conv) {
             try { _orchLog(`WORKFLOW ▸ deleted "${String(wf.name || wf.ask).slice(0, 40)}" (launch card)`); } catch { /* */ }
           });
           d.appendChild(acts);
-          d.addEventListener('click', () => { _dismissDeskLanding(); void _renderWorkflowRuns(wf); });   // §5 — body → history
+          d.addEventListener('click', () => { void _renderWorkflowRuns(wf); });   // §5 — body → history (v1743: the OVERLAY covers the landing, which stays intact beneath — closing reveals it)
           grid.appendChild(d);
           continue;
         }

@@ -693,15 +693,38 @@ textarea {
 }
 .wf-card-act:hover:not(:disabled) { border-color: var(--c-border); background: var(--c-bg-subtle); }
 .wf-card-act:disabled { opacity: 0.5; cursor: not-allowed; }
-/* v2.74.1742 (user directive) — the run-history view dismisses via a top-left BACK CHEVRON (→ the launch page),
-   not a ✕ button. The content pads down so the chevron never overlaps the first line. */
-.wf-history .message-content { position: relative; padding-top: 32px; }
-.wf-history-back {
+/* v2.74.1743 (user directive; CD-6 §6.2) — run history is an OVERLAY SURFACE above the timeline (the .rail
+   pattern: absolute, inset 0, blur backdrop), never a chat entry. The ⌄ chevron top-right closes it; whatever
+   was beneath (the launch page / thread) stays intact and is revealed on close. z-index 18 keeps the Rail (20)
+   openable above it; the input row lives OUTSIDE .app-body so it is never covered (the §6.3 structure). */
+.wf-history-overlay {
   position: absolute;
-  top: 4px;
-  left: 4px;
-  width: 24px;
-  height: 24px;
+  inset: 0;
+  z-index: 18;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-rail-bg, var(--c-bg-elevated));
+  backdrop-filter: blur(20px) saturate(1.4);
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition: transform var(--t-med), opacity var(--t-med);
+}
+.wf-history-overlay.open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.wf-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--c-border-soft);
+}
+.wf-history-title { font-weight: 600; min-width: 0; }
+.wf-history-sched { font-weight: 400; opacity: 0.75; }
+.wf-history-close {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
   padding: 0;
   line-height: 1;
   font-size: 18px;
@@ -711,7 +734,11 @@ textarea {
   color: var(--c-text);
   cursor: pointer;
 }
-.wf-history-back:hover { border-color: var(--c-border); background: var(--c-bg-subtle); }
+.wf-history-close:hover { border-color: var(--c-border); background: var(--c-bg-subtle); }
+.wf-history-list { flex: 1; overflow-y: auto; padding: var(--sp-3) var(--sp-4); }
+.wf-history-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--c-border-soft); }
+.wf-history-row:last-of-type { border-bottom: none; }
+.wf-history-notice { padding-top: var(--sp-2); opacity: 0.7; font-style: italic; }
 /* v2.74.1343 (review Batch 6) — the connection / rich-intent chip MENU (setup site candidates, "what can I do here"
    intents). The chips reuse .suggestion-card styling, but here they lay out as a WRAPPING ROW under the bubble text
    (they were appended to the .message flex row with NO CSS — squeezed as a third column beside the text). */
