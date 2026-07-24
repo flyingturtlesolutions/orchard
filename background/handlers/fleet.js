@@ -564,6 +564,20 @@ export function registerFleetAlarmListener({ invokeSgHandler } = {}) {
       const key = _ROUT_KEY(routInst);
       const cur = (await chrome.storage.local.get(key))[key];
       if (!cur || !cur.enabled) return;   // disabled records never fire (a stale alarm self-noops)
+      // CD-1 / DESIGN_cadence.md §10.1 (v2.74.1713) — the ORPHAN self-heal the sweep branch has had all along
+      // (fleet.js:210-216) and this branch never did: a routine whose desk conversation is GONE self-clears its
+      // alarm + record instead of rewriting `due:true` forever into a record no desk will ever open. Same
+      // limitation as the sweep's: only reachable when convId was stamped (the desk-delete path is the belt).
+      if (cur.convId) {
+        let conv = null;
+        try { conv = await ConversationStore.load(cur.convId); } catch { conv = null; }
+        if (!conv) {
+          try { await chrome.alarms.clear(routineAlarmName(routInst)); } catch { /* */ }
+          try { await chrome.storage.local.remove(key); } catch { /* */ }
+          try { Logger.info('route', `ROUTINE ▸ ${routInst.slice(0, 12)} desk gone — routine cleared (orphan self-heal)`); } catch { /* */ }
+          return;
+        }
+      }
       cur.due = true;
       await chrome.storage.local.set({ [key]: cur });
       try { Logger.info('route', `ROUTINE ▸ due ${routInst.slice(0, 12)} — "${String(cur.ask).slice(0, 50)}" (runs when the desk opens)`); } catch { /* */ }

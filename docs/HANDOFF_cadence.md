@@ -138,6 +138,20 @@ So the honest unit of unification is the STEP (done), not the LOOP. The panel al
 via the ⚡ Headless button (WORKFLOW_RUN_FIRE); the interactive `_orchRunChain` legitimately stays richer. Only
 adopt `runRideStep` in the panel once a live harness can prove the rendering parity.
 
+**Progress (v2.74.1713) — the ORPHANED FLEET ALARM class is retired (§10.1, CD-1's concrete bug).** Two fixes,
+belt + suspenders, WITHOUT the risky record migration:
+- **Desk delete clears the desk's fleet clocks.** The per-row delete's sibling-safe `_keys` loop and deleteAll's
+  bulk loop now also send `FLEET_SCHEDULE off` + `FLEET_ROUTINE off` (each clears alarm + record; a bare off with
+  no record is a safe no-op). A key another live desk still uses is never cleared (the v1643 guard reused).
+- **The routine alarm listener self-heals** (`fleet.js` routine branch): a firing routine whose `convId` names a
+  conversation that no longer exists clears its own alarm + record instead of rewriting `due:true` forever —
+  the exact self-heal the SWEEP branch has had since H-1b (fleet.js:210-216), transplanted. Same limitation as
+  the sweep's: needs `convId` stamped; the delete-path fix is the belt for records without one.
+The full CD-1 cutover (retire the routine branch entirely + migrate `fleetRoutine` records to workflow triggers)
+remains NOT done — note the migration as specced ("a 1-step workflow") conflicts with `normalizeWorkflow`'s
+≥2-subAsks floor; resolving that (relax the floor vs. keep routines separate) is a design decision, not a
+mechanical port.
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK

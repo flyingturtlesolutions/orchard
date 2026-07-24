@@ -595,6 +595,10 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
         if (_seen.has(k)) continue;
         _seen.add(k);
         await markWorkflowsOrphaned(k, c && c.title);
+        // CD-1 / §10.1 (v2.74.1713) — every desk dies here, so every fleet clock goes with it (the per-row
+        // delete's orphaned-alarm fix, bulk edition). Best-effort, never blocks the wipe.
+        _orchReq('FLEET_SCHEDULE', { instanceId: k, off: true }).catch(() => {});
+        _orchReq('FLEET_ROUTINE', { instanceId: k, off: true }).catch(() => {});
       }
     }
   } catch { /* a stamp must never block the wipe */ }
@@ -1033,7 +1037,15 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
       const _all = await ConversationStore.list().catch(() => []);
       const _keys = [conv.instanceId, conv.appId].filter(Boolean).filter((k, i, a) => a.indexOf(k) === i)
         .filter((k) => !(_all || []).some((c) => c && c.id !== conv.id && (c.instanceId === k || c.appId === k)));
-      for (const k of _keys) await markWorkflowsOrphaned(k, conv.title);
+      for (const k of _keys) {
+        await markWorkflowsOrphaned(k, conv.title);
+        // CD-1 / DESIGN_cadence.md §10.1 (v2.74.1713) — clear the desk's FLEET CLOCKS with it: the delete path
+        // cleared no alarm and no schedule/routine record, so `fleet-routine:{instanceId}` fired forever after
+        // its desk died (the spec's orphaned-alarm class). Same sibling-safe keys as the workflow stamp —
+        // a key another live desk still uses is never cleared. Best-effort, never blocks the delete.
+        _orchReq('FLEET_SCHEDULE', { instanceId: k, off: true }).catch(() => {});
+        _orchReq('FLEET_ROUTINE', { instanceId: k, off: true }).catch(() => {});
+      }
     } catch { /* a stamp must never block the delete */ }
     await ConversationStore.delete(conv.id);
     _expandedApps.delete(conv.id);
