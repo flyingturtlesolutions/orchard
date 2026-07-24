@@ -216,6 +216,15 @@ Live-owed: replay the workflow twice — the FIRST post-1730 run still interpret
 re-bank happens only on a re-save/re-qualify; a plain replay does NOT re-bank), so build/save one fresh workflow
 and replay it to see `banked bindings, no interpret`.
 
+**Specced (2026-07-24, unbuilt): §6.5 the AUDITABLE entry.** From the live one-row-history review. Two findings
+with rulings: `why` is stored-but-never-rendered (violates §7.2's load-bearing claim), and PANEL runs write NO
+history at all (`appendRunEntry` is SW-only — CD-5's "manual and triggered alike" was half-implemented; this is
+why a manually-exercised workflow shows an empty history). The extended entry adds trigger 4-way
+(auto/manual/headless/resume) · ms · failedStep{i,text,error} · counts.rows · runId-on-every-entry · contentId
+(the per-row "earlier steps" edit marker) · resumedFrom. Body-blind throughout; render contract in the spec.
+Build: cadence.js `_fire` + the three panel ▶ sites + pure mints/renders in runHistory.js (whitelist discipline
+day one).
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK

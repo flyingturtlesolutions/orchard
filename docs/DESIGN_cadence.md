@@ -277,6 +277,63 @@ disqualified as run state in `DESIGN_peritem_pipeline.md` §9.2: cap 500 shared 
 Therefore: **the cap is per workflow, not global**, and when it bites the surface says so —
 *"showing the last 50 of 214"* — rather than presenting a truncated list as a complete one.
 
+### 6.5 The AUDITABLE entry (specced 2026-07-24, from the live "auto → disarmed" review)
+
+A user showed their entire history — one row, `Jul 23 10:20 PM · auto → disarmed` — and asked what an auditable
+log should show. The review found two failures of §6's own promises and ruled the extension below.
+
+**Finding 1 — the `why` is stored and hidden.** The disarm entry carried `why: "the owning view was deleted"`;
+`describeRun` never rendered it. §7.2 calls the disarm entry "the only place a person learns their automation
+stopped" — stopping without saying why fails that clause. RULING: `why` renders on every row that has one
+(`→ disarmed — the owning view was deleted (re-arm with ⏱)`).
+
+**Finding 2 — panel runs write NO history.** `appendRunEntry` is called only from the SW fire paths
+(auto / ⚡ headless / resume / cancel / disarm / overlap-skip). The panel's ▶ runs — the launch card, the
+manage view, recall replays — never write an entry, so a manually-exercised workflow shows an empty history.
+CD-5's ruling was *"written by manual and triggered runs alike"*; the panel half was never implemented. RULING:
+**every run writes exactly one entry, whichever host ran it.** The panel writes at chain completion (the ▶ call
+sites currently fire-and-forget `_orchRunChain`; the build adds a completion hook or awaits at those three sites).
+
+**The extended entry** (additive to the v1715 shape; every field body-blind — counts, the step's own banked
+text, short error words, schema names; never captured values):
+
+```
+{ at, ranAt?, trigger: 'auto'|'manual'|'headless'|'resume', verdict, ms?, counts?,
+  failedStep?: { i, text, error }, runId, contentId, parkedRunId?, resumedFrom?, why?, coalesced? }
+```
+
+- `trigger` widens 2 → 4: `manual` = a panel ▶; `headless` = ⚡ / WORKFLOW_RUN_FIRE; `resume` = approve-and-
+  continue. The same workflow behaves differently per path (the pre-1730 scope split proved it); an audit that
+  can't distinguish them can't catch that class. Legacy entries normalize to `manual` (the existing fallback).
+- `ms` — wall-clock duration. Drift you can watch ("24s → 3m") without hand-mining traces.
+- `failedStep {i, text, error}` — a bare `failed` verdict is not auditable. `text` is the step's own banked
+  wording; `error` the short code (`field-gone`, `not-armed`). One failing step per entry (the chain stops or
+  continues past soft fails — the FIRST failure is the story).
+- `counts` gains `rows` — the final lastValue's row count when countable. Scale makes `complete` mean something;
+  deeper scale stays in traces.
+- `runId` on EVERY entry (today only parked ones) — the join key to gl traces and parked cases.
+- `contentId` — the workflow's content hash at run time (already minted as the edit-detector). The renderer
+  derives the edit marker: a row whose contentId differs from the CURRENT record's renders `· earlier steps` —
+  answering "was it the same workflow?" behind every "it worked last week". Ruled per-row (row-local, no group
+  logic), never a hash shown to the user.
+- `resumedFrom` — the parked runId this run continues, so park → approve → complete reads as one story.
+
+**Stays OUT** (restating the standing rules): per-item detail (pipelineRun records + cases; rows POINT via
+runId, §6.3), captured values of any kind (§11), and model/token telemetry (the routing scoreboard's domain —
+see DESIGN_hardening_ladder.md).
+
+**Render examples** (the contract for `describeRun`):
+```
+due 9:00 AM · ran 9:00 AM · auto · 3 steps · 11 rows · 24s → complete
+Jul 23 10:20 PM · auto → disarmed — the owning view was deleted (re-arm with ⏱)
+10:12 AM · headless · failed at step 2/3 — “read the instructions of each” (field-gone) · 8s → failed
+10:30 AM · resume · continues run_k3x9 · 2 steps · 4s → complete
+```
+
+**Build shape:** one fire-site (`cadence.js _fire`) + the three panel ▸ sites gain the entry write; the entry
+mint + renders stay pure in `Core/runHistory.js` (tested). Nothing in the store layer changes except passing the
+new fields through `runHistoryEntry`'s whitelist — the §2.1 closed-literal discipline applies on day one.
+
 ---
 
 ## 7. The trigger
