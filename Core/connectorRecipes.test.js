@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath} from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath} from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
@@ -23,6 +23,19 @@ describe('harvestedRecipeLegs — armable harvested reads → invoke-palette leg
     assert.deepEqual(l.paramSchema.required, ['id']);
   });
 
+  it('v1749 — ONE app spelling per host: the canonical catalog name wins over the registrable label', () => {
+    // the gl 104907 finding: the same endpoint projected as me.vendorsuite.* (catalog-direct) AND me.drhorton.*
+    // (this projection deriving from the registrable label). Now: record.app wins; else the CATALOG names the host.
+    assert.equal(canonicalAppForHost('vendorsuite.drhorton.com'), 'vendorsuite', 'exact catalog appHost');
+    assert.equal(canonicalAppForHost('deako.zendesk.com'), 'zendesk', 'suffix match on appHost zendesk.com');
+    assert.equal(canonicalAppForHost('some.unknown-site.com'), 'unknown-site', 'unknown host → registrable-label fallback');
+    const vs = harvestedRecipeLegs([REC({ id: 'vs1', origin: 'vendorsuite.drhorton.com' })], { host: 'vendorsuite.drhorton.com' });
+    assert.equal(vs[0].key, 'me.vendorsuite.vs1@vendorsuite.drhorton.com', 'harvested projection now matches the catalog spelling');
+    const own = harvestedRecipeLegs([REC({ id: 'vs2', app: 'customapp', origin: 'vendorsuite.drhorton.com' })], { host: 'vendorsuite.drhorton.com' });
+    assert.equal(own[0].key, 'me.customapp.vs2@vendorsuite.drhorton.com', "a record's OWN app always wins");
+    const perRec = harvestedRecipeLegs([REC({ id: 'vs3', origin: 'vendorsuite.drhorton.com' })], { host: '' });
+    assert.equal(perRec[0].key, 'me.vendorsuite.vs3@vendorsuite.drhorton.com', 'app derives PER RECORD from its own origin (the v1730 no-host lookup built me.site.*)');
+  });
   it('the §18 ARM GUARD: pending / rejected / disabled are NOT projected', () => {
     assert.equal(harvestedRecipeLegs([REC({ reviewState: 'pending' })], { host: 'deakoapi.deako.com' }).length, 0);
     assert.equal(harvestedRecipeLegs([REC({ reviewState: 'rejected' })], { host: 'deakoapi.deako.com' }).length, 0);

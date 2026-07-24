@@ -7072,7 +7072,11 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey 
   if (pinnedKey && pinnedGroundId && pinnedBindings && typeof pinnedBindings === 'object') {
     try {
       const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: pinnedGroundId });
-      const legs = harvestedRecipeLegs((rr && rr.recipes) || [], { groundId: pinnedGroundId });
+      // v1749 — the HOST rides in the pin's own key (me.app.id@host); without it this lookup built 'me.site.*'
+      // keys that could never match a pin, so the LLM-free fast path was dead since v1730 (found by the gl
+      // 104907 identity investigation). Records carry their own origin; the host also feeds sessionHost.
+      const _pinHost = String(pinnedKey).split('@')[1] || '';
+      const legs = harvestedRecipeLegs((rr && rr.recipes) || [], { host: _pinHost, groundId: pinnedGroundId });
       const leg = (legs || []).find((l) => l && l.key === pinnedKey);
       if (leg) {
         try { _orchLog(`WORKFLOW ▸ pinned ${pinnedKey} → banked bindings, no interpret`); } catch { /* */ }

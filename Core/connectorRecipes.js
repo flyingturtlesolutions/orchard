@@ -922,6 +922,31 @@ function _appFromHost(host) {
   return labels[0] || 'site';
 }
 
+// v2.74.1749 — ONE app spelling per host (gl 104907: interpret held me.vendorsuite.* AND me.drhorton.* for the
+// SAME endpoint — a catalog-direct leg keeps the curated `app`, while the harvested projection below derived
+// 'drhorton' from the registrable label). The leg KEY is identity for pins, banked bindings, aliases, and the
+// vitals tick; two spellings make all four unstable. The CURATED CATALOG is the canonical namer for any host it
+// knows (exact match, then suffix — 'deako.zendesk.com' matches appHost 'zendesk.com'); the registrable label
+// stays the fallback for hosts it has never heard of. PURE.
+const _CANONICAL_APP_BY_HOST = (() => {
+  const m = new Map();
+  for (const e of CONNECTOR_RECIPES) {
+    const app = e && e.app; if (!app) continue;
+    for (const raw of [e.appHost, e.origin]) {
+      const k = String(raw || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+      if (k && !m.has(k)) m.set(k, app);
+    }
+  }
+  return m;
+})();
+export function canonicalAppForHost(host) {
+  const h = String(host || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+  if (!h) return _appFromHost(h);
+  if (_CANONICAL_APP_BY_HOST.has(h)) return _CANONICAL_APP_BY_HOST.get(h);
+  for (const [k, app] of _CANONICAL_APP_BY_HOST) if (h.endsWith('.' + k)) return app;
+  return _appFromHost(h);
+}
+
 /**
  * §17/§18 — project a Ground's HARVESTED ride-recipes into session-ride connector legs for the IL invoke palette. PURE.
  * Gated by the §18 ARM GUARD: only `armable` recipes (enabled ∧ accepted) are projected — a `pending`/`rejected`/disabled
@@ -933,7 +958,6 @@ function _appFromHost(host) {
  */
 export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode = null, seenKeys = null, groundId = '' } = {}) {
   const list = Array.isArray(recipes) ? recipes : [];
-  const app = _appFromHost(host);
   const seen = seenKeys instanceof Set ? seenKeys : new Set();
   const out = [];
   for (const r of list) {
@@ -958,7 +982,10 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
     // path. A new recipe field now flows here for free; only recipeFromCatalogEntry + recipeToLeg still need the field added.
     const leg = recipeToLeg({
       ...r,
-      app,                                                             // derived from host — the per-Ground record carries no `app`
+      // v1749 — the record's OWN app wins (a curated-merged record names itself); else the CANONICAL app for its
+      // host. The old `_appFromHost(host)` here OVERRODE r.app and used ONE host for every record — the exact
+      // double-spelling gl 104907 caught (me.vendorsuite.* vs me.drhorton.* for one endpoint).
+      app: r.app || canonicalAppForHost(r.origin || host),
       origin: r.origin || host, method, write,
       destructive: r.destructive === true || r.safetyClass === 'destructive',
     }, { account, trusted: true });                                    // accepted = user-vetted → read drops to 'auto'
