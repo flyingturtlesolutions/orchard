@@ -41,7 +41,7 @@ import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/
 import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
 import { buildAnswerShapeMessages, parseAnswerShapeOutput } from '../Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — match a read's answer to the question
 import { buildClassifyRequest, parseClassifyOutput } from '../Core/branchClassify.js';
-import { buildStepsMessages, parseStepsOutput, sanitizeSteps, deriveStepSpec, assessStepCoverage, buildResplitMessages, stepRejectionContext } from '../Core/stepsPrompt.js';   // v2.74.1669 — intent → workflow STEPS (one step = one leg); dedicated, because interpret is a router and decomposeAsk splits grammar   // PP-5 (v2.74.1662) — batched free-text branch classification (pure prompt + strict parse)
+import { buildStepsMessages, parseStepsOutput, sanitizeSteps, deriveStepSpec, assessStepCoverage, buildResplitMessages, stepRejectionContext, restoreQuantifier } from '../Core/stepsPrompt.js';   // v2.74.1669 — intent → workflow STEPS (one step = one leg); dedicated, because interpret is a router and decomposeAsk splits grammar   // PP-5 (v2.74.1662) — batched free-text branch classification (pure prompt + strict parse)
 import { buildCaseBriefMessages, parseCaseBrief } from '../Core/caseBrief.js';   // DK-8h — a spawned case's conversational framing (the requestor's voice)
 import { buildRecipePolishMessages, parseRecipePolishOutput } from '../Core/recipePolishPrompt.js';   // §17 — name/does/param-name a HARVESTED ride-recipe (structure-only input; the OBS-4 analog)
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
@@ -5543,11 +5543,17 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
         }
       } catch { /* the un-split step stands, and the coverage report will say so */ }
     }
-    steps = sanitizeSteps(steps).steps;
+    // Stage 7.5 (v2.74.1714) — QUANTIFIER FIDELITY backstop. Live: the model dropped "for each" from the
+    // presentation step and the de-quantified step routed to the wrong case engine (single bulk case, no per-item
+    // drill). This restores the user's OWN quantifier — it only fires when the intent quantified and no step kept
+    // it, and the repaired text still goes to the plan page for approval. Before the final sanitize so the length
+    // clamp and dedupe apply to the repaired form too.
+    const rq = restoreQuantifier(goal, steps);
+    steps = sanitizeSteps(rq.steps).steps;
 
     // Stage 8: report what is still short of the floor. Reports, never repairs — the remaining judgement is the
     // reviewer's, and the surface shows them exactly which step is still doing two things.
-    return { steps, coverage: assessStepCoverage(steps, spec), dropped: san.dropped, spec };
+    return { steps, coverage: assessStepCoverage(steps, spec), dropped: san.dropped, spec, restored: rq.restored };
   }
 
   static async classifyBranch({ items = [], arms = [], field = '' } = {}) {

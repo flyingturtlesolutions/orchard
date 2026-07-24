@@ -9,7 +9,9 @@ import assert from 'node:assert/strict';
 import {
   buildStepsMessages, parseStepsOutput, looksCompound, compoundSteps, MAX_STEPS,
   deriveStepSpec, buildStepsDirective, sanitizeSteps, assessStepCoverage, stepRejectionContext, buildResplitMessages,
+  restoreQuantifier,
 } from './stepsPrompt.js';
+import { isFanoutAsk, isFieldDisplayAsk } from './orchChain.js';   // v2.74.1714 — the repair exists FOR routing; assert the tie
 
 describe('stepsPrompt — the prompt states the rule the wizard already promises', () => {
   it('names the one-step rule and the operation kinds, not just "split it up"', () => {
@@ -302,5 +304,66 @@ describe('stepsPrompt — buildResplitMessages (repair is a narrower ASK, not a 
   });
   it('permits "it really is one action"', () => {
     assert.match(buildResplitMessages('x').system, /genuinely is ONE action, return it unchanged/);
+  });
+});
+
+describe('stepsPrompt — restoreQuantifier (v2.74.1714: the quantifier-fidelity backstop)', () => {
+  // The live 172653 shape, verbatim: the model kept every word except "for each", and that one dropped token
+  // re-routed the step off the fan-out (per-item drill + case per item) onto the single-bulk-case engine.
+  const LIVE_ASK = "get open warranty tasks and for each, show primary homeowner's contact information in new case";
+  const LIVE_STEPS = ['get open warranty tasks', "show primary homeowner's contact information in new case"];
+
+  it('restores the dropped "for each" onto the step that owns the quantified clause (the live bug)', () => {
+    const { steps, restored } = restoreQuantifier(LIVE_ASK, LIVE_STEPS);
+    assert.deepEqual(restored, { quantifier: 'for each', stepIndex: 1 });
+    assert.equal(steps[0], 'get open warranty tasks', 'the read step is untouched');
+    assert.equal(steps[1], "for each, show primary homeowner's contact information in new case");
+  });
+
+  it('the repaired step actually ROUTES: fan-out fires, field-display keeps the raw card (the point of the repair)', () => {
+    const { steps } = restoreQuantifier(LIVE_ASK, LIVE_STEPS);
+    assert.equal(isFanoutAsk(steps[1]), true, 'quantifier + case target → the fan-out (which drills per-item detail)');
+    assert.equal(isFieldDisplayAsk(steps[1]), true, 'display verb, no analysis verb → the v1712 raw field card');
+    assert.equal(isFanoutAsk(LIVE_STEPS[1]), false, 'and WITHOUT the repair it misses the fan-out — the live misroute');
+  });
+
+  it('no-op when the model kept a quantifier anywhere (never double-quantify)', () => {
+    const kept = ['get open warranty tasks', "show each homeowner's contact information in a new case"];
+    const { steps, restored } = restoreQuantifier(LIVE_ASK, kept);
+    assert.equal(restored, null);
+    assert.deepEqual(steps, kept);
+  });
+
+  it('no-op when the ask never quantified (never invent a signal the user did not say)', () => {
+    const { restored } = restoreQuantifier('get open warranty tasks and show the summary', ['get open warranty tasks', 'show the summary']);
+    assert.equal(restored, null);
+  });
+
+  it('no-op when no step confidently owns the quantified clause (a wrong owner is worse than the gap)', () => {
+    const { restored } = restoreQuantifier('for each, review it', ['get the tickets', 'send the report']);
+    assert.equal(restored, null);
+  });
+
+  it('no-op on a TIE — two steps equally claim the clause, so neither confidently owns it', () => {
+    const { restored, steps } = restoreQuantifier(
+      'for each, show the ticket status note',
+      ['file the ticket status note', 'mail the ticket status note']);   // 4-word overlap each — dead heat
+    assert.equal(restored, null);
+    assert.equal(steps[0].startsWith('for each'), false);
+    assert.equal(steps[1].startsWith('for each'), false);
+  });
+
+  it('handles the mid-clause quantifier form too ("email each vendor" dropped to "email the vendors")', () => {
+    const { steps, restored } = restoreQuantifier(
+      'get the overdue invoices and email each vendor about the balance',
+      ['get the overdue invoices', 'email the vendors about the balance']);
+    assert.equal(restored && restored.quantifier, 'each');
+    assert.equal(steps[1], 'for each, email the vendors about the balance');
+  });
+
+  it('the prompt now states the rule (the teach half of the same fix)', () => {
+    const { system } = buildStepsMessages('x');
+    assert.match(system, /KEEP THE QUANTIFIER/);
+    assert.match(system, /keeps its quantifier IN the one step/);
   });
 });

@@ -92,6 +92,9 @@ export function createPipelineHandlers() {
           // The count is the DECISION; the steps are the DISPOSITION (the v1660 rule). One line, so a fan-out
           // cannot bury it the way 121 INVOKE lines bury everything else.
           if (steps.length) Logger.info('background', `STEPS ▸ plan: ${steps.map((s, i) => `${i + 1}) ${String(s).slice(0, 60)}`).join(' | ')}`);
+          // v2.74.1714 — the quantifier-fidelity backstop fired: the ask said "for each" and the draft dropped it.
+          // Logged as its own decision line — a silent repair would hide the model's miss from every trace.
+          if (out && out.restored) Logger.info('background', `STEPS ▸ quantifier restored — "${out.restored.quantifier}" re-attached to step ${out.restored.stepIndex + 1} (the draft dropped the per-item signal)`);
         } catch { /* */ }
         sendResponse({ success: true, steps, coverage: (out && out.coverage) || null, dropped: (out && out.dropped) || [] });
       } catch (e) { sendResponse({ success: false, error: String((e && e.message) || e) }); }

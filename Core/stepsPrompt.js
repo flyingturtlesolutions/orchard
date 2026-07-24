@@ -138,6 +138,50 @@ export function sanitizeSteps(steps, { max = MAX_STEPS } = {}) {
   return { steps: out, dropped };
 }
 
+// v2.74.1714 — QUANTIFIER FIDELITY, the guarantee half (the prompt rule above is the teach half).
+//
+// Live (trace 172653): "…and for each, show primary homeowner's contact information in new case" decomposed to
+// "show primary homeowner's contact information in new case" — the model kept every word EXCEPT the quantifier,
+// and that one dropped token re-routed the step off the fan-out (which drills per-item detail and opens a case
+// per item) onto the single-bulk-case engine. The decomposer is a router in disguise: quantifier fidelity is a
+// routing-correctness property, so it gets a deterministic backstop, not just a prompt rule.
+//
+// Deliberately NARROW, in keeping with "code does not get to invent a split it cannot verify": this only fires
+// when the INTENT carries a per-item quantifier and NO step kept one — restoring the user's own signal, never
+// adding one they didn't say. The repaired text is still shown on the plan page for approval before anything runs.
+const _QUANT_PHRASE = /\b(for\s+each|for-?each|each|every|per\s+(?:item|task|row|one|record))\b/i;
+
+/**
+ * Re-attach a per-item quantifier the model dropped. PURE.
+ *
+ * @returns {{steps:string[], restored:null|{quantifier:string, stepIndex:number}}}
+ */
+export function restoreQuantifier(intent, steps) {
+  const s = _str(intent);
+  const list = (Array.isArray(steps) ? steps : []).map(_str).filter(Boolean);
+  if (!list.length) return { steps: list, restored: null };
+  const m = s.match(_QUANT_PHRASE);
+  if (!m) return { steps: list, restored: null };                              // the ask never quantified
+  if (list.some((t) => _QUANT_PHRASE.test(t))) return { steps: list, restored: null };   // the model kept it
+  // The quantified CLAUSE is the text after the quantifier (to the sentence end); its owner is the step sharing
+  // the most words with it. Ties/thin overlap → leave everything alone (a wrong owner is worse than the gap —
+  // the coverage report and the plan reviewer still see the un-quantified step).
+  const tail = s.slice(m.index + m[0].length).split(/[.?!]/)[0].toLowerCase();
+  const tw = new Set(tail.split(/[^a-z0-9']+/).filter((w) => w.length > 2));
+  let best = -1; let bestN = 0; let tied = false;
+  list.forEach((t, i) => {
+    const n = t.toLowerCase().split(/[^a-z0-9']+/).filter((w) => w.length > 2 && tw.has(w)).length;
+    if (n > bestN) { best = i; bestN = n; tied = false; }
+    else if (n === bestN && n > 0 && i !== best) tied = true;   // two equal owners = no confident owner
+  });
+  if (best < 0 || bestN < 2 || tied) return { steps: list, restored: null };
+  // Normalized prefix form: "for each, <step>". Any per-item quantifier restores as this — it is the collection
+  // semantics the user stated, it reads naturally ahead of any verb, and it is the form the foreach gate matches.
+  const out = list.slice();
+  out[best] = `for each, ${out[best]}`;
+  return { steps: out, restored: { quantifier: m[1].toLowerCase(), stepIndex: best } };
+}
+
 /**
  * Coverage check (§ the `assessPerspectiveCompleteness` analogue): did the proposal meet the floor its own
  * signals imply, and does anything still look compound? PURE.
@@ -216,6 +260,15 @@ export function buildStepsMessages(intent, { host = '', spec = null, rejectionCo
     'ORDER so each step has its input: anything done to "each" / "those" comes AFTER the step that produced them,',
     'and anything that shows / files / writes X comes AFTER the step that read X.',
     '',
+    // v2.74.1714 — QUANTIFIER FIDELITY. Live: "…and for each, show primary homeowner's contact information in
+    // new case" came back as "show primary homeowner's contact information in new case" — same words minus the
+    // quantifier, and that one dropped word re-routed the step to a different engine (a single bulk case instead
+    // of one case per item, with no per-item detail read). The quantifier is not decoration; it is load-bearing.
+    'KEEP THE QUANTIFIER. If they say work happens "for each" / "each" / "every one" / "per item", the step that',
+    'does that work must SAY so ("for each, show its contact info in a new case" / "show each one\'s status").',
+    'Dropping the quantifier changes the meaning from one-result-per-item to one result total, and the plan will',
+    'run it that way. Their quantifier is part of their words — keep it in the step that owns it.',
+    '',
     'SPLIT THESE APART — each is more than one step. These are the common UNDER-splitting mistakes:',
     '  · "find X where Y"                → READ the list, THEN filter it. Two steps.',
     '  · "look it up, and create it if',
@@ -229,6 +282,8 @@ export function buildStepsMessages(intent, { host = '', spec = null, rejectionCo
     '  · a PRESENTATION and its target  → "display / show / list X IN A CASE" is ONE step: "open a case showing X".',
     '    The case is WHERE X appears; never a bare "display X" and then a dangling "open a case". (A case shows',
     '    only what a prior step READ — so if X is per-item detail, the READ of X is its own step BEFORE the case.)',
+    '    A PER-ITEM presentation keeps its quantifier IN the one step: "show each one\'s contact info in a new',
+    '    case" — never a de-quantified "show contact info in a case".',
     '  · a LOOK-UP and its key          → "search the CRM for their email" is ONE step, not "get the email" and',
     '    then "look them up".',
     '  · a READ and its columns         → "get the tickets with their status" is ONE read, not a read then a fetch.',

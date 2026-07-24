@@ -4543,6 +4543,11 @@ async function _runCaseClause(msg, cs, { tabId, priorValue = null, priorLeg = nu
         line,
       });
       opened++;
+      // v2.74.1714 — SETTLE the item. `recordStage` never sets an outcome (items are born 'not-run'; only
+      // `closeItem` is terminal), so every successfully-opened case tallied as `not-run` and the run reported
+      // "1 not run → failed" while the clause's own line said "1 opened" (live 172653). The write clause closes
+      // on every branch (chat.js:4418); this was the lone clause that only closed its FAILURE path.
+      closeItem(run, id, 'done');
       lines.push(`- **${escHtml(label)}** — ${escHtml(line)}`);
     } catch {
       failed++;
