@@ -12885,27 +12885,56 @@ async function _renderDeskLanding(conv) {
         // open" — that clause is live since v1692, so the body now opens the RUN HISTORY (§6) and only the ▶ chip
         // runs. Non-workflow cards (command / ＋ workflow) keep run-on-click — they're deterministic doors.
         if (c.kind === 'workflow') {
+          // §5 / CD-4 (v2.74.1724, live report "workflow card doesn't have all icons/functions") — the card
+          // carries the FULL action set, not just ▶: run · headless (tier-'sw') · schedule · delete, with the
+          // body opening run history (§5's ruling). Each chip stops propagation so the body-open never doubles.
           const wf = c.wf || {};
+          const wfKey = wf.appId || _memoryId();
           const d = document.createElement('div');
           d.className = 'suggestion-card wf-card';
           d.innerHTML = `<div class="suggestion-card-name">${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
-          const runBtn = document.createElement('button');
-          runBtn.className = 'wf-card-run';
-          runBtn.type = 'button';
-          runBtn.title = 'Run this workflow';
-          runBtn.textContent = '▶';
-          runBtn.addEventListener('click', async (ev) => {
-            ev.stopPropagation();   // the body's history-open must not also fire
-            runBtn.disabled = true;   // the v1343 double-click rule
+          const acts = document.createElement('div'); acts.className = 'wf-card-actions';
+          const chip = (label, titleTxt, fn) => {
+            const b = document.createElement('button');
+            b.className = 'wf-card-act'; b.type = 'button'; b.title = titleTxt; b.textContent = label;
+            b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(b); });
+            acts.appendChild(b); return b;
+          };
+          chip('▶', 'Run this workflow', async (b) => {
+            b.disabled = true;   // the v1343 double-click rule
             _dismissDeskLanding();
             const tab = await _orchActiveTab();
-            bumpWorkflowRun(wf.appId || _memoryId(), wf.id).catch(() => {});
+            bumpWorkflowRun(wfKey, wf.id).catch(() => {});
             const _p3 = _wfReplayPlan(wf);
             const _m3 = appendMessage({ role: 'assistant', body: '' });
             if (!_p3.runnable) { _wfReplayStopped(_m3, wf, _p3); return; }
             _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask });
           });
-          d.appendChild(runBtn);
+          if (workflowTier(wf) === 'sw') chip('⚡', 'Run in the background (headless)', async (b) => {
+            b.disabled = true;
+            _dismissDeskLanding();
+            const _mh = appendMessage({ role: 'assistant', body: '' });
+            _setMessageBody(_mh, `Running “${escHtml(wf.name || wf.ask)}” in the background…`, { markdown: true });
+            let res = null;
+            try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
+            const v = res && res.verdict;
+            _setMessageBody(_mh, (res && res.success !== false)
+              ? (v === 'parked' ? '⚠ Stopped at a write — type `workflows` to approve it.' : `Ran headless → ${v === 'complete' ? 'completed' : (v || 'finished')}. Its run shows in the card’s history.`)
+              : `Couldn’t run headless — ${_errWord(res && res.error)}.`, { markdown: true });
+          });
+          chip('⏱', wf.trigger && wf.trigger.enabled ? 'Change or remove the schedule' : 'Run this on a schedule', () => {
+            _dismissDeskLanding();
+            const row = appendMessage({ role: 'assistant', body: '' });
+            _setMessageBody(row, `⏱ Schedule “${escHtml(wf.name || wf.ask)}” — pick how often it should run:`, { markdown: true });
+            _wfScheduleBar(row, wf, wfKey);   // the tested picker, incl. the v1722 orphan re-key
+          });
+          chip('🗑', 'Delete this workflow', async () => {
+            if (!confirm(`Delete “${wf.name || wf.ask}”? This can’t be undone.`)) return;   // §5 — confirmation required
+            try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
+            try { d.remove(); } catch { /* */ }
+            try { _orchLog(`WORKFLOW ▸ deleted "${String(wf.name || wf.ask).slice(0, 40)}" (launch card)`); } catch { /* */ }
+          });
+          d.appendChild(acts);
           d.addEventListener('click', () => { _dismissDeskLanding(); void _renderWorkflowRuns(wf); });   // §5 — body → history
           grid.appendChild(d);
           continue;

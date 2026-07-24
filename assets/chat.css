@@ -670,18 +670,18 @@ textarea {
   opacity: 0.5;
   cursor: not-allowed;
 }
-/* DESIGN_cadence.md §5 (v2.74.1715) — the workflow card is a DIV (body → run history) with run as an explicit ▶
-   chip: once a workflow can fire on a clock, an accidental manual run is a more expensive misclick than an open. */
-.wf-card {
-  position: relative;
-  cursor: pointer;
-  padding-right: calc(var(--sp-4) + 34px);   /* clear the ▶ chip */
+/* DESIGN_cadence.md §5 (v2.74.1715; full icon set v1724) — the workflow card is a DIV (body → run history) with
+   its ACTIONS as an explicit chip row: ▶ run · ⚡ headless (tier-sw) · ⏱ schedule · 🗑 delete. Once a workflow can
+   fire on a clock, an accidental manual run is a more expensive misclick than an open — so every action is a
+   deliberate small target, and the big body target is the safe one (history). */
+.wf-card { cursor: pointer; }
+.wf-card-actions {
+  display: flex;
+  gap: var(--sp-1);
+  justify-content: flex-end;
+  margin-top: var(--sp-1);
 }
-.wf-card-run {
-  position: absolute;
-  top: 50%;
-  right: var(--sp-3);
-  transform: translateY(-50%);
+.wf-card-act {
   width: 28px;
   height: 28px;
   border: 1px solid var(--c-border-soft);
@@ -691,8 +691,8 @@ textarea {
   cursor: pointer;
   line-height: 1;
 }
-.wf-card-run:hover:not(:disabled) { border-color: var(--c-border); background: var(--c-bg-subtle); }
-.wf-card-run:disabled { opacity: 0.5; cursor: not-allowed; }
+.wf-card-act:hover:not(:disabled) { border-color: var(--c-border); background: var(--c-bg-subtle); }
+.wf-card-act:disabled { opacity: 0.5; cursor: not-allowed; }
 /* v2.74.1343 (review Batch 6) — the connection / rich-intent chip MENU (setup site candidates, "what can I do here"
    intents). The chips reuse .suggestion-card styling, but here they lay out as a WRAPPING ROW under the bubble text
    (they were appended to the .message flex row with NO CSS — squeezed as a third column beside the text). */
