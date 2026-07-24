@@ -602,6 +602,10 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
       }
     }
   } catch { /* a stamp must never block the wipe */ }
+  // v2.74.1719 — every desk dies here, so any live wizard / pending intent prompt dies with them (see the per-row
+  // delete's rationale: a wizard parked for a desk that will never reopen is a zombie holding the composer lock).
+  if (_wfWizard) _wfAbandon();
+  _wfIntentPending = null;
   await ConversationStore.deleteAll();
   _clearCurrentConversation();
   _resetConversation();
@@ -1047,6 +1051,11 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
         _orchReq('FLEET_ROUTINE', { instanceId: k, off: true }).catch(() => {});
       }
     } catch { /* a stamp must never block the delete */ }
+    // v2.74.1719 (live report) — a wizard PINNED to the dying desk can never revive (the v1623 park model assumes
+    // its desk will reopen): abandon it NOW — draft-keep, composer unlock, page-slot release — so its page and
+    // input lock don't outlive the desk. Same for a pending intent-first prompt (CD-3).
+    if (_wfWizard && (_wfWizard.convId === String(conv.id) || childIds.includes(_wfWizard.convId))) _wfAbandon();
+    if (_wfIntentPending && (_wfIntentPending === String(conv.id) || childIds.includes(_wfIntentPending))) _wfIntentPending = null;
     await ConversationStore.delete(conv.id);
     _expandedApps.delete(conv.id);
     // AP-3 fix (v2.74.1220) — the cascade also removed this app's sub-conversations, so reset the panel if the ACTIVE
@@ -5509,10 +5518,23 @@ const _wfAwaitingInput = () => !!(_wfWizard && (_wfWizard.phase === 'await-step'
 // never consume input, never re-assert the page, composer unlocked — the wizard REVIVES when its own desk is
 // reopened (_rehydrateConversation), and dies only on Cancel / Save / replacement (draft-kept).
 const _wfForeign = () => !!(_wfWizard && _wfWizard.convId && String(_currentConversationId || '') !== String(_wfWizard.convId));
+// v2.74.1719 — release the wizard's page-slot claim: drop its .wf-page node and un-hide the front page's skeleton
+// (greeting / subtitle / #suggestion-cards) that _wfRenderPage hid. EVERY wizard exit calls this — without it the
+// skeleton stays hidden and the next renderSuggestionCards() paints into an invisible (or, pre-1719, destroyed) node.
+function _wfReleasePageSlot() {
+  try {
+    const host = $('empty-state') && $('empty-state').querySelector('.empty-state-content'); if (!host) return;
+    host.querySelectorAll(':scope > .wf-page').forEach((el) => { try { el.remove(); } catch { /* */ } });
+    for (const el of Array.from(host.children)) { if (el.dataset && el.dataset.wfHidden) { delete el.dataset.wfHidden; el.classList.remove('hidden'); } }
+  } catch { /* */ }
+}
+
 function _wfAbandon() {
   const w = _wfWizard;
   _wfWizard = null;
   try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
+  try { $('btn-chat-send').disabled = !$('chat-input').value.trim(); } catch { /* */ }   // v1719 — the wizard's send-lock must not outlive it
+  _wfReleasePageSlot();   // v1719 — the page markup must not outlive the wizard (live: it survived a desk delete)
   // no repaint — the surface on screen belongs to the conversation the user moved to.
   // WW-1b (v2.74.1620) — PROVEN steps survive the abandon as a DRAFT on the PINNED desk's key (≥2 steps, the
   // workflow floor; a single proven step is honestly lost — a workflow IS ≥2). Drafts never reach the launch
@@ -5537,6 +5559,8 @@ function _wfEnterPage() {
 function _wfExitPage() {
   _wfWizard = null;
   try { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } catch { /* */ }
+  try { $('btn-chat-send').disabled = !$('chat-input').value.trim(); } catch { /* */ }   // v1719 — release the send-lock with the wizard
+  _wfReleasePageSlot();   // v1719 — restore the skeleton BEFORE the surface-restore below repaints into it
   // restore the surface (v1620 — the v1611 exit fell to the FRONT page on a fresh desk): a desk shows its thread
   // (if any) and its LAUNCH page comes back when still in launch state — the landing self-gates on no-user-messages,
   // self-replaces, asserts its own visibility (v1608), and now shows the just-saved workflow card. No conversation
@@ -5630,7 +5654,16 @@ function _wfRenderPage() {
   // (the live "step 1 runs, then blank page"). Rendering the page MEANS the page is the surface.
   _wfEnterPage();
   const host = $('empty-state') && $('empty-state').querySelector('.empty-state-content'); if (!host) return;
-  host.innerHTML = '';
+  // v2.74.1719 (live report: "workflow builder save confirmation page remains even after desk is deleted") — the
+  // wizard owns ONE NODE (.wf-page), NEVER the container. `host.innerHTML = ''` DESTROYED the front page's own
+  // skeleton (#empty-state-greeting / #empty-state-subtitle / #suggestion-cards live inside .empty-state-content,
+  // chat.html:138-143) — after any wizard render, renderSuggestionCards() threw on the missing #suggestion-cards
+  // node, the front page could never paint again, and the wizard's last page stayed on screen (a desk delete's
+  // _resetConversation() shows #empty-state and found only wizard markup). Hide the skeleton siblings while the
+  // wizard lives; _wfReleasePageSlot() restores them on every exit. This is §6.4's page-slot-owner rule in
+  // miniature: own a node, not the container.
+  host.querySelectorAll(':scope > .wf-page').forEach((el) => { try { el.remove(); } catch { /* */ } });
+  for (const el of Array.from(host.children)) { el.dataset.wfHidden = '1'; el.classList.add('hidden'); }
   const page = document.createElement('div'); page.className = 'wf-page';
   const n = w.steps.length;
   const title = document.createElement('div'); title.className = 'wf-page-title'; title.textContent = 'Workflow builder';
