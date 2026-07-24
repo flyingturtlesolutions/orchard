@@ -55,10 +55,34 @@ describe('goldenAsks — ANTI-ROT: every entry points at things that exist', () 
     }
   });
 
+  it('every mustNotIntent value is in INTENTS, and never forbids the entry\'s own expectation (v1753)', () => {
+    for (const e of GOLDEN_ASKS) {
+      for (const i of (e.mustNotIntent || [])) {
+        assert.ok(INTENTS.includes(i), `"${e.ask}" forbids unknown intent ${i}`);
+        assert.ok(!(e.expect && e.expect.intent === i), `"${e.ask}" forbids its own expected intent`);
+      }
+    }
+  });
+
   it('every mustNotResolve id names a real leg (a forbidden ghost forbids nothing)', () => {
     for (const e of GOLDEN_ASKS) {
       for (const id of (e.mustNotResolve || [])) assert.ok(ALL_IDS.has(id), `"${e.ask}" forbids unknown leg ${id}`);
     }
+  });
+
+  it('accept discipline (v1751): only beside expect.legId · ids exist · never repeats the primary · never coverage', () => {
+    for (const e of GOLDEN_ASKS) {
+      if (!e.accept) continue;
+      assert.ok(Array.isArray(e.accept) && e.accept.length, `"${e.ask}" carries an empty accept`);
+      assert.ok(e.expect && e.expect.legId, `"${e.ask}": accept without a primary legId has nothing to be an alternative TO`);
+      for (const id of e.accept) {
+        assert.ok(ALL_IDS.has(id), `"${e.ask}" accepts unknown leg ${id}`);
+        assert.notEqual(id, e.expect.legId, `"${e.ask}" accepts its own primary — redundant`);
+      }
+    }
+    // and accept NEVER grants A-0b coverage — asserted on the helper directly, not per entry
+    const probe = coveredLegIds([{ ask: 'x', expect: { legId: 'primary_leg' }, accept: ['alt_leg'] }]);
+    assert.ok(probe.has('primary_leg') && !probe.has('alt_leg'), 'coveredLegIds reads expect.legId only');
   });
 });
 

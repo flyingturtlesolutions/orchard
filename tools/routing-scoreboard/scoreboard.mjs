@@ -118,10 +118,13 @@ async function main() {
   if (SITE) runnable = runnable.filter((r) => r.site.includes(SITE));
   if (LIMIT) runnable = runnable.slice(0, LIMIT);
 
-  // attribution — the prompt sha covers system+palette for a CANARY ask, so palette drift moves it too
+  // attribution — the prompt sha covers system AND the canary USER message (v2.74.1752 fix: the TOOL_CATALOG —
+  // the palette, its names, detail lines, params — renders in the USER half; hashing system-only silently
+  // excluded all palette drift, which is exactly what run 1's "unmoved sha" anomaly exposed). The canary ask +
+  // now:'' keep the user half deterministic.
   const manifestVersion = (() => { try { return JSON.parse(fs.readFileSync(path.join(REPO, 'manifest.json'), 'utf8')).version; } catch { return '?'; } })();
   const canary = buildInterpretMessages('canary: score the router', { retrieved: legs, primitives: [] });
-  const promptSha = crypto.createHash('sha256').update(canary.system).digest('hex');
+  const promptSha = crypto.createHash('sha256').update(`${canary.system}\n \n${canary.user}`).digest('hex');
   const attribution = { manifestVersion: `v${manifestVersion}`, model: MODEL, promptSha, temperature: 0, corpusEntries: all.length, runnable: runnable.length, panelScopedSkipped: panelScoped.length, hosts, startedAt: new Date().toISOString() };
 
   console.log(`scoreboard ▸ palette ${legs.length} curated legs over ${hosts.length} hosts · ${runnable.length} runnable · ${panelScoped.length} builtin asks out-of-neck (pre-door routed; skipped honestly) · promptSha ${promptSha.slice(0, 12)}`);

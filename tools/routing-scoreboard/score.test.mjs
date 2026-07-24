@@ -56,6 +56,21 @@ t('violation: mustNotWrite hit a write-class leg', () => {
 t('pure negative satisfied → hit (the fence held)', () => {
   assert.equal(scoreEntry({ mustNotWrite: true }, ACT('me.vendorsuite.vs_warranty_stats@x'), { writeIds: new Set(['shopify_create_order']) }).status, 'hit');
 });
+t('mustNotIntent: an act-ask drawing a forbidden intent is a VIOLATION, not a miss (v1753, the answer-class)', () => {
+  const e = { expect: { legId: 'aw_my_line' }, mustNotIntent: ['answer'] };
+  const s = scoreEntry(e, { intent: 'answer', confidence: 0.95 });
+  assert.equal(s.status, 'violation'); assert.match(s.why, /forbidden intent "answer"/);
+  assert.equal(scoreEntry(e, { intent: 'clarify', question: 'which line?' }).status, 'redirect', 'clarify stays a legal redirect');
+  assert.equal(scoreEntry(e, ACT('me.aw.aw_my_line@x')).status, 'hit', 'the act path is untouched');
+});
+t('accept: an alternative leg scores as hit; anything else still misses (v1751, the drill-via-list correction)', () => {
+  const e = { expect: { legId: 'vs_warranty_task' }, accept: ['vs_warranty_tasks'] };
+  assert.equal(scoreEntry(e, ACT('me.vendorsuite.vs_warranty_tasks@x')).status, 'hit');
+  assert.match(scoreEntry(e, ACT('me.vendorsuite.vs_warranty_tasks@x')).why, /accepted alternative/);
+  assert.equal(scoreEntry(e, ACT('me.vendorsuite.vs_state@x')).status, 'miss', 'accept is a list, not a wildcard');
+  assert.equal(scoreEntry({ ...e, mustNotResolve: ['vs_warranty_tasks'] }, ACT('me.vendorsuite.vs_warranty_tasks@x')).status, 'violation',
+    'a negative still outranks an accept');
+});
 
 // ── tallies + calibration ────────────────────────────────────────────────────────────────────────────────────
 t('tally: rates exclude errors; per-site splits', () => {

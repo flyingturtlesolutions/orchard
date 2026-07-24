@@ -98,6 +98,13 @@ const SYSTEM = [
   '- "teach": the ask needs a capability not in the catalog and not a primitive — offer to be shown.',
   '- "answer": a question, reflection, or meta-ask you can reason about (how/why/what-do-you-think, "how could you',
   '  do better", "what can you do") — ANSWER it in prose. Do NOT "clarify" something you could simply answer.',
+  // v2.74.1753 — the ANSWER-instead-of-ACT fence (scoreboard run 2: "what\'s my line" / "close this conversation
+  // out" both drew answer@0.95 — an "answer" about data never fetched is a fabrication path, worse than either
+  // acting or asking).
+  '  BUT: never "answer" an ask whose object a TOOL serves ("what\'s my line", "close this conversation out",',
+  '  "show X") — you have not fetched that data, so prose here would be INVENTED. Terse operational asks are',
+  '  commands: pick the tool ("act"), or "clarify" if a required detail is genuinely missing. "answer" is for',
+  '  questions about reasoning, capability, or context you actually hold.',
   '',
   'RULES:',
   '- TOOL (a connected API read) vs PAGE (drive the live UI) — choose by who CONSUMES the result, not a blanket preference:',
@@ -206,7 +213,20 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
     const params = pkeys.length
       ? `\n  params: ${pkeys.map((k) => `${sanitizeToolString(k, 40)}${req.includes(k) ? '*' : ''}${ps[k] && ps[k].type ? `:${sanitizeToolString(String(ps[k].type), 20)}` : ''}${ps[k] && ps[k].format ? `(${sanitizeToolString(String(ps[k].format), 20)})` : ''}${ps[k] && Array.isArray(ps[k].enum) && ps[k].enum.length ? `[${ps[k].enum.slice(0, 8).map((e) => sanitizeToolString(String(e), 20)).join('|')}]` : ''}${ps[k] && ps[k].hint ? ` "${sanitizeToolString(String(ps[k].hint), 140)}"` : ''}`).join(', ')}`
       : '';
-    return `- ref: ${ref}${irr}${selfMark}${connMark}${scopeMark}\n  does: ${label}${params}`;
+    // v2.74.1752 — render the leg's DOES (scoreboard run 1's second-order find: the `does:` line above is really
+    // the NAME, so the catalog's carefully-authored does text never reached the router, and every run-1 miss was
+    // sibling-NAME confusion — "Warranty task counts" vs "Warranty tasks by status"). Cost-contained: clamped 140,
+    // same sanitize fence as every other catalog string, skipped when it adds nothing over the label.
+    // v2.74.1753 — ACCUMULATE segments to the budget instead of head-only: run 2 showed the hard head-cut dropping
+    // load-bearing tails ("blank = your current division"), which TAUGHT the model a param it then asked about
+    // (the flagship ask regressed hit→clarify). Same 140 ceiling — the budget was already priced in; this spends
+    // what head-only left on the table.
+    const _segs = String((c && c.does) || '').split(' — ');
+    let _head = _segs[0] || '';
+    for (let si = 1; si < _segs.length && (_head.length + 3 + _segs[si].length) <= 140; si++) _head += ` — ${_segs[si]}`;
+    const doesHead = sanitizeToolString(_head, 140);
+    const detail = (doesHead && doesHead.toLowerCase() !== label.toLowerCase()) ? `\n  detail: ${doesHead}` : '';
+    return `- ref: ${ref}${irr}${selfMark}${connMark}${scopeMark}\n  does: ${label}${detail}${params}`;
   }).filter(Boolean);
   const prims = (Array.isArray(primitives) ? primitives : []).map((p) => (typeof p === 'string' ? p : (p && (p.op || p.key)))).filter(Boolean);
   const intent = String(seed ?? '').trim();

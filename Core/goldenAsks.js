@@ -10,10 +10,15 @@
  *                                //   measures string-match, not routing); trace-verbatim where one exists
  *     expect: { legId } |        // the leg this ask must resolve to (recipe id or builtin key), XOR
  *             { intent },        // the INTENTS clause it must land in (branch / fieldread / case / map / write)
+ *     accept?: [ids],            // ADDITIONAL leg ids scored as a hit (run 1: the catalog's own drill-via-list
+ *                                //   pattern makes vs_warranty_tasks a correct answer for a single-task ask —
+ *                                //   the primary legId still carries A-0b coverage; accept never does)
  *     mustNotResolve?: [ids],    // NEGATIVE: legs this ask must NEVER resolve to (the case→Zendesk class)
+ *     mustNotIntent?: [intents], // NEGATIVE: intents this ask must never land in (run 2's answer-class — an
+ *                                //   act-ask drawing `answer` fabricates about data never fetched)
  *     mustNotWrite?: true,       // NEGATIVE: must never resolve to any write-class leg ("how many…" ≠ a write)
  *     mustBeGated?: true,        // the resolved leg's safety class must NOT be 'auto' (delete/merge/sms class)
- *     mintedAt }                 // provenance stamp — the manifest version that authored the entry (parent §8)
+ *     mintedAt }                 // provenance stamp — the manifest version that authored/last-corrected the entry
  *
  * Negative keying SETTLED (2026-07-23, was an open decision): BOTH forms exist — `mustNotResolve` (forbidden
  * legs, precise) and `mustNotWrite`/`mustBeGated` (class constraints, robust to catalog growth). An entry may be
@@ -72,7 +77,7 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'show my vendorsuite state', expect: { legId: 'vs_state' } },
   { ask: 'what version is vendorsuite on', expect: { legId: 'vs_versions' } },
   { ask: 'get open warranty tasks', expect: { legId: 'vs_warranty_tasks' } },   // VERBATIM live (traces 164717/172653)
-  { ask: 'open warranty task 4867009', expect: { legId: 'vs_warranty_task' } },
+  { ask: 'open warranty task 4867009', expect: { legId: 'vs_warranty_task' }, accept: ['vs_warranty_tasks'], mintedAt: 'v2.74.1751' },   // run 1 correction: the catalog's OWN drill pattern routes a single task through the LIST leg's address param — either resolve is right
   { ask: 'who are the contacts on task 4867009', expect: { legId: 'vs_task_contacts' } },
   { ask: 'warranty task counts by status', expect: { legId: 'vs_warranty_stats' } },
   { ask: 'any vendor announcements?', expect: { legId: 'vs_announcements' } },
@@ -93,11 +98,11 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'who is 206-555-0147', expect: { legId: 'aw_contact_by_phone' } },
   { ask: 'which lines can text 206-555-0147', expect: { legId: 'aw_authorized_lines' } },
   { ask: 'open the conversation with 206-555-0147', expect: { legId: 'aw_conversation_by_number' } },
-  { ask: "what's my line", expect: { legId: 'aw_my_line' } },
+  { ask: "what's my line", expect: { legId: 'aw_my_line' }, mustNotIntent: ['answer'], mintedAt: 'v2.74.1753' },   // run 2: drew answer@0.95 — prose about a line never fetched is fabrication
   { ask: 'call history for 206-555-0147', expect: { legId: 'aw_call_history' } },
   { ask: 'set me to away', expect: { legId: 'aw_set_availability' } },
   { ask: "text 206-555-0147 that we're on the way", expect: { legId: 'aw_send_sms' }, mustBeGated: true },
-  { ask: 'close this conversation out', expect: { legId: 'aw_close_conversation' } },
+  { ask: 'close this conversation out', expect: { legId: 'aw_close_conversation' }, mustNotIntent: ['answer'], mintedAt: 'v2.74.1753' },   // run 1+2: the terse-ask→answer class, fenced
   // ── Builtin: browser ──────────────────────────────────────────────────────────────────────────────────────
   { ask: 'open youtube.com', expect: { legId: 'OPEN_URL' } },
   { ask: 'switch to the gmail tab', expect: { legId: 'FOCUS_TAB' } },
@@ -133,6 +138,14 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'open a case for each', expect: { intent: 'case' } },
   { ask: 'look each caller up in the CRM', expect: { intent: 'map' } },
   { ask: 'create a shopify profile for each homeowner that has none', expect: { intent: 'write' } },
+  // run 1 additions (re-harvest ADDS, never replaces): the originals measure the context-free floor honestly
+  // (3/5 clarified standalone); these context-BEARING twins measure the phrasing a real chain carries.
+  { ask: 'we just pulled 8 warranty tasks — open a case for each of them', expect: { intent: 'case' }, mintedAt: 'v2.74.1751' },
+  { ask: 'from that list of callers, look each one up in the CRM by email', expect: { intent: 'map' }, mintedAt: 'v2.74.1751' },
+  { ask: 'for the homeowners we found with no profile, create a shopify profile for each', expect: { intent: 'write' }, mintedAt: 'v2.74.1751' },
+  // run 1: the case→Zendesk CANONICAL's runnable twin — the original expects OPEN_CASE (a builtin, panel-scoped,
+  // honestly skipped live), so the marquee fence never got live exercise. This PURE negative runs.
+  { ask: 'open a case for the leaking dishwasher', mustNotResolve: ['create_ticket'], mintedAt: 'v2.74.1751' },
 ]));
 
 /** The visible, shrinking waiver list (HANDOFF §4). v0 ships EMPTY — full coverage. An entry here needs {id, why}. */

@@ -57,6 +57,11 @@ export function scoreEntry(entry, decision, { writeIds = new Set() } = {}) {
   if (e.mustNotWrite && got && writeIds.has(got)) {
     return { status: 'violation', got: gotLabel, why: `a count/read ask resolved to the WRITE leg ${got}` };
   }
+  // v2.74.1753 (run 2's answer-class): intents this ask must never land in — an "answer" about data never
+  // fetched is a fabrication path, so an act-ask drawing `answer` is a breached fence, not a mere miss.
+  if (Array.isArray(e.mustNotIntent) && e.mustNotIntent.includes(d.intent)) {
+    return { status: 'violation', got: gotLabel, why: `landed in forbidden intent "${d.intent}"` };
+  }
 
   if (e.expect && e.expect.intent) {
     if (d.intent === e.expect.intent) return { status: 'hit', got: gotLabel, why: 'intent matched' };
@@ -65,6 +70,9 @@ export function scoreEntry(entry, decision, { writeIds = new Set() } = {}) {
   }
   if (e.expect && e.expect.legId) {
     if (got === e.expect.legId) return { status: 'hit', got: gotLabel, why: 'leg matched' };
+    // v2.74.1751 (run 1): `accept` — additional CORRECT legs (the drill-via-list pattern: the catalog itself
+    // routes a single-task ask through the list leg's address param, so either resolve is right)
+    if (got && Array.isArray(e.accept) && e.accept.includes(got)) return { status: 'hit', got: gotLabel, why: 'accepted alternative leg' };
     if (isRedirect(d)) return { status: 'redirect', got: gotLabel, why: 'guard rail absorbed it' };
     return { status: 'miss', got: gotLabel, why: `wanted ${e.expect.legId}` };
   }

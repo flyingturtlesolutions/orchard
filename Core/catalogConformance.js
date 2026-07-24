@@ -54,7 +54,7 @@ export function auditRecipeLegibility(recipes) {
     const id = _str(r.id) || '(unnamed)';
     if (seen.has(id)) out.push(`${id}: duplicate recipe id`);
     seen.add(id);
-    if (!_str(r.does)) out.push(`${id}: empty \`does\` — the router is blind to it`);
+    if (!_str(r.does)) out.push(`${id}: empty \`does\` — the decomposer's ground-facts + answer surfaces read it (interpret renders NAME only as of v1751 — see findings; rendering does there is an open cost/aim decision)`);
     for (const p of (Array.isArray(r.params) ? r.params : [])) {
       if (!p || !_str(p.name)) { out.push(`${id}: unnamed param`); continue; }
       if (typeof p.required !== 'boolean') out.push(`${id}.${p.name}: \`required\` must be an explicit boolean`);

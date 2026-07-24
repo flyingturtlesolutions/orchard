@@ -592,7 +592,7 @@ export const CONNECTOR_RECIPES = [
     // exactly this ("498840035|7048 eclipse trail|…|4866871|…|4866871-04-01"); it goes last as the catch-all,
     // after the precise fields, and it also absorbs the leading-whitespace quirk in the raw JobNumber value.
     drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName', 'TicketId', 'TaskId', 'JobNumber', 'SearchField'], also: ['vs_task_contacts'] },
-    does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount. The division can be a name ("Atlanta West"), a market number ("210"), blank for your current division, or "each" to list EVERY division you can access ("for each division…" / "across all divisions"); give a street address or a warranty ticket / task number to drill straight into that one task\'s details — or say "on the site" / "on vendorsuite" to open that record on the warranty page itself instead',
+    does: 'list a division\'s warranty tasks by status (new / open / fixed / closed; division optional — blank = your current one) — task number, claim number, address, age, allowed amount. The division can be a name ("Atlanta West"), a market number ("210"), blank for your current division, or "each" to list EVERY division you can access ("for each division…" / "across all divisions"); give a street address or a warranty ticket / task number to drill straight into that one task\'s details — or say "on the site" / "on vendorsuite" to open that record on the warranty page itself instead',
     endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
     params: [
       { name: 'divisionId', type: 'string', required: true, hint: 'the DIVISION — a name ("Atlanta West"), a market number ("210"), or exactly "each" for every accessible division; never a street' },
@@ -636,7 +636,7 @@ export const CONNECTOR_RECIPES = [
     params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id (TaskId from a list row / the case record) — never a ticket or task NUMBER' }] },
   { ...VS, id: 'vs_warranty_stats', name: 'Warranty task counts', listUrl: '/#dashboard',
     resolve: { divisionId: VS_DIVISION },
-    does: 'warranty task counts (new / open / fixed) for a division — the dashboard statistic; division by name, market number, or blank for your current one',
+    does: 'COUNTS of warranty tasks (new / open / fixed) for a division — answers "how many tasks are open/new/fixed" with the dashboard statistic, NEVER the task list itself; division by name, market number, or blank for your current one',   // v2.74.1751 — count-vocabulary added: scoreboard run 1 showed "how many … are open" pulling the LIST leg @0.95 over this one
     endpoint: '/api/Vendor/Dashboard/Statistic/{divisionId}/Warranty',
     params: [{ name: 'divisionId', type: 'string', required: true }] },
   { ...VS, id: 'vs_announcements', name: 'Vendor announcements', listUrl: '/#dashboard',
