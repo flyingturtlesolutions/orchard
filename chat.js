@@ -69,7 +69,7 @@ import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retire
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
-import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id)
+import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
 import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
@@ -7630,6 +7630,42 @@ async function _renderWorkflows() {
       bar.appendChild(_mkBtn('Not now', () => { try { bar.remove(); } catch { /* */ } }));
     }
   } catch { /* the offer must never block the list */ }
+  // v2.74.1720 (live report: "saved workflow is still deleted when desk is deleted") — the ADOPTION door. The
+  // records DO survive a desk delete (WF-3: ConversationStore touches only conversation keys; the delete path
+  // stamps orphanedFrom) — but every panel reader sweeps the LIVE desk's keys, and a recreated desk mints a NEW
+  // instanceId (AP-0), so the surviving bank was reachable only from Studio: "data intact, permanently invisible",
+  // the exact WF-3 class one level up. Offer each ORPHANED bank here; adopting RE-KEYS the records to this desk —
+  // the surrogate id is preserved, so the trigger AND the wfruns history (both workflow-id-keyed) travel with
+  // them, which is §9's promise completed. Only stamped banks are offered (the sibling guard means a stamped key
+  // has no live desk); a bank another live desk owns is never shown.
+  try {
+    const _mine = new Set(_workflowKeys());
+    const _banks = (await listAllWorkflows()).filter((b) => b && b.orphaned && !_mine.has(String(b.appId)) && b.items.length);
+    for (const b of _banks) {
+      const from = (b.items.find((x) => x && x.orphanedFrom) || {}).orphanedFrom || {};
+      const n = b.items.length;
+      const row = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(row, `**${n} workflow${n === 1 ? '' : 's'}** survive${n === 1 ? 's' : ''} from the deleted desk “${escHtml(from.deskName || 'a deleted desk')}” — adopt ${n === 1 ? 'it' : 'them'} into this desk? Schedules arrive paused (re-arm with ⏱); run history travels along.`, { markdown: true });
+      const bar = _orchActionBar(row);
+      bar.appendChild(_mkOnceBtn(`⤵ Adopt ${n === 1 ? 'it' : `all ${n}`}`, async () => {
+        const dest = _memoryId();
+        let moved = 0;
+        for (const wf of b.items) {
+          try {
+            // id honored → the trigger + wfruns history keys hold. The schedule arrives PAUSED by construction
+            // (not merely "the scanner probably disarmed it") — a deleted desk's automation must never resurrect
+            // armed without the user re-saying so; ⏱ re-arms in one click.
+            await saveWorkflow(dest, { ...wf, orphanedFrom: undefined, ...(wf.trigger ? { trigger: { ...wf.trigger, enabled: false } } : {}) });
+            await deleteWorkflow(b.appId, wf.id);                            // the old bank empties; no double home
+            moved++;
+          } catch { /* per-record best-effort */ }
+        }
+        try { _orchLog(`WORKFLOW ▸ adopted ${moved}/${n} from orphaned bank "${String(from.deskName || b.appId).slice(0, 40)}"`); } catch { /* */ }
+        _setMessageBody(row, moved ? `✓ Adopted ${moved} workflow${moved === 1 ? '' : 's'} — re-type \`workflows\` to see ${moved === 1 ? 'it' : 'them'}.` : 'Couldn’t adopt them — try again.', { markdown: true });
+      }));
+      bar.appendChild(_mkBtn('Not now', () => { try { bar.remove(); } catch { /* */ } }));
+    }
+  } catch { /* the adoption offer must never block the list */ }
   if (!wfs.length) { _setMessageBody(m, 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.'); return; }
   _setMessageBody(m, `${wfs.length} saved workflow${wfs.length === 1 ? '' : 's'} :`);
   for (const wf of wfs) {
