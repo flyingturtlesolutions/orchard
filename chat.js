@@ -7055,7 +7055,7 @@ async function _rejectProposal(id, reason) {
 // binding the single-ask path uses — and if it picks a connector leg, RUN it and return {leg, ok, value, …}. Returns
 // null when the app has no connections OR the clause isn't a connector read → the chain falls through to ORCH_MATCH
 // unchanged. Gated by the caller on `_boundConnections().length`, so non-connector apps pay nothing.
-async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // DK-8c (v1494) — onEach threads chain-step progress into the each fan-out
+async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey = null, pinnedGroundId = null }) {   // DK-8c (v1494) — onEach threads chain-step progress into the each fan-out; v1728 — pinnedKey enforces a PP-0c connector pin
   let raw = null; let retrieved = []; let groundId = null;
   try {
     const r = await _orchReq('INTERPRET_ASK', { ask: clauseText, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
@@ -7063,6 +7063,18 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // D
   } catch { return null; }
   if (!raw) return null;
   const d = applyConfidenceGate(normalizeInterpretDecision(raw, { retrieved }), { minConfidence: 0.6 });
+  // v2.74.1728 (live 223300 — the PP-0c warm path's CONNECTOR half was mis-dispatching) — a PINNED connector step
+  // runs THE PIN, before any intent-door can detour it: interpret contributes the palette + param BINDINGS only
+  // (the pin banks no values, §11 body-blind), and an aim disagreement is LOGGED but never followed — replaying
+  // what the human approved is the whole point of pinning. A pin absent from the current palette is DRIFT: return
+  // the honest stale marker (the caller stops; §10.4 — never silently re-interpret).
+  if (pinnedKey) {
+    const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === pinnedKey);
+    if (!leg) { try { _orchLog(`WORKFLOW ▸ pin STALE ${pinnedKey} — not in the current palette`); } catch { /* */ } return { pinnedStale: true, pinnedKey }; }
+    if (d && d.capabilityId && d.capabilityId !== pinnedKey) { try { _orchLog(`WORKFLOW ▸ pin held: interpret aimed ${d.capabilityId}, running pinned ${pinnedKey}`); } catch { /* */ } }
+    const run = await _runConnectorLeg(leg, coerceParams((d && d.params) || {}, leg.paramSchema), { tabId, groundId: pinnedGroundId || groundId, onEach });
+    return { leg, ...run };
+  }
   // PM-5 (v2.74.1627) — a MAP verdict rides back to the chain, which owns the executor. This is the door a PLAIN
   // ask actually takes (live 075620: `map` fired twice at conf 0.95 and was DISCARDED here — `_tryInterpret`'s
   // dispatch is only reached by the `i:` command, so the whole feature was unreachable through the front door).
@@ -7233,10 +7245,17 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     // to ORCH_MATCH exactly as before. Warm path and cold path — the alias flywheel this project already runs
     // on, applied to workflow steps instead of single asks.
     const _pin = clause.pinned && typeof clause.pinned === 'object' ? clause.pinned : null;
-    const m = _pin && _pin.capabilityId
-      ? { capabilityId: _pin.capabilityId, decision: 'pinned', groundId: _pin.groundId || null, bindings: {}, candidate: { kind: _pin.kind || null, intent: clause.text } }
-      : ((i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text }));
-    if (_pin && _pin.capabilityId) { try { _orchLog(`WORKFLOW ▸ step ${i + 1} PINNED → ${_pin.capabilityId} (not re-interpreted)`); } catch { /* */ } }
+    // v2.74.1728 (live 223300) — a CONNECTOR pin must reach the CONNECTOR door, never the page replay: the old
+    // warm path fabricated a page-match for ANY pinned capabilityId, so a pinned ride leg key was dispatched down
+    // REPLAY_SG_CAPABILITY (a page-capability channel that can't run it — the run died silently). m stays null
+    // for a connector pin (no ORCH_MATCH either — a page HIT would detour the step away from its pin), and the
+    // miss-branch's connector door below receives the pin to ENFORCE.
+    const _pinConn = !!(_pin && _pin.capabilityId && (_pin.kind === 'connector' || _pin.kind === 'ride'));
+    const m = _pinConn ? null
+      : (_pin && _pin.capabilityId
+        ? { capabilityId: _pin.capabilityId, decision: 'pinned', groundId: _pin.groundId || null, bindings: {}, candidate: { kind: _pin.kind || null, intent: clause.text } }
+        : ((i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text })));
+    if (_pin && _pin.capabilityId) { try { _orchLog(`WORKFLOW ▸ step ${i + 1} PINNED → ${_pin.capabilityId} (${_pinConn ? 'connector door' : 'not re-interpreted'})`); } catch { /* */ } }
     if (!m || !m.capabilityId || m.decision === 'miss') {
       // CX-4d (Slice A) — a grounded MISS may still be a CONNECTED session-ride read ("get my open tickets") that
       // doesn't live on the active tab — it rides the app's OWN logged-in origin. Try the app's connectors before
@@ -7245,7 +7264,14 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       if (_boundConnections().length) {
         // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
         // run's whole first clause showed one static line while 121 reads ran.
-        const cr = await _chainConnectorRun(clause.text, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        const cr = await _chainConnectorRun(clause.text, { tabId, pinnedKey: _pinConn ? _pin.capabilityId : null, pinnedGroundId: _pinConn ? (_pin.groundId || null) : null, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        // v2.74.1728 — a STALE pin stops the run honestly (the §10.4 drift rule at run time — the plan-time check
+        // can only see the recipe store; the palette is assembled here). Never silently re-interpret.
+        if (cr && cr.pinnedStale) {
+          _setMessageBody(msg, `${total > 1 ? `Stopped at step ${i + 1} — this` : 'This'} step was banked against a capability that no longer resolves (“${escHtml(String(_pin.capabilityId))}”). Run it by hand once and I’ll re-bank what it resolves to.`, { markdown: true });
+          _orchFinalize(msg);
+          return;
+        }
         // PM-5 (v2.74.1627) — a MAP clause: run the per-item cross-system executor HERE (the chain is the door a
         // plain ask takes). Its joined rows become st.lastValue so a following clause composes; its rendered text
         // rides into the readouts so the chain tail doesn't overwrite the table with "Done.". A non-ok map already
