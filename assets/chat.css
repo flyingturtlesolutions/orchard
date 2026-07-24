@@ -693,6 +693,25 @@ textarea {
 }
 .wf-card-act:hover:not(:disabled) { border-color: var(--c-border); background: var(--c-bg-subtle); }
 .wf-card-act:disabled { opacity: 0.5; cursor: not-allowed; }
+/* v2.74.1742 (user directive) — the run-history view dismisses via a top-left BACK CHEVRON (→ the launch page),
+   not a ✕ button. The content pads down so the chevron never overlaps the first line. */
+.wf-history .message-content { position: relative; padding-top: 32px; }
+.wf-history-back {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  line-height: 1;
+  font-size: 18px;
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--r-md);
+  background: var(--c-bg-elevated);
+  color: var(--c-text);
+  cursor: pointer;
+}
+.wf-history-back:hover { border-color: var(--c-border); background: var(--c-bg-subtle); }
 /* v2.74.1343 (review Batch 6) — the connection / rich-intent chip MENU (setup site candidates, "what can I do here"
    intents). The chips reuse .suggestion-card styling, but here they lay out as a WRAPPING ROW under the bubble text
    (they were appended to the .message flex row with NO CSS — squeezed as a third column beside the text). */

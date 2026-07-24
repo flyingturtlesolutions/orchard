@@ -7798,11 +7798,25 @@ function _histClock(at) {
 }
 async function _renderWorkflowRuns(wf) {
   const m = appendMessage({ role: 'assistant', body: '' });
-  // v2.74.1739 (live report) — the history view is TRANSIENT (a lookup, not conversation) and CLOSEABLE: it was
-  // persisting into the desk thread with no way to dismiss it. The delete-messageId trick makes finalize/persist
-  // no-op (the wizard-run precedent); ✕ Close removes the bubble.
+  // v2.74.1739 — the history view is TRANSIENT (a lookup, not conversation; delete-messageId = the wizard-run
+  // precedent). v2.74.1742 (user directive) — dismissal is a CHEVRON in the top-left corner, not a ✕ button:
+  // clicking it closes the history and RETURNS TO THE LAUNCH PAGE (the landing self-gates on launch state — on a
+  // desk mid-conversation it simply closes back to the thread, which is the honest equivalent there).
   try { delete m.dataset.messageId; } catch { /* */ }
-  const _close = () => { const bar = _orchActionBar(m); bar.appendChild(_mkBtn('✕ Close', () => { try { m.remove(); } catch { /* */ } })); };
+  try { m.classList.add('wf-history'); } catch { /* */ }
+  const _close = () => {
+    try {
+      const c = m.querySelector('.message-content'); if (!c || c.querySelector('.wf-history-back')) return;
+      const b = document.createElement('button');
+      b.className = 'wf-history-back'; b.type = 'button'; b.title = 'Back to workflows';
+      b.textContent = '‹';
+      b.addEventListener('click', async () => {
+        try { m.remove(); } catch { /* */ }
+        try { const conv = await ConversationStore.load(_currentConversationId); if (conv) void _renderDeskLanding(conv); } catch { /* */ }
+      });
+      c.prepend(b);
+    } catch { /* */ }
+  };
   _setMessageBody(m, `Loading run history for “${wf.name || wf.ask}”…`);
   let runs = null;
   try { runs = await _orchReq('WORKFLOW_RUNS', { workflowId: wf.id }); } catch { /* */ }
