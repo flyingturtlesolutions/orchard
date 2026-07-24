@@ -43,7 +43,7 @@ function _landingCadence(w) {
   if (!t || !t.minutes || t.enabled === false) return '';
   return `${workflowTier(w) === 'sw' ? 'runs' : 'due'} every ${describeMinutes(t.minutes)}`;
 }
-export function buildDeskLanding({ title = '', description = '', isAdmin = false, workflows = [], connections = [] } = {}) {
+export function buildDeskLanding({ title = '', description = '', isAdmin = false, workflows = [], connections = [], orphanBanks = [] } = {}) {
   const name = String(title || '').trim() || (isAdmin ? 'Admin desk' : '');
   // v1603 (live: "sub header has no description") — the Admin desk is not a catalog desk, so it has no
   // description SOURCE; it owns its operator description here.
@@ -73,9 +73,21 @@ export function buildDeskLanding({ title = '', description = '', isAdmin = false
       const cadence = _landingCadence(w);   // CD-2 (§7.3) — a scheduled workflow says so on its card
       cards.push({ kind: 'workflow', title: String(w.name || w.ask).slice(0, 70), sub: `${steps || '?'} step${steps === 1 ? '' : 's'}${w.runs ? ` · run ${w.runs}×` : ''}${cadence ? ` · ⏱ ${cadence}` : ''}`, wf: w });
     }
+    // v2.74.1721 (live report: "saved workflows still not listed") — RECOVERY OUTRANKS CREATION on this surface.
+    // A deleted desk's workflows survive in an orphaned bank, but the adoption door lived only behind the typed
+    // `workflows` command — invisible from the launch page, which is exactly where a person looks for them. When
+    // orphaned banks exist, the landing says so with a card; clicking it opens the workflows view (the adopt
+    // banner sits at its top). One aggregated card — multiple orphaned banks are rare and the view lists them all.
+    const _ob = (Array.isArray(orphanBanks) ? orphanBanks : []).filter((b) => b && Number(b.count) > 0);
+    if (_ob.length) {
+      const totalN = _ob.reduce((s, b) => s + Number(b.count), 0);
+      const from = String(_ob[0].deskName || 'a deleted desk');
+      cards.push({ kind: 'adopt-workflows', title: `⤵ Recover ${totalN} saved workflow${totalN === 1 ? '' : 's'}`, sub: `from your deleted “${from}” desk${_ob.length > 1 ? ' and others' : ''} — tap to adopt` });
+    }
     // CD-2 (DESIGN_cadence.md §6.5 / §0 dead-end) — ＋ Workflow is ALWAYS offered, not only on an empty page.
     // The old `!cards.length` guard made a SECOND workflow uncreatable from the surface once the first was saved.
-    cards.push({ kind: 'new-workflow', title: '＋ Workflow', sub: cards.length ? 'build another multi-step task' : 'save a multi-step task you run often' });
+    // (v1721 — the copy keys off WORKFLOW cards, not cards.length: an adopt card alone is still a fresh start.)
+    cards.push({ kind: 'new-workflow', title: '＋ Workflow', sub: cards.some((c) => c.kind === 'workflow') ? 'build another multi-step task' : 'save a multi-step task you run often' });
   }
 
   return { heading: LANDING_GREETING, sub, connections: connLine, cards, vitalsAfter: isAdmin === true };

@@ -55,6 +55,17 @@ describe('deskLanding — buildDeskLanding (the v1602 page shape)', () => {
     assert.match(byName('Panel').sub, /⏱ due every 1h/);
     assert.ok(!/⏱/.test(byName('Paused').sub), 'a paused cadence shows nothing');
   });
+  it('v1721 — orphaned banks put a RECOVERY card on the landing, ahead of ＋ Workflow', () => {
+    const s = buildDeskLanding({ title: 'Warranty', workflows: [], orphanBanks: [{ deskName: 'Warranty', count: 2 }] });
+    assert.equal(s.cards[0].kind, 'adopt-workflows');
+    assert.match(s.cards[0].title, /Recover 2 saved workflows/);
+    assert.match(s.cards[0].sub, /deleted “Warranty” desk/);
+    assert.equal(s.cards[1].kind, 'new-workflow');
+    assert.match(s.cards[1].sub, /save a multi-step task/, 'an adopt card alone is still a fresh start (copy keys off workflow cards)');
+    const none = buildDeskLanding({ title: 'W', orphanBanks: [] });
+    assert.ok(!none.cards.some((c) => c.kind === 'adopt-workflows'));
+    assert.ok(!buildDeskLanding({ isAdmin: true, orphanBanks: [{ deskName: 'X', count: 1 }] }).cards.some((c) => c.kind === 'adopt-workflows'), 'admin desk never adopts');
+  });
   it('the Admin desk: the three operator commands as its cards, vitals kept BELOW, its OWN description', () => {
     const s = buildDeskLanding({ title: 'Admin desk', isAdmin: true, workflows: [WF()] });
     assert.equal(s.vitalsAfter, true);

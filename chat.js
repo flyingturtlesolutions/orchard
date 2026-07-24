@@ -12859,11 +12859,22 @@ async function _renderDeskLanding(conv) {
     if ((conv.messages || []).some((m) => m && m.role === 'user')) return;   // the launch state ends at the first operator ask
     let workflows = [];
     if (!isAdmin) { try { workflows = (await _loadWorkflowsMerged()) || []; } catch { workflows = []; } }
+    // v2.74.1721 (live report) — orphaned banks surface ON THE LANDING (recovery outranks creation): the adoption
+    // door behind the `workflows` command was invisible from the page where a person looks for their workflows.
+    let orphanBanks = [];
+    if (!isAdmin) {
+      try {
+        const _mine = new Set(_workflowKeys());
+        orphanBanks = (await listAllWorkflows())
+          .filter((b) => b && b.orphaned && !_mine.has(String(b.appId)) && b.items.length)
+          .map((b) => ({ deskName: ((b.items.find((x) => x && x.orphanedFrom) || {}).orphanedFrom || {}).deskName || '', count: b.items.length }));
+      } catch { orphanBanks = []; }
+    }
     const def = (() => { try { return builtinApp(conv.presetId || conv.appId) || null; } catch { return null; } })();
     const spec = buildDeskLanding({
       title: conv.title || (def && def.name) || '',
       description: (def && def.description) || '',
-      isAdmin, workflows,
+      isAdmin, workflows, orphanBanks,
       connections: _boundConnections().map((c) => (c && (c.label || c.origin)) || '').filter(Boolean),
     });
     if (String(_currentConversationId || '') !== String(conv.id)) return;   // the user moved on while we read
@@ -12913,7 +12924,9 @@ async function _renderDeskLanding(conv) {
         b.innerHTML = `<div class="suggestion-card-name">${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
         b.addEventListener('click', async () => {
           _dismissDeskLanding();   // v1609 — acting from the page BEGINS the conversation; the page leaves (fill+send kinds also hit the send-entry dismiss)
-          if (c.kind === 'new-workflow') {
+          if (c.kind === 'adopt-workflows') {
+            void _renderWorkflows();   // v1721 — the workflows view opens with the adopt banner at its top
+          } else if (c.kind === 'new-workflow') {
             _promptWorkflowIntent();   // CD-3 (v2.74.1697) — the ＋ Workflow card goes INTENT-FIRST (describe → draft → wizard); "build step by step instead" reaches the blank wizard
           } else if (c.kind === 'command' && c.command === 'check-now') {
             const mm = appendMessage({ role: 'assistant', body: '' });
