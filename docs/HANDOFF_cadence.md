@@ -216,7 +216,7 @@ Live-owed: replay the workflow twice — the FIRST post-1730 run still interpret
 re-bank happens only on a re-save/re-qualify; a plain replay does NOT re-bank), so build/save one fresh workflow
 and replay it to see `banked bindings, no interpret`.
 
-**Specced (2026-07-24, unbuilt): §6.5 the AUDITABLE entry.** From the live one-row-history review. Two findings
+**§6.5 the AUDITABLE entry — BUILT v2.74.1748** (was specced 2026-07-24; both findings fixed: why renders with the re-arm hint, and ALL THREE panel ▶ sites now write entries via _wfRecordPanelRun — verdict derived from the shared chain state, failedStep stays SW-only). Original spec note: From the live one-row-history review. Two findings
 with rulings: `why` is stored-but-never-rendered (violates §7.2's load-bearing claim), and PANEL runs write NO
 history at all (`appendRunEntry` is SW-only — CD-5's "manual and triggered alike" was half-implemented; this is
 why a manually-exercised workflow shows an empty history). The extended entry adds trigger 4-way

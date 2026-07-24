@@ -73,6 +73,8 @@ import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkf
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
 import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
+import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
+import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
@@ -7625,7 +7627,9 @@ function _offerWorkflowReplay(goal, wf) {
     const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
     const _plan = _wfReplayPlan(wf);
     if (!_plan.runnable) { _wfReplayStopped(m, wf, _plan); return; }
-    _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask });   // replay via the same chain runner, PINNED where banked (PP-0c)
+    const _stR = _wfFreshChainState(); const _tR = Date.now();   // §6.5 (v1746) — recall replays write history too
+    _walkAbortFlag.requested = false;
+    _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask, state: _stR }).then(() => _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR)).catch(() => { /* */ });   // replay via the same chain runner, PINNED where banked (PP-0c)
   }, { lockBar: true }));
   bar.appendChild(_mkBtn('No, interpret it', () => {
     bar.remove();
@@ -7729,7 +7733,9 @@ async function _renderWorkflows() {
       const _p2 = _wfReplayPlan(wf);
       const _m2 = appendMessage({ role: 'assistant', body: '' });
       if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
-      _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask });
+      const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 (v1746) — the panel run writes its history entry
+      _walkAbortFlag.requested = false;   // passing state skips the chain's own stale-stop clear — do it here
+      _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 }).then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2)).catch(() => { /* */ });
     }));
     // CD-1a — a tier-'sw' workflow can run WITHOUT the panel (the same path the scheduler fires): run it now,
     // headless, through the SW. Useful on its own, and the on-demand way to confirm the scanner's fire path
@@ -7820,8 +7826,26 @@ async function _renderWorkflowRuns(wf) {
     return;
   }
   // newest first; RUN-level rows (§6.3) — time · auto/manual · counts · verdict; both stamps when due ≠ ran (§7.3).
-  list.innerHTML = items.slice().reverse().map((e) => `<div class="wf-history-row">${escHtml(describeRun(e, _histClock(e.ranAt || e.at), e.ranAt ? _histClock(e.at) : ''))}</div>`).join('')
+  list.innerHTML = items.slice().reverse().map((e) => `<div class="wf-history-row">${escHtml(describeRun(e, _histClock(e.ranAt || e.at), e.ranAt ? _histClock(e.at) : '', { currentContentId: wf.contentId || '' }))}</div>`).join('')
     + (runs.notice ? `<div class="wf-history-notice">${escHtml(runs.notice)}</div>` : '');
+}
+
+// §6.5 (v2.74.1746) — EVERY run writes exactly one history entry, whichever host ran it (finding 2: panel runs
+// wrote NONE — CD-5's "manual and triggered alike" was half-implemented, which is why a manually-exercised
+// workflow showed an empty history). The chain returns no verdict, so it derives from the SHARED chain state;
+// failedStep stays SW-only (the panel renders its failures in-chat, where the person already saw them).
+async function _wfRecordPanelRun(wf, t0, total, st) {
+  try {
+    const done = (st && Array.isArray(st.ranSteps)) ? st.ranSteps.length : 0;
+    const verdict = done >= total ? 'complete' : (done > 0 ? 'partial' : 'failed');
+    const lv = st && st.lastValue;
+    const rows = Array.isArray(lv) ? lv.length : (lv && typeof lv === 'object' && Array.isArray(lv.rows) ? lv.rows.length : 0);
+    await appendRunEntry(wf.id, {
+      at: t0, ranAt: t0, trigger: 'manual', verdict,
+      ms: Date.now() - t0, runId: mintRunId({ now: t0, rand: Math.random() }), contentId: wf.contentId || '',
+      counts: { steps: done, total, done, ...(rows ? { rows } : {}) },
+    });
+  } catch { /* history must never block a run */ }
 }
 
 // CD-1a/CD-4 — the honest schedule label for a saved workflow (§7.3): "runs every 4h" (tier-'sw', fires headless)
@@ -12979,7 +13003,9 @@ async function _renderDeskLanding(conv) {
             const _p3 = _wfReplayPlan(wf);
             const _m3 = appendMessage({ role: 'assistant', body: '' });
             if (!_p3.runnable) { _wfReplayStopped(_m3, wf, _p3); return; }
-            _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask });
+            const _st3 = _wfFreshChainState(); const _t3 = Date.now();   // §6.5 (v1746)
+            _walkAbortFlag.requested = false;
+            _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask, state: _st3 }).then(() => _wfRecordPanelRun(wf, _t3, _p3.clauses.length, _st3)).catch(() => { /* */ });
           });
           if (workflowTier(wf) === 'sw') chip('⚡', 'Run in the background (headless)', async (b) => {
             b.disabled = true;

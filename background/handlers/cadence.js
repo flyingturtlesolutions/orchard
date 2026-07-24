@@ -171,7 +171,7 @@ async function _tick() {
 // ── the fire: resolve → drive → write history → advance/record (§5.5 "go through the normal executor") ────────────
 // `reporter`/`startIndex`/`state` are the CD-7 resume seam: a resume passes a makeResumeReporter() + the parked
 // stepIndex + the parked chainState (§8's record — prior steps' values must survive the park for a later write).
-async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', reporter = null, startIndex = 0, state = null } = {}) {
+async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', reporter = null, startIndex = 0, state = null, resumedFrom = '' } = {}) {
   const runId = mintRunId({ now, rand: (now % 997) / 997 });   // deterministic-ish entropy (Math.random is banned in Core; fine here)
   await _stampRunMarker(wf.id, runId, now);
   const rep = reporter || makeAccumulatorReporter();
@@ -198,14 +198,18 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
   await _clearRunMarker(wf.id);
 
   const snap = rep.snapshot();
-  const counts = { steps: snap.steps, done: snap.results.length, parked: snap.parked ? 1 : 0 };
+  const _rows = (v) => (Array.isArray(v) ? v.length : (v && typeof v === 'object' && Array.isArray(v.rows) ? v.rows.length : 0));
+  const counts = { steps: snap.steps, total: snap.total, done: snap.results.length, parked: snap.parked ? 1 : 0, ...(_rows(out.state && out.state.lastValue) ? { rows: _rows(out.state.lastValue) } : {}) };
   const verdict = out.verdict === 'parked' || snap.parked ? 'parked' : out.verdict;
   const parkedRunId = out.parkedRunId || runId;
 
-  // history entry (§6.3) — auto vs manual, verdict, the coalesced-backlog note, and due!=ran (§7.3)
+  // history entry (§6.3/§6.5) — initiation · verdict · duration · scale · the failing step · the join keys
   try {
     await appendRunEntry(wf.id, {
       at: trig.nextDue || now, ranAt: now, trigger, verdict, counts,
+      ms: Date.now() - now, runId, contentId: wf.contentId || '',
+      ...(out.failedStep ? { failedStep: out.failedStep } : {}),
+      ...(resumedFrom ? { resumedFrom } : {}),
       ...(verdict === 'parked' ? { parkedRunId, why: 'a write step needs approval' } : {}),
       ...(coalesced > 1 ? { coalesced } : {}),
     });
@@ -333,7 +337,7 @@ export function createCadenceHandlers() {
           if (!wf) { sendResponse({ success: false, error: 'workflow-not-found' }); return; }
           if (!runsHeadless(wf)) { sendResponse({ success: false, error: 'panel-tier', tier: 'panel' }); return; }
           const now = Date.now();
-          const res = await _fire(owner, wf, wf.trigger || normalizeTrigger({ minutes: 60 }), { now, coalesced: 1, trigger: 'manual' });
+          const res = await _fire(owner, wf, wf.trigger || normalizeTrigger({ minutes: 60 }), { now, coalesced: 1, trigger: 'headless' });   // §6.5 — the 4-way initiation stamp
           sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'fire-failed' }); }
       })();
@@ -383,7 +387,7 @@ export function createCadenceHandlers() {
           await _clearParked(runId);   // this park is consumed; a re-park mints a fresh marker
           Logger.info('cadence', `TRIGGER ▸ resume "${wf.name || wf.id}" from step ${(marker.stepIndex || 0) + 1} (approved write, run ${runId})`);
           const res = await _fire(appId || marker.appId, wf, wf.trigger || normalizeTrigger({ minutes: 60 }),
-            { now: Date.now(), coalesced: 1, trigger: 'manual', reporter: makeResumeReporter(), startIndex: Number(marker.stepIndex) || 0,
+            { now: Date.now(), coalesced: 1, trigger: 'resume', resumedFrom: runId, reporter: makeResumeReporter(), startIndex: Number(marker.stepIndex) || 0,
               state: (marker.chainState && typeof marker.chainState === 'object') ? marker.chainState : null });   // §8 (v1715) — resume with the parked chainState
           sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'resume-failed' }); }

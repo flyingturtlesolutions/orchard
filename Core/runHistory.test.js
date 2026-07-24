@@ -60,6 +60,27 @@ describe('runHistory — rendering', () => {
     assert.match(describeRun({ trigger: 'auto', verdict: 'parked' }, '09:00'), /waiting on you$/);
     assert.match(describeRun({ trigger: 'auto', verdict: 'complete', coalesced: 3 }, '09:00'), /3 due-times collapsed/);
   });
+  it('§6.5 (v1746) — the audit fields mint and render: why, ms, failedStep, resume linkage, edit marker, rows', () => {
+    // finding 1 — the WHY renders (it was stored-and-hidden), with the re-arm hint on disarms
+    const dis = runHistoryEntry({ at: 100, trigger: 'auto', verdict: 'disarmed', why: 'the owning view was deleted' });
+    assert.equal(describeRun(dis, '10:20 PM'), '10:20 PM · auto → disarmed — the owning view was deleted (re-arm with ⏱)');
+    // duration + rows + the 4-way trigger
+    const ok = runHistoryEntry({ at: 100, trigger: 'headless', verdict: 'complete', ms: 24000, counts: { steps: 3, total: 3, done: 3, rows: 11 }, runId: 'run_x1', contentId: 'wf-abc' });
+    assert.equal(ok.trigger, 'headless');
+    assert.equal(ok.ms, 24000);
+    assert.match(describeRun(ok, '9:00 AM'), /3 steps · 11 rows · 24s → complete/);
+    // the failing step is the story of a failed run
+    const bad = runHistoryEntry({ at: 100, trigger: 'auto', verdict: 'failed', counts: { total: 3 }, failedStep: { i: 1, text: 'read the instructions of each', error: 'field-gone' } });
+    assert.match(describeRun(bad, '10:12 AM'), /failed at step 2\/3 — “read the instructions of each” \(field-gone\)/);
+    // resume linkage
+    const res = runHistoryEntry({ at: 100, trigger: 'resume', verdict: 'complete', resumedFrom: 'run_k3x9' });
+    assert.match(describeRun(res, '10:30 AM'), /^10:30 AM · resume · continues run_k3x9/);
+    // the edit marker — this run used an earlier revision than the record now holds
+    assert.match(describeRun(ok, '9:00 AM', '', { currentContentId: 'wf-DIFFERENT' }), /· earlier steps$/);
+    assert.ok(!/earlier steps/.test(describeRun(ok, '9:00 AM', '', { currentContentId: 'wf-abc' })), 'same revision → no marker');
+    // legacy entries: unknown trigger still normalizes to manual
+    assert.equal(runHistoryEntry({ trigger: 'cron' }).trigger, 'manual');
+  });
   it('historyTally counts auto/manual and verdicts', () => {
     const list = [
       runHistoryEntry({ verdict: 'complete', trigger: 'auto' }),

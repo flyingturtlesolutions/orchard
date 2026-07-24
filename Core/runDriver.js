@@ -66,6 +66,7 @@ export async function runWorkflow({ clauses, reporter, runStep, startIndex = 0, 
 
   let st = (state && typeof state === 'object') ? state : {};
   let ran = 0, failed = 0;
+  let firstFailure = null;   // §6.5 — the FIRST failing step is the audit story (the chain may continue past soft fails)
 
   for (let i = Math.max(0, Number(startIndex) || 0); i < total; i++) {
     const clause = list[i] || {};
@@ -93,20 +94,21 @@ export async function runWorkflow({ clauses, reporter, runStep, startIndex = 0, 
     // a failed step: record it. `stop` (a hard fail / auth stop) ends the run; otherwise the chain continues so
     // one flaky step doesn't sink the rest (the loose-chain behaviour _orchRunChain already has).
     failed++;
+    if (!firstFailure) firstFailure = { i, text: _str(clause.text), error: _str(r.error) };
     if (r.stop) {
       const v = ran > 0 ? 'partial' : 'failed';
       rep.done(v);
-      return _result(v, ran, failed, -1, '', st);
+      return _result(v, ran, failed, -1, '', st, firstFailure);
     }
   }
 
   const verdict = failed === 0 ? 'complete' : (ran > 0 ? 'partial' : 'failed');
   rep.done(verdict);
-  return _result(verdict, ran, failed, -1, '', st);
+  return _result(verdict, ran, failed, -1, '', st, firstFailure);
 }
 
-function _result(verdict, ranSteps, failedSteps, parkedAt, parkedRunId, state) {
-  return { verdict, ranSteps, failedSteps, parkedAt, parkedRunId: parkedRunId || '', state: state || {} };
+function _result(verdict, ranSteps, failedSteps, parkedAt, parkedRunId, state, failedStep = null) {
+  return { verdict, ranSteps, failedSteps, parkedAt, parkedRunId: parkedRunId || '', state: state || {}, failedStep };
 }
 
 /**

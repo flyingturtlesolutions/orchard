@@ -43,6 +43,14 @@ describe('runDriver — failure handling', () => {
     assert.equal(out.verdict, 'partial');
     assert.equal(out.ranSteps, 2);
     assert.equal(out.failedSteps, 1);
+    assert.deepEqual(out.failedStep, { i: 1, text: 'b', error: 'flaky' }, '§6.5 — the FIRST failing step rides the result');
+  });
+  it('§6.5 — failedStep holds the FIRST failure even when later steps also fail; null on clean runs', async () => {
+    const runStep = async (c) => (c.text === 'a' ? { ok: true } : { ok: false, error: c.text === 'b' ? 'first-err' : 'second-err' });
+    const out = await runWorkflow({ clauses: [{ text: 'a' }, { text: 'b' }, { text: 'c' }], reporter: recorder(), runStep });
+    assert.equal(out.failedStep.error, 'first-err');
+    const clean = await runWorkflow({ clauses: [{ text: 'a' }], reporter: recorder(), runStep: okStep });
+    assert.equal(clean.failedStep, null);
   });
   it('a hard stop ends the run immediately', async () => {
     const runStep = async (c) => (c.text === 'b' ? { ok: false, stop: true, error: 'auth' } : { ok: true, value: c.text });
