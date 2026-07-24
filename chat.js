@@ -5566,6 +5566,20 @@ function _promptWorkflowIntent() {
   try { const inp = $('chat-input'); if (inp) { inp.placeholder = 'Describe the workflow…'; inp.focus(); } } catch { /* */ }
 }
 
+// §11.4 (v2.74.1716, DESIGN_cadence.md) — the USER-MEDIATED routine migration: rebuild a legacy fleetRoutine as a
+// workflow through the intent-first door. Its ask decomposes to ≥2 steps the user proves one at a time (a silent
+// 1-step conversion is impossible under the workflow floor — the v1715 ruling); the cadence stage arrives
+// pre-seeded with the routine's interval (only when the routine was ARMED — enabled never auto-flips); and the
+// routine RETIRES when the workflow saves (the _wfDoSave hook). HITL is preserved twice over: every step is run +
+// approved, and the save button names the schedule before it arms.
+async function _wfRebuildFromRoutine(rec, inst) {
+  await _startWorkflowFromIntent(String((rec && rec.ask) || ''));
+  const w = _wfWizard;
+  if (!w) return;   // decomposition came back <2 steps — the intent door already said so; the routine stays
+  w.retireRoutineKey = inst;
+  if (rec && rec.enabled && Number(rec.minutes) > 0) w.cadenceMinutes = Number(rec.minutes);
+}
+
 async function _startWorkflowWizard() {
   if (!_memoryId() || !_currentConversationId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a desk first — workflows are saved per desk.'); _orchFinalize(m); return; }
   if (_wfWizard) _wfAbandon();   // v1623 — a NEW wizard replaces a parked one; the outgoing one's ≥2 proven steps draft-keep
@@ -6050,9 +6064,16 @@ async function _wfDoSave() {
   } catch { /* */ }
   // append the confirmation FIRST (so #messages is non-empty), THEN exit — else _wfExitPage would render the front
   // page over an empty thread and the confirmation would land in a hidden surface.
+  // §11.4 (v1716) — a workflow rebuilt FROM a legacy routine retires the routine on save (the user-mediated
+  // migration's final step: off clears both the record and its alarm). Fire-and-forget; the save never blocks.
+  if (ok && w.retireRoutineKey) {
+    _orchReq('FLEET_ROUTINE', { instanceId: w.retireRoutineKey, off: true }).catch(() => {});
+    try { _orchLog(`ROUTINE ▸ migrated → workflow "${String(payload.name || payload.ask).slice(0, 40)}" (legacy routine retired)`); } catch { /* */ }
+  }
   const done = appendMessage({ role: 'assistant', body: '' });
   const _sched = payload.trigger ? ` It’s set to run every ${_cadenceLabel(payload.trigger.minutes)} — change or remove that from its edit icon.` : '';
-  _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now: ▶ runs it, the card opens its run history.${_sched}` : 'Couldn’t save the workflow — try again.', { markdown: true });
+  const _migr = (ok && w.retireRoutineKey) ? ' The legacy routine it replaces is retired.' : '';
+  _setMessageBody(done, ok ? `✓ Saved “${payload.name || payload.ask}” — it’s on your launch page now: ▶ runs it, the card opens its run history.${_sched}${_migr}` : 'Couldn’t save the workflow — try again.', { markdown: true });
   _orchFinalize(done);
   // v2.74.1619 — the wizard's save is TRACE-VISIBLE (gl 194814: the whole wizard arc left zero log evidence — steps
   // never echo, runs are transient; the durable record deserves one line. WORKFLOW ▸ is already in _DECISION_RE.)
@@ -6661,6 +6682,7 @@ async function _renderRoutines() {
       : 'Couldn’t change the routine.' }));
   }));
   bar.appendChild(_mkBtn('Run now', () => { bar.remove(); void _fireRoutine(rec, { manual: true }); }));
+  bar.appendChild(_mkBtn('⤴ Rebuild as workflow', () => { bar.remove(); void _wfRebuildFromRoutine(rec, inst); }));   // §11.4 (v1716) — the user-mediated migration door, here too
   bar.appendChild(_mkBtn('Remove', async () => {
     bar.remove();
     await _orchReq('FLEET_ROUTINE', { instanceId: inst, off: true });
@@ -7557,6 +7579,21 @@ async function _renderWorkflows() {
   let wfs = [];
   try { wfs = await _loadWorkflowsMerged(); } catch { /* */ }   // DK-8k — the manage view sweeps every candidate key too
   await _renderParkedRuns(appId);   // CD-7 (§8) — surface any scheduled run that stopped at a write, needing approval, ABOVE the list
+  // §11.4 (v1716) — the migration OFFER: a desk still holding a legacy fleetRoutine gets a rebuild banner here (the
+  // workflows surface is where its replacement lives). Never a silent conversion — the rebuild walks the intent
+  // door + per-step approval and the routine retires only when the workflow SAVES. Best-effort, never blocks.
+  try {
+    const _inst = _memoryId();
+    const _rr = _inst ? await _orchReq('FLEET_ROUTINE', { instanceId: _inst }) : null;
+    const _rt = _rr && _rr.routine;
+    if (_rt && _rt.ask) {
+      const row = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(row, `This desk still has a **legacy routine** — every **${describeEvery(_rt.minutes)}**: “${escHtml(String(_rt.ask))}” (${_rt.enabled ? 'on' : 'off'}). Routines are retiring in favour of scheduled workflows: rebuild it once — each step gets run and approved — and it keeps the same schedule.`, { markdown: true });
+      const bar = _orchActionBar(row);
+      bar.appendChild(_mkOnceBtn('⤴ Rebuild as workflow', () => { try { bar.remove(); } catch { /* */ } void _wfRebuildFromRoutine(_rt, _inst); }));
+      bar.appendChild(_mkBtn('Not now', () => { try { bar.remove(); } catch { /* */ } }));
+    }
+  } catch { /* the offer must never block the list */ }
   if (!wfs.length) { _setMessageBody(m, 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.'); return; }
   _setMessageBody(m, `${wfs.length} saved workflow${wfs.length === 1 ? '' : 's'} :`);
   for (const wf of wfs) {

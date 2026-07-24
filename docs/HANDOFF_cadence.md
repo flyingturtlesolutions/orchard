@@ -166,6 +166,16 @@ resolve→plan→invoke and vitals' `_runCanary` now rides it (§12 "share the r
 correction, §11.4 migration RULING (user-mediated rebuild — no silent conversion, no relaxed ≥2 floor), §13
 reporter bullet resolved; CLAUDE.md's `_DECISION_RE` pointer refreshed.
 
+**Progress (v2.74.1716) — the §11.4 migration RULING is BUILT (user-mediated routine→workflow rebuild).**
+`_wfRebuildFromRoutine(rec, inst)`: the routine's ask goes through the intent-first door (≥2 proven steps — the
+floor stands), the cadence stage arrives pre-seeded with the routine's interval (only when the routine was ARMED),
+and `_wfDoSave` retires the routine (`FLEET_ROUTINE off` — record + alarm) when the workflow saves, logging
+`ROUTINE ▸ migrated`. Two doors: a banner in the workflows manage view (any desk still holding a legacy routine)
+and a "⤴ Rebuild as workflow" button in the `routines` view. Known seam: the SEED may still re-declare the routine
+on a later seed save (DK-8 declares it disabled; the banner would simply re-offer) — edit the seed line to drop it
+for good, same as Remove. With this, CD-0 is fully closed; the remaining CD-1 consolidation (retiring the routine
+ALARM branch wholesale) waits until live routines have actually migrated.
+
 **Deliberately NOT built (blind-risk too high vs value):**
 - **CD-7 as a `wfp_` Rail case** — the vtc_ template needs three reverse-engineered, untestable integrations
   (desk-conversation resolution from `instanceId`, whether the Rail renders `kind:'agent'` cases under a WORK
