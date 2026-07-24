@@ -20,6 +20,19 @@ import { normalizeCaseVerdict } from './caseClause.js';       // PP-3 (v2.74.168
 
 export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer', 'map', 'fieldread', 'branch', 'write', 'case'];   // PM-1 — `map` = the #2 primitive; PM-9 (v1649) — `fieldRead` = the per-item read of the row's OWN record; PP-1 (v1661) — `branch` = the per-item classify-and-route; PP-3 (v1686) — `case` = open the per-item review artifact (this array is the whole reachability surface: a clause absent here is not "unavailable", it is SILENTLY REROUTED to the nearest expressible thing — live, "create a new case" became an outward Zendesk write)
 
+// v2.74.1718 — CONFIDENCE-DISPOSITION TABLES (DESIGN_decision_gate.md §4.1). The gate's coverage lived only in
+// applyConfidenceGate's if-chain — not derivable data, which is exactly how `fieldread`'s pass-through went
+// UNRECORDED (found 2026-07-23 by performing the B.5 derivation by hand). The chain below keeps its exact
+// behavior; these tables make membership DATA, and the seal test (interpret.test.js) asserts chain ≡ tables and
+// union === INTENTS — so an intent added anywhere without a disposition goes red, by construction.
+export const GATED_INTENTS = Object.freeze(['act', 'navigate', 'map', 'write', 'branch']);   // below threshold → clarify
+export const FLAGGED_INTENTS = Object.freeze(['decompose']);   // below threshold → carries lowConfidence, passes through (v1342 — chat's dispatch guard reads the flag)
+export const UNGATED_INTENTS = Object.freeze([
+  'clarify', 'teach', 'answer',   // terminal/safe — they ARE the degradations; nothing to gate
+  'case',        // DECIDED ungated (PP-3 v1686): writes only to our own store, closeable, a wrong one costs a click
+  'fieldread',   // UNDECIDED (recorded 2026-07-23): fans N same-record reads (map's rationale, weakened); no gate arm and no recorded decision — owed to the partition audit (DESIGN_decision_gate.md §4)
+]);
+
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
 const _idSet = (list) => new Set((Array.isArray(list) ? list : []).map((c) => _str(legRef(c))).filter(Boolean));

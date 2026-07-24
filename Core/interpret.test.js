@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { parseInterpretOutput } from './interpretPrompt.js';
 import assert from 'node:assert/strict';
 
-import { normalizeInterpretDecision, applyConfidenceGate, interpret, INTENTS } from './interpret.js';
+import { normalizeInterpretDecision, applyConfidenceGate, interpret, INTENTS, GATED_INTENTS, FLAGGED_INTENTS, UNGATED_INTENTS } from './interpret.js';
 
 const RETRIEVED = [{ id: 'cap-search' }, { capabilityId: 'cap-filter' }];
 const PRIMS = ['OPEN_URL', { op: 'CLICK' }];
@@ -207,5 +207,40 @@ describe('interpret — the CASE intent is reachable (v2.74.1686)', () => {
     }));
     assert.equal(d.intent, 'case');
     assert.deepEqual(d.case, { scope: 'run', title: 'Replacements' });
+  });
+});
+
+describe('interpret — the confidence-disposition tables SEAL the gate (v2.74.1718, DESIGN_decision_gate.md §4.1)', () => {
+  // The gate's coverage lived only in an if-chain — not derivable, which is how `fieldread`'s pass-through went
+  // unrecorded. These assertions ARE the §5.4 tripwire's first sensor: chain ≡ tables, and tables ∪ === INTENTS.
+  it('the tables PARTITION INTENTS exactly — an intent without a disposition is unrepresentable', () => {
+    const union = [...GATED_INTENTS, ...FLAGGED_INTENTS, ...UNGATED_INTENTS];
+    assert.equal(new Set(union).size, union.length, 'no intent sits in two tables');
+    assert.deepEqual([...union].sort(), [...INTENTS].sort(), 'tables ∪ === INTENTS — add an intent, place it, or this goes red');
+  });
+
+  it('the if-chain MATCHES the tables at low confidence (fixtures DERIVED from the tables, run on the real function)', () => {
+    for (const intent of GATED_INTENTS) {
+      const d = applyConfidenceGate({ intent, params: {}, subAsks: ['a', 'b'], confidence: 0.2 });
+      assert.equal(d.intent, 'clarify', `${intent} low → clarify`);
+    }
+    for (const intent of FLAGGED_INTENTS) {
+      const d = applyConfidenceGate({ intent, params: {}, subAsks: ['a', 'b'], confidence: 0.2 });
+      assert.equal(d.intent, intent, `${intent} low → passes through (v1342, NOT clarify)`);
+      assert.equal(d.lowConfidence, true, `${intent} low → carries the flag the dispatch guard reads`);
+    }
+    for (const intent of UNGATED_INTENTS) {
+      const d = applyConfidenceGate({ intent, params: {}, subAsks: [], confidence: 0.2 });
+      assert.equal(d.intent, intent, `${intent} low → passes through untouched (asserted absence, not an omission)`);
+      assert.ok(!d.lowConfidence, `${intent} low → no flag either`);
+    }
+  });
+
+  it('above the threshold nothing moves, for every intent (the gate only ever degrades)', () => {
+    for (const intent of INTENTS) {
+      const d = applyConfidenceGate({ intent, params: {}, subAsks: ['a', 'b'], confidence: 0.95 });
+      assert.equal(d.intent, intent, `${intent} high → untouched`);
+      assert.ok(!d.lowConfidence, `${intent} high → unflagged`);
+    }
   });
 });
