@@ -816,7 +816,10 @@ async function _renderRailListNow() {
 }
 
 // v2.74.1223 (message-input redesign) — a row's own action buttons; their handlers run instead of select/open.
-const _isRowActionTarget = (e) => !!(e.target.closest('.rail-item-delete') || e.target.closest('.rail-item-preview') || e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask') || e.target.closest('.rail-item-wf') || e.target.closest('.rail-item-badge.parked'));
+// PS-8 (v2.74.1770, DESIGN_panel_surfaces.md §8.2) — DERIVED, not enumerated: every row action stamps
+// data-row-action; the row's select/dblclick ignores anything inside one. The hand-list (the _DECISION_RE
+// invariant class — forget the entry, the button also selects the row) is deleted, not extended.
+const _isRowActionTarget = (e) => !!e.target.closest('[data-row-action]');
 
 // v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
 // stays open as a live multi-conversation surface (its row highlights `active`, the input now routes here, and a reply
@@ -910,9 +913,9 @@ function _historyAdminRow(row) {
   // scratch case via the normal spawn) that every app row carries. Same classes → same styling + hover behavior.
   if (row.hasChildren) el.classList.add('has-children');
   const chevron = row.hasChildren
-    ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+    ? `<button class="rail-chevron" data-row-action title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
     : '';
-  const subtaskBtn = `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
+  const subtaskBtn = `<button class="rail-item-subtask" data-row-action title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
   el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}${chevron}${subtaskBtn}`;
   void (async () => {   // the attention badge — one cheap storage read; green = nothing
     try {
@@ -934,7 +937,7 @@ function _historyAdminRow(row) {
     await _spawnSubTask(ADMIN_ID);
   });
   el.addEventListener('click', (e) => {
-    if (e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask')) return;
+    if (e.target.closest('[data-row-action]')) return;   // PS-8 — derived, same rule as conv rows
     _closeRail(); void _openAdminDesk();
   });
   _wireRowKeyboard(el, () => el.click(), 'Admin view — Orchard health');   // a11y (v1343 pattern)
@@ -957,7 +960,7 @@ function _historyNewAppRow() {
 function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   const isDev = conv.kind === 'dev';
   const badge = isDev ? (conv.surface === 'high' ? '<span class="rail-item-badge design">design</span>' : '<span class="rail-item-badge">dev</span>')
-                      : (row.role === 'subtask' ? '<span class="rail-item-badge app">case</span>' : '<span class="rail-item-badge app">view</span>');   // Case rename (v1492) — a spawned child badges as a CASE
+                      : (row.role === 'subtask' ? `<span class="rail-item-badge app" aria-label="a case under ${escHtml(conv.title)}">case</span>` : `<span class="rail-item-badge app" aria-label="${escHtml(conv.title)} — a view">view</span>`);   // Case rename (v1492) — a spawned child badges as a CASE
   // FL-6c (v2.74.1357) — the pending-proposals chip: a sweep with results lights the APP row (children share the
   // instance, so only the app row carries it). `pending` is a derived count (number), never untrusted text.
   const pendingChip = (row.role === 'app' && pending > 0)
@@ -966,7 +969,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   // PS-6 (v2.74.1768, §7) — the parked-run badge: a scheduled run stopped at a write; click opens the desk's
   // workflows overlay (where the approve/cancel strip lives). The calm channel — no thread bubble.
   const parkedChip = (row.role === 'app' && parkedN > 0)
-    ? `<span class="rail-item-badge parked" role="button" tabindex="0" title="${parkedN} scheduled run${parkedN === 1 ? '' : 's'} stopped at a write — click to review">✋ ${parkedN}</span>`
+    ? `<span class="rail-item-badge parked" data-row-action role="button" tabindex="0" title="${parkedN} scheduled run${parkedN === 1 ? '' : 's'} stopped at a write — click to review">✋ ${parkedN}</span>`
     : '';
   const item = document.createElement('div');
   item.className = ['rail-item', row.active ? 'active' : '', isDev ? 'dev' : 'app',
@@ -979,22 +982,22 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
 
   const leaf = row.role === 'subtask' ? '<span class="rail-glyph leaf" aria-hidden="true">•</span>' : '';
   const chevron = (row.role === 'app' && row.hasChildren)
-    ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+    ? `<button class="rail-chevron" data-row-action title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
     : '';
-  const previewBtn = isDev ? `<button class="rail-item-preview" title="Load this branch into the live build (reloads the panel)">
+  const previewBtn = isDev ? `<button class="rail-item-preview" data-row-action title="Load this branch into the live build (reloads the panel)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
         </svg>
       </button>` : '';
   // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
   const subtaskBtn = row.role === 'app'
-    ? `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
+    ? `<button class="rail-item-subtask" data-row-action title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
     : '';
   // PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the workflows DOOR on every app row: saved workflows get a
   // visible glyph (they were only reachable by typing `workflows` — an alias, never the sole door). Opens THAT
   // desk's workflows overlay (switching to the desk first when it isn't the current one).
   const wfBtn = (row.role === 'app' && !isDev)
-    ? `<button class="rail-item-wf" title="Workflows" aria-label="Workflows — ${escHtml(conv.title)}">${Icons.workflow(14)}</button>`
+    ? `<button class="rail-item-wf" data-row-action title="Workflows" aria-label="Workflows — ${escHtml(conv.title)}">${Icons.workflow(14)}</button>`
     : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
@@ -1011,7 +1014,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
       ${wfBtn}
       ${subtaskBtn}
       ${previewBtn}
-      <button class="rail-item-delete" title="Delete">
+      <button class="rail-item-delete" data-row-action title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
         </svg>
