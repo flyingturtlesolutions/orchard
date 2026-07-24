@@ -12519,6 +12519,12 @@ $('btn-chat-send').addEventListener('click', sendChatMessage);
     await renderSuggestionCards();
   }
 
+  // v2.74.1737 — the PANEL-OPEN reconcile: dismiss/refresh incident cases that resolved while the panel was
+  // CLOSED. The v1703 dismiss ran only on vitals events arriving while the panel is open — a presence case that
+  // self-healed overnight (live: signed out 12:11, signed in 10:29) stayed ✓-resolved in the Rail until some
+  // unrelated event happened to sync. One idempotent sync per open, deferred past the boot paint.
+  try { setTimeout(() => { void _syncIncidentCases(); }, 3000); } catch { /* */ }
+
   // v2.71.7 — Refresh transport bar at end of init regardless of conversation
   // state. Bar shows global running state — present even on an empty/new
   // conversation surface so user always sees their running strategies.
@@ -12784,7 +12790,13 @@ async function _rehydrateConversation(conv) {
   // the wizard (unlock the composer — the surface belongs to the conv being opened); opening the wizard's OWN
   // desk revives it at the end of this rehydrate (the page re-asserts + the phase lock re-applies).
   try { if (_wfWizard && _wfWizard.convId !== String(conv.id)) { const inp = $('chat-input'); inp.disabled = false; inp.placeholder = 'Message'; } } catch { /* */ }
+  // v2.74.1737 (live report: resolved presence case still in the Rail hours later) — LEAVING a vtc_ case completes
+  // its deferred dismissal. The v1703 guard rightly never yanks the case being VIEWED, but its "it clears next
+  // sync" assumed syncs are frequent — they are EVENT-driven, so with no later vitals event the resolved case sat
+  // in the Rail indefinitely. Navigating away IS the deferred moment; the sync's pure check is idempotent.
+  const _prevConvId = String(_currentConversationId || '');
   _currentConversationId = conv.id;
+  if (_prevConvId.startsWith('vtc_') && _prevConvId !== String(conv.id)) { try { setTimeout(() => { void _syncIncidentCases(); }, 400); } catch { /* */ } }
   // VT-2b (v2.74.1587) — opening an incident CASE refreshes its card + action bar from the live store (deferred
   // past this paint; the persisted incident_card renders first, then the pass upserts + re-arms the bar).
   if (String(conv.id || '').startsWith('vtc_')) { try { setTimeout(() => { void _maybeRenderIncidentCase(); }, 250); } catch { /* */ } }
