@@ -7804,7 +7804,7 @@ async function _renderWorkflowRuns(wf) {
   const ov = document.createElement('div');
   ov.className = 'wf-history-overlay';
   const sched = _wfScheduleLabel(wf);
-  ov.innerHTML = `<div class="wf-history-head"><div class="wf-history-title">Run history — “${escHtml(wf.name || wf.ask)}”${sched ? ` <span class="wf-history-sched">(${escHtml(sched)})</span>` : ''}</div><button class="wf-history-close" type="button" title="Close">⌄</button></div><div class="wf-history-list">Loading…</div>`;
+  ov.innerHTML = `<div class="wf-history-head"><div class="wf-history-title">Run history — “${escHtml(wf.name || wf.ask)}”${sched ? ` <span class="wf-history-sched">(${escHtml(sched)})</span>` : ''}</div><button class="wf-history-close" type="button" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="5 12 12 19 19 12"/></svg></button></div><div class="wf-history-list">Loading…</div>`;   // v1745 — a DOWN-ARROW icon (the codebase's inline-SVG idiom), not a text glyph
   ov.querySelector('.wf-history-close').addEventListener('click', () => {
     try { ov.classList.remove('open'); setTimeout(() => { try { ov.remove(); } catch { /* */ } }, 200); } catch { try { ov.remove(); } catch { /* */ } }
   });
