@@ -160,8 +160,37 @@ export const DRIVER_REACTIONS = Object.freeze([
   { id: 'driver:differential-oracle-seed', subject: 'driver', kind: 'pass' },          // panel ≡ SW per reaction — B5-5's double duty, seeded at the driver core
 ]);
 
+/** B5-6 slice 1 (v2.74.1761) — the COMPOSITION layer: not one decision's effect, but the HANDOFF BETWEEN steps.
+ *  Spec §11's "frozen sequences asserting state handoff" — seam bugs disguise themselves as late aim errors, so
+ *  they need sequence fixtures, not more single-step coverage. The park/resume round-trip is the load-bearing
+ *  one: a resume that re-ran completed steps would re-fire an already-approved WRITE. PURE DATA. */
+export const COMPOSITION_REACTIONS = Object.freeze([
+  { id: 'compose:state-threads-forward', subject: 'composition', kind: 'pass' },       // step N's state reaches N+1 AND the final result
+  { id: 'compose:resume-never-reruns', subject: 'composition', kind: 'gate' },         // THE row: startIndex skips completed steps — a resumed write never double-fires
+  { id: 'compose:park-resume-roundtrip', subject: 'composition', kind: 'gate' },       // park at i → resume from i with carried state → complete; steps run exactly once across both halves
+  { id: 'compose:verdict-composes', subject: 'composition', kind: 'pass' },            // a failure in half 1 + success in half 2 reads honestly per half
+]);
+
+/** THE EFFECT HALF, slice 2 (v2.74.1762) — the HEADLESS FIELD READ (`Core/headlessClause.runFieldReadStep`,
+ *  CD-1a extraction 1 of 5). The first per-CLAUSE effect to become gate-able. Its governing discipline is
+ *  FAIL-HONESTLY: a banked field that drifted or turned ambiguous STOPS the step — it never re-interprets,
+ *  because a confidently-wrong field read is this area's recurring failure (the §1626 rule). Deep coverage in
+ *  headlessClause.test.js; these are the spine's representatives, plus the integration row no unit test has. */
+export const HEADLESS_FIELDREAD_REACTIONS = Object.freeze([
+  { id: 'hlfr:valid→enriched+tally', subject: 'hl-fieldread', kind: 'pass' },
+  { id: 'hlfr:term-narrows', subject: 'hl-fieldread', kind: 'pass' },
+  { id: 'hlfr:key-resolved-once', subject: 'hl-fieldread', kind: 'gate' },        // resolved on the FIRST record, applied to all — per-row re-resolution could read DIFFERENT fields from different rows
+  { id: 'hlfr:not-banked→fail', subject: 'hl-fieldread', kind: 'catchall' },      // a legacy pin needs the panel's interpreter; headless refuses rather than guessing
+  { id: 'hlfr:no-prior-rows→fail', subject: 'hl-fieldread', kind: 'catchall' },
+  { id: 'hlfr:rows-not-records→fail', subject: 'hl-fieldread', kind: 'catchall' },
+  { id: 'hlfr:field-gone→fail', subject: 'hl-fieldread', kind: 'gate' },          // the §2.1 drift rule one level down: a banked field that no longer resolves stops the run
+  { id: 'hlfr:field-ambiguous→fail', subject: 'hl-fieldread', kind: 'gate' },     // two candidates ⇒ refuse + NAME them; never pick one
+  { id: 'hlfr:rowsOf-shapes', subject: 'hl-fieldread', kind: 'pass' },
+  { id: 'hlfr:composes-with-driver', subject: 'hl-fieldread', kind: 'pass' },     // the CD-1a point: the extraction really plugs into runWorkflow's runStep contract
+]);
+
 /** Every registered reaction: nine gated necks + the effect half's first slice. PURE. */
-export function allReactions() { return [...interpretReactions(), ...DECOMPOSER_REACTIONS, ...CLASSIFY_REACTIONS, ...ROUTER_REACTIONS, ...WFMATCH_REACTIONS, ...JUDGE_REACTIONS, ...SWEEP_REACTIONS, ...SEEDDIR_REACTIONS, ...STEPIL_REACTIONS, ...DRIVER_REACTIONS]; }
+export function allReactions() { return [...interpretReactions(), ...DECOMPOSER_REACTIONS, ...CLASSIFY_REACTIONS, ...ROUTER_REACTIONS, ...WFMATCH_REACTIONS, ...JUDGE_REACTIONS, ...SWEEP_REACTIONS, ...SEEDDIR_REACTIONS, ...STEPIL_REACTIONS, ...DRIVER_REACTIONS, ...COMPOSITION_REACTIONS, ...HEADLESS_FIELDREAD_REACTIONS]; }
 
 // ── B5-1 — factory 1a: the STRUCTURED garbage list (constructed, never rots; decision-gate §6) ────────────────
 // Each shape is a way a model output could be wrong that code must absorb: land in a legal reaction, never throw.

@@ -1761,8 +1761,10 @@ const _sgMessageHandlers = {
     cloudInvokeConnector: invokeConnector,   // GD-3 (§8) — the gdoc backend paints via the broker's REST channel
   }),
   ...createWorkflowDebugHandlers({
-    invokeSgHandler    : _invokeSgHandler,
-    ensureContentScript: _ensureContentScript,
+    invokeSgHandler        : _invokeSgHandler,
+    ensureContentScript    : _ensureContentScript,
+    broadcastStorageChanged,   // v2.74.1763 — both were CALLED but never passed: a ReferenceError waiting on
+    deleteRecordWithSync,      // SAVE_WORKFLOW / DELETE_WORKFLOW (the legacy Studio authoring path)
   }),
   ...createFleetHandlers({ invokeSgHandler: _invokeSgHandler }),   // FL-6 (v1355) — FLEET_SCHEDULE (set/off/status); the alarm listener registers below
   ...createConnectionsHandlers({ invokeSgHandler: _invokeSgHandler }),   // CP-1/2 (v1506) — CONN_LIST / CONN_CHECK / CONN_FOCUS (the auth-presence registry)
@@ -1775,6 +1777,7 @@ const _sgMessageHandlers = {
     mergeSiteMapForGround: _mergeSiteMapForGround,
     readRideRecipes      : _readRideRecipes,        // §17 (1b) — auto-harvest ride-recipes during the crawl (bank target)
     writeRideRecipes     : _writeRideRecipes,
+    syncGroundAssetsAfterSave,   // v2.74.1763 — called on the sitemap-seed path; was never seamed
   }),
   ...createForageHandlers({                          // §19 — Forage (recipe-capture nav crawl); banks into the ride store
     readRideRecipes      : _readRideRecipes,
@@ -1791,6 +1794,7 @@ const _sgMessageHandlers = {
     appendOutcomes       : _appendOutcomes,
     readRideRecipes      : _readRideRecipes,        // §17 — Explore-depth ride-recipe harvest (poke-triggered reads); bank target
     writeRideRecipes     : _writeRideRecipes,
+    syncGroundAssetsAfterSave,   // v2.74.1763 — called on the locale-modeled path; was never seamed
   }),
   ...createSgMessageHandlers({
   runTrialBundle       : _runTrialBundle,

@@ -20,7 +20,11 @@ import { markEngineBusy, focusTabPolicy, ensureTabForGround } from './sg.js';   
 import { CapabilityAPI }    from '../../Services/CapabilityAPI.js';
 
 // v2.74.953 (CR-X3c) — the workflow-debug ctx seam contract, asserted at wiring time.
-const REQUIRED_CTX_KEYS = Object.freeze(['invokeSgHandler', 'ensureContentScript']);
+// v2.74.1763 — `broadcastStorageChanged` + `deleteRecordWithSync` were CALLED BARE in the case bodies below
+// (SAVE_WORKFLOW / DELETE_WORKFLOW) but never seamed: they are background.js locals, invisible to this module,
+// so each call was a latent ReferenceError on a legacy Studio authoring path. Adding them to the contract makes
+// the omission fail LOUD at SW startup instead of deep inside a handler — which is what this list is for.
+const REQUIRED_CTX_KEYS = Object.freeze(['invokeSgHandler', 'ensureContentScript', 'broadcastStorageChanged', 'deleteRecordWithSync']);
 
 /** Throw (at SW startup) if the seam object is missing any contract key. */
 export function assertWorkflowDebugCtx(ctx) {
@@ -129,7 +133,7 @@ export function createWorkflowDebugHandlers(ctx) {
             return;
           }
           const saved = await StorageManager.saveWorkflow(workflow);
-          broadcastStorageChanged('workflow', saved.id, 'saved');
+          ctx.broadcastStorageChanged('workflow', saved.id, 'saved');
           // v2.74.82 — Strategy entities are capabilities now; notify the
           // CapabilityAPI registry so chat suggestion cards refresh. Match
           // the pattern SAVE_STRATEGY uses for Workflow entities.
@@ -147,7 +151,7 @@ export function createWorkflowDebugHandlers(ctx) {
       (async () => {
         try {
           const { workflowId } = payload;
-          await deleteRecordWithSync('workflow', workflowId, () => StorageManager.deleteWorkflow(workflowId));
+          await ctx.deleteRecordWithSync('workflow', workflowId, () => StorageManager.deleteWorkflow(workflowId));
           CapabilityAPI.notifyRegistryChange('removed', workflowId);
           sendResponse({ success: true });
         } catch (err) {

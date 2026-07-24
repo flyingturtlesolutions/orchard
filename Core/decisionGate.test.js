@@ -26,6 +26,7 @@ import { parseSweepReads } from './sweepPrompt.js';                             
 import { parseSeedDirectives } from './fleetSchedule.js';                                   // subject #8 (v2.74.1734)
 import { parseStepDecision } from './stepPrompt.js';                                        // subject #9 (v2.74.1734)
 import { runWorkflow, normalizeReporter, makeAccumulatorReporter, makeResumeReporter, DRIVER_VERDICTS } from './runDriver.js';   // THE EFFECT HALF, slice 1 (v2.74.1754 — CD-1a landed the driver core)
+import { runFieldReadStep, rowsOf } from './headlessClause.js';   // slice 2 (v2.74.1762) — CD-1a extraction 1 of 5, the first per-CLAUSE effect
 import {
   normalizeInterpretDecision, applyConfidenceGate, interpret,
   INTENTS, GATED_INTENTS, FLAGGED_INTENTS, UNGATED_INTENTS,
@@ -345,6 +346,127 @@ FIXTURES['driver:differential-oracle-seed'] = async () => {
   const b = await runWorkflow({ clauses: CL(4), reporter: dom, runStep: mk() });
   assert.equal(a.verdict, b.verdict); assert.equal(a.ranSteps, b.ranSteps); assert.equal(a.failedSteps, b.failedSteps);
   assert.equal(acc.snapshot().verdict, 'partial'); assert.ok(domish.includes('dpartial'));
+};
+
+// ── B5-6 slice 1 — COMPOSITION: the handoff BETWEEN steps (sequences, not single decisions) ──────────────────
+// A step that records every index it ran, so a re-run is VISIBLE rather than inferred.
+const _tracer = () => { const ran = []; return { ran, step: async (c, { index, state }) => { ran.push(index); return { ok: true, value: index, state: { ...state, [`s${index}`]: true, last: index } }; } }; };
+
+FIXTURES['compose:state-threads-forward'] = async () => {
+  const seen = [];
+  const r = await runWorkflow({
+    clauses: CL(3),
+    runStep: async (c, { index, state }) => { seen.push(state.last === undefined ? null : state.last); return { ok: true, state: { ...state, last: index } }; },
+  });
+  assert.deepEqual(seen, [null, 0, 1], 'each step sees the PREVIOUS step\'s state');
+  assert.equal(r.state.last, 2, 'and the final state reaches the caller');
+};
+
+FIXTURES['compose:resume-never-reruns'] = async () => {
+  const t = _tracer();
+  const r = await runWorkflow({ clauses: CL(5), runStep: t.step, startIndex: 3, state: { carried: true } });
+  assert.deepEqual(t.ran, [3, 4], 'steps 0-2 NEVER re-ran — a resumed write cannot double-fire');
+  assert.equal(r.ranSteps, 2, 'ranSteps counts THIS half only (the history entry composes the halves)');
+  assert.equal(r.state.carried, true, 'the carried state survived the hop');
+  assert.equal(r.verdict, 'complete');
+};
+
+FIXTURES['compose:park-resume-roundtrip'] = async () => {
+  const all = [];
+  const mk = (parkAt) => async (c, { index, state }) => {
+    if (index === parkAt) return { park: true, parkedRunId: 'run_x', state: { ...state, parkedFrom: index } };
+    all.push(index);
+    return { ok: true, state: { ...state, [`done${index}`]: true } };
+  };
+  const half1 = await runWorkflow({ clauses: CL(4), reporter: makeAccumulatorReporter(), runStep: mk(2) });
+  assert.equal(half1.verdict, 'parked'); assert.equal(half1.parkedAt, 2);
+  // the human approves → resume from the park index with the carried state and the RESUME reporter
+  const rep = makeResumeReporter();
+  const half2 = await runWorkflow({ clauses: CL(4), reporter: rep, runStep: mk(-1), startIndex: half1.parkedAt, state: half1.state });
+  assert.equal(half2.verdict, 'complete');
+  assert.deepEqual(all, [0, 1, 2, 3], 'every step ran EXACTLY once across both halves — no gap, no repeat');
+  assert.equal(half2.state.done0, true, 'half 1\'s work is still in the state half 2 returns');
+  assert.equal(half2.state.parkedFrom, 2, 'the park marker rode through');
+};
+
+FIXTURES['compose:verdict-composes'] = async () => {
+  const half1 = await runWorkflow({ clauses: CL(4), runStep: async (c, { index }) => (index === 1 ? { ok: false, error: 'soft' } : (index === 2 ? { park: true } : { ok: true })) });
+  assert.equal(half1.verdict, 'parked', 'a park outranks an earlier soft failure — the run STOPPED, it did not fail');
+  assert.equal(half1.failedSteps, 1, 'but the failure is still counted honestly');
+  const half2 = await runWorkflow({ clauses: CL(4), runStep: async () => ({ ok: true }), startIndex: 2 });
+  assert.equal(half2.verdict, 'complete', 'the resumed half reads on its OWN merits — the audit entry keeps both');
+};
+
+// ── THE EFFECT HALF, slice 2 — the HEADLESS FIELD READ (CD-1a extraction 1) ──────────────────────────────────
+const FR = (field, term) => ({ text: 'read the field', pinned: { kind: 'fieldRead', field, ...(term ? { term } : {}) } });
+const ST = (rows) => ({ lastValue: rows });
+
+FIXTURES['hlfr:valid→enriched+tally'] = () => {
+  const r = runFieldReadStep(FR('note'), { state: ST([{ id: 1, note: 'hello world' }, { id: 2, note: '' }]) });
+  assert.equal(r.ok, true);
+  assert.equal(r.value.field, 'note');
+  assert.equal(r.value.items.length, 2);
+  assert.match(r.value.tally, /2 rows/);
+  assert.ok('note__read' in r.state.lastValue[0], 'the enriched row threads the extract forward (the PP-1 composition rule)');
+  assert.equal(r.state.lastFieldRead.field, 'note', 'and the read is recorded on the state for a following step');
+};
+FIXTURES['hlfr:term-narrows'] = () => {
+  const rows = [{ note: 'Vendor: acme.\nDamage: water damage under sink.' }];
+  const all = runFieldReadStep(FR('note'), { state: ST(rows) });
+  const narrowed = runFieldReadStep(FR('note', 'damage'), { state: ST(rows) });
+  assert.equal(narrowed.value.term, 'damage');
+  assert.ok(narrowed.value.items[0].text.length <= all.value.items[0].text.length, 'a term narrows, never widens');
+};
+FIXTURES['hlfr:key-resolved-once'] = () => {
+  // row 0 resolves 'note' → key 'note'; row 1 carries only 'notes'. A per-row resolver would read row 1's
+  // DIFFERENT field and report a find; resolve-once correctly reports it missing.
+  const r = runFieldReadStep(FR('note'), { state: ST([{ note: 'first' }, { notes: 'second' }]) });
+  assert.equal(r.value.field, 'note');
+  assert.equal(r.value.items[1].mode, 'missing', 'row 1 is MISSING, not silently read from a different key');
+};
+FIXTURES['hlfr:not-banked→fail'] = () => {
+  const r = runFieldReadStep({ pinned: { kind: 'fieldRead' } }, { state: ST([{ note: 'x' }]) });
+  assert.equal(r.ok, false); assert.equal(r.error, 'field-not-banked', 'a legacy pin refuses headless — the panel interprets, not this');
+};
+FIXTURES['hlfr:no-prior-rows→fail'] = () => {
+  for (const v of [null, undefined, [], { rows: [] }]) {
+    const r = runFieldReadStep(FR('note'), { state: ST(v) });
+    assert.equal(r.ok, false, JSON.stringify(v)); assert.equal(r.error, 'no-prior-rows');
+  }
+  assert.equal(runFieldReadStep(FR('note'), {}).error, 'no-prior-rows', 'no state at all is the same answer');
+};
+FIXTURES['hlfr:rows-not-records→fail'] = () => {
+  const r = runFieldReadStep(FR('note'), { state: ST(['a', 'b']) });
+  assert.equal(r.ok, false); assert.equal(r.error, 'rows-not-records');
+};
+FIXTURES['hlfr:field-gone→fail'] = () => {
+  const r = runFieldReadStep(FR('vendor explanation'), { state: ST([{ note: 'x' }]) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /field-gone/, 'a banked field that drifted STOPS the step — it never re-interprets');
+  assert.match(r.error, /vendor explanation/, 'and the error names what was banked, so a human can fix the pin');
+};
+FIXTURES['hlfr:field-ambiguous→fail'] = () => {
+  const r = runFieldReadStep(FR('name'), { state: ST([{ first_name: 'a', last_name: 'b' }]) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /field-ambiguous/);
+  assert.match(r.error, /first_name, last_name/, 'refuses AND names both candidates — never picks one');
+};
+FIXTURES['hlfr:rowsOf-shapes'] = () => {
+  assert.deepEqual(rowsOf([{ a: 1 }]), [{ a: 1 }]);
+  assert.deepEqual(rowsOf({ rows: [{ a: 1 }] }), [{ a: 1 }], 'the {rows:[…]} envelope is accepted');
+  for (const junk of ['x', 42, null, undefined, {}, { rows: 'no' }]) assert.equal(rowsOf(junk), null, String(junk));
+};
+FIXTURES['hlfr:composes-with-driver'] = async () => {
+  // THE CD-1a POINT: the extraction satisfies runWorkflow's runStep contract, so a headless workflow really runs.
+  const r = await runWorkflow({
+    clauses: [FR('note'), FR('note')],
+    reporter: makeAccumulatorReporter(),
+    runStep: (clause, ctx) => runFieldReadStep(clause, { state: ctx.state }),
+    state: ST([{ id: 1, note: 'alpha' }]),
+  });
+  assert.equal(r.verdict, 'complete', 'two banked field reads run end-to-end with no DOM, no LLM, no IO');
+  assert.equal(r.ranSteps, 2);
+  assert.ok('note__read' in r.state.lastValue[0], 'the enrichment survived the loop into the final state');
 };
 
 // ── B5-0 — the coverage seal ──────────────────────────────────────────────────────────────────────────────────

@@ -19,6 +19,9 @@ import { markEngineBusy, startHarvestSession, stopHarvestSession } from './sg.js
 const REQUIRED_CTX_KEYS = Object.freeze([
   'readLocaleCache', 'writeLocaleCache', 'normalizeUrl', 'readSiteMap', 'mergeSiteMapForGround',
   'readGroundChrome', 'deriveGroundChrome', 'appendOutcomes',
+  // v2.74.1763 — was called BARE below (a background.js local, invisible here): a latent ReferenceError on the
+  // locale-modeled path. Seamed so a future omission fails at SW startup rather than mid-Explore.
+  'syncGroundAssetsAfterSave',
 ]);
 
 /** Throw (at SW startup) if the seam object is missing any contract key. */
@@ -408,7 +411,7 @@ export function createExploreHandlers(ctx) {
                 // (GROUND_SPEC § 4). Additive/non-destructive this slice. Never fails Explore.
                 try { await ctx.deriveGroundChrome(groundId); }
                 catch (e) { Logger.warn('background', `Ground.chrome derive failed (continuing): ${e.message}`); }
-                await syncGroundAssetsAfterSave(groundId, {
+                await ctx.syncGroundAssetsAfterSave(groundId, {
                   localeKey,
                   siteMap: true,
                   chrome: !!(await ctx.readGroundChrome(groundId)),

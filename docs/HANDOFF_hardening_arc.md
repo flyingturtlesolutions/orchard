@@ -66,7 +66,16 @@ lane's runDriver.test.js; these are thin representatives under the two-direction
 slices accrue as extractions 2–5 land (branch next, per the cadence HANDOFF). The C-rail loop's three measured
 runs (77.6% → 83.1%, records in logs/run/) landed as v2.74.1753.
 
-**Remaining:** Stage 6 slices 2+ (per-clause effects, as each extraction lands) · B5-6 composition fixtures
+**Stage 6 slice 2 + B5-6 slice 1 (pending land, markers v2.74.1761-1762).** The COMPOSITION layer (4 rows —
+state threads forward · **resume never re-runs** (a resumed write cannot double-fire) · park→resume round-trip
+runs every step exactly once · a park outranks an earlier soft failure) and the HEADLESS FIELD READ (10 rows —
+CD-1a extraction 1's per-clause effect: valid/term-narrows/**key-resolved-once** (never reads a different field
+from a different row) / the four honest failures / **field-gone** + **field-ambiguous** refuse rather than
+re-interpret / and `hlfr:composes-with-driver`, which proves the extraction really satisfies runWorkflow's
+runStep contract — a headless workflow running with no DOM, no LLM, no IO). Registry: **108 reactions, 12
+subjects**. Gate 3200/0.
+
+**Remaining:** Stage 6 slices 3-6 (branch · map · case · write, one per CD-1a extraction 2-5) · B5-6 composition fixtures
 (after the extractions) · the B5-2 tap: BUILT v2.74.1756 (INTERPRET_RAW ▸ in full traces — copy the JSON into a fixture) · the ongoing disciplines
 (§10; first audit item: `fieldread`) · scoreboard run 4 whenever a pulse is wanted (baseline 83.1%, sha
 14b28e576852).

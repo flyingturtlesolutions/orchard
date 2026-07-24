@@ -19,7 +19,9 @@ import { startHarvestSession, stopHarvestSession } from './sg.js';   // §17 (1b
 import { runForage } from './forage.js';   // §19 — auto-chain Forage after Discovery (the decided trigger): drive the read-safe nav to harvest the section/param surface
 
 // v2.74.952 (CR-X3b) — the discovery ctx seam contract, asserted at wiring time.
-const REQUIRED_CTX_KEYS = Object.freeze(['readSiteMap', 'mergeSiteMapForGround']);
+// v2.74.1763 — `syncGroundAssetsAfterSave` joins the contract: it was called BARE below (a background.js local,
+// invisible here) — a latent ReferenceError on the sitemap-seed path. Seamed so a future omission fails at boot.
+const REQUIRED_CTX_KEYS = Object.freeze(['readSiteMap', 'mergeSiteMapForGround', 'syncGroundAssetsAfterSave']);
 
 /** Throw (at SW startup) if the seam object is missing any contract key. */
 export function assertDiscoveryCtx(ctx) {
@@ -153,7 +155,7 @@ export function createDiscoveryHandlers(ctx) {
                 sitemapTruncated = !!truncated;
                 if (urls.length) {
                   await ctx.mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
-                  await syncGroundAssetsAfterSave(groundId, { siteMap: true });
+                  await ctx.syncGroundAssetsAfterSave(groundId, { siteMap: true });
                   Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
                 } else if (blocked) {
                   // v2.74.452/455 — a Cloudflare/WAF challenge blocked the sitemap even via the
@@ -231,7 +233,7 @@ export function createDiscoveryHandlers(ctx) {
                 const existing = await ctx.readSiteMap(groundId);
                 const rules = (existing && existing.templateRules) || [];
                 await ctx.mergeSiteMapForGround(groundId, SiteMap.siteMapFromCrawl(crawled, { rules }));
-                await syncGroundAssetsAfterSave(groundId, { siteMap: true });
+                await ctx.syncGroundAssetsAfterSave(groundId, { siteMap: true });
                 const sm = await ctx.readSiteMap(groundId);
                 siteMapStats = sm ? SiteMap.siteMapStats(sm) : null;
                 // v2.74.450 — drift (§8): what changed vs the prior siteMap. The persisted

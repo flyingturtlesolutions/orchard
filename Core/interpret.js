@@ -30,7 +30,16 @@ export const FLAGGED_INTENTS = Object.freeze(['decompose']);   // below threshol
 export const UNGATED_INTENTS = Object.freeze([
   'clarify', 'teach', 'answer',   // terminal/safe — they ARE the degradations; nothing to gate
   'case',        // DECIDED ungated (PP-3 v1686): writes only to our own store, closeable, a wrong one costs a click
-  'fieldread',   // UNDECIDED (recorded 2026-07-23): fans N same-record reads (map's rationale, weakened); no gate arm and no recorded decision — owed to the partition audit (DESIGN_decision_gate.md §4)
+  // DECIDED ungated (v2.74.1763, the partition audit's first item — was UNDECIDED since 2026-07-23). `map` is
+  // gated because it fans N reads at ANOTHER system and forces the model to NAME that system — the invention
+  // surface that once picked the user's real Zendesk queue. `fieldread` exists precisely because it needs no
+  // target (Core/fieldRead.js §79: "that absence IS the distinction"), so the same rationale does not carry: it
+  // is read-only, same-record, and the resolver underneath already refuses rather than guesses (no field →
+  // clarify · ambiguous → refuse + NAME the candidates · banked field drifted → stop). A fourth stop at the
+  // confidence gate would spend a question where three honest refusals already stand.
+  // REVISIT IF: the panel path's per-item DRILL (chat.js — fetching each row's full record when the field is
+  // absent from the list rows) proves expensive live; that N-request fan-out is the only real cost here.
+  'fieldread',
 ]);
 
 // v2.74.1736 — B5-4: the NORMALIZE-VALIDATION partition, owned by the code it describes (moved here from
