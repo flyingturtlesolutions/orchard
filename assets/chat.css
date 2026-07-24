@@ -783,6 +783,15 @@ textarea {
   font-size: 0.78em;
 }
 .composer-chip.hidden { display: none; }
+/* PS-9 (v2.74.1771, DESIGN_panel_surfaces.md §9) — the run bubble's elapsed ticker (outside .message-body,
+   so per-clause body rewrites never wipe it). */
+.run-elapsed {
+  font-size: 0.75em;
+  opacity: 0.55;
+  text-align: right;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
 /* v2.74.1343 (review Batch 6) — the connection / rich-intent chip MENU (setup site candidates, "what can I do here"
    intents). The chips reuse .suggestion-card styling, but here they lay out as a WRAPPING ROW under the bubble text
    (they were appended to the .message flex row with NO CSS — squeezed as a third column beside the text). */

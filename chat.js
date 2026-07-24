@@ -3054,6 +3054,27 @@ function _mkIconBtn(iconName, ariaLabel, fn, { title = '', size = 16, once = fal
   return b;
 }
 
+// PS-9 (v2.74.1771, DESIGN_panel_surfaces.md §9) — the run bubble's ELAPSED ticker, minimal form: mounted
+// OUTSIDE .message-body (which _setMessageBody rewrites wholesale — the chain's per-clause updates would
+// otherwise wipe it), self-stops when the bubble leaves the DOM, removed on done(). The full reporter-interface
+// component (step line / tick region / result region) migrates in per-clause later — never a chain rewrite.
+function _progressBubble(msg) {
+  const t0 = Date.now();
+  let el = null;
+  try {
+    el = document.createElement('div');
+    el.className = 'run-elapsed';
+    el.textContent = '0s';
+    msg.appendChild(el);
+  } catch { /* the ticker must never break a run */ }
+  const iv = setInterval(() => {
+    if (!el || !el.isConnected) { clearInterval(iv); return; }
+    const sec = Math.floor((Date.now() - t0) / 1000);
+    el.textContent = sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`;
+  }, 1000);
+  return { done() { clearInterval(iv); try { if (el) el.remove(); } catch { /* */ } } };
+}
+
 // v2.74.1343 (review Batch 6, J) — a button that fires AT MOST ONCE. On the first click it self-disables (and, with
 // `lockBar`, disables every button in the same action bar), synchronously, BEFORE `fn` runs — so a double-click /
 // double-tap can't double-launch a chain, double-corroborate an alias, or double-merge (the flagged double-fire on
@@ -7862,7 +7883,8 @@ function _offerWorkflowReplay(goal, wf) {
     if (!_plan.runnable) { _wfReplayStopped(m, wf, _plan); return; }
     const _stR = _wfFreshChainState(); const _tR = Date.now();   // §6.5 (v1746) — recall replays write history too
     _walkAbortFlag.requested = false;
-    _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask, state: _stR }).then(() => _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR)).catch(() => { /* */ });   // replay via the same chain runner, PINNED where banked (PP-0c)
+    const _pbR = _progressBubble(m);   // PS-9 — the elapsed ticker rides the run bubble
+    _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask, state: _stR }).then(() => _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR)).catch(() => { /* */ }).finally(() => _pbR.done());   // replay via the same chain runner, PINNED where banked (PP-0c)
   }, { lockBar: true }));
   bar.appendChild(_mkBtn('No, interpret it', () => {
     bar.remove();
@@ -7980,7 +8002,8 @@ async function _renderWorkflowsBody(body, appId) {
       if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
       const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
       _walkAbortFlag.requested = false;
-      _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 }).then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2)).catch(() => { /* */ });
+      const _pb2 = _progressBubble(_m2);   // PS-9 — the elapsed ticker rides the run bubble
+      _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 }).then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2)).catch(() => { /* */ }).finally(() => _pb2.done());
     }, { once: true }));
     if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
       releaseSurface('workflows');
@@ -13310,7 +13333,8 @@ async function _renderDeskLanding(conv) {
             if (!_p3.runnable) { _wfReplayStopped(_m3, wf, _p3); return; }
             const _st3 = _wfFreshChainState(); const _t3 = Date.now();   // §6.5 (v1746)
             _walkAbortFlag.requested = false;
-            _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask, state: _st3 }).then(() => _wfRecordPanelRun(wf, _t3, _p3.clauses.length, _st3)).catch(() => { /* */ });
+            const _pb3 = _progressBubble(_m3);   // PS-9 — the elapsed ticker rides the run bubble
+            _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask, state: _st3 }).then(() => _wfRecordPanelRun(wf, _t3, _p3.clauses.length, _st3)).catch(() => { /* */ }).finally(() => _pb3.done());
           });
           if (workflowTier(wf) === 'sw') chip('⚡', 'Run in the background (headless)', async (b) => {
             b.disabled = true;
