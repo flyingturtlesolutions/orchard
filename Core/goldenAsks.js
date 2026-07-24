@@ -1,0 +1,157 @@
+/**
+ * Core/goldenAsks.js — the golden-ask CORPUS, v0 (Stage 2 of the hardening arc; v2.74.1726). PURE DATA + helpers.
+ *
+ * Spec: docs/DESIGN_hardening_ladder.md §6 (one corpus, four consumers) · docs/HANDOFF_hardening_arc.md §4.
+ * The four consumers: A-0b reads it for coverage (every leg ↔ ≥1 ask — goldenAsks.test.js), B.5 freezes real
+ * decisions for its asks, C.1 runs it live and scores aim, and the NEGATIVES encode what must never happen.
+ *
+ * ── Entry shape ────────────────────────────────────────────────────────────────────────────────────────────
+ *   { ask,                       // a NATURAL user phrasing — never a paraphrase of the leg's `does` (else C.1
+ *                                //   measures string-match, not routing); trace-verbatim where one exists
+ *     expect: { legId } |        // the leg this ask must resolve to (recipe id or builtin key), XOR
+ *             { intent },        // the INTENTS clause it must land in (branch / fieldread / case / map / write)
+ *     mustNotResolve?: [ids],    // NEGATIVE: legs this ask must NEVER resolve to (the case→Zendesk class)
+ *     mustNotWrite?: true,       // NEGATIVE: must never resolve to any write-class leg ("how many…" ≠ a write)
+ *     mustBeGated?: true,        // the resolved leg's safety class must NOT be 'auto' (delete/merge/sms class)
+ *     mintedAt }                 // provenance stamp — the manifest version that authored the entry (parent §8)
+ *
+ * Negative keying SETTLED (2026-07-23, was an open decision): BOTH forms exist — `mustNotResolve` (forbidden
+ * legs, precise) and `mustNotWrite`/`mustBeGated` (class constraints, robust to catalog growth). An entry may be
+ * positive + negative at once ("delete ticket 5" expects delete_ticket AND must be gated).
+ *
+ * ── Discipline ─────────────────────────────────────────────────────────────────────────────────────────────
+ * · Re-harvest ADDS, never replaces (decision-gate §6): new entries get new stamps; old entries never die.
+ * · WAIVED_LEGS is the visible, shrinking escape hatch (HANDOFF §4). v0 ships EMPTY — full coverage on day one.
+ * · The meta-test (goldenAsks.test.js) enforces both directions: every leg covered-or-waived, and every entry's
+ *   ids/intents actually exist (an entry naming a deleted leg is red — corpus rot is loud, not silent).
+ */
+
+const MINTED = 'v2.74.1726';   // v0 — every founding entry carries this; later harvests stamp their own
+
+const _e = (list) => list.map((e) => ({ mintedAt: MINTED, ...e }));
+
+export const GOLDEN_ASKS = Object.freeze(_e([
+  // ── Zendesk reads ─────────────────────────────────────────────────────────────────────────────────────────
+  { ask: 'show my open tickets', expect: { legId: 'my_open_tickets' } },
+  { ask: 'show my pending tickets', expect: { legId: 'my_pending_tickets' } },
+  { ask: 'what did I solve recently', expect: { legId: 'my_solved_tickets' } },
+  { ask: 'show the whole open queue', expect: { legId: 'all_open_tickets' } },
+  { ask: 'any unassigned tickets?', expect: { legId: 'unassigned_tickets' } },
+  { ask: 'what tickets came in over the last 24 hours', expect: { legId: 'tickets_last_day' } },
+  { ask: 'read ticket 4521', expect: { legId: 'read_ticket' } },
+  { ask: 'show the conversation on ticket 4521', expect: { legId: 'ticket_comments' } },
+  { ask: 'search tickets for water heater', expect: { legId: 'search_tickets' } },
+  { ask: 'look up the zendesk user jane@example.com', expect: { legId: 'view_user' } },
+  // ── Zendesk writes ────────────────────────────────────────────────────────────────────────────────────────
+  { ask: 'create a zendesk ticket about the broken faucet at 12 Elm', expect: { legId: 'create_ticket' } },
+  { ask: 'add a comment to ticket 4521 saying the parts shipped', expect: { legId: 'add_comment' } },
+  { ask: 'set ticket 4521 to solved', expect: { legId: 'update_ticket_status' } },
+  { ask: 'assign ticket 4521 to me', expect: { legId: 'assign_ticket_to_me' } },
+  { ask: 'make ticket 4521 urgent', expect: { legId: 'update_ticket_priority' } },
+  { ask: 'tag ticket 4521 with warranty', expect: { legId: 'add_tags' } },
+  { ask: 'move ticket 4521 to the billing group', expect: { legId: 'reassign_group' } },
+  { ask: 'create a zendesk profile for John Smith, john@example.com', expect: { legId: 'create_user' } },
+  { ask: 'set the requester on ticket 4521 to john@example.com', expect: { legId: 'set_ticket_requester' } },
+  { ask: 'merge ticket 4520 into 4521', expect: { legId: 'merge_tickets' }, mustBeGated: true },
+  { ask: 'mark ticket 4521 as spam', expect: { legId: 'mark_as_spam' }, mustBeGated: true },
+  // the ladder-§6 canonical: the destructive ask resolves AND stays behind the gate
+  { ask: 'delete ticket 5', expect: { legId: 'delete_ticket' }, mustBeGated: true },
+  // ── Shopify ───────────────────────────────────────────────────────────────────────────────────────────────
+  { ask: 'find the shopify customer with email jane@example.com', expect: { legId: 'shopify_customer_by_email' } },
+  { ask: 'find the customer with phone 206-555-0147', expect: { legId: 'shopify_customer_by_phone' } },
+  { ask: 'search shopify customers named Rivera', expect: { legId: 'shopify_customer_search' } },
+  { ask: 'show the shopify orders for this customer', expect: { legId: 'shopify_orders_for_customer' } },
+  { ask: 'look up shopify order 1043', expect: { legId: 'shopify_order' } },
+  { ask: 'search shopify products for valve', expect: { legId: 'shopify_search_products' } },
+  { ask: "how's the store doing today", expect: { legId: 'shopify_shop_pulse' } },
+  { ask: 'show the unfulfilled orders', expect: { legId: 'shopify_orders_queue' } },
+  { ask: 'create a shopify profile for the homeowner', expect: { legId: 'shopify_create_customer' } },   // trace-adjacent (the find-or-create flow)
+  { ask: "update the customer's phone number in shopify", expect: { legId: 'shopify_update_customer' } },
+  { ask: 'create a draft order for this customer with that valve', expect: { legId: 'shopify_create_order' } },
+  // ── VendorSuite (trace-verbatim where live asks exist) ────────────────────────────────────────────────────
+  { ask: 'show my vendorsuite state', expect: { legId: 'vs_state' } },
+  { ask: 'what version is vendorsuite on', expect: { legId: 'vs_versions' } },
+  { ask: 'get open warranty tasks', expect: { legId: 'vs_warranty_tasks' } },   // VERBATIM live (traces 164717/172653)
+  { ask: 'open warranty task 4867009', expect: { legId: 'vs_warranty_task' } },
+  { ask: 'who are the contacts on task 4867009', expect: { legId: 'vs_task_contacts' } },
+  { ask: 'warranty task counts by status', expect: { legId: 'vs_warranty_stats' } },
+  { ask: 'any vendor announcements?', expect: { legId: 'vs_announcements' } },
+  // ── HubSpot ───────────────────────────────────────────────────────────────────────────────────────────────
+  { ask: 'show my hubspot portal', expect: { legId: 'hubspot_me' } },
+  { ask: 'list the hubspot teams', expect: { legId: 'hubspot_teams' } },
+  { ask: 'look up jane@example.com in hubspot', expect: { legId: 'hubspot_contact' } },
+  // ── Aircall ───────────────────────────────────────────────────────────────────────────────────────────────
+  { ask: "who's available on the team right now", expect: { legId: 'aw_team_availability' } },
+  { ask: 'am I set to available?', expect: { legId: 'aw_my_availability' } },
+  { ask: 'show my aircall profile', expect: { legId: 'aw_my_agent' } },
+  { ask: 'show the teammate roster', expect: { legId: 'aw_teammate_roster' } },
+  { ask: 'find teammate Sarah', expect: { legId: 'aw_teammate_search' } },
+  { ask: 'list the aircall teams', expect: { legId: 'aw_search_teams' } },
+  { ask: 'show the missed calls', expect: { legId: 'aw_missed_calls' } },
+  { ask: 'what conversations are open', expect: { legId: 'aw_open_conversations' } },
+  { ask: 'how many unread conversations', expect: { legId: 'aw_unread_count' } },
+  { ask: 'who is 206-555-0147', expect: { legId: 'aw_contact_by_phone' } },
+  { ask: 'which lines can text 206-555-0147', expect: { legId: 'aw_authorized_lines' } },
+  { ask: 'open the conversation with 206-555-0147', expect: { legId: 'aw_conversation_by_number' } },
+  { ask: "what's my line", expect: { legId: 'aw_my_line' } },
+  { ask: 'call history for 206-555-0147', expect: { legId: 'aw_call_history' } },
+  { ask: 'set me to away', expect: { legId: 'aw_set_availability' } },
+  { ask: "text 206-555-0147 that we're on the way", expect: { legId: 'aw_send_sms' }, mustBeGated: true },
+  { ask: 'close this conversation out', expect: { legId: 'aw_close_conversation' } },
+  // ── Builtin: browser ──────────────────────────────────────────────────────────────────────────────────────
+  { ask: 'open youtube.com', expect: { legId: 'OPEN_URL' } },
+  { ask: 'switch to the gmail tab', expect: { legId: 'FOCUS_TAB' } },
+  { ask: 'close the other tabs', expect: { legId: 'CLOSE_TABS' } },
+  { ask: 'what tabs are open', expect: { legId: 'LIST_TABS' } },
+  // ── Builtin: self ─────────────────────────────────────────────────────────────────────────────────────────
+  { ask: 'what can you do here', expect: { legId: 'LIST_CAPABILITIES' } },
+  { ask: "what's running right now", expect: { legId: 'RUN_STATUS' } },
+  { ask: 'start a dev conversation', expect: { legId: 'NEW_DEV_CONVERSATION' } },
+  { ask: 'start a new conversation', expect: { legId: 'NEW_CONVERSATION' } },
+  { ask: 'clear this chat', expect: { legId: 'CLEAR_CHAT' } },
+  { ask: 'show my conversation history', expect: { legId: 'OPEN_HISTORY' } },
+  { ask: 'delete all conversations', expect: { legId: 'DELETE_ALL_CONVERSATIONS' }, mustBeGated: true },
+  { ask: 'open studio', expect: { legId: 'OPEN_STUDIO' } },
+  { ask: 'open the ground panel', expect: { legId: 'OPEN_GROUND' } },
+  { ask: 'hide the panel', expect: { legId: 'HIDE_PANEL' } },
+  { ask: 'reload the extension', expect: { legId: 'RELOAD_EXTENSION' } },
+  { ask: 'explore this page', expect: { legId: 'EXPLORE_PAGE' } },
+  { ask: 'toggle interaction tracking', expect: { legId: 'TOGGLE_TRACKING' } },
+  { ask: 'show my cases', expect: { legId: 'LIST_CASES' } },
+  { ask: 'show my workflows', expect: { legId: 'OPEN_WORKFLOWS' } },
+  { ask: 'close this case', expect: { legId: 'CLOSE_CASE' } },
+  { ask: 'show this in the canvas', expect: { legId: 'DISPLAY' } },
+  { ask: 'compose a summary in the canvas', expect: { legId: 'COMPOSE' } },
+  // ── THE case→Zendesk canonical (the v1686 misroute, frozen as a negative forever) ────────────────────────
+  { ask: 'open a case about the leaking dishwasher', expect: { legId: 'OPEN_CASE' }, mustNotResolve: ['create_ticket'] },
+  // ── Count asks are never writes ───────────────────────────────────────────────────────────────────────────
+  { ask: 'how many warranty tasks are open', expect: { legId: 'vs_warranty_stats' }, mustNotWrite: true },
+  { ask: 'how many tickets are open', mustNotWrite: true },   // pure negative — either count leg is fine, a write never is
+  // ── Per-item clause asks (the family this project bled on — ladder §6) ───────────────────────────────────
+  { ask: 'which of those ask for a replacement?', expect: { intent: 'branch' } },
+  { ask: 'read the vendor note on each one', expect: { intent: 'fieldread' } },
+  { ask: 'open a case for each', expect: { intent: 'case' } },
+  { ask: 'look each caller up in the CRM', expect: { intent: 'map' } },
+  { ask: 'create a shopify profile for each homeowner that has none', expect: { intent: 'write' } },
+]));
+
+/** The visible, shrinking waiver list (HANDOFF §4). v0 ships EMPTY — full coverage. An entry here needs {id, why}. */
+export const WAIVED_LEGS = Object.freeze([]);
+
+/** Leg ids the corpus covers with a positive expectation. PURE. */
+export function coveredLegIds(entries = GOLDEN_ASKS) {
+  return new Set(entries.filter((e) => e && e.expect && e.expect.legId).map((e) => e.expect.legId));
+}
+
+/** Corpus shape stats for a dashboard / log line. PURE. */
+export function corpusStats(entries = GOLDEN_ASKS) {
+  const legs = coveredLegIds(entries);
+  return {
+    entries: entries.length,
+    legsCovered: legs.size,
+    intents: entries.filter((e) => e.expect && e.expect.intent).length,
+    negatives: entries.filter((e) => (e.mustNotResolve && e.mustNotResolve.length) || e.mustNotWrite).length,
+    gated: entries.filter((e) => e.mustBeGated).length,
+    waived: WAIVED_LEGS.length,
+  };
+}
