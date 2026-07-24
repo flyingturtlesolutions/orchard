@@ -896,7 +896,7 @@ function _historyAdminRow(row) {
   const chevron = row.hasChildren
     ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
     : '';
-  const subtaskBtn = `<button class="rail-item-subtask" title="Open a detail"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
+  const subtaskBtn = `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
   el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}${chevron}${subtaskBtn}`;
   void (async () => {   // the attention badge — one cheap storage read; green = nothing
     try {
@@ -941,7 +941,7 @@ function _historyNewAppRow() {
 function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
   const isDev = conv.kind === 'dev';
   const badge = isDev ? (conv.surface === 'high' ? '<span class="rail-item-badge design">design</span>' : '<span class="rail-item-badge">dev</span>')
-                      : (row.role === 'subtask' ? '<span class="rail-item-badge app">detail</span>' : '<span class="rail-item-badge app">view</span>');   // Case rename (v1492) — a spawned child badges as a CASE
+                      : (row.role === 'subtask' ? '<span class="rail-item-badge app">case</span>' : '<span class="rail-item-badge app">view</span>');   // Case rename (v1492) — a spawned child badges as a CASE
   // FL-6c (v2.74.1357) — the pending-proposals chip: a sweep with results lights the APP row (children share the
   // instance, so only the app row carries it). `pending` is a derived count (number), never untrusted text.
   const pendingChip = (row.role === 'app' && pending > 0)
@@ -967,7 +967,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
       </button>` : '';
   // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
   const subtaskBtn = row.role === 'app'
-    ? `<button class="rail-item-subtask" title="Open a detail"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
+    ? `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
     : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
@@ -1029,7 +1029,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
     const prompt = liveRun
       ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
       : childN
-        ? `Delete "${conv.title}" and its ${childN} detail${childN === 1 ? '' : 's'}? This can't be undone.`
+        ? `Delete "${conv.title}" and its ${childN} case${childN === 1 ? '' : 's'}? This can't be undone.`
         : `Delete "${conv.title}"?`;
     if (!confirm(prompt)) return;
     if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
@@ -1624,22 +1624,22 @@ async function _spawnSubTask(appConvId) {
       await ConversationStore.create({ title: `Ops case #${n}`, kind: 'agent', seed: app.seed || _ADMIN_SEED, parentId: ADMIN_ID });
       _expandedApps.add(ADMIN_ID);
       await _revealRail();
-    } catch (e) { try { console.warn('[chat] ops-case spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the detail.', 'err'); }
+    } catch (e) { try { console.warn('[chat] ops-case spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the case.', 'err'); }
     return;
   }
-  if (!app || !app.appId || app.parentId) { toast('Details open under a view.', 'err'); return; }
+  if (!app || !app.appId || app.parentId) { toast('Cases open under a view.', 'err'); return; }
   let n = 1; let titles = new Set();
   try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === appConvId); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
   const base = app.title || 'Task';
   while (titles.has(`${base} #${n}`)) n++;     // a deletion can leave a gap — bump past any taken number
   const title = `${base} #${n}`;
   const spec = subTaskFromApp(app, '');        // blank sub-seed → the child inherits the app's seed (composeSeed)
-  if (!spec) { toast('Details open under a view.', 'err'); return; }
+  if (!spec) { toast('Cases open under a view.', 'err'); return; }
   try {
     await ConversationStore.create({ title: title.slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
     _expandedApps.add(app.id);
     await _revealRail();   // v2.74.1249 — open the drawer (if closed) so the new sub-conversation is visible
-  } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the detail.', 'err'); }
+  } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the case.', 'err'); }
 }
 
 // CV-5 (v2.74.1173, DESIGN_conversations.md §9) — the user app catalog: user-authored AppDefinitions persisted in
@@ -1836,7 +1836,7 @@ async function _seedInstanceMemory(instanceId, presetId) {
 // CV-4 — the shared fan-out parent guard: the CURRENT conversation must be a real APP (not a sub-task / Overview /
 // non-app), since children nest ONE level under an app. Returns {app} or {error:<message>}. (One store load.)
 async function _fanoutParentApp() {
-  if (!_currentConversationId) return { error: 'Open a view first — details open under a view.' };
+  if (!_currentConversationId) return { error: 'Open a view first — cases open under a view.' };
   let app = null;
   try { app = await ConversationStore.load(_currentConversationId); } catch { /* */ }
   if (!app || !app.appId || app.parentId) {
@@ -1917,7 +1917,7 @@ async function _spawnSubTasks(listText) {
   const { created, skipped } = await _createSubTasks(app, items);
   const made = created.length;
   _setMessageBody(msg, made
-    ? `Opened ${made} detail${made === 1 ? '' : 's'} under “${app.title}”${skipped ? ` (${skipped} already open — skipped)` : ''} — nested under the view in the rail.`
+    ? `Opened ${made} case${made === 1 ? '' : 's'} under “${app.title}”${skipped ? ` (${skipped} already open — skipped)` : ''} — nested under the view in the rail.`
     : (skipped ? `${skipped === 1 ? 'That case is' : `All ${skipped} are`} already open under “${app.title}” — nothing new to open.` : 'Couldn’t open any cases.'));
   _orchFinalize(msg);
 }
@@ -2180,12 +2180,12 @@ async function _runEphemeralFanout(app, children, directive, msg) {
 // "needs you" on that child (the per-child safety gate in _runChildTask — never an unattended action). §9 boundary +
 // the bounded concurrent pool live in the shared _runEachChild. `msg` is the chain's reused bubble (its progress line).
 async function _runPersistentFanout(app, children, directive, msg, { suffix = '' } = {}) {
-  _setMessageBody(msg, `${children.length} detail${children.length === 1 ? '' : 's'} — ${directive}…`);
+  _setMessageBody(msg, `${children.length} case${children.length === 1 ? '' : 's'} — ${directive}…`);
   const results = await _runEachChild(children, directive, (fin) => _setMessageBody(msg, `Working ${fin}/${children.length}…`));
   const done = results.filter((r) => r && r.status === 'done').length;
   const need = results.length - done;
   _revealRail().catch(() => {});   // children's peeks updated → reveal them
-  const line = `Opened ${children.length} detail${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`;
+  const line = `Opened ${children.length} case${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`;
   _setMessageBody(msg, line);
   _orchFinalize(msg);
   return line;   // DK-8i — the caller's chain summary (survives the readouts join instead of being flattened to `Ran "…" in N.`)
@@ -4597,7 +4597,7 @@ const _ADHOC_CASES = 'case:adhoc';
 async function _openCaseFromLeg(msg, params = {}) {
   const title = _str0(params.title) || _str0(params.label);
   if (!title) {
-    _setMessageBody(msg, 'What should the detail be about? Give it a title and I’ll open one.', { markdown: true });
+    _setMessageBody(msg, 'What should the case be about? Give it a title and I’ll open one.', { markdown: true });
     _orchFinalize(msg);
     try { _orchLog('CASE   ▸ leg open — refused, no title'); } catch { /* */ }
     return;
@@ -4614,13 +4614,13 @@ async function _openCaseFromLeg(msg, params = {}) {
     });
   } catch { res = null; }
   if (!res || !res.success) {
-    _setMessageBody(msg, 'Couldn’t open the detail — nothing was saved.', { markdown: true });
+    _setMessageBody(msg, 'Couldn’t open the case — nothing was saved.', { markdown: true });
     _orchFinalize(msg);
     try { _orchLog('CASE   ▸ leg open FAILED — storage'); } catch { /* */ }
     return;
   }
   _setMessageBody(msg, res.opened
-    ? `Opened a detail — **${escHtml(title)}**. It’s local to Orchard; nothing was sent anywhere.`
+    ? `Opened a case — **${escHtml(title)}**. It’s local to Orchard; nothing was sent anywhere.`
     : `That case is already open — **${escHtml(title)}**. Nothing duplicated.`, { markdown: true });
   _orchFinalize(msg);
   try { _orchLog(`CASE   ▸ leg open "${title.slice(0, 40)}" → ${res.opened ? 'opened' : 'already open'} (${res.id})`); } catch { /* */ }
@@ -4632,7 +4632,7 @@ async function _listCasesMsg(msg) {
   const all = (r && r.success && Array.isArray(r.cases)) ? r.cases : [];
   const open = all.filter((c) => c && c.state === 'open');
   if (!open.length) {
-    _setMessageBody(msg, all.length ? 'No open details — everything has been closed.' : 'No details yet.', { markdown: true });
+    _setMessageBody(msg, all.length ? 'No open cases — everything has been closed.' : 'No cases yet.', { markdown: true });
     _orchFinalize(msg);
     try { _orchLog(`CASE   ▸ leg list → 0 open of ${all.length}`); } catch { /* */ }
     return;
@@ -4650,14 +4650,14 @@ async function _listCasesMsg(msg) {
 async function _closeCaseFromLeg(msg, params = {}) {
   const id = _str0(params.id);
   if (!id) {
-    _setMessageBody(msg, 'Which detail? Say “show my details” and name one.', { markdown: true });
+    _setMessageBody(msg, 'Which case? Say “show my cases” and name one.', { markdown: true });
     _orchFinalize(msg);
     try { _orchLog('CASE   ▸ leg close — refused, no id'); } catch { /* */ }
     return;
   }
   let ok = false;
   try { const r = await _orchReq('PIPELINE_CLOSE_CASE', { id, state: 'done', verdict: _str0(params.verdict) }); ok = !!(r && r.success); } catch { ok = false; }
-  _setMessageBody(msg, ok ? 'Closed.' : 'Couldn’t close that detail — check the id with “show my details”.', { markdown: true });
+  _setMessageBody(msg, ok ? 'Closed.' : 'Couldn’t close that case — check the id with “show my cases”.', { markdown: true });
   _orchFinalize(msg);
   try { _orchLog(`CASE   ▸ leg close ${id} → ${ok ? 'closed' : 'failed'}`); } catch { /* */ }
 }
@@ -13251,8 +13251,8 @@ function _incidentCardBody(inc) {
   const durWord = mins == null ? '' : (mins < 90 ? `${mins}m` : `${Math.round(mins / 60)}h`);
   if (inc.status === 'open') {
     const hint = inc.cls === 'presence'
-      ? 'Sign in on the site and its reads resume — this detail closes itself.'
-      : 'A relearn can re-point the read — this detail closes when a run verifies.';
+      ? 'Sign in on the site and its reads resume — this case closes itself.'
+      : 'A relearn can re-point the read — this case closes when a run verifies.';
     return `⚠ **${inc.title}**\nsince ${clockWord(inc.openedAt, now)}\n\n${hint}${timeline}`;
   }
   const done = String(inc.title || '')

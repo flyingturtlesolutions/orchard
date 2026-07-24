@@ -70,7 +70,7 @@ describe('deskLanding — buildDeskLanding (the v1602 page shape)', () => {
     assert.deepEqual(s.cards.map((c) => c.command), ['show dashboard', 'check-now', 'keepalive']);
     assert.ok(!s.cards.some((c) => c.kind === 'new-workflow'), 'admin has commands — no ＋ card');
     assert.equal(s.heading, LANDING_GREETING);
-    assert.equal(s.sub, 'Admin desk — watches your connections, ride health, and open details across every connected site.', 'not a catalog desk — the builder owns its description (live: the subheader was just the name)');   // v1732 — "details" (the case→detail copy rename)
+    assert.equal(s.sub, 'Admin desk — watches your connections, ride health, and open cases across every connected site.', 'not a catalog desk — the builder owns its description (live: the subheader was just the name)');   // v1735 — "cases" (the case→detail rename was REVERTED; desk→view stands)
     assert.match(buildDeskLanding({ isAdmin: true }).sub, /^Admin view — watches/, 'title defaults too (v1732 — the desk→view copy rename)');
   });
 });

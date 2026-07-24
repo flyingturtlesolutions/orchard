@@ -48,7 +48,7 @@ export function buildDeskLanding({ title = '', description = '', isAdmin = false
   // v1603 (live: "sub header has no description") — the Admin desk is not a catalog desk, so it has no
   // description SOURCE; it owns its operator description here.
   const desc = String(description || '').trim()
-    || (isAdmin ? 'watches your connections, ride health, and open details across every connected site.' : '');
+    || (isAdmin ? 'watches your connections, ride health, and open cases across every connected site.' : '');
   const labels = (Array.isArray(connections) ? connections : []).map((c) => String(c || '').trim()).filter(Boolean);
 
   // The SUBHEADER: "<Name> — <description>" (the desk, described); connections join it as a second line only

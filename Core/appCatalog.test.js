@@ -124,7 +124,7 @@ describe('appCatalog — DK-6: preconfigured desks (the flat gallery — sites b
     assert.equal(w.name, 'Warranty');   // v1508 — the kind badge carries 'desk'; the name drops the descriptor
     assert.deepEqual(w.sites.map((s) => s.host), ['vendorsuite.drhorton.com', 'zendesk.com', 'admin.shopify.com', 'app.hubspot.com']);
     assert.deepEqual(w.sites.map((s) => s.label), ['VendorSuite', 'Zendesk', 'Shopify', 'HubSpot']);
-    assert.ok(/HubSpot/.test(w.seed) && /ONE matter/.test(w.seed), 'the seed spans the homeowner’s whole record + correlation');
+    assert.ok(/HubSpot/.test(w.seed) && /ONE case/.test(w.seed), 'the seed spans the homeowner’s whole record + correlation');
   });
   it('preconfiguredDesks = presets WITH sites (Support + Warranty + Call, v2.74.1509); site-less presets stay resolvable', () => {
     assert.deepEqual(preconfiguredDesks().map((d) => d.id).sort(), ['call-manager', 'support', 'warranty-manager']);
@@ -135,7 +135,7 @@ describe('appCatalog — DK-6: preconfigured desks (the flat gallery — sites b
     const s = builtinApp('support');
     assert.equal(s.name, 'Support');
     assert.deepEqual(s.sites.map((x) => x.host), ['zendesk.com', 'app.hubspot.com', 'app.slack.com', 'admin.shopify.com', 'app.mezmo.com']);
-    assert.ok(/Mezmo/.test(s.seed) && /ONE matter/.test(s.seed) && /duplicate tickets/.test(s.seed), 'mirrors Support-agent + Queue-manager functions');
+    assert.ok(/Mezmo/.test(s.seed) && /ONE case/.test(s.seed) && /duplicate tickets/.test(s.seed), 'mirrors Support-agent + Queue-manager functions');
     assert.ok(/setup/.test(s.seed), 'the CS tool (no public host) joins per-instance via setup');
   });
   it('the Call desk (v2.74.1509, id call-manager kept) ships Aircall + Zendesk + Google Calendar; presence + calendar-aware call-backs', () => {

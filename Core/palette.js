@@ -52,25 +52,25 @@ export const BUILTIN_LEGS = [
   //
   // This is not a new architecture: `domain:'self'` legs already exist and already dispatch panel-local. Cases
   // were simply missing from the one list that makes a capability visible everywhere at once.
-  { key: 'OPEN_CASE',  name: 'Open a detail',   mode: 'act', domain: 'self', safety: 'auto', source: 'builtin',
-    does: "open a DETAIL — Orchard's own local review record, stored here and visible only to you. NOT a ticket, issue, or record on any connected site: if the ask names a system (Zendesk, Jira, Shopify), use that system's own capability instead. Reversible — a detail costs nothing to open or close.",
+  { key: 'OPEN_CASE',  name: 'Open a case',   mode: 'act', domain: 'self', safety: 'auto', source: 'builtin',
+    does: "open a CASE — Orchard's own local review record, stored here and visible only to you. NOT a ticket, issue, or record on any connected site: if the ask names a system (Zendesk, Jira, Shopify), use that system's own capability instead. Reversible — a case costs nothing to open or close.",
     params: ['title', 'scope'],
     paramSchema: { type: 'object', properties: {
-      title: { type: 'string', description: "what the detail is about, in the user's own words" },
-      scope: { type: 'string', description: '"item" = one detail per record (the default, for "for each …"), "run" = a single detail covering the whole set' },
+      title: { type: 'string', description: "what the case is about, in the user's own words" },
+      scope: { type: 'string', description: '"item" = one case per record (the default, for "for each …"), "run" = a single case covering the whole set' },
     }, required: [] } },
-  { key: 'LIST_CASES', name: 'Show my details', mode: 'ask', domain: 'self', safety: 'auto', source: 'builtin',
-    does: 'list the open Orchard details — what is still waiting on a person. For "show my details", "show my cases", "open details".', params: [] },
+  { key: 'LIST_CASES', name: 'Show my cases', mode: 'ask', domain: 'self', safety: 'auto', source: 'builtin',
+    does: 'list the open Orchard cases — what is still waiting on a person', params: [] },
   // CD-2 (DESIGN_cadence.md §3.2) — WORKFLOWS resolve through the front door as a LEG, never a composer regex: so
   // "show my workflows", "what runs automatically", and the step DECOMPOSER all see the capability (the v1689
   // lesson: a capability absent from the catalog is not unavailable, it is silently SUBSTITUTED with a wrong act).
   { key: 'OPEN_WORKFLOWS', name: 'Show my workflows', mode: 'ask', domain: 'self', safety: 'auto', source: 'builtin',
     does: 'list this view\'s saved WORKFLOWS — the multi-step tasks you built, which of them run automatically on a schedule, and when each is next due. For "show my workflows", "what runs automatically", "my scheduled tasks", "my automations", "workflows".', params: [] },
-  { key: 'CLOSE_CASE', name: 'Close a detail',  mode: 'act', domain: 'self', safety: 'confirm', source: 'builtin',
-    does: 'close an Orchard detail that has been dealt with',
+  { key: 'CLOSE_CASE', name: 'Close a case',  mode: 'act', domain: 'self', safety: 'confirm', source: 'builtin',
+    does: 'close an Orchard case that has been dealt with',
     params: ['id', 'verdict'],
     paramSchema: { type: 'object', properties: {
-      id: { type: 'string', description: 'the detail id to close' },
+      id: { type: 'string', description: 'the case id to close' },
       verdict: { type: 'string', description: 'a short note on how it was resolved' },
     }, required: ['id'] } },
   // Self — CANVAS render (ACT×Self → the SW channel RENDER_CANVAS, not panel-local). CA-2 (DESIGN_canvas.md §3).
