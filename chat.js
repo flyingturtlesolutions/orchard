@@ -2361,12 +2361,18 @@ async function _runEphemeralFanout(app, children, directive, msg) {
 // "needs you" on that child (the per-child safety gate in _runChildTask — never an unattended action). §9 boundary +
 // the bounded concurrent pool live in the shared _runEachChild. `msg` is the chain's reused bubble (its progress line).
 async function _runPersistentFanout(app, children, directive, msg, { suffix = '' } = {}) {
-  _setMessageBody(msg, `${children.length} case${children.length === 1 ? '' : 's'} — ${directive}…`);
-  const results = await _runEachChild(children, directive, (fin) => _setMessageBody(msg, `Working ${fin}/${children.length}…`));
+  // TL-3 (v2.74.1793, §14.2) — the fan-out adopts the reporter regions: step line + live tick + elapsed in
+  // ONE bubble, replaced by the result on done. (The chain's own per-clause adoption is the owed §9 rung.)
+  const pb = _progressBubble(msg);
+  pb.step(`${children.length} case${children.length === 1 ? '' : 's'} — “${directive}”`);
+  const results = await _runEachChild(children, directive, (fin) => pb.tick(`working ${fin}/${children.length}`));
+  pb.done();
   const done = results.filter((r) => r && r.status === 'done').length;
   const need = results.length - done;
   _revealRail().catch(() => {});   // children's peeks updated → reveal them
-  const line = `Opened ${children.length} case${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`;
+  // TL-4 — a RESULT line, not coaching: the how-to prose moves to the bubble's tooltip; the Rail is the roster.
+  const line = `✓ ${done}/${children.length} case${children.length === 1 ? '' : 's'}${suffix} — “${directive}” ran in each${need ? ` · ${need} need you` : ''}.`;
+  try { msg.title = 'Open a case in the Rail to see its result — or ask me to “summarize what each found”.'; } catch { /* */ }
   _setMessageBody(msg, line);
   _orchFinalize(msg);
   return line;   // DK-8i — the caller's chain summary (survives the readouts join instead of being flattened to `Ran "…" in N.`)
@@ -3200,19 +3206,28 @@ function _mkIconBtn(iconName, ariaLabel, fn, { title = '', size = 16, once = fal
 // component (step line / tick region / result region) migrates in per-clause later — never a chain rewrite.
 function _progressBubble(msg) {
   const t0 = Date.now();
-  let el = null;
+  let wrap = null, stepEl = null, tickEl = null, timeEl = null;
   try {
-    el = document.createElement('div');
-    el.className = 'run-elapsed';
-    el.textContent = '0s';
-    msg.appendChild(el);
-  } catch { /* the ticker must never break a run */ }
+    wrap = document.createElement('div');
+    wrap.className = 'run-progress';
+    stepEl = document.createElement('div'); stepEl.className = 'run-progress-step'; stepEl.hidden = true;
+    tickEl = document.createElement('div'); tickEl.className = 'run-progress-tick'; tickEl.hidden = true;
+    timeEl = document.createElement('div'); timeEl.className = 'run-elapsed'; timeEl.textContent = '0s';
+    wrap.appendChild(stepEl); wrap.appendChild(tickEl); wrap.appendChild(timeEl);
+    msg.appendChild(wrap);
+  } catch { /* the reporter must never break a run */ }
   const iv = setInterval(() => {
-    if (!el || !el.isConnected) { clearInterval(iv); return; }
+    if (!timeEl || !timeEl.isConnected) { clearInterval(iv); return; }
     const sec = Math.floor((Date.now() - t0) / 1000);
-    el.textContent = sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`;
+    timeEl.textContent = sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`;
   }, 1000);
-  return { done() { clearInterval(iv); try { if (el) el.remove(); } catch { /* */ } } };
+  return {
+    // TL-3 (v2.74.1793, §14.2) — the §9 reporter REGIONS: a step line and a tick line that update in place,
+    // outside .message-body so per-clause body rewrites never wipe them. Existing done()-only callers unchanged.
+    step(text) { try { if (stepEl) { stepEl.textContent = String(text || ''); stepEl.hidden = !text; } } catch { /* */ } },
+    tick(text) { try { if (tickEl) { tickEl.textContent = String(text || ''); tickEl.hidden = !text; } } catch { /* */ } },
+    done() { clearInterval(iv); try { if (wrap) wrap.remove(); } catch { /* */ } },
+  };
 }
 
 // v2.74.1343 (review Batch 6, J) — a button that fires AT MOST ONCE. On the first click it self-disables (and, with
