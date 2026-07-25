@@ -255,3 +255,40 @@ export function catalogArmedEntries(hosts, catalog, covered = []) {
   }
   return out;
 }
+
+/**
+ * Armable ride inventory for a named host (TR-1 meta "what can you do on X"). PURE.
+ * Merges stored Ground recipes with curated catalog for that host; reads first, then writes; dedup by id.
+ * @returns {{ id: string, name: string, does: string, write: boolean }[]}
+ */
+export function hostRideInventory(recipes, { host = '', catalog = null, limit = 14 } = {}) {
+  const h = _host(host);
+  const curated = catalog ? seedFromCatalog(catalog, { origin: h }) : [];
+  const merged = mergeRideCatalogForAnswer(curated, recipes);
+  const reads = []; const writes = [];
+  for (const r of merged) {
+    if (!armable(r)) continue;
+    const origin = _host(r.origin) || h;
+    if (h && origin && origin !== h && !origin.endsWith('.' + h) && !h.endsWith('.' + origin)) continue;
+    const write = r.write === true || (r.write == null && String(r.method || 'GET').toUpperCase() !== 'GET'
+      && !(r.gql === true));   // gql POST without write:true counts as a read for inventory
+    const item = { id: String(r.id || ''), name: String(r.name || r.id || ''), does: String(r.does || ''), write: !!write };
+    if (!item.id && !item.name) continue;
+    (write ? writes : reads).push(item);
+  }
+  return [...reads, ...writes].slice(0, Math.max(0, Number(limit) || 14));
+}
+
+/** Markdown body for a host ride inventory, or null when empty. PURE. */
+export function formatHostRideInventory(host, items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return null;
+  const label = String(host || 'that site').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  const lines = list.map((i) => {
+    const name = String((i && i.name) || (i && i.id) || 'ride');
+    const does = String((i && i.does) || '').trim();
+    const tag = (i && i.write) ? ' *(write)*' : '';
+    return `- **${name}**${tag}${does ? ` — ${does}` : ''}`;
+  });
+  return `On **${label}** I can:\n\n${lines.join('\n')}`;
+}

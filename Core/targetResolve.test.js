@@ -3,7 +3,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveTarget, siteRefTokens, renderTargetDecision } from './targetResolve.js';
+import { resolveTarget, siteRefTokens, renderTargetDecision, isCapabilityMetaAsk } from './targetResolve.js';
 import { vocabularyFingerprint } from './groundVocabulary.js';
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -95,5 +95,17 @@ describe('targetResolve — the TR ladder (TRT-2)', () => {
     const line = renderTargetDecision(d, { shadow: true });
     assert.ok(line.startsWith('TARGET ▸ (shadow) tier=TR-2/conversation'));
     assert.ok(line.includes('vendorsuite.drhorton.com') && line.includes('division'));
+  });
+});
+
+describe('isCapabilityMetaAsk — TR-1 meta vs act (v2.74.1761)', () => {
+  it('inventory phrasing is meta; about/with/for and compound are act', () => {
+    assert.equal(isCapabilityMetaAsk('what can you do on shopify?'), true);
+    assert.equal(isCapabilityMetaAsk("what's possible on admin.shopify.com"), true);
+    assert.equal(isCapabilityMetaAsk('capabilities on zendesk'), true);
+    assert.equal(isCapabilityMetaAsk('what can you do about refunds on shopify'), false);
+    assert.equal(isCapabilityMetaAsk('can you refund on shopify'), false);
+    assert.equal(isCapabilityMetaAsk('search shopify for customer x'), false);
+    assert.equal(isCapabilityMetaAsk('what can you do on shopify and then open the order'), false);
   });
 });

@@ -7,6 +7,7 @@ import {
   safetyClassForMethod, safetyRank, originMatchesAppHost, recipeFromCatalogEntry,
   seedFromCatalog, mergeRecipes, setEnabled, review, downgradeSafety, editMeta, armable, acceptPendingReads,
   curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries,
+  hostRideInventory, formatHostRideInventory,
 } from './rideRecipe.js';
 import { recipeToLeg } from './connectorLeg.js';   // PP-3 (v1661) — hop 3, so the Invariant-#3 test can assert on the LEG rather than the record
 
@@ -279,5 +280,26 @@ describe('PP-4 (v2.74.1680) — the pipeline-gate axes ride the SEEDED path (Inv
     assert.equal(leg.tool.reversible, true);
     assert.equal(leg.tool.outward, false);
     assert.equal(leg.safety, 'confirm', 'the pipeline axes must NOT relax the ordinary write gate');
+  });
+});
+
+describe('hostRideInventory / formatHostRideInventory — TR-1 meta (v2.74.1761)', () => {
+  it('lists armable curated rides for a host; pending excluded; markdown when non-empty', () => {
+    const cat = [
+      { id: 'a', name: 'Find customer', does: 'by email', method: 'GET', endpoint: '/c', appHost: 'admin.shopify.com' },
+      { id: 'b', name: 'Create customer', does: 'write', method: 'POST', endpoint: '/c', appHost: 'admin.shopify.com', write: true },
+      { id: 'z', name: 'Tickets', does: 'list', method: 'GET', endpoint: '/t', appHost: 'zendesk.com' },
+    ];
+    const items = hostRideInventory([], { host: 'admin.shopify.com', catalog: cat });
+    assert.equal(items.length, 2);
+    assert.equal(items[0].id, 'a');
+    assert.equal(items[0].write, false);
+    assert.equal(items[1].id, 'b');
+    assert.equal(items[1].write, true);
+    const md = formatHostRideInventory('admin.shopify.com', items);
+    assert.ok(md.includes('Find customer') && md.includes('Create customer') && md.includes('*(write)*'));
+    assert.equal(formatHostRideInventory('x', []), null);
+    const pending = [{ id: 'p', name: 'P', method: 'GET', endpoint: '/p', origin: 'admin.shopify.com', enabled: true, reviewState: 'pending' }];
+    assert.equal(hostRideInventory(pending, { host: 'admin.shopify.com' }).length, 0);
   });
 });

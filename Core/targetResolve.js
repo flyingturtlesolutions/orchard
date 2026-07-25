@@ -180,3 +180,17 @@ export function renderTargetDecision(d, { shadow = false } = {}) {
   if (d.altAffinity) parts.push(`alt=${d.altAffinity.groundId}(${(d.altAffinity.matchedTerms || []).join(',')})`);
   return `TARGET ▸ ${shadow ? '(shadow) ' : ''}${parts.join(' ')}`;
 }
+
+/**
+ * Capability / inventory meta-ask? PURE. Used by TR-1 (v2.74.1761): meta → host ride inventory (never honest-gap
+ * first); act-shaped stays on the do-path. Ambiguous ("can you refund on Shopify?") is NOT meta — act default.
+ * Anchored inventory phrasing only; "what can you do about/with/for …" is a do-ask; compound and/then stays act.
+ */
+export function isCapabilityMetaAsk(ask) {
+  const t = String(ask || '').trim();
+  if (!t) return false;
+  if (!/^\s*(?:what\s+can\s+(?:i|you|we)\s+do\b|what(?:'s|\s+is)\s+possible\b|what\s+do\s+you\s+(?:know\s+how\s+to\s+do|support)\b|(?:list\s+|show\s+(?:me\s+)?)?(?:your\s+)?capabilities\b)/i.test(t)) return false;
+  if (/\bwhat\s+can\s+(?:i|you|we)\s+do\s+(?:about|with|for|to)\b/i.test(t)) return false;
+  if (/\b(?:\band\b|\bthen\b|\bafter that\b|foreach|for\s+each)\b/i.test(t)) return false;
+  return true;
+}
