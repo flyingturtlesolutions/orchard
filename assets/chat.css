@@ -1854,9 +1854,9 @@ textarea {
   max-width: 100%;
   margin: 3px 0;
   padding: 3px 8px;
-  background: var(--c-bg-subtle);   /* v1788 — gray family (user directive), theme-aware via the neutrals */
+  background: rgba(160, 122, 201, 0.16);   /* v1789 — violet it is (v1787 → gray v1788 → back) */
   border-radius: var(--r-sm);
-  color: var(--c-text-subtle);
+  color: var(--c-x-violet-soft);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1865,7 +1865,7 @@ textarea {
   opacity: 0;
   transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background var(--t-fast);
 }
-.wf-row-steps li:hover { background: var(--c-bg-elevated); color: var(--c-text); }
+.wf-row-steps li:hover { background: rgba(160, 122, 201, 0.26); }
 .rail-item.is-workflow:hover .wf-row-steps li,
 .rail-item.is-workflow:focus-within .wf-row-steps li {
   transform: translateX(0);
