@@ -737,6 +737,7 @@ function _stopRailStatusTimer() { if (_railStatusTimer) { clearInterval(_railSta
 
 let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the drawer accordion (collapsed by default)
 let _expandedWfs = new Set();    // v2.74.1777 ("one class") — which desks' WORKFLOWS sections are pinned open
+let _expandedWfDetails = new Set();   // v1804 — which workflow CARDS' details are pinned open (by wf.id)
 
 // v2.74.1588 — COALESCE re-entrant renders: the body clears the container synchronously then awaits (list /
 // pending counts / alarms) before appending, so two OVERLAPPING calls each appended a full row set — the whole
@@ -8278,20 +8279,29 @@ function _railWorkflowRow(row, parentConv) {
   // v1799 — the detail's height slides via the measured-height helpers (the grid close snapped); the same
   // 150ms intent / 300ms grace as the CSS opacity, so the two stay in step. focus in/out mirrors for keyboard.
   const _detail = item.querySelector('.wf-row-detail');
+  const _detailPinned = () => _expandedWfDetails.has(wf.id);
   if (_detail) {
     let dOpenT = null, dCloseT = null;
+    if (_detailPinned()) { item.classList.add('detail-pinned'); item.setAttribute('aria-expanded', 'true'); _detail.style.height = 'auto'; }   // v1804 — a pinned card mounts open (re-renders keep it)
     item.addEventListener('pointerenter', () => { clearTimeout(dCloseT); dOpenT = setTimeout(() => _slideOpen(_detail), 150); });
-    item.addEventListener('pointerleave', () => { clearTimeout(dOpenT); dCloseT = setTimeout(() => _slideClosed(_detail), 300); });
+    item.addEventListener('pointerleave', () => { clearTimeout(dOpenT); dCloseT = setTimeout(() => { if (!_detailPinned()) _slideClosed(_detail); }, 300); });
     item.addEventListener('focusin', () => { clearTimeout(dCloseT); _slideOpen(_detail); });
-    item.addEventListener('focusout', () => { dCloseT = setTimeout(() => { if (!item.matches(':focus-within')) _slideClosed(_detail); }, 300); });
+    item.addEventListener('focusout', () => { dCloseT = setTimeout(() => { if (!item.matches(':focus-within') && !_detailPinned()) _slideClosed(_detail); }, 300); });
   }
-  // primary click = ITS history (the case-row symmetry: click a desk child, see its transcript)
+  // v1804 (user directive) — the card BODY click PINS the expansion in place, the same click-pins theme as the
+  // section buttons (hover peeks · click fixes). Run history stays on its chip.
+  const _toggleDetailPin = () => {
+    if (!_detail) return;
+    const nowPinned = !_detailPinned();
+    if (nowPinned) { _expandedWfDetails.add(wf.id); item.classList.add('detail-pinned'); _slideOpen(_detail); }
+    else { _expandedWfDetails.delete(wf.id); item.classList.remove('detail-pinned'); if (!item.matches(':hover')) _slideClosed(_detail); }
+    item.setAttribute('aria-expanded', String(nowPinned));
+  };
   item.addEventListener('click', (e) => {
     if (e.target.closest('[data-row-action]') || e.target.closest('button')) return;
-    _closeRail();
-    void _renderWorkflowRuns(wf);
+    _toggleDetailPin();
   });
-  _wireRowKeyboard(item, () => { _closeRail(); void _renderWorkflowRuns(wf); }, 'Workflow — ' + String(wf.name || wf.ask || ''));
+  _wireRowKeyboard(item, () => _toggleDetailPin(), 'Workflow — ' + String(wf.name || wf.ask || ''));
   return item;
 }
 
