@@ -1843,20 +1843,20 @@ textarea {
   margin: var(--sp-1) 0 0 0;
   padding: 0;
   list-style: none;
-  counter-reset: wfstep;
   font-size: 0.85em;
 }
-/* v2.74.1786 (user directive) — each step is a BLOCK in the badge-chip design language (the "workflow" label
-   the card carries: the soft-blue tint of .rail-item-badge.app), sentence-cased since steps are ask text. */
+/* v2.74.1786/1787 (user directives) — each step is a badge-style chip block: v1787 — its OWN color (the
+   violet family, distinct from the blue "workflow" badge), NO numbering, and the background WRAPS the text
+   (fit-content, not full-width). Order still reads top-to-bottom; ellipsis guards the rail width. */
 .wf-row-steps li {
-  counter-increment: wfstep;
-  position: relative;
   display: block;
+  width: fit-content;
+  max-width: 100%;
   margin: 3px 0;
-  padding: 3px 7px 3px 1.9em;
-  background: rgba(92, 139, 201, 0.14);
+  padding: 3px 8px;
+  background: rgba(160, 122, 201, 0.16);
   border-radius: var(--r-sm);
-  color: var(--c-x-info-soft);
+  color: var(--c-x-violet-soft);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1865,15 +1865,7 @@ textarea {
   opacity: 0;
   transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background var(--t-fast);
 }
-.wf-row-steps li::before {
-  content: counter(wfstep);
-  position: absolute;
-  left: 8px;
-  color: var(--c-x-info-soft);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-.wf-row-steps li:hover { background: rgba(92, 139, 201, 0.24); }
+.wf-row-steps li:hover { background: rgba(160, 122, 201, 0.26); }
 .rail-item.is-workflow:hover .wf-row-steps li,
 .rail-item.is-workflow:focus-within .wf-row-steps li {
   transform: translateX(0);
