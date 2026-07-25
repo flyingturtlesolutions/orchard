@@ -55,7 +55,7 @@ import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 �
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
-import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1791 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
+import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from
@@ -851,6 +851,7 @@ async function _renderRailListNow() {
   const _mkSection = (g, cls, pinned) => {
     const outer = document.createElement('div');
     outer.className = 'rail-section ' + cls + (pinned ? ' pinned' : '');
+    if (pinned) outer.style.height = 'auto';   // v1799 — measured-height slide: open sections render open
     outer.inert = !pinned;   // hidden rows must not be tab-reachable
     const inner = document.createElement('div');
     inner.className = 'rail-section-inner';
@@ -864,7 +865,7 @@ async function _renderRailListNow() {
     g.appendChild(el);
     _grpWfs = (row.wfCount > 0) ? _mkSection(g, 'rail-sec-wfs', _expandedWfs.has(row.id)) : null;
     _grpCases = row.hasChildren ? _mkSection(g, 'rail-sec-cases', row.expanded) : null;
-    // TL-1 (v2.74.1791, §14.2) — creation stays reachable with a thread up: the section ends in a ＋ Workflow
+    // TL-1 (v2.74.1796, §14.2) — creation stays reachable with a thread up: the section ends in a ＋ Workflow
     // row (the landing's card now shows only in true launch state). Parked + workflow rows insert BEFORE it.
     if (_grpWfs) {
       const add = document.createElement('div');
@@ -903,7 +904,7 @@ async function _renderRailListNow() {
       _grpCases.appendChild(el);
       // the ACTIVE case must never hide inside a closed section (a spawn opens the case as current) — force it
       // open presentationally; the pin store is untouched.
-      if (row.active) { _grpCases.parentElement.classList.add('pinned'); _grpCases.parentElement.inert = false; }
+      if (row.active) { _grpCases.parentElement.classList.add('pinned'); _grpCases.parentElement.style.height = 'auto'; _grpCases.parentElement.inert = false; }
       continue;
     }
     if (row.role === 'app' && (row.hasChildren || row.wfCount > 0)) {
@@ -935,17 +936,40 @@ const _isRowActionTarget = (e) => !!e.target.closest('[data-row-action]');
 // action button, in AND out): hovering it (150ms intent delay) reveals the section; leaving it closes after a
 // 300ms grace. Peek is a PREVIEW — interacting with the rows means pinning (click). A pinned section ignores
 // all of it. inert tracks visibility so hidden rows are never tab-reachable.
+// v2.74.1799 (live: "expands animated, SNAPS on collapse") — measured-height slide replaces the grid
+// 0fr→1fr trick: the grid CLOSE never animated in the field (the open only looked animated because the row
+// slide-ins masked the height snap). Explicit px→px height transitions run deterministically BOTH ways.
+// Open: measure → px → release to 'auto' on transition end (so content growing inside — a card detail —
+// is never clipped; a 400ms fallback covers reduced-motion where transitionend never fires).
+// Close: lock the real height in px, commit it, then 0 — 'auto'→0 cannot transition, px→0 does.
+function _slideOpen(el) {
+  if (!el) return;
+  el.style.height = el.scrollHeight + 'px';
+  const t = setTimeout(() => { try { el.style.height = 'auto'; } catch { /* */ } }, 400);
+  const onEnd = (e) => { if (e.propertyName === 'height') { clearTimeout(t); el.style.height = 'auto'; el.removeEventListener('transitionend', onEnd); } };
+  el.addEventListener('transitionend', onEnd);
+}
+function _slideClosed(el) {
+  if (!el) return;
+  el.style.height = el.scrollHeight + 'px';
+  void el.offsetHeight;
+  el.style.height = '0px';
+}
 function _wireSectionPeek(btn, section) {
   if (!btn || !section) return;
   let openT = null, closeT = null;
   const syncInert = () => { section.inert = !(section.classList.contains('pinned') || section.classList.contains('peek')); };
   btn.addEventListener('pointerenter', () => {
     clearTimeout(closeT);
-    openT = setTimeout(() => { section.classList.add('peek'); syncInert(); }, 150);
+    openT = setTimeout(() => { section.classList.add('peek'); _slideOpen(section); syncInert(); }, 150);
   });
   btn.addEventListener('pointerleave', () => {
     clearTimeout(openT);
-    closeT = setTimeout(() => { section.classList.remove('peek'); syncInert(); }, 300);
+    closeT = setTimeout(() => {
+      section.classList.remove('peek');
+      if (!section.classList.contains('pinned')) _slideClosed(section);
+      syncInert();
+    }, 300);
   });
 }
 
@@ -958,6 +982,7 @@ function _railTogglePin(rowEl, secCls, store, key, btn) {
   if (sec) {
     sec.classList.toggle('pinned', nowPinned);
     if (!nowPinned) sec.classList.remove('peek');
+    if (nowPinned) _slideOpen(sec); else if (!sec.classList.contains('peek')) _slideClosed(sec);   // v1799 — height rides the pin
     sec.inert = !nowPinned && !sec.classList.contains('peek');
   }
   if (btn) btn.setAttribute('aria-pressed', String(nowPinned));
@@ -8009,7 +8034,7 @@ async function _loadWorkflowsMerged() {
   } catch { /* the orphan merge must never hide the desk's own workflows */ }
   return out;
 }
-// v2.74.1791 — every DECLARED leg name, from the pure catalogs (no IO, no storage): ride recipes, drive
+// v2.74.1796 — every DECLARED leg name, from the pure catalogs (no IO, no storage): ride recipes, drive
 // artifacts, builtin/self legs. Feeds the reachability guard below. Taught capabilities are deliberately absent
 // — they are user-authored and may legitimately share a workflow's phrasing; the catalogs are ours.
 let _LEG_NAMES = null;
@@ -8032,7 +8057,7 @@ async function _matchWorkflow(goal) {
   if (workflows.length) { try { _orchLog(`WORKFLOW ▸ recall miss "${String(goal).slice(0, 40)}" keys=${_workflowKeys().join('+')} (${workflows.length} saved)`); } catch { /* */ } }
   const candidates = workflowCandidates(workflows);
   if (!candidates.length || !workflowSharesVocab(goal, candidates)) return null;   // near-miss gate — no LLM otherwise
-  // v2.74.1791 — THE REACHABILITY GUARD. This semantic fallback is CLASS-BLIND: it sees only workflows, so it
+  // v2.74.1796 — THE REACHABILITY GUARD. This semantic fallback is CLASS-BLIND: it sees only workflows, so it
   // can never answer "that isn't a workflow ask". Live (trace 201711) it claimed "review a warranty task on the
   // page" at conf 0.72 — the EXACT name of a declared drive artifact — and the artifact, armed and projecting a
   // palette leg the whole time, has never hydrated once. Declining hands the ask to interpret, which offers the
@@ -8210,6 +8235,16 @@ function _railWorkflowRow(row, parentConv) {
     rerender();
   }));
   item.appendChild(acts);
+  // v1799 — the detail's height slides via the measured-height helpers (the grid close snapped); the same
+  // 150ms intent / 300ms grace as the CSS opacity, so the two stay in step. focus in/out mirrors for keyboard.
+  const _detail = item.querySelector('.wf-row-detail');
+  if (_detail) {
+    let dOpenT = null, dCloseT = null;
+    item.addEventListener('pointerenter', () => { clearTimeout(dCloseT); dOpenT = setTimeout(() => _slideOpen(_detail), 150); });
+    item.addEventListener('pointerleave', () => { clearTimeout(dOpenT); dCloseT = setTimeout(() => _slideClosed(_detail), 300); });
+    item.addEventListener('focusin', () => { clearTimeout(dCloseT); _slideOpen(_detail); });
+    item.addEventListener('focusout', () => { dCloseT = setTimeout(() => { if (!item.matches(':focus-within')) _slideClosed(_detail); }, 300); });
+  }
   // primary click = ITS history (the case-row symmetry: click a desk child, see its transcript)
   item.addEventListener('click', (e) => {
     if (e.target.closest('[data-row-action]') || e.target.closest('button')) return;
@@ -8340,7 +8375,7 @@ async function _wfSetSchedule(wf, wfKey, minutes) {
   return { ok, wfKey };
 }
 
-// TL-1 (v2.74.1791) — _wfScheduleBar (the launch-card message-row picker) is DELETED with the cards; the rail
+// TL-1 (v2.74.1796) — _wfScheduleBar (the launch-card message-row picker) is DELETED with the cards; the rail
 // rows' _wfScheduleInline + the shared _wfSetSchedule writer are the surviving pickers.
 
 // ORCH-CB — COLD ground: the LLM planner couldn't bind a plan, but a STRUCTURED ask still has shape. Comprehend it
@@ -10246,9 +10281,17 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     }
     const why = _errWord(d && (d.reason || d.error), 'a step failed');   // v1591
     _setMessageBody(msg, `Opened ${host}, but couldn’t finish “${leg.name || 'the walk'}” — ${why}. The page is open where it stopped.`);
-    // v2.74.1791 — a PRECONDITION failure is not evidence about the capability (the walk never ran a step), so it
+    // v2.74.1796 — a PRECONDITION failure is not evidence about the capability (the walk never ran a step), so it
     // banks NO outcome — the same carve-out a user CANCEL already gets. Without this, one signed-out run taught
     // "this capability doesn't work" and permanently steered later asks away from it (live traces 203241/203602).
+    // v2.74.1796 — SELF-HEAL: a precondition failure PROVES this ask has a non-capability failure mode, so an
+    // earlier un-classified "this capability didn't work" verdict for it is untrustworthy — retire it. Worst
+    // case a genuinely broken capability loses a weak (0.4) flag and re-earns it on the next REAL failure, which
+    // now banks with its cause classified. Best case the wedge from a signed-out run clears itself.
+    if (d && d.precondition) {
+      const _mid = _memoryId();
+      if (_mid) retireActFail(_mid, ask).then((n) => { if (n) { try { _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${String(ask).slice(0, 40)}" after a PRECONDITION failure (not a capability verdict)`); } catch { /* */ } } }).catch(() => { /* */ });
+    }
     return (d && d.precondition) ? 'precondition' : false;
   }
   // §20 (v2.74.1288) — HEADER-REPLAY session-ride: a harvested cross-origin Bearer read (cookie-ride can't reach it) runs
@@ -10715,7 +10758,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     if (cleg) {
       const ok = await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema) });
       _orchFinalize(msg);
-      // AL-3e — bank the OUTCOME. A user CANCEL is neither success nor failure (v1338, review C); v2.74.1791 — nor
+      // AL-3e — bank the OUTCOME. A user CANCEL is neither success nor failure (v1338, review C); v2.74.1796 — nor
       // is a PRECONDITION failure (the page never became ready, e.g. signed out) — the walk ran no step, so it is
       // no evidence about the capability. Note `ok !== false` would otherwise score the sentinel as a SUCCESS.
       if (ok !== 'cancelled' && ok !== 'precondition') _bankCapabilityOutcome(goal, d.capabilityId, ok !== false, turn.memoryId);
@@ -11804,6 +11847,27 @@ async function sendChatMessage() {
   // "memorize …"). Live: "add to memory, return only the result…" fell to the LLM answer path, which ECHOED a
   // FABRICATED division list and claimed "Added to memory" — a false side-effect claim. A memory command is
   // deterministic: bank + the honest ack, never a model turn.
+  // v2.74.1796 — `forget:` — the ERASER `remember:` shipped without. Live (traces 203241→205258): ONE failure
+  // recorded while the site was signed out became "this capability didn't work", and every retry afterwards was
+  // steered to clarify. Two escape hatches already existed (re-teach → retireActFail at the demonstration path;
+  // one success → the v1328 positive-belief suppression) but BOTH require running the thing the lesson forbids,
+  // so a user who disagrees with a lesson had no way to say so. This is that way: it retires the ACT-FAIL
+  // lesson(s) for a goal — never beliefs, never `remember:` rules (those have no act-fail provenance).
+  const _mForget = text.match(/^(?:forget\s*:|forget\s+(?:that\s+)?|unlearn\s*:?)\s*(\S[\s\S]*)$/i);
+  if (_mForget) {
+    const m = appendMessage({ role: 'assistant', body: '' });
+    const _goal = String(_mForget[1] || '').trim();
+    const _mid = _memoryId();
+    if (!_mid) { _setMessageBody(m, 'Nothing to forget — this view has no memory of its own yet.'); _orchFinalize(m); return; }
+    let n = 0;
+    try { n = await retireActFail(_mid, _goal); } catch { n = 0; }
+    try { _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${_goal.slice(0, 40)}" (user: forget)`); } catch { /* */ }
+    _setMessageBody(m, n
+      ? `Forgotten — dropped ${n} “that didn’t work” lesson${n === 1 ? '' : 's'} for “${_goal}”. I’ll try it fresh next time.`
+      : `I had no “that didn’t work” lesson for “${_goal}”. (This clears failure lessons only — standing rules from “remember:” stay; type “memory” to review them.)`);
+    _orchFinalize(m); return;
+  }
+
   const _mRemember = text.match(/^(?:remember\s*:|remember\s+this\s*[:,—–-]|add\s+(?:this\s+)?to\s+(?:your\s+)?memory\s*[:,—–-]?|save\s+(?:this\s+)?to\s+(?:your\s+)?memory\s*[:,—–-]?|memorize\s*[:,—–-])\s*(\S[\s\S]*)$/i);
   if (_mRemember) {
     const m = appendMessage({ role: 'assistant', body: '' });
@@ -13450,7 +13514,7 @@ async function _renderDeskLanding(conv) {
     // otherwise _enterConversation() and steal the page right after a revive). The exit paths re-render it.
     if (_wfWizard && _wfWizard.convId === String(conv.id)) return;
     if (!isAdmin && !(conv.appId && !conv.parentId)) return;
-    // TL-1 (v2.74.1791, §14.2) — HARD launch-state gate: for a work desk ANY thread message (a fan-out summary,
+    // TL-1 (v2.74.1796, §14.2) — HARD launch-state gate: for a work desk ANY thread message (a fan-out summary,
     // a run bubble — assistant counts) means the landing never renders; it must not interleave with a thread.
     // The DOM check covers messages appended this session that haven't landed in the store snapshot yet.
     // Admin keeps the user-role gate (its vitals card is an assistant message and must not suppress the landing).
@@ -13482,7 +13546,7 @@ async function _renderDeskLanding(conv) {
         // workflow can fire on a clock, an accidental manual run is a more expensive misclick than an accidental
         // open" — that clause is live since v1692, so the body now opens the RUN HISTORY (§6) and only the ▶ chip
         // runs. Non-workflow cards (command / ＋ workflow) keep run-on-click — they're deterministic doors.
-        // TL-1 (v2.74.1791) — the c.kind === 'workflow' branch is GONE with the launch cards (§14.2);
+        // TL-1 (v2.74.1796) — the c.kind === 'workflow' branch is GONE with the launch cards (§14.2);
         // the Rail workflows section owns rendering + actions now.
         const b = document.createElement('button');
         b.className = 'suggestion-card';
