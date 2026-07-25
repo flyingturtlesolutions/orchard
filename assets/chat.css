@@ -1784,6 +1784,10 @@ textarea {
 /* ── Rail peek/pin (v2.74.1774, DESIGN_panel_surfaces.md §8) ─────────────────────────────────────────────
    The bottom-right ACTION CLUSTER — one flex container (workflows · cases · add case), replacing three
    hand-tuned absolute offsets (the v1773 collision class dies here). Sits left of the delete column. */
+/* v1819 (user directive) — body text never sits under the bottom action cluster: rows carrying one
+   reserve its band (cluster = 22px at bottom sp-2 → 34px clears it with a 4px gap). Parked rows use the
+   in-flow .rail-static cluster and need no reservation. */
+.rail-item:has(> .rail-item-actions:not(.rail-static)) { padding-bottom: 34px; }
 .rail-item-actions {
   position: absolute;
   bottom: var(--sp-2);
