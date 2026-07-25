@@ -1270,6 +1270,17 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     try {
       item.closest('#rail-list')?.querySelectorAll('.rail-item.active').forEach((el) => el.classList.remove('active'));
       item.classList.add('active');
+      // v1810 (user: "rule not honored") — ONE shifted card across the WHOLE rail: selecting a view/case
+      // releases any pinned workflow card in place (its section too, if the pin was all that held it open).
+      _expandedWfDetails.clear();
+      document.querySelectorAll('#rail-list .rail-item.is-workflow.detail-pinned').forEach((el) => {
+        el.classList.remove('detail-pinned');
+        el.setAttribute('aria-expanded', 'false');
+        const d = el.querySelector('.wf-row-detail');
+        if (d && !el.matches(':hover')) _slideClosed(d);
+        const sec = el.closest('.rail-section');
+        if (sec && !sec.classList.contains('pinned') && !sec.classList.contains('peek') && !sec.querySelector('.detail-pinned')) { _slideClosed(sec); sec.inert = true; }
+      });
     } catch { /* */ }
   };
   item.addEventListener('click', (e) => {

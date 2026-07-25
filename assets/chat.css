@@ -1857,6 +1857,10 @@ textarea {
 .rail-item:not(.is-workflow) .rail-item-meta { padding-left: 0; transition: padding-left 300ms cubic-bezier(0.22, 1, 0.36, 1); }
 .rail-item.active:not(.is-workflow) .rail-item-summary,
 .rail-item.active:not(.is-workflow) .rail-item-meta { padding-left: 13px; }
+/* v1810 — ONE shifted card rail-wide: while a workflow card is pinned, the active view/case card yields
+   its indent (selection itself is untouched — only the shift styling is exclusive). */
+#rail-list:has(.rail-item.is-workflow.detail-pinned) .rail-item.active:not(.is-workflow) .rail-item-summary,
+#rail-list:has(.rail-item.is-workflow.detail-pinned) .rail-item.active:not(.is-workflow) .rail-item-meta { padding-left: 0; }
 /* v2.74.1785 (user directive) — each STEP is highlighted: its own pill row (accented number + soft chip
    background) sliding in with the theme's stagger as the card opens. */
 .wf-row-steps {
