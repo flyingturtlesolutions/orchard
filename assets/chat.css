@@ -1846,15 +1846,18 @@ textarea {
   counter-reset: wfstep;
   font-size: 0.85em;
 }
+/* v2.74.1786 (user directive) — each step is a BLOCK in the badge-chip design language (the "workflow" label
+   the card carries: the soft-blue tint of .rail-item-badge.app), sentence-cased since steps are ask text. */
 .wf-row-steps li {
   counter-increment: wfstep;
   position: relative;
+  display: block;
   margin: 3px 0;
-  padding: 2px 7px 2px 1.9em;
-  background: var(--c-bg-subtle);
-  border: 1px solid var(--c-border-soft);
+  padding: 3px 7px 3px 1.9em;
+  background: rgba(92, 139, 201, 0.14);
   border-radius: var(--r-sm);
-  color: var(--c-text);
+  color: var(--c-x-info-soft);
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1866,11 +1869,11 @@ textarea {
   content: counter(wfstep);
   position: absolute;
   left: 8px;
-  color: var(--c-accent);
+  color: var(--c-x-info-soft);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
-.wf-row-steps li:hover { background: var(--c-bg-elevated); }
+.wf-row-steps li:hover { background: rgba(92, 139, 201, 0.24); }
 .rail-item.is-workflow:hover .wf-row-steps li,
 .rail-item.is-workflow:focus-within .wf-row-steps li {
   transform: translateX(0);
