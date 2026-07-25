@@ -1102,7 +1102,7 @@ function _historyNewAppRow() {
 function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   const isDev = conv.kind === 'dev';
   const badge = isDev ? (conv.surface === 'high' ? '<span class="rail-item-badge design">design</span>' : '<span class="rail-item-badge">dev</span>')
-                      : (row.role === 'subtask' ? `<span class="rail-item-badge app" aria-label="a case under ${escHtml(conv.title)}">case</span>` : `<span class="rail-item-badge app" aria-label="${escHtml(conv.title)} — a view">view</span>`);   // Case rename (v1492) — a spawned child badges as a CASE
+                      : (row.role === 'subtask' ? `<span class="rail-item-badge case" aria-label="a case under ${escHtml(conv.title)}">case</span>` : `<span class="rail-item-badge app" aria-label="${escHtml(conv.title)} — a view">view</span>`);   // v1794 — view/case/workflow each get their own badge color   // Case rename (v1492) — a spawned child badges as a CASE
   // FL-6c (v2.74.1357) — the pending-proposals chip: a sweep with results lights the APP row (children share the
   // instance, so only the app row carries it). `pending` is a derived count (number), never untrusted text.
   const pendingChip = (row.role === 'app' && pending > 0)
@@ -8169,7 +8169,7 @@ function _railWorkflowRow(row, parentConv) {
     ? new Date(wf.trigger.nextDue).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   const schedLine = _sched ? ('⏱ ' + _sched + (nextDue ? ' · next ' + nextDue : '')) : 'no schedule — the clock chip arms one';
   const stepsList = (Array.isArray(wf.subAsks) ? wf.subAsks : []).map((t) => '<li>' + escHtml(String(t)) + '</li>').join('');
-  item.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">•</span><span class="rail-item-badge app" aria-label="a workflow under ' + escHtml((parentConv && parentConv.title) || '') + '">workflow</span>' + escHtml(wf.name || wf.ask || '') + '</div>'
+  item.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">•</span><span class="rail-item-badge wf" aria-label="a workflow under ' + escHtml((parentConv && parentConv.title) || '') + '">workflow</span>' + escHtml(wf.name || wf.ask || '') + '</div>'
     + '<div class="rail-item-meta">' + escHtml(meta) + '</div>'
     + '<div class="wf-row-detail"><div class="wf-row-detail-inner"><ol class="wf-row-steps">' + stepsList + '</ol><div class="wf-row-sched">' + escHtml(schedLine) + '</div></div></div>';
   const acts = document.createElement('div');

@@ -1732,6 +1732,10 @@ textarea {
    Declared before .rail-item.active so an active row's accent left-rail wins (equal specificity, later rule). */
 .rail-item.app { border-left: 2px solid #5c8bc9; padding-left: calc(var(--sp-3) - 2px); }
 .rail-item-badge.app { background: rgba(92, 139, 201, 0.18); color: var(--c-x-info-soft); }
+/* v2.74.1794 (user directive) — the three desk-child labels each get their own family:
+   VIEW = blue (kept) · CASE = green · WORKFLOW = violet (matching its step chips). */
+.rail-item-badge.case { background: rgba(76, 175, 125, 0.18); color: var(--c-x-ok-soft); }
+.rail-item-badge.wf { background: rgba(160, 122, 201, 0.18); color: var(--c-x-violet-soft); }
 .rail-item-badge.design { background: rgba(160, 122, 201, 0.18); color: var(--c-x-violet-soft); }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
 .rail-item-badge {
   display: inline-block;
