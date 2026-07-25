@@ -1851,6 +1851,12 @@ textarea {
 /* v1806 — the META line ("2 steps · …") is part of the body: it shifts with the same pin transition. */
 .rail-item.is-workflow .rail-item-meta { padding-left: 0; transition: padding-left 300ms cubic-bezier(0.22, 1, 0.36, 1); }
 .rail-item.is-workflow.detail-pinned .rail-item-meta { padding-left: 13px; }
+/* v1807 (user directive) — the SAME click-shift on every card: the ACTIVE (selected) card's body — summary
+   + meta — indents on the same curve. Workflow cards keep their own pin-driven variant above. */
+.rail-item:not(.is-workflow) .rail-item-summary,
+.rail-item:not(.is-workflow) .rail-item-meta { padding-left: 0; transition: padding-left 300ms cubic-bezier(0.22, 1, 0.36, 1); }
+.rail-item.active:not(.is-workflow) .rail-item-summary,
+.rail-item.active:not(.is-workflow) .rail-item-meta { padding-left: 13px; }
 /* v2.74.1785 (user directive) — each STEP is highlighted: its own pill row (accented number + soft chip
    background) sliding in with the theme's stagger as the card opens. */
 .wf-row-steps {

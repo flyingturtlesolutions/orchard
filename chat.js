@@ -1253,14 +1253,24 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   // opens its FULL timeline (closes the drawer). A short timer separates the two; delete/preview/chevron/subtask keep
   // their own handlers.
   let _rowClickTimer = null;
+  // v1807 (user directive) — selection carries the SAME click-shift the workflow pin has: flip 'active'
+  // optimistically so the body-indent transition runs NOW, not after the async select's re-render (the swap
+  // then mounts the same final state — no jump).
+  const _optimisticActive = () => {
+    try {
+      item.closest('#rail-list')?.querySelectorAll('.rail-item.active').forEach((el) => el.classList.remove('active'));
+      item.classList.add('active');
+    } catch { /* */ }
+  };
   item.addEventListener('click', (e) => {
     if (_isRowActionTarget(e)) return;
     if (_rowClickTimer) return;                          // 2nd click of a double — dblclick handles it
-    _rowClickTimer = setTimeout(() => { _rowClickTimer = null; void _selectConvForInput(conv); }, 220);
+    _rowClickTimer = setTimeout(() => { _rowClickTimer = null; _optimisticActive(); void _selectConvForInput(conv); }, 220);
   });
   item.addEventListener('dblclick', (e) => {
     if (_isRowActionTarget(e)) return;
     if (_rowClickTimer) { clearTimeout(_rowClickTimer); _rowClickTimer = null; }
+    _optimisticActive();
     void _openConvFullTimeline(conv);
   });
 
