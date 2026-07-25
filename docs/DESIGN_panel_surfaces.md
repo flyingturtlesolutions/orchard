@@ -374,3 +374,65 @@ they were one missing system (§5.4). When corrections cluster on the same contr
 | Rail badges wrong vocabulary (v1733) | hand-coded rows, bare-word badges | PS-8 |
 | adopt ceremony rejected (v1722) | needs-action ceremony in the wrong channel | PS-6/7 |
 | one-row history "what else should it show" (v1748) | (data, fixed by §6.5) — but FOUND only because history finally had a surface | — |
+
+---
+
+## 14. The timeline carries conversation ONLY — the hygiene arc (added 2026-07-25, post-live-review)
+
+### 14.1 The finding (a single live screenful)
+
+One paste of the Warranty desk timeline contained FOUR content classes fighting one scroll:
+
+1. a fan-out completion summary — conversation (belongs; bloated: ~30 words of repeated coaching),
+2. a `deako.zendesk.com looks signed out` bubble WITH an "Open Admin view" button — system status
+   (violates the §1 transcript ruling AND the VT-2/§7 channel policy; persisted, so it stays visible —
+   and stale — after the case auto-resolves),
+3. the desk LANDING (greeting · description · workflow launch cards · ＋ Workflow) — a page, interleaved
+   mid-thread between the warning and a live run (the one-shot-surface disease; the launch-state gate either
+   failed or re-asserted after the fan-out),
+4. live run-step bubbles (`Step 1 of 2 … 11s`) — conversation in the wrong SHAPE (per-step bubbles; the §9
+   one-component ruling is built only in its PS-9 minimal form).
+
+Post-§8.4, (3) is also REDUNDANT: the landing's workflow cards duplicate the Rail workflows section in a
+second styling system (the three emoji chips the §6.3 conformance advisory already flags).
+
+### 14.2 Rulings
+
+**TL-1 — the landing never interleaves with a thread.**
+- The landing renders ONLY in true launch state (zero thread messages) and never re-asserts into `#messages`
+  once a thread exists. Its self-gate becomes a hard precondition, not a courtesy check.
+- The landing's workflow LAUNCH CARDS retire — the Rail workflows section (§8.4) is the one workflow surface.
+  The three emoji chips die with them (closes the §6.3 advisory).
+- ＋ Workflow keeps two doors: the empty landing's card (unchanged) and a trailing "＋ Workflow" row at the
+  bottom of the Rail workflows section — so creation is reachable while a thread is up without re-entering
+  launch state.
+- The `from "X"` provenance tag shows only when the workflow's class ≠ this desk's class (post-1780 it is
+  stale on-desk).
+
+**TL-2 — no status bubbles in the transcript, ever.** The presence/signed-out warning bubble is DELETED, not
+compressed: the fact is already fully carried by its channel-correct surfaces (the Admin incident CASE + the
+Rail badge, §7). A status claim must never persist in a transcript — the transcript is durable and the claim
+is not ("signed out" outlives the re-sign-in). If a desk-local hint proves necessary live, it is a TRANSIENT
+chip in the composer area (the §4 chip infrastructure), never a message.
+
+**TL-3 — one run, one bubble (§9 finished).** The full `_progressBubble`: the step line updates IN PLACE
+(`Step i of N — "text"`), the tick region carries `onEach` progress, elapsed rides it (PS-9's ticker folds
+in), and the result region replaces the whole thing on `done()` — which is also where the §6.5 history write
+already hangs. The chain's per-step `appendMessage` calls migrate INTO it per-clause (the CD-1a phase-2
+discipline; never a big-bang rewrite of the working chain).
+
+**TL-4 — fan-out summaries are result lines, not coaching.** `✓ 2 cases · "show contacts" ran in each` +
+case links. The how-to prose ("Open any to see its result; ask me to…") moves to a title tooltip; the Rail
+cases section is the roster. The transcript records WHAT happened; the chrome teaches how to see more.
+
+### 14.3 The ladder continues (§10 numbering)
+
+| Rung | Builds | Depends on | Risk |
+|---|---|---|---|
+| **TL-1** | landing de-interleave (hard gate) + launch-card retirement + the Rail "＋ Workflow" row | §8.4 | medium (the landing's self-gate interacts with the wizard/fan-out re-render paths) |
+| **TL-2** | delete the presence thread bubble (`_maybeWarnDeskConnections` path) | §7 | low |
+| **TL-3** | full `_progressBubble`, adopted per-clause | PS-9 | medium-high (live run rendering; per-clause, verify each) |
+| **TL-4** | compact fan-out summary line | — | low |
+
+Order is by clutter-per-effort: TL-1 deletes the biggest block AND a dual-maintenance burden; TL-2 is a
+deletion; TL-3 is the careful one; TL-4 is copy.
