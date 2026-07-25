@@ -8106,8 +8106,15 @@ function _railWorkflowRow(row, parentConv) {
   const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
   const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
   const meta = steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '');
+  // v2.74.1781 (user directive) — the hover-expand theme continues INTO the card: hovering a workflow row
+  // slides open its detail (the itemized steps + the schedule), same grid animation, intent delay in CSS.
+  const nextDue = (wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0)
+    ? new Date(wf.trigger.nextDue).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  const schedLine = _sched ? ('⏱ ' + _sched + (nextDue ? ' · next ' + nextDue : '')) : 'no schedule — the clock chip arms one';
+  const stepsList = (Array.isArray(wf.subAsks) ? wf.subAsks : []).map((t) => '<li>' + escHtml(String(t)) + '</li>').join('');
   item.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">•</span><span class="rail-item-badge app" aria-label="a workflow under ' + escHtml((parentConv && parentConv.title) || '') + '">workflow</span>' + escHtml(wf.name || wf.ask || '') + '</div>'
-    + '<div class="rail-item-meta">' + escHtml(meta) + '</div>';
+    + '<div class="rail-item-meta">' + escHtml(meta) + '</div>'
+    + '<div class="wf-row-detail"><div class="wf-row-detail-inner"><ol class="wf-row-steps">' + stepsList + '</ol><div class="wf-row-sched">' + escHtml(schedLine) + '</div></div></div>';
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions wf-ov-actions';   // wf-ov-actions → _wfScheduleInline swaps it for the picker
   acts.dataset.rowAction = '';
