@@ -946,12 +946,21 @@ function _slideOpen(el) {
   if (!el) return;
   el.style.height = el.scrollHeight + 'px';
   const t = setTimeout(() => { try { el.style.height = 'auto'; } catch { /* */ } }, 400);
-  const onEnd = (e) => { if (e.propertyName === 'height') { clearTimeout(t); el.style.height = 'auto'; el.removeEventListener('transitionend', onEnd); } };
+  const onEnd = (e) => {
+    if (e.target !== el || e.propertyName !== 'height') return;   // bcp v1801 — a CHILD's height transitionend bubbles (the card detail inside a section) and must not release early
+    clearTimeout(t); el.style.height = 'auto'; el.removeEventListener('transitionend', onEnd);
+  };
   el.addEventListener('transitionend', onEnd);
 }
 function _slideClosed(el) {
   if (!el) return;
-  el.style.height = el.scrollHeight + 'px';
+  // bcp v1801 — start from the RENDERED height, never scrollHeight: scrollHeight ignores height:0, so closing
+  // an already-closed section (a sub-150ms hover-past fires the close timer with nothing open) faked a
+  // full-height start — a phantom flash-open + 340ms shrink. Rendered height also makes a mid-open close
+  // reverse from where it visually is instead of jumping to full.
+  const cur = el.getBoundingClientRect().height;
+  if (cur < 1) { el.style.height = '0px'; return; }
+  el.style.height = cur + 'px';
   void el.offsetHeight;
   el.style.height = '0px';
 }
@@ -2389,6 +2398,7 @@ async function _runPersistentFanout(app, children, directive, msg, { suffix = ''
   // TL-3 (v2.74.1793, §14.2) — the fan-out adopts the reporter regions: step line + live tick + elapsed in
   // ONE bubble, replaced by the result on done. (The chain's own per-clause adoption is the owed §9 rung.)
   const pb = _progressBubble(msg);
+  _setMessageBody(msg, '');   // bcp v1801 — the reused chain bubble's stale step text must not sit above the reporter regions
   pb.step(`${children.length} case${children.length === 1 ? '' : 's'} — “${directive}”`);
   const results = await _runEachChild(children, directive, (fin) => pb.tick(`working ${fin}/${children.length}`));
   pb.done();
