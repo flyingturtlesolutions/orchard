@@ -1837,15 +1837,57 @@ textarea {
   opacity: 1;
   transition-delay: 150ms;
 }
+/* v2.74.1785 (user directive) — each STEP is highlighted: its own pill row (accented number + soft chip
+   background) sliding in with the theme's stagger as the card opens. */
 .wf-row-steps {
   margin: var(--sp-1) 0 0 0;
-  padding-left: 1.4em;
+  padding: 0;
+  list-style: none;
+  counter-reset: wfstep;
   font-size: 0.85em;
-  color: var(--c-text-subtle);
 }
-.wf-row-steps li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-row-steps li {
+  counter-increment: wfstep;
+  position: relative;
+  margin: 3px 0;
+  padding: 2px 7px 2px 1.9em;
+  background: var(--c-bg-subtle);
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--r-sm);
+  color: var(--c-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translateX(-8px);
+  opacity: 0;
+  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background var(--t-fast);
+}
+.wf-row-steps li::before {
+  content: counter(wfstep);
+  position: absolute;
+  left: 8px;
+  color: var(--c-accent);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.wf-row-steps li:hover { background: var(--c-bg-elevated); }
+.rail-item.is-workflow:hover .wf-row-steps li,
+.rail-item.is-workflow:focus-within .wf-row-steps li {
+  transform: translateX(0);
+  opacity: 1;
+  transition-delay: 150ms;   /* rides the card's intent gate */
+}
+.rail-item.is-workflow:hover .wf-row-steps li:nth-child(2),
+.rail-item.is-workflow:focus-within .wf-row-steps li:nth-child(2) { transition-delay: 190ms; }
+.rail-item.is-workflow:hover .wf-row-steps li:nth-child(3),
+.rail-item.is-workflow:focus-within .wf-row-steps li:nth-child(3) { transition-delay: 230ms; }
+.rail-item.is-workflow:hover .wf-row-steps li:nth-child(n+4),
+.rail-item.is-workflow:focus-within .wf-row-steps li:nth-child(n+4) { transition-delay: 270ms; }
 .wf-row-sched { margin-top: 2px; font-size: 0.85em; color: var(--c-text-subtle); }
-@media (prefers-reduced-motion: reduce) { .wf-row-detail { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .wf-row-detail,
+  .wf-row-steps li { transition: none; }
+}
 
 /* a WORKFLOW row's icon chips hover-reveal (the app-row idiom), slightly tightened for the rail */
 .rail-item.is-workflow .rail-item-actions { right: var(--sp-2); }   /* no delete column on these rows */
