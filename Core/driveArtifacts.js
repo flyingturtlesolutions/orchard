@@ -37,10 +37,19 @@ function _host(origin) { return String(origin || '').replace(/^https?:\/\//i, ''
 //   compose (tier 2)          — ordered tier-1 ids; params derive as the union of the composed entries'.
 //   write                     — true → safetyClass 'gated' (slice 1 ships READ-shaped review flows only).
 
-const VSD = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', sectionPath: '/#warranty', catalogVersion: 3 });
+const VSD = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', sectionPath: '/#warranty', catalogVersion: 5 });   // v2.74.1812 — 4→5 re-invalidates the entities hydrated from the F2/F3 steps below; v2.74.1804 — 3→4 INVALIDATES the entities hydrated from the broken #divisionMenu steps (they hydrated for the first time this run); without the bump the stale fragments would replay forever
 // Live DOM (v1456): `#divisionMenu` is the OPEN dropdown list (`ul.item-list` of divisions), NOT the header toggle.
 // The toggle is the sibling `.self-stretch…pointer-select` showing the current division name + chevron.
-const VSD_DIVISION_TOGGLE = '.flex.align-center:has(#divisionMenu) > .self-stretch.flex.align-center.pointer-select';
+// v2.74.1804 — `#divisionMenu` DOES NOT EXIST on the live site. Proven twice: the drive walk's own step
+// (`WAIT_FOR #divisionMenu` timed out after 15s on a painted, authenticated page at /#warranty — trace 214431)
+// and, independently, the gate probe before it (divisionMenu=false statusTabs=false — trace 212347). Every
+// division selector here hung off that id, INCLUDING this toggle via `:has(#divisionMenu)`, so all three steps
+// were unreachable. Replaced with the chain a REAL replay exercised successfully on this page (trace 190406:
+// `SCROLL_TO → success` then `CLICK → success`, "CLICK landed on <h5>").
+const VSD_DIVISION_TOGGLE = 'div.self-stretch.flex.align-center.pointer-select > h5.dhicon-down-open';
+// Readiness: the toggle itself, or its container if the icon child differs — an OR so one class rename can't
+// re-wall the walk. Used only to WAIT; the click uses the precise, evidence-backed form above.
+const VSD_DIVISION_READY = 'div.self-stretch.flex.align-center.pointer-select > h5.dhicon-down-open, div.self-stretch.flex.align-center.pointer-select';
 
 export const DRIVE_ARTIFACTS = Object.freeze([
   // F1 — atomic: wait for header chrome, click the division TOGGLE (not #divisionMenu — that's the list panel),
@@ -49,9 +58,12 @@ export const DRIVE_ARTIFACTS = Object.freeze([
     does: 'on the live VendorSuite warranty page, open the division menu and click a division by its NAME — a visual step (changes what the page shows), returns no data',
     params: [{ name: 'DIVISION', hint: 'the division name (e.g. "Atlanta West") — matches the menu row that contains it; blank keeps the current one' }],
     steps: [
-      { action: 'WAIT_FOR', selector: '#divisionMenu', value: '15000' },
-      { action: 'CLICK', selector: VSD_DIVISION_TOGGLE },
-      { action: 'CLICK_BY_LABEL', selector: '#divisionMenu', value: '{{DIVISION}}' },
+      { action: 'WAIT_FOR', selector: VSD_DIVISION_READY, value: '15000' },
+      // `optional` so a toggle-shape change degrades to "menu already open / unchanged division" instead of
+      // failing the whole walk — the RISK this leaves is a blank {{DIVISION}}: its label-click skips (the v877
+      // contract) and the opened menu could overlay fragment 2. Watch the next trace for a status-tab mis-click.
+      { action: 'CLICK', selector: VSD_DIVISION_TOGGLE, optional: true },
+      { action: 'CLICK_BY_LABEL', selector: 'body', value: '{{DIVISION}}' },
     ] },
   // F2 — atomic: open one of the warranty status tabs (label-scoped click — no brittle tablist proto).
   { ...VSD, id: 'vsd_open_status_tab', tier: 1, name: 'Open a warranty status tab',
@@ -59,14 +71,25 @@ export const DRIVE_ARTIFACTS = Object.freeze([
     params: [{ name: 'STATUS', enum: ['new', 'open', 'fixed', 'closed'], hint: 'which status tab to open' }],
     steps: [
       { action: 'WAIT_FOR', selector: '.nav-tabs, [role="tablist"]', value: '12000', optional: true },
-      { action: 'CLICK_BY_LABEL', selector: 'body', value: '{{STATUS}}' },
+      // v2.74.1812 — OPTIONAL. Live (trace 215842): this hard-failed the whole walk with "no option matched
+      // 'open' in container 'body'. Available: (none found)" — CLICK_BY_LABEL picks from an OPEN MENU (fragment
+      // 1's identical call succeeded 14s earlier, against the open division list), and a status TAB is not a
+      // menu option. Narrowing by status is a CONVENIENCE; the goal is the ROW (fragment 3), which is often
+      // already visible — the API shows only 2 open tasks in this division. Failing here threw away a walk that
+      // could have finished. The right tab selector needs a live DOM read; guessing one is what produced
+      // `#divisionMenu`, so this degrades instead of guessing.
+      { action: 'CLICK_BY_LABEL', selector: 'body', value: '{{STATUS}}', optional: true },
     ] },
   // F3 — atomic: open ONE task row by visible text (the durable form of v1453's generic text-click).
   { ...VSD, id: 'vsd_open_task_row', tier: 1, name: 'Open a warranty task row',
     does: 'open ONE task on the live VendorSuite warranty list by clicking its row — identify it by the street address exactly as the list shows it, or the task number',
     params: [{ name: 'FIND', hint: 'the row text to click — a street address as displayed, or a task/claim number' }],
     steps: [
-      { action: 'WAIT_FOR', selector: 'table, [role="grid"], [role="table"]', value: '12000', optional: true },
+      // v2.74.1812 — the task list is NOT a table. Trace 190406's taught replay clicked a row at
+      // `li.pointer-select.flex.justify-between > div.flex-fill > span…`, so `table, [role="grid"]` could only
+      // ever burn its 12s and continue. Wait on the row shape the page really uses (kept OR'd with the table
+      // forms so a future re-skin degrades rather than breaks), and keep it optional.
+      { action: 'WAIT_FOR', selector: 'li.pointer-select, table, [role="grid"], [role="table"]', value: '12000', optional: true },
       { action: 'CLICK_BY_LABEL', selector: 'body', value: '{{FIND}}' },
     ] },
   // S1 — composite: the visual-review flow (the drive twin of the vs_warranty_tasks ride drill).

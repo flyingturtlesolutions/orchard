@@ -968,6 +968,21 @@ export function createSgMessageHandlers(ctx) {
     if (typeof tabId !== 'number') return { ok: false, reason: 'no-tab' };
     try { await ctx.ensureContentScript(tabId); } catch { /* */ }
     const want = String(sectionPath || '').replace(/^[^#]*#?\/?/, '').toLowerCase();
+    // v2.74.1798 — PRESENCE PRE-CHECK. Five diagnostic passes could not separate "signed out" from "wrong page
+    // state" because this wait just timed out silently either way (live: 22s of trace silence, twice). The
+    // registry ALREADY knows — it is the same signal the Admin desk renders — so ask it BEFORE burning 12s on a
+    // page that cannot render. Advisory only: a registry read that throws never blocks the walk.
+    let _host0 = '';
+    try { _host0 = new URL((await chrome.tabs.get(tabId))?.url || '').host.toLowerCase(); } catch { _host0 = ''; }
+    if (_host0) {
+      try {
+        const _reg = (await readConnRegistry()) || {};
+        if (attentionOrigins(_reg, [_host0]).some((a) => a && a.origin === _host0)) {
+          Logger.info('drive', `DRIVE ▸ section-wait SKIPPED — ${_host0} presence says signed-out (pre-check; saved the 12s timeout)`);
+          return { ok: false, precondition: true, signedOut: true, reason: `you appear to be signed out of ${_host0} — sign in and I’ll retry` };
+        }
+      } catch { /* presence is advisory — never block a walk on a registry read */ }
+    }
     const deadline = Date.now() + 12000;
     const _probe = async (selector) => {
       try {
@@ -975,6 +990,7 @@ export function createSgMessageHandlers(ctx) {
         return !!(p && p.matched);
       } catch { return false; }
     };
+    let _seen = { url: '', menu: false, tabs: false };
     while (Date.now() < deadline) {
       let url = '';
       try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { break; }
@@ -982,11 +998,32 @@ export function createSgMessageHandlers(ctx) {
       const hashOk = !want || urlLc.includes(`#${want}`) || urlLc.includes(`#/${want}`);
       const menu = await _probe('#divisionMenu');
       const tabs = await _probe('.nav-tabs, [role="tablist"]');
-      // Header #divisionMenu exists site-wide — require hash OR warranty status tabs so we don't run on `/`.
+      // v2.74.1800 — PAINTED: does the SPA have ANY rendered content? Selector-free, so it cannot go stale.
+      const painted = (menu || tabs) ? true : await _probe('body > *');
+      _seen = { url, menu, tabs, painted };   // v2.74.1798 — remembered for the timeout line below
+      // FAST PATH (unchanged): the catalog's known controls are present — the strictest, happiest signal.
       if (menu && (hashOk || tabs)) return { ok: true };
+      // v2.74.1800 — ROUTE + PAINTED. The old gate demanded `#divisionMenu`, an UNVERIFIED catalog guess, with no
+      // recovery — while the doctrine this artifact ships under expects wrong guesses and repairs them during
+      // HYDRATION (selector-first, then proto-identity). The gate therefore blocked the only step that could fix
+      // it: live 212347 proved the page was authenticated, correctly routed at /#warranty, content-script alive
+      // (8/8 landmarks found on that very tab) — and still timed out, because that one selector isn't there. A
+      // readiness gate must never be STRICTER than the recovery behind it. It is also REDUNDANT: the walk's own
+      // first step is `WAIT_FOR #divisionMenu` (15s), so any real absence is caught there — as a NAMED step
+      // failure the user can act on, instead of an opaque pre-gate timeout.
+      if (hashOk && painted) return { ok: true, viaRoute: true };
       await new Promise((r) => setTimeout(r, 350));
     }
-    return { ok: false, reason: 'the warranty section did not finish loading — the SPA may still be on the home view' };
+    // v2.74.1796 — PRECONDITION, not a capability verdict. This wait failing means the PAGE never became ready
+    // (signed out, wrong route, slow SPA) — it says nothing about whether the walk's steps work, and the walk
+    // never ran a single step. Live (trace 203241): the artifact's FIRST-EVER invoke hit this while the site was
+    // signed out, and the resulting act-fail memory then steered every retry to clarify — so it could never earn
+    // the positive belief that would retire the lesson. The flag lets the caller skip banking a verdict.
+    // v2.74.1798 — SAY WHY. This wait was the only step in the whole drive flow that failed SILENTLY: 22 seconds
+    // of nothing between two unrelated trace lines, which is exactly why "signed out" vs "wrong page state"
+    // survived five diagnostic passes. The last-seen state makes the next failure readable from a download.
+    try { Logger.info('drive', `DRIVE ▸ section-wait TIMEOUT (12s) — want=#${want || '(any)'} url=${String(_seen.url || '?').slice(0, 70)} divisionMenu=${_seen.menu} statusTabs=${_seen.tabs} painted=${_seen.painted}`); } catch { /* */ }
+    return { ok: false, precondition: true, reason: 'the page section never became ready — if you are signed out of this site, sign in and I will retry' };
   }
 
   return {
@@ -1291,7 +1328,13 @@ export function createSgMessageHandlers(ctx) {
         if (tabId != null) { try { liveUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         const settle = await _settleDriveSection(tabId, rec.sectionPath || '/#warranty');
         if (!settle.ok) {
-          sendResponse({ success: true, ran: false, ok: false, reason: settle.reason || 'section-not-ready' });
+          // v2.74.1802 — FORWARD the precondition markers. They were being DROPPED here: `_settleDriveSection`
+          // returns {precondition, signedOut}, but this response carried only {ok, reason}, so chat.js's
+          // `d.precondition` was always undefined — which silently made v1790's no-bank sentinel and v1796's
+          // self-heal INERT, and an act-fail verdict was banked on every section-wait timeout after all (live
+          // 213605: still clarifying, LEARNED naming this very tool). Both halves were individually correct;
+          // the value simply did not survive the hop — the same class as Invariant #3's three-hop threading.
+          sendResponse({ success: true, ran: false, ok: false, reason: settle.reason || 'section-not-ready', precondition: !!settle.precondition, signedOut: !!settle.signedOut });
           return;
         }
         const h = await _hydrateDriveArtifact(groundId, list, rec, ctx.normalizeUrl(liveUrl));

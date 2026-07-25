@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, innerDirective, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
+import { namesDeclaredLeg, decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, innerDirective, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
@@ -676,5 +676,38 @@ describe('orchChain — decomposeAsk returns OBJECTS, and callers must read .tex
     const correct = decomposeAsk('get the tasks, then draft an order').map((c) => String(c && c.text).trim()).filter(Boolean);
     assert.ok(correct.every((s) => s && s !== '[object Object]'));
     assert.ok(correct.some((s) => /draft an order/.test(s)));
+  });
+});
+
+describe('orchChain — namesDeclaredLeg (v2.74.1796: the REACHABILITY guard)', () => {
+  const NAMES = ['Review a warranty task on the page', 'Pick a division on the page', 'Open a URL', 'My open Zendesk tickets'];
+
+  it('the LIVE failure: the ask that named a drive artifact and was claimed by the workflow matcher', () => {
+    // trace 201711 — conf 0.72 workflow match on the artifact's EXACT name; the artifact never hydrated.
+    assert.equal(namesDeclaredLeg('review a warranty task on the page', NAMES), 'Review a warranty task on the page');
+  });
+
+  it('normalizes case and punctuation, and tolerates surrounding words for SUBSTANTIAL names', () => {
+    assert.ok(namesDeclaredLeg('Review a Warranty Task on the Page!', NAMES));
+    assert.ok(namesDeclaredLeg('please review a warranty task on the page for me', NAMES));
+    assert.ok(namesDeclaredLeg('pick a division on the page', NAMES));
+  });
+
+  it('a SHORT name only matches exactly — never by containment (no false claim on ordinary prose)', () => {
+    assert.equal(namesDeclaredLeg('open a url', NAMES), 'Open a URL', 'exact still counts');
+    assert.equal(namesDeclaredLeg('can you open a url for the report and then summarize it', NAMES), null,
+      '"Open a URL" is too short to be a naming when embedded');
+  });
+
+  it('declines to fire on ordinary asks — a false positive would only defer to interpret, but silence matters', () => {
+    for (const ask of ['get open warranty tasks', 'show this ticket', 'what did I solve recently', '']) {
+      assert.equal(namesDeclaredLeg(ask, NAMES), null, ask);
+    }
+  });
+
+  it('never throws on junk input', () => {
+    assert.equal(namesDeclaredLeg(null, NAMES), null);
+    assert.equal(namesDeclaredLeg('x', null), null);
+    assert.equal(namesDeclaredLeg('review a warranty task on the page', [null, 42, '']), null);
   });
 });

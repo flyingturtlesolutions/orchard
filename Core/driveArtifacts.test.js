@@ -43,16 +43,21 @@ describe('DRIVE_ARTIFACTS — catalog integrity', () => {
     }
   });
 
-  it('F1 waits for #divisionMenu, clicks the header toggle (not the list panel), picks inside #divisionMenu', () => {
+  it('F1 waits for a REAL division control, clicks the header toggle, picks by label (v2.74.1804)', () => {
+    // The old shape asserted `#divisionMenu` — an element live traces proved absent (WAIT_FOR timed out 15s on a
+    // painted, authenticated page; the gate probe saw it false too). The test encoded a FACT about the page that
+    // turned out to be wrong, so it moves with the fix. Intent is unchanged: wait, click the toggle, pick by label.
     const f1 = DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_select_division');
-    assert.equal(f1.catalogVersion, 3);
+    assert.ok(f1.catalogVersion >= 4, 'a step fix must bump catalogVersion so stale hydrations are invalidated');
     assert.equal(f1.steps[0].action, 'WAIT_FOR');
-    assert.equal(f1.steps[0].selector, '#divisionMenu');
+    assert.ok(!f1.steps[0].selector.includes('#divisionMenu'), 'the phantom id must not gate readiness');
+    assert.ok(f1.steps[0].selector.includes('pointer-select'), 'waits on a control the live page actually has');
     assert.equal(f1.steps[1].action, 'CLICK');
-    assert.ok(f1.steps[1].selector.includes(':has(#divisionMenu)'));
+    assert.ok(f1.steps[1].selector.includes('dhicon-down-open'), 'the toggle a real replay clicked successfully');
+    assert.equal(f1.steps[1].optional, true, 'a toggle-shape change degrades, never fails the walk');
     assert.equal(f1.steps[1].proto, undefined);
     assert.equal(f1.steps[2].action, 'CLICK_BY_LABEL');
-    assert.equal(f1.steps[2].selector, '#divisionMenu');
+    assert.equal(f1.steps[2].selector, 'body', 'label-scoped like the other two entries');
   });
 });
 
@@ -113,12 +118,15 @@ describe('mergeArtifacts — re-seed preserves user state AND hydration stamps',
 
   it('hydration stamps survive a catalog refresh ONLY when catalogVersion is unchanged — a step fix bumps version and clears them', () => {
     const cur = seed();
-    const existing = [{ ...cur[0], capabilityId: 'cap_1', fragmentId: 'frag_1', hydratedAt: 111, hydratedCatalogVersion: 3 }];
+    // v2.74.1804 — derive the version from the catalog; hardcoding it made this test fail on every legitimate
+    // catalog fix, which is exactly the event it exists to verify.
+    const V = cur[0].catalogVersion;
+    const existing = [{ ...cur[0], capabilityId: 'cap_1', fragmentId: 'frag_1', hydratedAt: 111, hydratedCatalogVersion: V }];
     const kept = mergeArtifacts(existing, cur).find((x) => x.id === cur[0].id);
     assert.equal(kept.capabilityId, 'cap_1');
-    const bumped = [{ ...cur[0], catalogVersion: 4 }];
+    const bumped = [{ ...cur[0], catalogVersion: V + 1 }];
     const cleared = mergeArtifacts(existing, bumped).find((x) => x.id === cur[0].id);
-    assert.equal(cleared.catalogVersion, 4);
+    assert.equal(cleared.catalogVersion, V + 1);
     assert.equal(cleared.capabilityId, undefined);
     assert.equal(cleared.fragmentId, undefined);
   });
@@ -169,17 +177,17 @@ describe('buildDriveFragment — tier-1 record + injected deps → Fragment + ob
   const rec = () => seed().find((r) => r.id === 'vsd_select_division');
   const deps = () => { let n = 0; return { groundId: 'g1', localeUrl: 'https://x/#warranty', now: 42, newId: () => `id_${++n}` }; };
 
-  it('actions wait for #divisionMenu, click the header toggle, pick inside #divisionMenu', () => {
+  it('actions wait for a real control, click the header toggle, pick by label (v2.74.1804)', () => {
     const built = buildDriveFragment(rec(), deps());
     const actions = JSON.parse(built.fragment.rawJson);
     assert.equal(actions[0].action, 'WAIT_FOR');
-    assert.equal(actions[0].selector, '#divisionMenu');
-    const click = actions.find((a) => a.action === 'CLICK' && a.selector.includes(':has(#divisionMenu)'));
+    assert.ok(!actions[0].selector.includes('#divisionMenu'), 'v1803 — the phantom id is gone from the built actions too');
+    const click = actions.find((a) => a.action === 'CLICK' && a.selector.includes('dhicon-down-open'));
     assert.ok(click);
     assert.equal(click.landmark, undefined);
     const pick = actions.find((a) => a.action === 'CLICK_BY_LABEL' && a.value === '{{DIVISION}}');
     assert.ok(pick);
-    assert.equal(pick.selector, '#divisionMenu');
+    assert.equal(pick.selector, 'body');
   });
 
   it('paces interactive actions after WAIT_FOR (no double-wait before the settle step)', () => {

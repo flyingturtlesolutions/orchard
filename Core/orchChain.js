@@ -342,6 +342,35 @@ export function isFieldDisplayAsk(ask) {
   return _DISPLAY_VERB.test(s) && !_ANALYSIS.test(s) && !_REDUCE.test(s);
 }
 
+// v2.74.1796 — THE REACHABILITY GUARD (findings 2026-07-24: "built-but-unnameable"). A pre-door intercept that
+// knows only ONE artifact class will always answer in that class — live, the workflow matcher claimed
+// "review a warranty task on the page" at conf 0.72 and offered a 2-step workflow, even though that phrase is
+// the EXACT name of a declared drive artifact it cannot see. Interpret would have routed it correctly; it never
+// got the chance, so the artifact has never hydrated in its lifetime.
+//
+// This predicate lets such an intercept DECLINE. It is deliberately CONSERVATIVE — declining only hands the ask
+// to interpret (the real router), so a false positive is harmless, while a false NEGATIVE re-creates the bug.
+// Short names are ignored on the containment arm: "Open a URL" inside a long sentence is not a naming.
+const _normName = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * Does `ask` essentially NAME one of `names` (a declared leg/artifact)? PURE.
+ * Exact (normalized) equality always counts; containment counts only for names substantial enough that
+ * appearing verbatim is intentional (≥3 words AND ≥15 chars).
+ * @returns {string|null} the matched name, or null
+ */
+export function namesDeclaredLeg(ask, names) {
+  const a = _normName(ask);
+  if (!a) return null;
+  for (const raw of (Array.isArray(names) ? names : [])) {
+    const n = _normName(raw);
+    if (!n) continue;
+    if (a === n) return raw;
+    if (n.length >= 15 && n.split(' ').length >= 3 && a.includes(n)) return raw;
+  }
+  return null;
+}
+
 /**
  * v2.74.1547 — the READ-shaped ask a SELF-CONTAINED fan-out enumerates with. The clause carries BOTH the
  * collection and the spawn ("foreach division, open new warranty tasks in a new case"); handing the WHOLE
