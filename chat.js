@@ -886,8 +886,10 @@ async function _renderRailListNow() {
     const g = document.createElement('div');
     g.className = 'rail-group';
     g.appendChild(el);
-    _grpWfs = (row.wfCount > 0) ? _mkSection(g, 'rail-sec-wfs', _expandedWfs.has(row.id)) : null;
-    _grpCases = row.hasChildren ? _mkSection(g, 'rail-sec-cases', row.expanded) : null;
+    // v1817 (user directive) — both sections ALWAYS exist on a desk (an empty one holds just its ＋ row);
+    // the admin fixture gets cases only.
+    _grpWfs = (row.role === 'app') ? _mkSection(g, 'rail-sec-wfs', _expandedWfs.has(row.id)) : null;
+    _grpCases = _mkSection(g, 'rail-sec-cases', row.expanded);
     // TL-1 (v2.74.1796, §14.2) — creation stays reachable with a thread up: the section ends in a ＋ Workflow
     // row (the landing's card now shows only in true launch state). Parked + workflow rows insert BEFORE it.
     if (_grpWfs) {
@@ -904,6 +906,21 @@ async function _renderRailListNow() {
       _wireRowKeyboard(add, () => add.click(), 'New workflow');
       _grpWfs.appendChild(add);
     }
+    // v1817 — the ＋ Case trailing row (the ＋ View / ＋ Workflow pattern replaces the Add-case icon).
+    if (_grpCases) {
+      const addCase = document.createElement('div');
+      addCase.className = 'rail-item is-subtask rail-wf-add rail-case-add';
+      addCase.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Case</div>';
+      addCase.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (row.id === ADMIN_ID) await _ensureAdminConversation();   // the parent must exist before a child hangs off it
+        _expandedApps.add(row.id);            // reveal the new case immediately
+        await _spawnSubTask(row.id);
+        void _renderRailList({ force: true });
+      });
+      _wireRowKeyboard(addCase, () => addCase.click(), 'New case');
+      _grpCases.appendChild(addCase);
+    }
     container.appendChild(g);
     _wireSectionPeek(el.querySelector('.rail-item-wf'), _grpWfs && _grpWfs.parentElement);
     _wireSectionPeek(el.querySelector('.rail-item-cases'), _grpCases && _grpCases.parentElement);
@@ -911,8 +928,7 @@ async function _renderRailListNow() {
   for (const row of rows) {
     if (row.role === 'overview') { _grpCases = _grpWfs = null; container.appendChild(_historyPinRow(row)); continue; }
     if (row.role === 'admin') {   // VT-2 (v2.74.1573) — the reserved vitals fixture
-      const el = _historyAdminRow(row);
-      if (row.hasChildren) _startGroup(el, row); else { _grpCases = _grpWfs = null; container.appendChild(el); }
+      _startGroup(_historyAdminRow(row), row);   // v1817 — always grouped (empty cases section holds ＋ Case)
       continue;
     }
     if (row.role === 'new-app') { _grpCases = _grpWfs = null; container.appendChild(_historyNewAppRow()); continue; }
@@ -928,13 +944,13 @@ async function _renderRailListNow() {
     if (!conv) continue;
     const el = _historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_parkedByInst[conv.instanceId] || 0) : 0);
     if (row.role === 'subtask' && _grpCases) {
-      _grpCases.appendChild(el);
+      _grpCases.insertBefore(el, _grpCases.querySelector('.rail-case-add'));   // v1817 — cases sit above the ＋ Case row
       // the ACTIVE case must never hide inside a closed section (a spawn opens the case as current) — force it
       // open presentationally; the pin store is untouched.
       if (row.active) { _grpCases.parentElement.classList.add('pinned'); _grpCases.parentElement.style.height = 'auto'; _grpCases.parentElement.inert = false; }
       continue;
     }
-    if (row.role === 'app' && (row.hasChildren || row.wfCount > 0)) {
+    if (row.role === 'app') {   // v1817 — every desk groups (both sections always exist)
       _startGroup(el, row);
       // needs-action rows ride at the TOP of the workflows section: parked runs (approve/cancel inline)
       if (_grpWfs && conv.instanceId) for (const p of (_parkedFull[conv.instanceId] || [])) _grpWfs.insertBefore(_railParkedRow(p), _grpWfs.querySelector('.rail-wf-add'));
@@ -1154,11 +1170,8 @@ function _historyAdminRow(row) {
   // scratch case via the normal spawn) that every app row carries. Same classes → same styling + hover behavior.
   if (row.hasChildren) el.classList.add('has-children');
   // v2.74.1774 — app-row parity for the redesign: case icon + count (peek/pin) and "Add case", in the cluster.
-  const casesBtn = row.hasChildren
-    ? `<button class="rail-item-cases" data-row-action title="Cases — hover to peek, click to pin open" aria-label="Cases (${row.count}) — click to pin open" aria-pressed="${row.expanded}">${Icons.cases(14)}<span class="rail-case-count">${row.count}</span></button>`
-    : '';
-  const subtaskBtn = `<button class="rail-item-subtask" data-row-action title="Add case" aria-label="Add case">${Icons.plus(14)}</button>`;
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}<div class="rail-item-actions">${casesBtn}${subtaskBtn}</div>`;
+  const casesBtn = `<button class="rail-item-cases" data-row-action title="Cases — hover to peek, click to pin open" aria-label="Cases (${row.count || 0}) — click to pin open" aria-pressed="${row.expanded}">${Icons.cases(14)}${row.count > 0 ? `<span class="rail-case-count">${row.count}</span>` : ''}</button>`;   // v1817 — always visible; ＋ Case moved into the section
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}<div class="rail-item-actions">${casesBtn}</div>`;
   void (async () => {   // the attention badge — one cheap storage read; green = nothing
     try {
       const r = await _orchReq('VITALS_BADGE', {});
@@ -1170,12 +1183,6 @@ function _historyAdminRow(row) {
   el.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {   // v2.74.1774/1777 — the shared pin toggle
     e.stopPropagation();
     _railTogglePin(el, '.rail-sec-cases', _expandedApps, ADMIN_ID, e.currentTarget);
-  });
-  el.querySelector('.rail-item-subtask')?.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    await _ensureAdminConversation();       // the parent must exist before a child hangs off it
-    _expandedApps.add(ADMIN_ID);            // reveal the new case immediately
-    await _spawnSubTask(ADMIN_ID);
   });
   el.addEventListener('click', (e) => {
     if (e.target.closest('[data-row-action]')) return;   // PS-8 — derived, same rule as conv rows
@@ -1223,23 +1230,22 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
 
   const leaf = row.role === 'subtask' ? '<span class="rail-glyph leaf" aria-hidden="true">•</span>' : '';
   // v2.74.1774 (user redesign) — the chevron+count becomes a CASE icon + count chip: hover peeks, click pins.
-  const casesBtn = (row.role === 'app' && row.hasChildren)
-    ? `<button class="rail-item-cases" data-row-action title="Cases — hover to peek, click to pin open" aria-label="Cases (${row.count}) — click to pin open" aria-pressed="${row.expanded}">${Icons.cases(14)}<span class="rail-case-count">${row.count}</span></button>`
+  // v1817 (user directive) — the cases icon is ALWAYS visible; an empty desk's section holds just the ＋ Case row.
+  const casesBtn = (row.role === 'app')
+    ? `<button class="rail-item-cases" data-row-action title="Cases — hover to peek, click to pin open" aria-label="Cases (${row.count || 0}) — click to pin open" aria-pressed="${row.expanded}">${Icons.cases(14)}${row.count > 0 ? `<span class="rail-case-count">${row.count}</span>` : ''}</button>`
     : '';
   const previewBtn = isDev ? `<button class="rail-item-preview" data-row-action title="Load this branch into the live build (reloads the panel)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
         </svg>
       </button>` : '';
-  // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
-  const subtaskBtn = row.role === 'app'
-    ? `<button class="rail-item-subtask" data-row-action title="Add case" aria-label="Add case">${Icons.plus(14)}</button>`
-    : '';
+  // v1817 — the Add-case ICON is gone (user directive): creation follows the ＋ View / ＋ Workflow pattern —
+  // a trailing ＋ Case row inside the cases section (built in _startGroup).
   // v2.74.1777 ("one class") — the workflows button MIRRORS the cases button: icon + count, always visible when
   // the desk has workflows, hover peeks its section, click pins. (PS-3's open-the-overlay glyph is retired with
   // the overlay itself.)
-  const wfBtn = (row.role === 'app' && !isDev && row.wfCount > 0)
-    ? `<button class="rail-item-wf" data-row-action title="Workflows — hover to peek, click to pin open" aria-label="Workflows (${row.wfCount}) — click to pin open" aria-pressed="${_expandedWfs.has(conv.id)}">${Icons.workflow(14)}<span class="rail-case-count">${row.wfCount}</span></button>`
+  const wfBtn = (row.role === 'app' && !isDev)
+    ? `<button class="rail-item-wf" data-row-action title="Workflows — hover to peek, click to pin open" aria-label="Workflows (${row.wfCount || 0}) — click to pin open" aria-pressed="${_expandedWfs.has(conv.id)}">${Icons.workflow(14)}${row.wfCount > 0 ? `<span class="rail-case-count">${row.wfCount}</span>` : ''}</button>`
     : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
@@ -1252,7 +1258,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
       ${summaryLine}
       <div class="rail-item-meta">${relTime(conv.updatedAt)}</div>
       ${row.role === 'app' && nextSweep > 0 ? '<span class="rail-item-timer" title="Next sweep"></span>' : ''}
-      ${(wfBtn || casesBtn || subtaskBtn) ? `<div class="rail-item-actions">${wfBtn}${casesBtn}${subtaskBtn}</div>` : ''}
+      ${(wfBtn || casesBtn) ? `<div class="rail-item-actions">${wfBtn}${casesBtn}</div>` : ''}
       ${previewBtn}
       <button class="rail-item-delete" data-row-action title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1268,12 +1274,6 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   item.querySelector('.rail-item-wf')?.addEventListener('click', (e) => {
     e.stopPropagation();
     _railTogglePin(item, '.rail-sec-wfs', _expandedWfs, conv.id, e.currentTarget);
-  });
-
-  // AP-2 — "+" → start a sub-conversation under this app, AUTO-NAMED `<parent> #N` (no prompt; v2.74.1216).
-  item.querySelector('.rail-item-subtask')?.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    await _spawnSubTask(conv.id);
   });
 
   // PS-6/1777 — the parked badge is a DOOR: it pins the workflows section open (the approve rows live there).
