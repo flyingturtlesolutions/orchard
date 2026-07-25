@@ -765,8 +765,23 @@ async function _renderRailListNow() {
   const _wfByConv = new Map();
   try {
     const banks = await listAllWorkflows();
-    const byInst = new Map(banks.filter((b) => b && !b.orphaned && Array.isArray(b.items) && b.items.length).map((b) => [String(b.appId), b.items]));
-    for (const c of all) { if (c && c.instanceId && byInst.has(String(c.instanceId))) _wfByConv.set(c.id, byInst.get(String(c.instanceId))); }
+    const byKey = new Map(banks.filter((b) => b && !b.orphaned && Array.isArray(b.items) && b.items.length).map((b) => [String(b.appId), b.items]));
+    for (const c of all) {
+      if (!c || !c.appId || c.parentId) continue;   // desks only
+      // v2.74.1779 (live: icon vanished) — a desk's bank keys by instanceId OR appId (the DK-8k dual-key
+      // reality _workflowKeys() sweeps); instanceId-only matching missed appId-keyed banks. Merge both,
+      // deduped by id/contentId (the record's own key wins downstream via wf.appId).
+      const merged = []; const seen = new Set();
+      for (const k of [c.instanceId, c.appId].filter(Boolean).map(String)) {
+        for (const w of (byKey.get(k) || [])) {
+          const dk = w && (w.id || w.contentId);
+          if (!w || (dk && seen.has(dk))) continue;
+          if (dk) seen.add(dk);
+          merged.push(w);
+        }
+      }
+      if (merged.length) _wfByConv.set(c.id, merged);
+    }
   } catch { /* section-only — never blocks the Rail */ }
 
   // CV-3c (v2.74.1168, DESIGN_conversations.md §7) — render the flush-left ACCORDION (Core/railTree.js): an
@@ -8069,7 +8084,7 @@ function _wfScheduleInline(row, wf, wfKey, rerender) {
 // history · delete) — the exact handlers the retired overlay used.
 function _railWorkflowRow(row, parentConv) {
   const wf = row.wf || {};
-  const wfKey = row.wfKey || (parentConv && parentConv.instanceId) || _memoryId();
+  const wfKey = (wf.appId ? String(wf.appId) : '') || row.wfKey || (parentConv && parentConv.instanceId) || _memoryId();   // DK-8k — the record's OWN key first
   const item = document.createElement('div');
   item.className = 'rail-item is-subtask is-workflow';
   const _sched = _wfScheduleLabel(wf);
