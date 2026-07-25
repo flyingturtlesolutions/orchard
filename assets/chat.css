@@ -1951,7 +1951,10 @@ textarea {
 .wf-row-steps li.step-done { opacity: 0.55; }
 .wf-row-steps li.step-done::after { content: " ✓"; color: var(--c-x-ok-soft); }
 @keyframes wfstep-pulse { 50% { background: rgba(167, 139, 250, 0.42); } }
-@media (prefers-reduced-motion: reduce) { .wf-row-steps li.step-running { animation: none; } }
+/* v1824 — working-dots on the running chip: visible activity even between chain updates. */
+.wf-row-steps li.step-running::after { content: " ⋯"; color: var(--c-x-violet); animation: wfdots 1s ease-in-out infinite; }
+@keyframes wfdots { 50% { opacity: 0.15; } }
+@media (prefers-reduced-motion: reduce) { .wf-row-steps li.step-running, .wf-row-steps li.step-running::after { animation: none; } }
 /* TL-1 (v2.74.1791, §14.2) — the section's trailing ＋ Workflow row: the creation door that survives a thread. */
 .rail-wf-add { color: var(--c-text-subtle); cursor: pointer; }
 .rail-wf-add:hover .rail-item-title { color: var(--c-text); }

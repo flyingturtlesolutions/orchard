@@ -8342,9 +8342,16 @@ function _railWorkflowRow(row, parentConv) {
     };
     host.classList.add('wf-run-live');
     _markStep(0);
+    // v1824 (live: 'no indication of work being done') — the chain's live text becomes the ACTIVITY LINE:
+    // strip the step prefix (the chips carry that) and stream the remainder into the reporter's tick
+    // region, so per-item progress ('Pulling the full record 3/12…', 'Working 2/5…') shows under the chips.
+    let _pbRef = null;
     const _mo = new MutationObserver(() => {
-      const m = (host.textContent || '').match(/Step (\d+)/);
+      const t = (host.querySelector('.message-body')?.textContent || '').trim();
+      const m = t.match(/Step (\d+)/);
       if (m) _markStep(Number(m[1]) - 1);
+      const activity = t.replace(/^Step \d+(?: of \d+)?:?\s*/, '').trim();
+      if (_pbRef && activity) _pbRef.tick(activity.length > 90 ? activity.slice(0, 90) + '…' : activity);
     });
     try { _mo.observe(host, { childList: true, subtree: true, characterData: true }); } catch { /* */ }
     _railRunBusy++;
@@ -8358,6 +8365,7 @@ function _railWorkflowRow(row, parentConv) {
       const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
       _walkAbortFlag.requested = false;
       const _pb2 = _progressBubble(host);   // PS-9 — step/tick/elapsed ride the card
+      _pbRef = _pb2;   // v1824 — the observer streams the chain's live text into the tick region
       _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
         .then(() => { _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); }); _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2); })
         .catch(() => { /* */ })
