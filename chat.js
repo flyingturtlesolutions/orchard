@@ -753,8 +753,19 @@ async function _renderRailList() {
   }
 }
 async function _renderRailListNow() {
-  const container = $('rail-list');
-  container.innerHTML = '';
+  const live = $('rail-list');
+  if (!live) return;
+  // v1803 (fix 3) — a background refresh must not rebuild the DOM under an active interaction: a hover-peek
+  // is DOM-only state, so a churn-triggered render mid-hover made the open cards VANISH under the cursor.
+  // Defer once; the coalescer + the steady churn guarantee a prompt retry.
+  if (live.querySelector('.rail-section.peek')) {
+    setTimeout(() => { void _renderRailList(); }, 700);
+    return;
+  }
+  // v1803 (fix 2) — BUILD-THEN-SWAP: the old body cleared the live list FIRST and then awaited four fetches,
+  // leaving a visibly EMPTY rail for the whole await window on every background refresh. Build into a
+  // detached container, swap once at the end.
+  const container = document.createElement('div');
 
   const all = await ConversationStore.list();
 
@@ -922,8 +933,11 @@ async function _renderRailListNow() {
   // FL-6d (v1361) — a visible next-sweep countdown keeps the timer ticking too.
   let anyActive = false;
   container.querySelectorAll('.rail-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
+  // v1803 (fix 2) — the ONE atomic swap: the live list is replaced only now, fully built (listeners ride the
+  // moved nodes). No empty-await window, ever.
+  live.replaceChildren(...container.childNodes);
   _updateRailActionDot();
-  if (anyActive || container.querySelector('.rail-item[data-next-sweep]')) _startRailStatusTimer(); else _stopRailStatusTimer();
+  if (anyActive || live.querySelector('.rail-item[data-next-sweep]')) _startRailStatusTimer(); else _stopRailStatusTimer();
 }
 
 // v2.74.1223 (message-input redesign) — a row's own action buttons; their handlers run instead of select/open.
@@ -942,18 +956,34 @@ const _isRowActionTarget = (e) => !!e.target.closest('[data-row-action]');
 // Open: measure → px → release to 'auto' on transition end (so content growing inside — a card detail —
 // is never clipped; a 400ms fallback covers reduced-motion where transitionend never fires).
 // Close: lock the real height in px, commit it, then 0 — 'auto'→0 cannot transition, px→0 does.
+// v1803 (vanishing-cards/gaps investigation, fix 1) — the pending auto-release (timer + transitionend) lives
+// ON the element so open/close always cancel each other's leftovers. Without this, a close arriving before
+// the open settled left the open's release armed — the close's OWN transitionend (same element, same height
+// property) or the 400ms fallback then snapped the section to height:auto with neither peek nor pinned class:
+// full reserved height, rows at opacity 0 — the section-wide EMPTY GAP.
+function _slideCancelRelease(el) {
+  if (el._slideT) { clearTimeout(el._slideT); el._slideT = null; }
+  if (el._slideEnd) { el.removeEventListener('transitionend', el._slideEnd); el._slideEnd = null; }
+}
 function _slideOpen(el) {
   if (!el) return;
+  _slideCancelRelease(el);
   el.style.height = el.scrollHeight + 'px';
-  const t = setTimeout(() => { try { el.style.height = 'auto'; } catch { /* */ } }, 400);
-  const onEnd = (e) => {
-    if (e.target !== el || e.propertyName !== 'height') return;   // bcp v1801 — a CHILD's height transitionend bubbles (the card detail inside a section) and must not release early
-    clearTimeout(t); el.style.height = 'auto'; el.removeEventListener('transitionend', onEnd);
+  const release = () => {
+    _slideCancelRelease(el);
+    if (el.style.height === '0px') return;   // a close won the race — never re-open an element that shut
+    el.style.height = 'auto';
   };
-  el.addEventListener('transitionend', onEnd);
+  el._slideT = setTimeout(() => { try { release(); } catch { /* */ } }, 400);
+  el._slideEnd = (e) => {
+    if (e.target !== el || e.propertyName !== 'height') return;   // bcp v1801 — a CHILD's height transitionend bubbles
+    release();
+  };
+  el.addEventListener('transitionend', el._slideEnd);
 }
 function _slideClosed(el) {
   if (!el) return;
+  _slideCancelRelease(el);   // v1803 — disarm the open's pending auto-release (the empty-gap bug)
   // bcp v1801 — start from the RENDERED height, never scrollHeight: scrollHeight ignores height:0, so closing
   // an already-closed section (a sub-150ms hover-past fires the close timer with nothing open) faked a
   // full-height start — a phantom flash-open + 340ms shrink. Rendered height also makes a mid-open close
