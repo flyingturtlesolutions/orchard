@@ -1945,6 +1945,8 @@ textarea {
 .rail-list {
   flex: 1;
   overflow-y: auto;
+  scrollbar-gutter: stable;   /* v1796 — card width is ABSOLUTE: the scrollbar's gutter is reserved always, so a
+                                 section expanding into overflow never narrows every card (the grow/shrink jitter) */
   padding: var(--sp-1) var(--sp-2) var(--sp-3) var(--sp-2);
   display: flex;
   flex-direction: column;
