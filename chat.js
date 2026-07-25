@@ -1200,7 +1200,8 @@ function _historyAdminRow(row) {
 function _historyNewAppRow() {
   const el = document.createElement('div');
   el.className = 'rail-item rail-new-app';
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">＋</span>view</div>`;   // v2.74.1517 — "＋ desk" (the gallery's constructor card owns "New desk…")
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">＋</span>view</div>`   // v2.74.1517 — "＋ desk" (the gallery's constructor card owns "New desk…")
+    + '<div class="rail-item-meta rail-add-desc">a workspace for a role — connect its sites, save workflows, work cases</div>';   // v1820 — type description, HOVER-revealed (the row is always on screen; a standing description would be clutter)
   el.addEventListener('click', () => { _closeRail(); _renderAppGallery(); });
   _wireRowKeyboard(el, () => el.click(), 'New view');   // v1343 (a11y)
   return el;

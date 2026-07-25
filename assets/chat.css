@@ -1777,6 +1777,20 @@ textarea {
 .rail-overview .rail-glyph { width: 16px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .rail-glyph.leaf { margin-right: 5px; font-weight: 700; }
 .rail-new-app { color: var(--c-text-subtle); }
+/* v1820 — the ＋ View row's type description slides open on hover only (same curve + intent gate). */
+.rail-new-app .rail-add-desc {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
+}
+.rail-new-app:hover .rail-add-desc,
+.rail-new-app:focus-within .rail-add-desc {
+  max-height: 3em;
+  opacity: 1;
+  transition-delay: 150ms;
+}
+@media (prefers-reduced-motion: reduce) { .rail-new-app .rail-add-desc { transition: none; } }
 .rail-new-app:hover .rail-item-title { color: var(--c-text); }
 .rail-item.is-subtask .rail-item-title { font-weight: 400; color: var(--c-text-subtle); }
 .rail-item.has-children { padding-right: 64px; }   /* clear the action cluster, which sits left of the delete button */
