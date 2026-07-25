@@ -8329,6 +8329,24 @@ function _railWorkflowRow(row, parentConv) {
     host.innerHTML = '<div class="message-content"><div class="message-body"></div></div>';
     inner.appendChild(host);
     if (!_expandedWfDetails.has(wf.id)) _toggleDetailPin(); else _slideOpen(_detail);   // the report must be visible
+    // v1823 (user directive) — the card's OWN step chips are the progress display: highlight the running
+    // step, check off finished ones, and hide the chain's duplicate "Step i of N: …" text while live (it
+    // reappears as the RESULT once the run settles). The chain stays untouched — a MutationObserver on the
+    // host parses its progress writes (the per-clause §9 adoption remains the owed rung).
+    const _chips = Array.from(item.querySelectorAll('.wf-row-steps li'));
+    const _markStep = (i) => {
+      _chips.forEach((c, k) => {
+        c.classList.toggle('step-running', k === i);
+        c.classList.toggle('step-done', k < i);
+      });
+    };
+    host.classList.add('wf-run-live');
+    _markStep(0);
+    const _mo = new MutationObserver(() => {
+      const m = (host.textContent || '').match(/Step (\d+)/);
+      if (m) _markStep(Number(m[1]) - 1);
+    });
+    try { _mo.observe(host, { childList: true, subtree: true, characterData: true }); } catch { /* */ }
     _railRunBusy++;
     try {
       const tab = await _orchActiveTab();
@@ -8341,10 +8359,15 @@ function _railWorkflowRow(row, parentConv) {
       _walkAbortFlag.requested = false;
       const _pb2 = _progressBubble(host);   // PS-9 — step/tick/elapsed ride the card
       _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
-        .then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2))
+        .then(() => { _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); }); _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2); })
         .catch(() => { /* */ })
-        .finally(() => { _pb2.done(); _railRunBusy--; if (_detail) _slideOpen(_detail); });
-    } catch { _railRunBusy--; }
+        .finally(() => {
+          try { _mo.disconnect(); } catch { /* */ }
+          _chips.forEach((c) => c.classList.remove('step-running'));   // a failed run keeps its ✓s honest — only finished steps stay marked
+          host.classList.remove('wf-run-live');   // the body now shows the RESULT
+          _pb2.done(); _railRunBusy--; if (_detail) _slideOpen(_detail);
+        });
+    } catch { _railRunBusy--; try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
   }, { once: true }));
   if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
     _closeRail();

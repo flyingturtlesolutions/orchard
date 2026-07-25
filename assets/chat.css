@@ -1939,6 +1939,19 @@ textarea {
 .wf-card-run { display: block; margin: 6px 0 0; padding: 0; background: none; font-size: 0.85em; }
 .wf-card-run .message-content { display: block; max-width: none; padding: 0; background: none; border: none; }
 .wf-card-run .message-body { white-space: normal; overflow-wrap: anywhere; }
+/* v1823 — while a run is LIVE the step chips are the progress display: the running step glows, finished
+   steps check off; the chain's duplicate progress text stays hidden until it becomes the result. */
+.wf-card-run.wf-run-live .message-body { display: none; }
+.wf-row-steps li.step-running {
+  background: rgba(167, 139, 250, 0.30);
+  color: var(--c-x-violet);
+  font-weight: 600;
+  animation: wfstep-pulse 1.2s ease-in-out infinite;
+}
+.wf-row-steps li.step-done { opacity: 0.55; }
+.wf-row-steps li.step-done::after { content: " ✓"; color: var(--c-x-ok-soft); }
+@keyframes wfstep-pulse { 50% { background: rgba(167, 139, 250, 0.42); } }
+@media (prefers-reduced-motion: reduce) { .wf-row-steps li.step-running { animation: none; } }
 /* TL-1 (v2.74.1791, §14.2) — the section's trailing ＋ Workflow row: the creation door that survives a thread. */
 .rail-wf-add { color: var(--c-text-subtle); cursor: pointer; }
 .rail-wf-add:hover .rail-item-title { color: var(--c-text); }
