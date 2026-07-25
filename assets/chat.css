@@ -1861,9 +1861,9 @@ textarea {
   max-width: 100%;
   margin: 3px 0;
   padding: 3px 8px;
-  background: rgba(160, 122, 201, 0.16);   /* v1789 — violet it is (v1787 → gray v1788 → back) */
+  background: rgba(167, 139, 250, 0.10);   /* v1795 — a LIGHTER violet than the workflow badge (steps sit under it) */
   border-radius: var(--r-sm);
-  color: var(--c-x-violet-soft);
+  color: var(--c-x-violet);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1872,7 +1872,7 @@ textarea {
   opacity: 0;
   transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background var(--t-fast);
 }
-.wf-row-steps li:hover { background: rgba(160, 122, 201, 0.26); }
+.wf-row-steps li:hover { background: rgba(167, 139, 250, 0.18); }
 .rail-item.is-workflow:hover .wf-row-steps li,
 .rail-item.is-workflow:focus-within .wf-row-steps li {
   transform: translateX(0);
