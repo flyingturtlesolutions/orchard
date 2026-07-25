@@ -756,6 +756,19 @@ async function _renderRailListNow() {
   container.innerHTML = '';
 
   const all = await ConversationStore.list();
+
+  // v2.74.1777 ("one class") — workflows per desk, ONE sweep (the parked-badge pattern): counts + row content
+  // for every desk, so a section peek is instant — no per-hover fetch, no pop-in. Orphaned (stamped) banks stay
+  // out of the rail (no desk row to sit under); they still surface via _loadWorkflowsMerged on the landing.
+  // v2.74.1778 (regression: the rail button did NOTHING) — this block must precede buildRailTree, which reads
+  // _wfByConv: declared after it, the reference hit the temporal dead zone and every render threw.
+  const _wfByConv = new Map();
+  try {
+    const banks = await listAllWorkflows();
+    const byInst = new Map(banks.filter((b) => b && !b.orphaned && Array.isArray(b.items) && b.items.length).map((b) => [String(b.appId), b.items]));
+    for (const c of all) { if (c && c.instanceId && byInst.has(String(c.instanceId))) _wfByConv.set(c.id, byInst.get(String(c.instanceId))); }
+  } catch { /* section-only — never blocks the Rail */ }
+
   // CV-3c (v2.74.1168, DESIGN_conversations.md §7) — render the flush-left ACCORDION (Core/railTree.js): an
   // Overview pin → apps → (when expanded) their sub-tasks → a New-app entry. The dev-filter, the per-row
   // preview/delete/run-status, and the active highlight are all preserved; only the ORDER + grouping + the
@@ -783,16 +796,6 @@ async function _renderRailListNow() {
       }
     }
   } catch { /* badge-only — never blocks the Rail */ }
-
-  // v2.74.1777 ("one class") — workflows per desk, ONE sweep (the parked-badge pattern): counts + row content
-  // for every desk, so a section peek is instant — no per-hover fetch, no pop-in. Orphaned (stamped) banks stay
-  // out of the rail (no desk row to sit under); they still surface via _loadWorkflowsMerged on the landing.
-  const _wfByConv = new Map();
-  try {
-    const banks = await listAllWorkflows();
-    const byInst = new Map(banks.filter((b) => b && !b.orphaned && Array.isArray(b.items) && b.items.length).map((b) => [String(b.appId), b.items]));
-    for (const c of all) { if (c && c.instanceId && byInst.has(String(c.instanceId))) _wfByConv.set(c.id, byInst.get(String(c.instanceId))); }
-  } catch { /* section-only — never blocks the Rail */ }
 
   // FL-6d (v2.74.1361) — next-sweep countdown per app card: ONE alarms.getAll(), keyed back to instances by the
   // alarm name. The alarm's scheduledTime is the ground truth (never derived from createdAt + periods).
