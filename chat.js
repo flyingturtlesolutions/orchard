@@ -906,7 +906,11 @@ async function _renderRailListNow() {
     }
     if (row.role === 'new-app') { _grpCases = _grpWfs = null; container.appendChild(_historyNewAppRow()); continue; }
     if (row.role === 'workflow') {   // v2.74.1777 — a desk child, same as a case row
-      if (_grpWfs) _grpWfs.insertBefore(_railWorkflowRow(row, byId.get(row.parentId)), _grpWfs.querySelector('.rail-wf-add'));
+      if (_grpWfs) {
+        _grpWfs.insertBefore(_railWorkflowRow(row, byId.get(row.parentId)), _grpWfs.querySelector('.rail-wf-add'));
+        // v1809 — a pinned card holds its section open across re-renders too
+        if (row.wf && _expandedWfDetails.has(row.wf.id)) { const sec = _grpWfs.parentElement; sec.style.height = 'auto'; sec.inert = false; }
+      }
       continue;
     }
     const conv = byId.get(row.id);
@@ -995,10 +999,15 @@ function _slideClosed(el) {
   void el.offsetHeight;
   el.style.height = '0px';
 }
+// v1809 — a section HOLDING A PINNED CARD counts as open: closers skip it, inert respects it, the CSS :has()
+// twin keeps its rows visible ("pinned state includes the expanded card").
+function _sectionHeldOpen(section) {
+  return section.classList.contains('pinned') || section.classList.contains('peek') || !!section.querySelector('.detail-pinned');
+}
 function _wireSectionPeek(btn, section) {
   if (!btn || !section) return;
   let openT = null, closeT = null;
-  const syncInert = () => { section.inert = !(section.classList.contains('pinned') || section.classList.contains('peek')); };
+  const syncInert = () => { section.inert = !_sectionHeldOpen(section); };
   btn.addEventListener('pointerenter', () => {
     clearTimeout(closeT);
     openT = setTimeout(() => { section.classList.add('peek'); _slideOpen(section); syncInert(); }, 150);
@@ -1007,7 +1016,7 @@ function _wireSectionPeek(btn, section) {
     clearTimeout(openT);
     closeT = setTimeout(() => {
       section.classList.remove('peek');
-      if (!section.classList.contains('pinned')) _slideClosed(section);
+      if (!section.classList.contains('pinned') && !section.querySelector('.detail-pinned')) _slideClosed(section);   // v1809 — a pinned card holds it open
       syncInert();
     }, 300);
   });
@@ -1022,8 +1031,9 @@ function _railTogglePin(rowEl, secCls, store, key, btn) {
   if (sec) {
     sec.classList.toggle('pinned', nowPinned);
     if (!nowPinned) sec.classList.remove('peek');
-    if (nowPinned) _slideOpen(sec); else if (!sec.classList.contains('peek')) _slideClosed(sec);   // v1799 — height rides the pin
-    sec.inert = !nowPinned && !sec.classList.contains('peek');
+    if (nowPinned) _slideOpen(sec);
+    else if (!sec.classList.contains('peek') && !sec.querySelector('.detail-pinned')) _slideClosed(sec);   // v1809 — a pinned card holds it open
+    sec.inert = !nowPinned && !sec.classList.contains('peek') && !sec.querySelector('.detail-pinned');
   }
   if (btn) btn.setAttribute('aria-pressed', String(nowPinned));
 }
@@ -8319,6 +8329,20 @@ function _railWorkflowRow(row, parentConv) {
     } else {
       _expandedWfDetails.delete(wf.id); item.classList.remove('detail-pinned');
       if (!item.matches(':hover')) _slideClosed(_detail);
+      // v1809 — this card may have been the only thing holding its section open: release it. Pointer still
+      // inside → hold as a peek and close on leave (no rug-pull); pointer gone → close now.
+      const sec = item.closest('.rail-section');
+      if (sec && !sec.classList.contains('pinned') && !sec.querySelector('.detail-pinned')) {
+        if (sec.matches(':hover')) {
+          sec.classList.add('peek');
+          sec.addEventListener('pointerleave', function onL() {
+            sec.removeEventListener('pointerleave', onL);
+            setTimeout(() => {
+              if (!sec.classList.contains('pinned') && !sec.querySelector('.detail-pinned')) { sec.classList.remove('peek'); _slideClosed(sec); sec.inert = true; }
+            }, 300);
+          });
+        } else if (!sec.classList.contains('peek')) { _slideClosed(sec); sec.inert = true; }
+      }
     }
     item.setAttribute('aria-expanded', String(nowPinned));
   };
