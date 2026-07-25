@@ -739,6 +739,7 @@ let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the
 let _expandedWfs = new Set();    // v2.74.1777 ("one class") — which desks' WORKFLOWS sections are pinned open
 let _expandedWfDetails = new Set();   // v1804 — which workflow CARDS' details are pinned open (by wf.id)
 let _railBodyPinned = null;   // v1811 — which view/case card carries the body shift (conv id; click toggles it)
+let _railRunBusy = 0;         // v1822 — card-hosted workflow runs in flight; background renders hold off
 
 // v2.74.1588 — COALESCE re-entrant renders: the body clears the container synchronously then awaits (list /
 // pending counts / alarms) before appending, so two OVERLAPPING calls each appended a full row set — the whole
@@ -768,7 +769,7 @@ async function _renderRailListNow() {
   // wiggle ("cards appear and disappear"). Defer while the pointer is anywhere inside the rail, or while a
   // peek/height-animation is live. USER-ACTION renders (force) land regardless — the click already spent the
   // hover state they cared about.
-  const _engaged = () => { try { return live.matches(':hover') || !!live.querySelector('.rail-section.peek, .sliding'); } catch { return false; } };
+  const _engaged = () => { try { return _railRunBusy > 0 || live.matches(':hover') || !!live.querySelector('.rail-section.peek, .sliding'); } catch { return false; } };   // v1822 — a reporting card must not be swapped away
   if (!_force && _engaged()) {
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
@@ -8316,19 +8317,34 @@ function _railWorkflowRow(row, parentConv) {
   acts.dataset.rowAction = '';
   const rerender = () => { void _renderRailList({ force: true }); };   // v1816 — action renders land now
   acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async () => {
-    _closeRail();   // §9 — run output is conversation; reveal the thread it streams into
-    if (parentConv && parentConv.id !== _currentConversationId) await _openConvFullTimeline(parentConv);
-    const tab = await _orchActiveTab();
-    const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
-    bumpWorkflowRun(wfKey, wf.id).catch(() => {});
-    if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }   // CD-1a — a due tier-'panel' run fulfills the schedule
-    const _p2 = _wfReplayPlan(wf);
-    const _m2 = appendMessage({ role: 'assistant', body: '' });
-    if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
-    const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
-    _walkAbortFlag.requested = false;
-    const _pb2 = _progressBubble(_m2);   // PS-9 — the elapsed ticker rides the run bubble
-    _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 }).then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2)).catch(() => { /* */ }).finally(() => _pb2.done());
+    // v1822 (user directive) — the run REPORTS IN THE CARD and the rail STAYS OPEN. No desk switch: the
+    // pinned clauses are self-contained (PP-0c). The chain writes into a message-shaped host inside the
+    // card's detail (which pins open for the run); deeper output (fan-out bubbles, offers) still lands in
+    // the thread behind the rail for later reading, and §6.5 history records the run either way.
+    const inner = item.querySelector('.wf-row-detail-inner');
+    if (!inner) return;
+    item.querySelector('.wf-card-run')?.remove();
+    const host = document.createElement('div');
+    host.className = 'message assistant wf-card-run';
+    host.innerHTML = '<div class="message-content"><div class="message-body"></div></div>';
+    inner.appendChild(host);
+    if (!_expandedWfDetails.has(wf.id)) _toggleDetailPin(); else _slideOpen(_detail);   // the report must be visible
+    _railRunBusy++;
+    try {
+      const tab = await _orchActiveTab();
+      const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+      bumpWorkflowRun(wfKey, wf.id).catch(() => {});
+      if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }   // CD-1a — a due tier-'panel' run fulfills the schedule
+      const _p2 = _wfReplayPlan(wf);
+      if (!_p2.runnable) { _wfReplayStopped(host, wf, _p2); _railRunBusy--; return; }
+      const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
+      _walkAbortFlag.requested = false;
+      const _pb2 = _progressBubble(host);   // PS-9 — step/tick/elapsed ride the card
+      _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
+        .then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2))
+        .catch(() => { /* */ })
+        .finally(() => { _pb2.done(); _railRunBusy--; if (_detail) _slideOpen(_detail); });
+    } catch { _railRunBusy--; }
   }, { once: true }));
   if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
     _closeRail();

@@ -1934,6 +1934,11 @@ textarea {
   transition-delay: 0ms;
 }
 .wf-row-sched { margin-top: 2px; font-size: 0.85em; color: var(--c-text-subtle); }
+/* v1822 — the card-hosted RUN REPORT: a message-shaped host inside the detail; neutralize bubble chrome
+   so it reads as part of the card. */
+.wf-card-run { display: block; margin: 6px 0 0; padding: 0; background: none; font-size: 0.85em; }
+.wf-card-run .message-content { display: block; max-width: none; padding: 0; background: none; border: none; }
+.wf-card-run .message-body { white-space: normal; overflow-wrap: anywhere; }
 /* TL-1 (v2.74.1791, §14.2) — the section's trailing ＋ Workflow row: the creation door that survives a thread. */
 .rail-wf-add { color: var(--c-text-subtle); cursor: pointer; }
 .rail-wf-add:hover .rail-item-title { color: var(--c-text); }
