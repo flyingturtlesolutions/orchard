@@ -1819,11 +1819,11 @@ textarea {
 .rail-item-cases[aria-pressed="true"],
 .rail-item-wf[aria-pressed="true"] { color: var(--c-accent); }
 .rail-case-count { font-variant-numeric: tabular-nums; }
-/* v2.74.1781/1782 — the hover-expand theme continues INTO the workflow card: the detail (itemized steps +
-   schedule) slides open with the same grid 0fr→1fr curve. v1782 (user directive) — the HOVER BOUNDS are the
-   Workflows rail button, not the row: while the button's hover drives the section PEEK, the cards show full
-   detail; a PINNED section browses compact (hover the button again to re-expand). One hover surface drives
-   the whole story. focus-within still opens a card for keyboard users. */
+/* v2.74.1781–1784 — the hover-expand theme continues INTO the workflow card: the detail (itemized steps +
+   schedule) slides open with the same grid 0fr→1fr curve, PER CARD (v1784 live report: binding it to the
+   section peek expanded every child at once). The composed model: the button's hover previews the COMPACT
+   list (1783 — leave the button, it closes); pin the section to browse; hover ONE card and its detail slides
+   open. The 150ms open transition-delay is the intent gate; focus-within opens a card for keyboard users. */
 .wf-row-detail {
   display: grid;
   grid-template-rows: 0fr;
@@ -1831,7 +1831,7 @@ textarea {
   transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
 }
 .wf-row-detail-inner { min-height: 0; overflow: hidden; }
-.rail-sec-wfs.peek .wf-row-detail,
+.rail-item.is-workflow:hover .wf-row-detail,
 .rail-item.is-workflow:focus-within .wf-row-detail {
   grid-template-rows: 1fr;
   opacity: 1;
