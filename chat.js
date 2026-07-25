@@ -625,7 +625,7 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
 });
 
 async function _openRail() {
-  await _renderRailList();
+  await _renderRailList({ force: true });   // v1816 — opening the rail is a user action; render immediately
   $('rail').classList.add('open');   // width 0 → drawer-w (chat column shrinks alongside)
 }
 
@@ -744,8 +744,11 @@ let _railBodyPinned = null;   // v1811 — which view/case card carries the body
 // pending counts / alarms) before appending, so two OVERLAPPING calls each appended a full row set — the whole
 // Rail doubled (live 1587: the VT-2b reconcile + a broadcast refresh landed while the open-render was mid-await).
 // Latest-wins: a call during a running pass queues exactly ONE re-run at the end.
-let _railRendering = false, _railRenderQueued = false;
-async function _renderRailList() {
+let _railRendering = false, _railRenderQueued = false, _railForceNext = false;
+async function _renderRailList(opts = {}) {
+  // v1816 — force = a USER ACTION drove this render (delete/schedule/approve/open): it must land now even if
+  // the pointer is inside the rail. Background churn defers instead (see _renderRailListNow).
+  if (opts && opts.force) _railForceNext = true;
   if (_railRendering) { _railRenderQueued = true; return; }
   _railRendering = true;
   try { await _renderRailListNow(); }
@@ -757,10 +760,16 @@ async function _renderRailList() {
 async function _renderRailListNow() {
   const live = $('rail-list');
   if (!live) return;
-  // v1803 (fix 3) — a background refresh must not rebuild the DOM under an active interaction: a hover-peek
-  // is DOM-only state, so a churn-triggered render mid-hover made the open cards VANISH under the cursor.
-  // Defer once; the coalescer + the steady churn guarantee a prompt retry.
-  if (live.querySelector('.rail-section.peek, .sliding')) {   // v1815 — peeked OR animating
+  const _force = _railForceNext; _railForceNext = false;
+  // v1803/1815/1816 — a BACKGROUND refresh must never rebuild the DOM the user is engaged with. v1816 root
+  // cause (headless-Chrome instrumented repro): the helpers + CSS animate perfectly, but a churn swap under a
+  // stationary pointer destroys hover-held state — and Chrome dispatches NO boundary events on swapped nodes
+  // until the pointer physically moves, so an open card detail dies instantly and cannot reopen without a
+  // wiggle ("cards appear and disappear"). Defer while the pointer is anywhere inside the rail, or while a
+  // peek/height-animation is live. USER-ACTION renders (force) land regardless — the click already spent the
+  // hover state they cared about.
+  const _engaged = () => { try { return live.matches(':hover') || !!live.querySelector('.rail-section.peek, .sliding'); } catch { return false; } };
+  if (!_force && _engaged()) {
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
   }
@@ -944,7 +953,7 @@ async function _renderRailListNow() {
   // moved nodes). No empty-await window, ever. v1815 — RE-CHECK before swapping: a render that passed the head
   // check while idle can arrive here mid-peek/mid-animation (the awaits take real time; the churn is constant)
   // and would destroy the animating node — the "animations no longer evident" regression.
-  if (live.querySelector('.rail-section.peek, .sliding')) {
+  if (!_force && _engaged()) {
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
   }
@@ -8300,7 +8309,7 @@ function _railWorkflowRow(row, parentConv) {
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions wf-ov-actions';   // wf-ov-actions → _wfScheduleInline swaps it for the picker
   acts.dataset.rowAction = '';
-  const rerender = () => { void _renderRailList(); };
+  const rerender = () => { void _renderRailList({ force: true }); };   // v1816 — action renders land now
   acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async () => {
     _closeRail();   // §9 — run output is conversation; reveal the thread it streams into
     if (parentConv && parentConv.id !== _currentConversationId) await _openConvFullTimeline(parentConv);
@@ -8416,13 +8425,13 @@ function _railParkedRow(p) {
     if (meta) meta.textContent = (res && res.success !== false)
       ? (v === 'parked' ? 'sent — the run continued and stopped at the NEXT write' : 'done — the run ' + (v === 'complete' ? 'completed' : (v || 'finished')))
       : 'couldn’t resume — ' + _errWord(res && res.error);
-    setTimeout(() => { void _renderRailList(); }, 1400);
+    setTimeout(() => { void _renderRailList({ force: true }); }, 1400);
   }));
   acts.appendChild(_mkBtn('✕ Cancel', async () => {
     try { await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
     const meta = item.querySelector('.rail-item-meta');
     if (meta) meta.textContent = 'cancelled — the write was not sent';
-    setTimeout(() => { void _renderRailList(); }, 1400);
+    setTimeout(() => { void _renderRailList({ force: true }); }, 1400);
   }));
   item.appendChild(acts);
   return item;
