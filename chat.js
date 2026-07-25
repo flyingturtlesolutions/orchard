@@ -760,7 +760,7 @@ async function _renderRailListNow() {
   // v1803 (fix 3) — a background refresh must not rebuild the DOM under an active interaction: a hover-peek
   // is DOM-only state, so a churn-triggered render mid-hover made the open cards VANISH under the cursor.
   // Defer once; the coalescer + the steady churn guarantee a prompt retry.
-  if (live.querySelector('.rail-section.peek')) {
+  if (live.querySelector('.rail-section.peek, .sliding')) {   // v1815 — peeked OR animating
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
   }
@@ -941,7 +941,13 @@ async function _renderRailListNow() {
   let anyActive = false;
   container.querySelectorAll('.rail-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
   // v1803 (fix 2) — the ONE atomic swap: the live list is replaced only now, fully built (listeners ride the
-  // moved nodes). No empty-await window, ever.
+  // moved nodes). No empty-await window, ever. v1815 — RE-CHECK before swapping: a render that passed the head
+  // check while idle can arrive here mid-peek/mid-animation (the awaits take real time; the churn is constant)
+  // and would destroy the animating node — the "animations no longer evident" regression.
+  if (live.querySelector('.rail-section.peek, .sliding')) {
+    setTimeout(() => { void _renderRailList(); }, 700);
+    return;
+  }
   live.replaceChildren(...container.childNodes);
   _updateRailActionDot();
   if (anyActive || live.querySelector('.rail-item[data-next-sweep]')) _startRailStatusTimer(); else _stopRailStatusTimer();
@@ -972,9 +978,15 @@ function _slideCancelRelease(el) {
   if (el._slideT) { clearTimeout(el._slideT); el._slideT = null; }
   if (el._slideEnd) { el.removeEventListener('transitionend', el._slideEnd); el._slideEnd = null; }
 }
+function _slideMark(el) {   // v1815 — 'sliding' = a height animation in flight; renders must not swap the DOM under it
+  el.classList.add('sliding');
+  if (el._slideMarkT) clearTimeout(el._slideMarkT);
+  el._slideMarkT = setTimeout(() => { try { el.classList.remove('sliding'); } catch { /* */ } }, 420);
+}
 function _slideOpen(el) {
   if (!el) return;
   _slideCancelRelease(el);
+  _slideMark(el);
   el.style.height = el.scrollHeight + 'px';
   const release = () => {
     _slideCancelRelease(el);
@@ -997,6 +1009,7 @@ function _slideClosed(el) {
   // reverse from where it visually is instead of jumping to full.
   const cur = el.getBoundingClientRect().height;
   if (cur < 1) { el.style.height = '0px'; return; }
+  _slideMark(el);   // v1815
   el.style.height = cur + 'px';
   void el.offsetHeight;
   el.style.height = '0px';
