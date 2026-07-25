@@ -580,9 +580,30 @@ async function _editDevConcern(convId, current) {
 
 // v2.74.1030 — the drawer is an inline push panel now, so the header button TOGGLES it (open ↔ close)
 // rather than only opening — there's no dark backdrop to click away.
+// v1826 (user directive) — the button joins the HOVER-REVEAL family (the section-button semantics, v1783):
+// hovering it (150ms intent) PEEKS the rail open; leaving it (300ms grace) closes an unpinned peek; CLICK
+// pins it open (or closes a pinned rail). A peek converts to a pin on click, never toggles shut.
+let _railPeek = false;
+let _railPeekOpenT = null, _railPeekCloseT = null;
 $('btn-rail').addEventListener('click', async () => {
-  if ($('rail').classList.contains('open')) { _closeRail(); return; }
+  clearTimeout(_railPeekOpenT); clearTimeout(_railPeekCloseT);
+  if ($('rail').classList.contains('open')) {
+    if (_railPeek) { _railPeek = false; return; }   // hover-opened → the click PINS it
+    _closeRail();
+    return;
+  }
+  _railPeek = false;
   await _openRail();
+});
+$('btn-rail').addEventListener('pointerenter', () => {
+  clearTimeout(_railPeekCloseT);
+  if ($('rail').classList.contains('open')) return;
+  _railPeekOpenT = setTimeout(async () => { _railPeek = true; await _openRail(); }, 150);
+});
+$('btn-rail').addEventListener('pointerleave', () => {
+  clearTimeout(_railPeekOpenT);
+  if (!_railPeek) return;
+  _railPeekCloseT = setTimeout(() => { if (_railPeek) { _railPeek = false; _closeRail(); } }, 300);
 });
 
 $('btn-close-rail').addEventListener('click', _closeRail);
