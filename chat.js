@@ -864,8 +864,8 @@ async function _renderRailListNow() {
     _grpWfs = (row.wfCount > 0) ? _mkSection(g, 'rail-sec-wfs', _expandedWfs.has(row.id)) : null;
     _grpCases = row.hasChildren ? _mkSection(g, 'rail-sec-cases', row.expanded) : null;
     container.appendChild(g);
-    _wireSectionPeek(el.querySelector('.rail-item-wf'), _grpWfs && _grpWfs.parentElement, g);
-    _wireSectionPeek(el.querySelector('.rail-item-cases'), _grpCases && _grpCases.parentElement, g);
+    _wireSectionPeek(el.querySelector('.rail-item-wf'), _grpWfs && _grpWfs.parentElement);
+    _wireSectionPeek(el.querySelector('.rail-item-cases'), _grpCases && _grpCases.parentElement);
   };
   for (const row of rows) {
     if (row.role === 'overview') { _grpCases = _grpWfs = null; container.appendChild(_historyPinRow(row)); continue; }
@@ -914,10 +914,11 @@ async function _renderRailListNow() {
 // invariant class — forget the entry, the button also selects the row) is deleted, not extended.
 const _isRowActionTarget = (e) => !!e.target.closest('[data-row-action]');
 
-// v2.74.1774/1777 — PER-SECTION peek: hover a section's button (150ms intent delay) reveals ITS rows; leaving
-// the GROUP (row + revealed rows — moving down into them keeps them open) closes after a 300ms grace. A pinned
-// section ignores all of it. inert tracks visibility so hidden rows are never tab-reachable.
-function _wireSectionPeek(btn, section, group) {
+// v2.74.1774/1777/1783 — PER-SECTION peek, bounded by the BUTTON (user directive: the hover bounds are the
+// action button, in AND out): hovering it (150ms intent delay) reveals the section; leaving it closes after a
+// 300ms grace. Peek is a PREVIEW — interacting with the rows means pinning (click). A pinned section ignores
+// all of it. inert tracks visibility so hidden rows are never tab-reachable.
+function _wireSectionPeek(btn, section) {
   if (!btn || !section) return;
   let openT = null, closeT = null;
   const syncInert = () => { section.inert = !(section.classList.contains('pinned') || section.classList.contains('peek')); };
@@ -925,8 +926,7 @@ function _wireSectionPeek(btn, section, group) {
     clearTimeout(closeT);
     openT = setTimeout(() => { section.classList.add('peek'); syncInert(); }, 150);
   });
-  group.addEventListener('pointerenter', () => { clearTimeout(closeT); });
-  group.addEventListener('pointerleave', () => {
+  btn.addEventListener('pointerleave', () => {
     clearTimeout(openT);
     closeT = setTimeout(() => { section.classList.remove('peek'); syncInert(); }, 300);
   });
