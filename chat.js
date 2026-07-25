@@ -738,6 +738,7 @@ function _stopRailStatusTimer() { if (_railStatusTimer) { clearInterval(_railSta
 let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the drawer accordion (collapsed by default)
 let _expandedWfs = new Set();    // v2.74.1777 ("one class") — which desks' WORKFLOWS sections are pinned open
 let _expandedWfDetails = new Set();   // v1804 — which workflow CARDS' details are pinned open (by wf.id)
+let _railBodyPinned = null;   // v1811 — which view/case card carries the body shift (conv id; click toggles it)
 
 // v2.74.1588 — COALESCE re-entrant renders: the body clears the container synchronously then awaits (list /
 // pending counts / alarms) before appending, so two OVERLAPPING calls each appended a full row set — the whole
@@ -1189,7 +1190,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     ? `<span class="rail-item-badge parked" data-row-action role="button" tabindex="0" title="${parkedN} scheduled run${parkedN === 1 ? '' : 's'} stopped at a write — click to review">✋ ${parkedN}</span>`
     : '';
   const item = document.createElement('div');
-  item.className = ['rail-item', row.active ? 'active' : '', isDev ? 'dev' : 'app',
+  item.className = ['rail-item', row.active ? 'active' : '', (_railBodyPinned === String(conv.id)) ? 'body-pinned' : '', isDev ? 'dev' : 'app',
     row.role === 'app' ? 'is-app' : '', row.role === 'subtask' ? 'is-subtask' : '',
     (row.role === 'app' && row.hasChildren) ? 'has-children' : ''].filter(Boolean).join(' ');
   item.dataset.conversationId = conv.id;
@@ -1268,8 +1269,10 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   // then mounts the same final state — no jump).
   const _optimisticActive = () => {
     try {
-      item.closest('#rail-list')?.querySelectorAll('.rail-item.active').forEach((el) => el.classList.remove('active'));
+      item.closest('#rail-list')?.querySelectorAll('.rail-item.active, .rail-item.body-pinned').forEach((el) => { el.classList.remove('active'); el.classList.remove('body-pinned'); });
       item.classList.add('active');
+      item.classList.add('body-pinned');   // v1811 — the shift is a PIN: first click pins, second unpins
+      _railBodyPinned = String(conv.id);
       // v1810 (user: "rule not honored") — ONE shifted card across the WHOLE rail: selecting a view/case
       // releases any pinned workflow card in place (its section too, if the pin was all that held it open).
       _expandedWfDetails.clear();
@@ -1286,7 +1289,18 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   item.addEventListener('click', (e) => {
     if (_isRowActionTarget(e)) return;
     if (_rowClickTimer) return;                          // 2nd click of a double — dblclick handles it
-    _rowClickTimer = setTimeout(() => { _rowClickTimer = null; _optimisticActive(); void _selectConvForInput(conv); }, 220);
+    _rowClickTimer = setTimeout(() => {
+      _rowClickTimer = null;
+      // v1811 (user directive) — first click PINS the shift (+ selects), second click UNPINS it (selection
+      // stays — a conversation is always current); double-click keeps its open-timeline behavior.
+      if (item.classList.contains('body-pinned')) {
+        item.classList.remove('body-pinned');
+        _railBodyPinned = null;
+      } else {
+        _optimisticActive();
+      }
+      void _selectConvForInput(conv);   // no-op when already the selected target
+    }, 220);
   });
   item.addEventListener('dblclick', (e) => {
     if (_isRowActionTarget(e)) return;
@@ -8326,6 +8340,8 @@ function _railWorkflowRow(row, parentConv) {
     const nowPinned = !_detailPinned();
     if (nowPinned) {
       // v1808 (user directive) — ONE pinned card at a time: pinning this one releases any other, in place.
+      _railBodyPinned = null;   // v1811 — the view/case body pin yields too (one shift rail-wide)
+      try { document.querySelectorAll('#rail-list .rail-item.body-pinned').forEach((el) => el.classList.remove('body-pinned')); } catch { /* */ }
       _expandedWfDetails.clear();
       try {
         document.querySelectorAll('#rail-list .rail-item.is-workflow.detail-pinned').forEach((el) => {
