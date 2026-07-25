@@ -1835,14 +1835,14 @@ textarea {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
-  transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
+  transition: grid-template-rows 340ms cubic-bezier(0.45, 0, 0.2, 1), opacity 260ms ease 60ms;   /* CLOSE (v1797) */
 }
 .wf-row-detail-inner { min-height: 0; overflow: hidden; }
 .rail-item.is-workflow:hover .wf-row-detail,
 .rail-item.is-workflow:focus-within .wf-row-detail {
   grid-template-rows: 1fr;
   opacity: 1;
-  transition-delay: 150ms;
+  transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1) 150ms, opacity 240ms ease 150ms;   /* OPEN + intent gate */
 }
 /* v2.74.1785 (user directive) — each STEP is highlighted: its own pill row (accented number + soft chip
    background) sliding in with the theme's stagger as the card opens. */
@@ -1870,7 +1870,7 @@ textarea {
   white-space: nowrap;
   transform: translateX(-8px);
   opacity: 0;
-  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, background var(--t-fast);
+  transition: transform 260ms cubic-bezier(0.45, 0, 0.2, 1) 40ms, opacity 240ms ease 40ms, background var(--t-fast);   /* CLOSE lingers 40ms (v1797) */
 }
 .wf-row-steps li:hover { background: rgba(167, 139, 250, 0.18); }
 .rail-item.is-workflow:hover .wf-row-steps li,
@@ -1910,13 +1910,17 @@ textarea {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
-  transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
+  /* v1797 — the BASE transition is the CLOSE: a gentle symmetric curve + the opacity lingering 60ms so the
+     rows are still visible while the height eases shut (the ease-out open curve made closes collapse most of
+     the height in the first 100ms — the reported abruptness). The open states override with the snappy curve. */
+  transition: grid-template-rows 340ms cubic-bezier(0.45, 0, 0.2, 1), opacity 260ms ease 60ms;
 }
 .rail-section-inner { min-height: 0; overflow: hidden; }
 .rail-section.pinned,
 .rail-section.peek {
   grid-template-rows: 1fr;
   opacity: 1;
+  transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;   /* OPEN timing */
 }
 /* v2.74.1775 (user directive) — SLIDE-OUT reveal / slide-in hide: each row slides out from under its desk row
    (translateX) as the section opens, staggered on the first few; the hide runs all rows back together (delays
@@ -1924,12 +1928,13 @@ textarea {
 .rail-section .rail-item {
   transform: translateX(-14px);
   opacity: 0;
-  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms ease;
+  transition: transform 320ms cubic-bezier(0.45, 0, 0.2, 1) 40ms, opacity 280ms ease 40ms;   /* CLOSE lingers (v1797) */
 }
 .rail-section.pinned .rail-item,
 .rail-section.peek .rail-item {
   transform: translateX(0);
   opacity: 1;
+  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms ease;   /* OPEN timing (nth-child delays still override) */
 }
 .rail-section.pinned .rail-item:nth-child(2),
 .rail-section.peek .rail-item:nth-child(2) { transition-delay: 40ms; }
