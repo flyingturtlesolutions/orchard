@@ -895,10 +895,10 @@ async function _renderRailListNow() {
     if (_grpWfs) {
       const add = document.createElement('div');
       add.className = 'rail-item is-subtask rail-wf-add';
-      // v1818 (user directive) — an EMPTY section's ＋ row explains its type on expand (there is nothing else
-      // there to say what a workflow is); once items exist the row stays compact.
+      // v1818/1821 — the ＋ row's type description is HOVER-revealed (the ＋ View pattern; live report: the
+      // empty-only static line read as "no description on hover").
       add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>'
-        + (!(row.wfCount > 0) ? '<div class="rail-item-meta">save a multi-step task you run often — it can run on a schedule</div>' : '');
+        + '<div class="rail-item-meta rail-add-desc">save a multi-step task you run often — it can run on a schedule</div>';
       add.addEventListener('click', async (e) => {
         e.stopPropagation();
         _closeRail();
@@ -914,7 +914,7 @@ async function _renderRailListNow() {
       const addCase = document.createElement('div');
       addCase.className = 'rail-item is-subtask rail-wf-add rail-case-add';
       addCase.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Case</div>'
-        + (!(row.count > 0) ? '<div class="rail-item-meta">a focused thread under this view — one per ticket, task, or customer</div>' : '');   // v1818 — type description only while empty
+        + '<div class="rail-item-meta rail-add-desc">a focused thread under this view — one per ticket, task, or customer</div>';   // v1821 — hover-revealed (the ＋ View pattern)
       addCase.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (row.id === ADMIN_ID) await _ensureAdminConversation();   // the parent must exist before a child hangs off it
