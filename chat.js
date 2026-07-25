@@ -8303,8 +8303,23 @@ function _railWorkflowRow(row, parentConv) {
   const _toggleDetailPin = () => {
     if (!_detail) return;
     const nowPinned = !_detailPinned();
-    if (nowPinned) { _expandedWfDetails.add(wf.id); item.classList.add('detail-pinned'); _slideOpen(_detail); }
-    else { _expandedWfDetails.delete(wf.id); item.classList.remove('detail-pinned'); if (!item.matches(':hover')) _slideClosed(_detail); }
+    if (nowPinned) {
+      // v1808 (user directive) — ONE pinned card at a time: pinning this one releases any other, in place.
+      _expandedWfDetails.clear();
+      try {
+        document.querySelectorAll('#rail-list .rail-item.is-workflow.detail-pinned').forEach((el) => {
+          if (el === item) return;
+          el.classList.remove('detail-pinned');
+          el.setAttribute('aria-expanded', 'false');
+          const d = el.querySelector('.wf-row-detail');
+          if (d && !el.matches(':hover')) _slideClosed(d);
+        });
+      } catch { /* */ }
+      _expandedWfDetails.add(wf.id); item.classList.add('detail-pinned'); _slideOpen(_detail);
+    } else {
+      _expandedWfDetails.delete(wf.id); item.classList.remove('detail-pinned');
+      if (!item.matches(':hover')) _slideClosed(_detail);
+    }
     item.setAttribute('aria-expanded', String(nowPinned));
   };
   item.addEventListener('click', (e) => {
