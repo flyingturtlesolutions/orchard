@@ -1786,15 +1786,21 @@ textarea {
   gap: 4px;
 }
 /* cluster members are static flex items — the standalone absolute rules below don't apply inside it */
-.rail-item-actions .rail-item-wf,
 .rail-item-actions .rail-item-subtask {
   position: static;
   top: auto; bottom: auto; right: auto;
   transform: none;
 }
-/* the CASES button — icon + count chip; always visible (the count is workload signal). Hover peeks the
-   group's case rows; click pins (aria-pressed). Pinned state shows as accent. */
-.rail-item-cases {
+/* v2.74.1777 — parked needs-action rows carry ALWAYS-VISIBLE text buttons in normal flow, not the corner cluster */
+.rail-item-actions.rail-static {
+  position: static;
+  margin-top: 4px;
+  justify-content: flex-end;
+}
+/* the CASES + WORKFLOWS buttons — one look ("one class"): icon + count chip, always visible (the count is
+   workload signal). Hover peeks that section's rows; click pins (aria-pressed → accent). */
+.rail-item-cases,
+.rail-item-wf {
   height: 22px;
   min-width: 28px;
   padding: 0 5px;
@@ -1808,50 +1814,57 @@ textarea {
   font-weight: 600;
   transition: background var(--t-fast), color var(--t-fast);
 }
-.rail-item-cases:hover { background: var(--c-bg); color: var(--c-text); }
-.rail-group.pinned .rail-item-cases { color: var(--c-accent); }
+.rail-item-cases:hover,
+.rail-item-wf:hover { background: var(--c-bg); color: var(--c-text); }
+.rail-item-cases[aria-pressed="true"],
+.rail-item-wf[aria-pressed="true"] { color: var(--c-accent); }
 .rail-case-count { font-variant-numeric: tabular-nums; }
+/* a WORKFLOW row's icon chips hover-reveal (the app-row idiom), slightly tightened for the rail */
+.rail-item.is-workflow .rail-item-actions { right: var(--sp-2); }   /* no delete column on these rows */
+.rail-item.is-workflow .wf-card-act { width: 24px; height: 24px; opacity: 0; transition: opacity var(--t-fast), background var(--t-fast); }
+.rail-item.is-workflow:hover .wf-card-act,
+.rail-item.is-workflow:focus-within .wf-card-act { opacity: 1; }
 
 /* the GROUP — an app/admin row + its case rows, one hover zone. Case rows are ALWAYS in the DOM; peek/pin
    reveal them with a max-height transition (the card-expand feel). inert is managed in JS for focus safety. */
-/* v2.74.1776 (user: "smooth") — grid 0fr→1fr replaces max-height: the old 1000px cap interpolated over the
-   full range, so opening visually snapped and closing lagged; grid animates the TRUE height, both directions,
-   under one soft ease-out curve. The inner wrapper (min-height:0, overflow hidden) is the one sizable child
-   the trick requires. */
-.rail-group-cases {
+/* v2.74.1776/1777 (user: "smooth" · "one class") — a SECTION is the generic slide block: grid 0fr→1fr animates
+   the TRUE height both directions under one soft ease-out curve (max-height's cap interpolation snapped open and
+   lagged closed). A group holds up to two sections — workflows above cases, mirroring the icon order — each with
+   its OWN pinned/peek state. The inner wrapper (min-height:0, overflow hidden) is the one sizable grid child. */
+.rail-section {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
   transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
 }
-.rail-group-cases-inner { min-height: 0; overflow: hidden; }
-.rail-group.pinned .rail-group-cases,
-.rail-group.peek .rail-group-cases {
+.rail-section-inner { min-height: 0; overflow: hidden; }
+.rail-section.pinned,
+.rail-section.peek {
   grid-template-rows: 1fr;
   opacity: 1;
 }
-/* v2.74.1775 (user directive) — SLIDE-OUT reveal / slide-in hide: each case row slides out from under its
-   desk row (translateX) as the group opens, with a light stagger on the first few; the hide runs all rows
-   back together (delays live only on the open-state selectors). */
-.rail-group-cases .rail-item {
+/* v2.74.1775 (user directive) — SLIDE-OUT reveal / slide-in hide: each row slides out from under its desk row
+   (translateX) as the section opens, staggered on the first few; the hide runs all rows back together (delays
+   live only on the open-state selectors). */
+.rail-section .rail-item {
   transform: translateX(-14px);
   opacity: 0;
   transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms ease;
 }
-.rail-group.pinned .rail-group-cases .rail-item,
-.rail-group.peek .rail-group-cases .rail-item {
+.rail-section.pinned .rail-item,
+.rail-section.peek .rail-item {
   transform: translateX(0);
   opacity: 1;
 }
-.rail-group.pinned .rail-group-cases .rail-item:nth-child(2),
-.rail-group.peek .rail-group-cases .rail-item:nth-child(2) { transition-delay: 40ms; }
-.rail-group.pinned .rail-group-cases .rail-item:nth-child(3),
-.rail-group.peek .rail-group-cases .rail-item:nth-child(3) { transition-delay: 80ms; }
-.rail-group.pinned .rail-group-cases .rail-item:nth-child(n+4),
-.rail-group.peek .rail-group-cases .rail-item:nth-child(n+4) { transition-delay: 120ms; }
+.rail-section.pinned .rail-item:nth-child(2),
+.rail-section.peek .rail-item:nth-child(2) { transition-delay: 40ms; }
+.rail-section.pinned .rail-item:nth-child(3),
+.rail-section.peek .rail-item:nth-child(3) { transition-delay: 80ms; }
+.rail-section.pinned .rail-item:nth-child(n+4),
+.rail-section.peek .rail-item:nth-child(n+4) { transition-delay: 120ms; }
 @media (prefers-reduced-motion: reduce) {
-  .rail-group-cases,
-  .rail-group-cases .rail-item { transition: none; }
+  .rail-section,
+  .rail-section .rail-item { transition: none; }
 }
 
 .rail-list {
@@ -2028,23 +2041,8 @@ textarea {
 .rail-item:hover .rail-item-subtask { opacity: 1; }
 .rail-item-subtask:hover { background: var(--c-bg); color: var(--c-accent); }
 
-/* PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the per-app WORKFLOWS door; same hover-reveal idiom.
-   v2.74.1774 — lives in the .rail-item-actions flex cluster (workflows · cases · add case), so no absolute
-   positioning of its own (the v1773 slot-collision class is dead). */
-.rail-item-wf {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--r-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--c-text-subtle);
-  opacity: 0;
-  transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
-}
-.rail-item:hover .rail-item-wf,
-.rail-item-wf:focus-visible { opacity: 1; }
-.rail-item-wf:hover { background: var(--c-bg); color: var(--c-accent); }
+/* PS-3 → v2.74.1777 — the workflows button now MIRRORS the cases button (icon + count, always visible,
+   peek/pin); its styles live with .rail-item-cases above. The hover-reveal glyph era is over. */
 
 /* surfaces-§4.5 (preview-as-selection) — the per-dev-row "load this branch into the live build" button (sat just left
    of delete) + the drawer's "Preview main" control. Mirrors the delete button: hover-revealed icon; amber on hover. */

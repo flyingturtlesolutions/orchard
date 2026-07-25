@@ -26,16 +26,16 @@ describe('panelConformance — §2.2 migrated views stay off the transcript', ()
   // The overlay BODY renderers must never append chat bubbles — a bubble from a view is the one-shot-surface
   // regression the whole migration exists to kill. (The entry functions keep their no-desk guard bubble —
   // "Open a view first…" IS conversation.)
-  // Exception (§9): a RUN handler may append its run bubble — but only after releaseSurface() closed the
-  // overlay (run output streams into the thread it revealed). Textual proxy: every appendMessage in these
-  // functions must have a releaseSurface( within the preceding handler span.
-  for (const name of ['_renderWorkflowsBody', '_renderParkedRuns', '_renderRoutinesBody', '_showKeepAliveBody', '_listCasesMsg']) {
-    it(`${name} appends into the thread only after closing its overlay`, () => {
+  // Exception (§9): a RUN handler may append its run bubble — but only after closing the surface it lives on
+  // (releaseSurface for an overlay, _closeRail for a Rail row — run output streams into the thread it
+  // revealed). Textual proxy: every appendMessage must have one of those closes in the preceding handler span.
+  for (const name of ['_railWorkflowRow', '_railParkedRow', '_renderRoutinesBody', '_showKeepAliveBody', '_listCasesMsg']) {
+    it(`${name} appends into the thread only after closing its surface`, () => {
       const src = fnSource(name);
       assert.ok(src, `${name} not found — if renamed, update this test`);
       for (const m of [...src.matchAll(/appendMessage\(/g)]) {
         const before = src.slice(Math.max(0, m.index - 600), m.index);
-        assert.ok(before.includes('releaseSurface('), `${name} appends a bubble while its overlay is up — close the surface first (§9) or render into the body`);
+        assert.ok(before.includes('releaseSurface(') || before.includes('_closeRail('), `${name} appends a bubble while its surface is up — close it first (§9) or render in place`);
       }
     });
   }

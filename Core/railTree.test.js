@@ -74,6 +74,23 @@ describe('railTree — buildRailTree', () => {
     assert.equal(open.find((r) => r.id === 'app1').expanded, true, 'the pin flows through');
   });
 
+  it('v1777 "one class" — workflows emit as desk children (role workflow) between the app row and its cases', () => {
+    const summaries = [
+      { id: 'app1', title: 'Support', kind: 'agent', appId: 'support', instanceId: 'inst1', updatedAt: 100 },
+      { id: 't1', title: 'Ticket #1', kind: 'agent', parentId: 'app1', updatedAt: 90 },
+    ];
+    const wf = { id: 'w1', name: 'daily sweep', ask: 'get open tickets', subAsks: ['a', 'b'] };
+    const rows = buildRailTree(summaries, { workflowsByConv: new Map([['app1', [wf]]]) });
+    const appIdx = rows.findIndex((r) => r.id === 'app1');
+    assert.equal(rows[appIdx].wfCount, 1, 'the app row carries the workflow count for the mirrored button');
+    assert.equal(rows[appIdx + 1].role, 'workflow', 'workflow rows come FIRST (icon order), then cases');
+    assert.equal(rows[appIdx + 1].title, 'daily sweep');
+    assert.equal(rows[appIdx + 1].wfKey, 'inst1', 'wfKey = the desk instance (the bank key)');
+    assert.deepEqual(rows[appIdx + 1].wf, wf, 'the full record rides the row — actions need it');
+    assert.equal(rows[appIdx + 2].role, 'subtask');
+    assert.equal(buildRailTree(summaries).find((r) => r.id === 'app1').wfCount, 0, 'no map → count 0, no button');
+  });
+
   it('dev mode off hides dev conversations; on shows them as plain rows', () => {
     const summaries = [
       { id: 'c1', title: 'Free chat', kind: 'agent', updatedAt: 50 },

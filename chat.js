@@ -735,6 +735,7 @@ function _startRailStatusTimer() {
 function _stopRailStatusTimer() { if (_railStatusTimer) { clearInterval(_railStatusTimer); _railStatusTimer = null; } }
 
 let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the drawer accordion (collapsed by default)
+let _expandedWfs = new Set();    // v2.74.1777 ("one class") — which desks' WORKFLOWS sections are pinned open
 
 // v2.74.1588 — COALESCE re-entrant renders: the body clears the container synchronously then awaits (list /
 // pending counts / alarms) before appending, so two OVERLAPPING calls each appended a full row set — the whole
@@ -759,7 +760,7 @@ async function _renderRailListNow() {
   // Overview pin → apps → (when expanded) their sub-tasks → a New-app entry. The dev-filter, the per-row
   // preview/delete/run-status, and the active highlight are all preserved; only the ORDER + grouping + the
   // Overview/New-app pins are new. Hierarchy is glyph + chevron + weight, NEVER indentation.
-  const rows = buildRailTree(all, { devMode: _devModeEnabled, activeId: _currentConversationId, expanded: _expandedApps });
+  const rows = buildRailTree(all, { devMode: _devModeEnabled, activeId: _currentConversationId, expanded: _expandedApps, workflowsByConv: _wfByConv });
   const byId = new Map(all.map((c) => [c.id, c]));
 
   // FL-6c (v2.74.1357) — the APP CARD is the pending-proposals signal (the extension-icon badge belongs to other
@@ -772,12 +773,26 @@ async function _renderRailListNow() {
   // notification channel (the thread nudge is retired — a transient bubble in a conversation the run doesn't
   // belong to was the wrong surface). One cross-desk fetch, grouped by the workflow's OWN appId.
   const _parkedByInst = {};
+  const _parkedFull = {};   // v2.74.1777 — the full entries render as needs-action rows atop the workflows section
   try {
     const r = await _orchReq('WORKFLOW_PARKED', {});
     for (const p of ((r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [])) {
-      if (p && p.appId) _parkedByInst[p.appId] = (_parkedByInst[p.appId] || 0) + 1;
+      if (p && p.appId) {
+        _parkedByInst[p.appId] = (_parkedByInst[p.appId] || 0) + 1;
+        (_parkedFull[p.appId] = _parkedFull[p.appId] || []).push(p);
+      }
     }
   } catch { /* badge-only — never blocks the Rail */ }
+
+  // v2.74.1777 ("one class") — workflows per desk, ONE sweep (the parked-badge pattern): counts + row content
+  // for every desk, so a section peek is instant — no per-hover fetch, no pop-in. Orphaned (stamped) banks stay
+  // out of the rail (no desk row to sit under); they still surface via _loadWorkflowsMerged on the landing.
+  const _wfByConv = new Map();
+  try {
+    const banks = await listAllWorkflows();
+    const byInst = new Map(banks.filter((b) => b && !b.orphaned && Array.isArray(b.items) && b.items.length).map((b) => [String(b.appId), b.items]));
+    for (const c of all) { if (c && c.instanceId && byInst.has(String(c.instanceId))) _wfByConv.set(c.id, byInst.get(String(c.instanceId))); }
+  } catch { /* section-only — never blocks the Rail */ }
 
   // FL-6d (v2.74.1361) — next-sweep countdown per app card: ONE alarms.getAll(), keyed back to instances by the
   // alarm name. The alarm's scheduledTime is the ground truth (never derived from createdAt + periods).
@@ -802,43 +817,58 @@ async function _renderRailListNow() {
   // .rail-group (the case rows are ALWAYS in the DOM; a class hides them). Hover on the cases button PEEKS the
   // group open; mouse-away (with grace) closes it; click PINS (persists in _expandedApps). No re-render on hover —
   // a hover-driven rebuild would destroy the node under the pointer and flicker-loop.
-  let _grpCases = null;
+  let _grpCases = null, _grpWfs = null;
+  // v2.74.1777 — a section = one grid 0fr→1fr slide block (v1776) with its OWN pin/peek classes; a group can
+  // hold two (workflows above cases, mirroring the icon order). Inner wrapper = the one sizable grid child.
+  const _mkSection = (g, cls, pinned) => {
+    const outer = document.createElement('div');
+    outer.className = 'rail-section ' + cls + (pinned ? ' pinned' : '');
+    outer.inert = !pinned;   // hidden rows must not be tab-reachable
+    const inner = document.createElement('div');
+    inner.className = 'rail-section-inner';
+    outer.appendChild(inner);
+    g.appendChild(outer);
+    return inner;
+  };
   const _startGroup = (el, row) => {
     const g = document.createElement('div');
-    g.className = 'rail-group' + (row.expanded ? ' pinned' : '');
+    g.className = 'rail-group';
     g.appendChild(el);
-    // v2.74.1776 — the grid 0fr→1fr height animation needs ONE sizable child: rows append into an inner
-    // wrapper; inert/class state stays on the outer .rail-group-cases.
-    const outer = document.createElement('div');
-    outer.className = 'rail-group-cases';
-    outer.inert = !row.expanded;   // hidden cases must not be tab-reachable
-    _grpCases = document.createElement('div');
-    _grpCases.className = 'rail-group-cases-inner';
-    outer.appendChild(_grpCases);
-    g.appendChild(outer);
+    _grpWfs = (row.wfCount > 0) ? _mkSection(g, 'rail-sec-wfs', _expandedWfs.has(row.id)) : null;
+    _grpCases = row.hasChildren ? _mkSection(g, 'rail-sec-cases', row.expanded) : null;
     container.appendChild(g);
-    _wireGroupPeek(g);
+    _wireSectionPeek(el.querySelector('.rail-item-wf'), _grpWfs && _grpWfs.parentElement, g);
+    _wireSectionPeek(el.querySelector('.rail-item-cases'), _grpCases && _grpCases.parentElement, g);
   };
   for (const row of rows) {
-    if (row.role === 'overview') { _grpCases = null; container.appendChild(_historyPinRow(row)); continue; }
+    if (row.role === 'overview') { _grpCases = _grpWfs = null; container.appendChild(_historyPinRow(row)); continue; }
     if (row.role === 'admin') {   // VT-2 (v2.74.1573) — the reserved vitals fixture
       const el = _historyAdminRow(row);
-      if (row.hasChildren) _startGroup(el, row); else { _grpCases = null; container.appendChild(el); }
+      if (row.hasChildren) _startGroup(el, row); else { _grpCases = _grpWfs = null; container.appendChild(el); }
       continue;
     }
-    if (row.role === 'new-app') { _grpCases = null; container.appendChild(_historyNewAppRow()); continue; }
+    if (row.role === 'new-app') { _grpCases = _grpWfs = null; container.appendChild(_historyNewAppRow()); continue; }
+    if (row.role === 'workflow') {   // v2.74.1777 — a desk child, same as a case row
+      if (_grpWfs) _grpWfs.appendChild(_railWorkflowRow(row, byId.get(row.parentId)));
+      continue;
+    }
     const conv = byId.get(row.id);
     if (!conv) continue;
     const el = _historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_parkedByInst[conv.instanceId] || 0) : 0);
     if (row.role === 'subtask' && _grpCases) {
       _grpCases.appendChild(el);
-      // the ACTIVE case must never hide inside a closed group (a spawn opens the case as current) — force the
-      // group open presentationally; the pin store is untouched.
-      if (row.active) { _grpCases.closest('.rail-group')?.classList.add('pinned'); _grpCases.parentElement.inert = false; }
+      // the ACTIVE case must never hide inside a closed section (a spawn opens the case as current) — force it
+      // open presentationally; the pin store is untouched.
+      if (row.active) { _grpCases.parentElement.classList.add('pinned'); _grpCases.parentElement.inert = false; }
       continue;
     }
-    if (row.role === 'app' && row.hasChildren) { _startGroup(el, row); continue; }
-    _grpCases = null;
+    if (row.role === 'app' && (row.hasChildren || row.wfCount > 0)) {
+      _startGroup(el, row);
+      // needs-action rows ride at the TOP of the workflows section: parked runs (approve/cancel inline)
+      if (_grpWfs && conv.instanceId) for (const p of (_parkedFull[conv.instanceId] || [])) _grpWfs.appendChild(_railParkedRow(p));
+      continue;
+    }
+    _grpCases = _grpWfs = null;
     container.appendChild(el);
   }
 
@@ -857,24 +887,36 @@ async function _renderRailListNow() {
 // invariant class — forget the entry, the button also selects the row) is deleted, not extended.
 const _isRowActionTarget = (e) => !!e.target.closest('[data-row-action]');
 
-// v2.74.1774 — the group's PEEK behavior: hover the cases button (150ms intent delay) reveals the case rows;
-// leaving the GROUP (row + revealed cases — so moving down into them keeps them open) closes after a 300ms
-// grace. A pinned group ignores all of it. inert tracks visibility so hidden rows are never tab-reachable.
-function _wireGroupPeek(group) {
-  const btn = group.querySelector('.rail-item-cases');
-  const cases = group.querySelector('.rail-group-cases');
-  if (!btn || !cases) return;
+// v2.74.1774/1777 — PER-SECTION peek: hover a section's button (150ms intent delay) reveals ITS rows; leaving
+// the GROUP (row + revealed rows — moving down into them keeps them open) closes after a 300ms grace. A pinned
+// section ignores all of it. inert tracks visibility so hidden rows are never tab-reachable.
+function _wireSectionPeek(btn, section, group) {
+  if (!btn || !section) return;
   let openT = null, closeT = null;
-  const syncInert = () => { cases.inert = !(group.classList.contains('pinned') || group.classList.contains('peek')); };
+  const syncInert = () => { section.inert = !(section.classList.contains('pinned') || section.classList.contains('peek')); };
   btn.addEventListener('pointerenter', () => {
     clearTimeout(closeT);
-    openT = setTimeout(() => { group.classList.add('peek'); syncInert(); }, 150);
+    openT = setTimeout(() => { section.classList.add('peek'); syncInert(); }, 150);
   });
   group.addEventListener('pointerenter', () => { clearTimeout(closeT); });
   group.addEventListener('pointerleave', () => {
     clearTimeout(openT);
-    closeT = setTimeout(() => { group.classList.remove('peek'); syncInert(); }, 300);
+    closeT = setTimeout(() => { section.classList.remove('peek'); syncInert(); }, 300);
   });
+}
+
+// v2.74.1777 — the shared pin toggle (cases + workflows buttons): flip the store, flip the section classes in
+// place (no re-render — the peek state under the pointer survives), reflect aria-pressed.
+function _railTogglePin(rowEl, secCls, store, key, btn) {
+  const nowPinned = !store.has(key);
+  if (nowPinned) store.add(key); else store.delete(key);
+  const sec = rowEl.closest('.rail-group')?.querySelector(secCls);
+  if (sec) {
+    sec.classList.toggle('pinned', nowPinned);
+    if (!nowPinned) sec.classList.remove('peek');
+    sec.inert = !nowPinned && !sec.classList.contains('peek');
+  }
+  if (btn) btn.setAttribute('aria-pressed', String(nowPinned));
 }
 
 // v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
@@ -982,18 +1024,9 @@ function _historyAdminRow(row) {
       if (b && n > 0) { b.textContent = ` ⚠ ${n}`; b.hidden = false; }
     } catch { /* */ }
   })();
-  el.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {   // v2.74.1774 — pin toggle, in place
+  el.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {   // v2.74.1774/1777 — the shared pin toggle
     e.stopPropagation();
-    const nowPinned = !_expandedApps.has(ADMIN_ID);
-    if (nowPinned) _expandedApps.add(ADMIN_ID); else _expandedApps.delete(ADMIN_ID);
-    const g = el.closest('.rail-group');
-    if (g) {
-      g.classList.toggle('pinned', nowPinned);
-      if (!nowPinned) g.classList.remove('peek');
-      const cw = g.querySelector('.rail-group-cases');
-      if (cw) cw.inert = !nowPinned && !g.classList.contains('peek');
-    }
-    e.currentTarget.setAttribute('aria-pressed', String(nowPinned));
+    _railTogglePin(el, '.rail-sec-cases', _expandedApps, ADMIN_ID, e.currentTarget);
   });
   el.querySelector('.rail-item-subtask')?.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -1059,11 +1092,11 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   const subtaskBtn = row.role === 'app'
     ? `<button class="rail-item-subtask" data-row-action title="Add case" aria-label="Add case">${Icons.plus(14)}</button>`
     : '';
-  // PS-3 (v2.74.1766, DESIGN_panel_surfaces.md §3) — the workflows DOOR on every app row: saved workflows get a
-  // visible glyph (they were only reachable by typing `workflows` — an alias, never the sole door). Opens THAT
-  // desk's workflows overlay (switching to the desk first when it isn't the current one).
-  const wfBtn = (row.role === 'app' && !isDev)
-    ? `<button class="rail-item-wf" data-row-action title="Workflows" aria-label="Workflows — ${escHtml(conv.title)}">${Icons.workflow(14)}</button>`
+  // v2.74.1777 ("one class") — the workflows button MIRRORS the cases button: icon + count, always visible when
+  // the desk has workflows, hover peeks its section, click pins. (PS-3's open-the-overlay glyph is retired with
+  // the overlay itself.)
+  const wfBtn = (row.role === 'app' && !isDev && row.wfCount > 0)
+    ? `<button class="rail-item-wf" data-row-action title="Workflows — hover to peek, click to pin open" aria-label="Workflows (${row.wfCount}) — click to pin open" aria-pressed="${_expandedWfs.has(conv.id)}">${Icons.workflow(14)}<span class="rail-case-count">${row.wfCount}</span></button>`
     : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
@@ -1084,20 +1117,14 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
         </svg>
       </button>`;
 
-  // v2.74.1774 — cases click = PIN toggle (persists in _expandedApps; the group class flips in place — no
-  // re-render, so the peek state under the pointer survives). Never loads the app.
+  // v2.74.1774/1777 — cases + workflows clicks = PIN toggles through the one shared helper. Never loads the app.
   item.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    const nowPinned = !_expandedApps.has(conv.id);
-    if (nowPinned) _expandedApps.add(conv.id); else _expandedApps.delete(conv.id);
-    const g = item.closest('.rail-group');
-    if (g) {
-      g.classList.toggle('pinned', nowPinned);
-      if (!nowPinned) g.classList.remove('peek');
-      const cw = g.querySelector('.rail-group-cases');
-      if (cw) cw.inert = !nowPinned && !g.classList.contains('peek');
-    }
-    e.currentTarget.setAttribute('aria-pressed', String(nowPinned));
+    _railTogglePin(item, '.rail-sec-cases', _expandedApps, conv.id, e.currentTarget);
+  });
+  item.querySelector('.rail-item-wf')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _railTogglePin(item, '.rail-sec-wfs', _expandedWfs, conv.id, e.currentTarget);
   });
 
   // AP-2 — "+" → start a sub-conversation under this app, AUTO-NAMED `<parent> #N` (no prompt; v2.74.1216).
@@ -1106,15 +1133,11 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     await _spawnSubTask(conv.id);
   });
 
-  // PS-3 — the workflows glyph: switch to this desk if needed (rehydrate owns _memoryId), then open the overlay.
-  const _openDeskWorkflows = async () => {
-    if (conv.id !== _currentConversationId) await _openConvFullTimeline(conv);
-    else _closeRail();
-    void _renderWorkflows();
-  };
-  item.querySelector('.rail-item-wf')?.addEventListener('click', (e) => { e.stopPropagation(); void _openDeskWorkflows(); });
-  // PS-6 — the parked badge is a DOOR to the approve strip, not just a count.
-  item.querySelector('.rail-item-badge.parked')?.addEventListener('click', (e) => { e.stopPropagation(); void _openDeskWorkflows(); });
+  // PS-6/1777 — the parked badge is a DOOR: it pins the workflows section open (the approve rows live there).
+  item.querySelector('.rail-item-badge.parked')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!_expandedWfs.has(conv.id)) _railTogglePin(item, '.rail-sec-wfs', _expandedWfs, conv.id, item.querySelector('.rail-item-wf'));
+  });
 
   // v2.74.1223 (message-input redesign) — SINGLE-click SELECTS this conversation as the message-input target and KEEPS
   // the drawer open (the drawer is a live multi-conversation surface; a reply refreshes this row's peek). DOUBLE-click
@@ -8014,91 +8037,15 @@ async function _renderDistill() {
   }
 }
 
-// PS-2 (v2.74.1765, DESIGN_panel_surfaces.md §2.2) — the FLAGSHIP migration: workflows is an OVERLAY SURFACE,
-// never chat bubbles. Needs-action strips (parked runs · the §11.4 legacy-routine rebuild) render at the TOP of
-// the surface that owns the action (§7); rows carry icon-chip actions (§5). RUNNING closes the overlay first —
-// run output is conversation and belongs to the thread (§9). The "re-type `workflows`" era ends here.
+// v2.74.1777 (user redesign, "one class") — the workflows OVERLAY is retired: workflow cards are desk
+// CHILDREN in the Rail, rendered exactly like case cards (_railWorkflowRow below; sections in _renderRailList).
+// The command/leg doors stay aliases: they pin the current desk's workflows section open and reveal the Rail.
+// The §11.4 legacy-routine rebuild offer lives on in the routines overlay (its other door).
 async function _renderWorkflows() {
   const appId = _memoryId();
-  if (!appId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a view — workflows are saved per view.'); _orchFinalize(m); return; }
-  const ov = openPanelOverlay({ id: 'workflows', title: 'Workflows' });
-  if (!ov) return;
-  ov.body.textContent = 'Loading…';
-  await _renderWorkflowsBody(ov.body, appId);
-}
-async function _renderWorkflowsBody(body, appId) {
-  let wfs = [];
-  try { wfs = await _loadWorkflowsMerged(); } catch { /* */ }   // DK-8k — sweeps every candidate key (+ the v1722 orphan merge)
-  if (!body.isConnected) return;
-  body.innerHTML = '';
-  const rerender = () => { void _renderWorkflowsBody(body, appId); };
-  // needs-action strip 1 — PARKED runs (§7: the banner lives in the surface that owns the action)
-  try { await _renderParkedRuns(body, appId, rerender); } catch { /* */ }
-  // needs-action strip 2 — the §11.4 legacy-routine rebuild offer
-  try {
-    const _rr = await _orchReq('FLEET_ROUTINE', { instanceId: appId });
-    const _rt = _rr && _rr.routine;
-    if (_rt && _rt.ask && body.isConnected) {
-      const ban = document.createElement('div'); ban.className = 'wf-ov-banner';
-      ban.innerHTML = '<div>This view still has a <strong>legacy routine</strong> — every <strong>' + escHtml(describeEvery(_rt.minutes)) + '</strong>: “' + escHtml(String(_rt.ask)) + '” (' + (_rt.enabled ? 'on' : 'off') + '). Rebuild it once — each step gets run and approved — and it keeps the same schedule.</div>';
-      const acts = document.createElement('div'); acts.className = 'wf-ov-actions';
-      acts.appendChild(_mkOnceBtn('Rebuild as workflow', () => { releaseSurface('workflows'); void _wfRebuildFromRoutine(_rt, appId); }));
-      acts.appendChild(_mkBtn('Not now', () => { try { ban.remove(); } catch { /* */ } }));
-      ban.appendChild(acts);
-      body.appendChild(ban);
-    }
-  } catch { /* the offer must never block the list */ }
-  if (!wfs.length) {
-    const empty = document.createElement('div'); empty.className = 'wf-history-notice';
-    empty.textContent = 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.';
-    body.appendChild(empty);
-    return;
-  }
-  for (const wf of wfs) {
-    const wfKey = wf.appId || appId;   // DK-8k — operate on the record's OWN store
-    const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
-    const _sched = _wfScheduleLabel(wf);
-    const _t = workflowTier(wf);
-    const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
-    const _from = (wf.orphanedFrom && wf.orphanedFrom.deskName) ? ' · from “' + String(wf.orphanedFrom.deskName).slice(0, 40) + '”' : '';
-    const row = document.createElement('div'); row.className = 'wf-ov-row';
-    row.innerHTML = '<div class="wf-ov-main"><div class="wf-ov-title">' + escHtml(wf.name || wf.ask) + '</div><div class="wf-ov-meta">' + escHtml(steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '') + _from) + '</div></div>';
-    const acts = document.createElement('div'); acts.className = 'wf-ov-actions';
-    acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async () => {
-      releaseSurface('workflows');   // §9 — run output is conversation; reveal the thread it streams into
-      const tab = await _orchActiveTab();
-      const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
-      bumpWorkflowRun(wfKey, wf.id).catch(() => {});
-      if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }   // CD-1a — a due tier-'panel' run fulfills the schedule
-      const _p2 = _wfReplayPlan(wf);
-      const _m2 = appendMessage({ role: 'assistant', body: '' });
-      if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
-      const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
-      _walkAbortFlag.requested = false;
-      const _pb2 = _progressBubble(_m2);   // PS-9 — the elapsed ticker rides the run bubble
-      _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 }).then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2)).catch(() => { /* */ }).finally(() => _pb2.done());
-    }, { once: true }));
-    if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
-      releaseSurface('workflows');
-      const _mh = appendMessage({ role: 'assistant', body: '' });
-      _setMessageBody(_mh, 'Running “' + escHtml(wf.name || wf.ask) + '” in the background…', { markdown: true });
-      let res = null;
-      try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
-      const v = res && res.verdict;
-      _setMessageBody(_mh, (res && res.success !== false)
-        ? (v === 'parked' ? '⚠ Stopped at a write — open Workflows to approve it.' : 'Ran headless → ' + (v === 'complete' ? 'completed' : (v || 'finished')) + '. Its run shows in the workflow’s history.')
-        : 'Couldn’t run headless — ' + _errWord(res && res.error) + '.', { markdown: true });
-    }, { once: true }));
-    acts.appendChild(_mkIconBtn('schedule', (wf.trigger && wf.trigger.enabled) ? 'Change or remove the schedule' : 'Run this on a schedule', () => _wfScheduleInline(row, wf, wfKey, rerender)));
-    acts.appendChild(_mkIconBtn('history', 'Run history', () => { void _renderWorkflowRuns(wf); }));
-    acts.appendChild(_mkIconBtn('trash', 'Delete this workflow', async () => {
-      if (!confirm('Delete “' + (wf.name || wf.ask) + '”? This can’t be undone.')) return;   // §5 — confirmation required
-      try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
-      rerender();
-    }));
-    row.appendChild(acts);
-    body.appendChild(row);
-  }
+  if (!appId || !_currentConversationId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a view — workflows are saved per view.'); _orchFinalize(m); return; }
+  _expandedWfs.add(String(_currentConversationId));
+  await _openRail();
 }
 
 // PS-2 — the inline schedule picker for an overlay row (the message-row _wfScheduleBar stays for the launch card).
@@ -8112,38 +8059,102 @@ function _wfScheduleInline(row, wf, wfKey, rerender) {
   old.replaceWith(pick);
 }
 
-// CD-7 (§8) / PS-2+§7 — PARKED runs render as a needs-action STRIP inside the workflows overlay (they were
-// thread bubbles). Approve re-fires from the parked step (one approval per write — a later write re-parks);
-// Cancel drops the run. Both re-render the surface so the strip is always current.
-async function _renderParkedRuns(container, appId, rerender = null) {
-  let r = null;
-  try { r = await _orchReq('WORKFLOW_PARKED', { appId }); } catch { /* */ }
-  const parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [];
-  if (!parked.length || !container || !container.isConnected) return 0;
-  for (const p of parked) {
-    const prev = (p.preview && typeof p.preview === 'object') ? p.preview : {};
-    const what = prev.recipe || prev.step || 'a write step';
-    const ban = document.createElement('div'); ban.className = 'wf-ov-banner wf-ov-parked';
-    ban.innerHTML = '<div>⚠ <strong>“' + escHtml(p.name || p.workflowId) + '”</strong> ran on schedule and stopped — <strong>' + escHtml(String(what)) + '</strong> is a write that needs your approval before it sends.</div>';
-    const acts = document.createElement('div'); acts.className = 'wf-ov-actions';
-    acts.appendChild(_mkOnceBtn('✓ Approve & continue', async () => {
-      let res = null;
-      try { res = await _orchReq('WORKFLOW_RESUME_PARKED', { runId: p.runId }); } catch { /* */ }
-      const v = res && res.verdict;
-      ban.querySelector('div').textContent = (res && res.success !== false)
-        ? (v === 'parked' ? 'Sent — the run continued and stopped at the NEXT write.' : 'Done — the run ' + (v === 'complete' ? 'completed' : (v || 'finished')) + '.')
-        : 'Couldn’t resume — ' + _errWord(res && res.error) + '.';
-      if (rerender) setTimeout(rerender, 900);
-    }));
-    acts.appendChild(_mkBtn('✕ Cancel run', async () => {
-      try { await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
-      ban.querySelector('div').textContent = 'Cancelled — the write was not sent.';
-      if (rerender) setTimeout(rerender, 900);
-    }));
-    ban.appendChild(acts);
-    container.appendChild(ban);
-  }
-  return parked.length;
+// v2.74.1777 ("one class") — a WORKFLOW row: the same silhouette as a case row (leaf glyph · badge · title ·
+// meta), because a workflow IS a condensed case — the desk's chat history distilled to its replayable skeleton.
+// Primary click opens ITS history (the run log — its transcript, re-condensed per run), the same "click a child,
+// see its history" semantics a case row has. Action chips hover-reveal on the row (run · headless · schedule ·
+// history · delete) — the exact handlers the retired overlay used.
+function _railWorkflowRow(row, parentConv) {
+  const wf = row.wf || {};
+  const wfKey = row.wfKey || (parentConv && parentConv.instanceId) || _memoryId();
+  const item = document.createElement('div');
+  item.className = 'rail-item is-subtask is-workflow';
+  const _sched = _wfScheduleLabel(wf);
+  const _t = workflowTier(wf);
+  const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
+  const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
+  const meta = steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '');
+  item.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">•</span><span class="rail-item-badge app" aria-label="a workflow under ' + escHtml((parentConv && parentConv.title) || '') + '">workflow</span>' + escHtml(wf.name || wf.ask || '') + '</div>'
+    + '<div class="rail-item-meta">' + escHtml(meta) + '</div>';
+  const acts = document.createElement('div');
+  acts.className = 'rail-item-actions wf-ov-actions';   // wf-ov-actions → _wfScheduleInline swaps it for the picker
+  acts.dataset.rowAction = '';
+  const rerender = () => { void _renderRailList(); };
+  acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async () => {
+    _closeRail();   // §9 — run output is conversation; reveal the thread it streams into
+    if (parentConv && parentConv.id !== _currentConversationId) await _openConvFullTimeline(parentConv);
+    const tab = await _orchActiveTab();
+    const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+    bumpWorkflowRun(wfKey, wf.id).catch(() => {});
+    if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }   // CD-1a — a due tier-'panel' run fulfills the schedule
+    const _p2 = _wfReplayPlan(wf);
+    const _m2 = appendMessage({ role: 'assistant', body: '' });
+    if (!_p2.runnable) { _wfReplayStopped(_m2, wf, _p2); return; }
+    const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
+    _walkAbortFlag.requested = false;
+    const _pb2 = _progressBubble(_m2);   // PS-9 — the elapsed ticker rides the run bubble
+    _orchRunChain(_m2, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 }).then(() => _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2)).catch(() => { /* */ }).finally(() => _pb2.done());
+  }, { once: true }));
+  if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
+    _closeRail();
+    const _mh = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(_mh, 'Running “' + escHtml(wf.name || wf.ask) + '” in the background…', { markdown: true });
+    let res = null;
+    try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
+    const v = res && res.verdict;
+    _setMessageBody(_mh, (res && res.success !== false)
+      ? (v === 'parked' ? '⚠ Stopped at a write — the ✋ row in the Rail approves it.' : 'Ran headless → ' + (v === 'complete' ? 'completed' : (v || 'finished')) + '. Its run shows in the workflow’s history.')
+      : 'Couldn’t run headless — ' + _errWord(res && res.error) + '.', { markdown: true });
+  }, { once: true }));
+  acts.appendChild(_mkIconBtn('schedule', (wf.trigger && wf.trigger.enabled) ? 'Change or remove the schedule' : 'Run this on a schedule', () => _wfScheduleInline(item, wf, wfKey, rerender)));
+  acts.appendChild(_mkIconBtn('history', 'Run history', () => { _closeRail(); void _renderWorkflowRuns(wf); }));   // the rail (z20) would cover the overlay (z18)
+  acts.appendChild(_mkIconBtn('trash', 'Delete this workflow', async () => {
+    if (!confirm('Delete “' + (wf.name || wf.ask) + '”? This can’t be undone.')) return;   // §5 — confirmation required
+    try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
+    rerender();
+  }));
+  item.appendChild(acts);
+  // primary click = ITS history (the case-row symmetry: click a desk child, see its transcript)
+  item.addEventListener('click', (e) => {
+    if (e.target.closest('[data-row-action]') || e.target.closest('button')) return;
+    _closeRail();
+    void _renderWorkflowRuns(wf);
+  });
+  _wireRowKeyboard(item, () => { _closeRail(); void _renderWorkflowRuns(wf); }, 'Workflow — ' + String(wf.name || wf.ask || ''));
+  return item;
+}
+
+// CD-7 (§8) / v2.74.1777 — a PARKED run renders as a needs-action row atop its desk's workflows section:
+// the run reached a write on a schedule and stopped. Approve re-fires from the parked step (one approval per
+// write — a later write re-parks); Cancel drops it. Actions are always visible (it needs a human).
+function _railParkedRow(p) {
+  const prev = (p.preview && typeof p.preview === 'object') ? p.preview : {};
+  const what = prev.recipe || prev.step || 'a write step';
+  const item = document.createElement('div');
+  item.className = 'rail-item is-subtask is-parked';
+  item.innerHTML = '<div class="rail-item-title"><span class="rail-item-badge parked">✋</span>' + escHtml(p.name || p.workflowId || 'scheduled run') + '</div>'
+    + '<div class="rail-item-meta">stopped at ' + escHtml(String(what)) + ' — a write that needs your approval</div>';
+  const acts = document.createElement('div');
+  acts.className = 'rail-item-actions rail-static';
+  acts.dataset.rowAction = '';
+  acts.appendChild(_mkOnceBtn('✓ Approve', async () => {
+    let res = null;
+    try { res = await _orchReq('WORKFLOW_RESUME_PARKED', { runId: p.runId }); } catch { /* */ }
+    const v = res && res.verdict;
+    const meta = item.querySelector('.rail-item-meta');
+    if (meta) meta.textContent = (res && res.success !== false)
+      ? (v === 'parked' ? 'sent — the run continued and stopped at the NEXT write' : 'done — the run ' + (v === 'complete' ? 'completed' : (v || 'finished')))
+      : 'couldn’t resume — ' + _errWord(res && res.error);
+    setTimeout(() => { void _renderRailList(); }, 1400);
+  }));
+  acts.appendChild(_mkBtn('✕ Cancel', async () => {
+    try { await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
+    const meta = item.querySelector('.rail-item-meta');
+    if (meta) meta.textContent = 'cancelled — the write was not sent';
+    setTimeout(() => { void _renderRailList(); }, 1400);
+  }));
+  item.appendChild(acts);
+  return item;
 }
 
 // CD-6 (DESIGN_cadence.md §6) — the RUN HISTORY view. History is its OWN store (wfruns:<workflowId>), never the

@@ -43,9 +43,14 @@ const isSub = (c) => !!c.parentId;
  * @param {{ devMode?:boolean, activeId?:string|null, expanded?:Set<string>|Array<string>|null }} [opts]
  * @returns {RailRow[]}
  */
-export function buildRailTree(summaries, { devMode = false, activeId = null, expanded = null } = {}) {
+export function buildRailTree(summaries, { devMode = false, activeId = null, expanded = null, workflowsByConv = null } = {}) {
   const list = (Array.isArray(summaries) ? summaries : []).filter(Boolean);
   const expandedSet = expanded instanceof Set ? expanded : new Set(Array.isArray(expanded) ? expanded : []);
+  // v2.74.1777 ("one class") — workflows are desk CHILDREN like cases: the intensional record (chat history
+  // condensed to its replayable skeleton) beside the extensional one (the case). workflowsByConv: Map convId →
+  // saved-workflow records; each becomes a role:'workflow' row right after its desk row (mirroring the icon
+  // order — workflows section above cases).
+  const wfMap = workflowsByConv instanceof Map ? workflowsByConv : new Map();
 
   // Dev filter — mirror _renderRailList: dev mode off → hide dev conversations entirely (§2 precedent).
   const visible = devMode ? list : list.filter((c) => c.kind !== 'dev');
@@ -85,13 +90,24 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
   for (const c of top) {
     if (isApp(c)) {
       const subs = subsByParent.get(c.id) || [];
+      const wfs = wfMap.get(c.id) || [];
       const open = expandedSet.has(c.id);
       rows.push({
         id: c.id, role: 'app', title: c.title, icon: c.icon || null, depth: 0,
         hasChildren: subs.length > 0, expanded: open, active: activeId === c.id,
         count: subs.length, kind: c.kind || 'agent', appId: c.appId, pinned: !!c.pinned,   // AP-1 — drives the pin toggle's state
+        wfCount: wfs.length,   // v2.74.1777 — drives the mirrored workflows button (icon + count, peek/pin)
         summary: c.summary || null,   // v2.74.1217 — the under-the-name "quick peek" (index-mirrored; rendered ≤3 lines)
       });
+      // v2.74.1777 — workflow rows FIRST (the icons read workflows · cases left-to-right; the sections stack the
+      // same way), then the case rows. Both always emit — hiding is the renderer's class, never a rebuild.
+      for (const w of wfs) {
+        rows.push({
+          id: `wf:${w.id}`, role: 'workflow', title: w.name || w.ask || '', icon: null, depth: 1,
+          hasChildren: false, expanded: false, active: false, count: 0,
+          kind: 'agent', parentId: c.id, appId: c.appId, wf: w, wfKey: c.instanceId || null,
+        });
+      }
       // Rail peek/pin (v2.74.1774, DESIGN_panel_surfaces.md §8) — sub-task rows ALWAYS emit: the renderer
       // groups them under their app and hides them with a class, so a hover-peek never rebuilds the DOM
       // (a hover-driven re-render would destroy the node under the pointer — an instant open/close flicker

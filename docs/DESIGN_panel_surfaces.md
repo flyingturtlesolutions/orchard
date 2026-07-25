@@ -91,7 +91,7 @@ function openPanelOverlay({ id, title, titleMeta = '', render, onClose = null })
 
 | Today (a bubble in the thread) | Target | Notes |
 |---|---|---|
-| `_renderWorkflows` (`workflows`) | **overlay** `workflows` | the flagship migration: rows with the chip actions; the parked banner (§7) and routine-rebuild offer render at its top; the launch card's ⏱/📜 chips open it pre-focused |
+| `_renderWorkflows` (`workflows`) | ~~overlay `workflows`~~ → **Rail desk-children** (v1777, §8.4) | SUPERSEDED: built as the overlay at v1765, retired at v1777 — workflow cards render as desk children beside case rows; the command/leg doors pin the section open. Parked runs = needs-action rows atop the section; the routine-rebuild offer lives in the routines overlay |
 | `_renderWorkflowRuns` | overlay `wf-history` | **done (v1743)** — retrofit onto the helper, gaining Escape/focus for free |
 | `_renderRoutines` | overlay `routines` | |
 | `_listCasesMsg` (LIST_CASES) | overlay `cases` | the leg's `run` opens the overlay instead of printing rows |
@@ -261,6 +261,28 @@ the `_DECISION_RE` invariant class), and the hard-coded right-edge arithmetic
 `view` / `case` single-word badges become icon + tooltip chips from the registry (§5) with `aria-label`
 ("Warranty — a view", "a case under Warranty"). Standing-state badges (§7) join the same cluster: `⏳ n`
 pending, `⚠ n` parked, ⏱ next-run.
+
+### 8.4 One class — workflows are desk children (RULING, v2.74.1777)
+
+A workflow is a desk's chat history condensed to its replayable skeleton — the INTENSIONAL record of a strand
+of work beside the case's extensional one. Both render as desk children through one mechanism:
+
+- `buildRailTree` emits typed children (`role: 'workflow' | 'subtask'`); `workflowsByConv` feeds it from ONE
+  `listAllWorkflows()` sweep per render (counts + content for every desk — no per-peek fetch).
+- Each desk group holds up to two `.rail-section` slide blocks — workflows above cases, mirroring the button
+  order. Sections share the peek/pin machinery: hover the button (150ms intent) peeks, leaving the group
+  (300ms grace) closes, click pins (`_expandedWfs` / `_expandedApps`, aria-pressed → accent). Case rows and
+  workflow rows are ALWAYS in the DOM; a class hides them (hover must never re-render).
+- The workflow/cases buttons are one look: icon + count chip, always visible when count > 0.
+- A workflow row's primary click opens ITS history (`wf-history` overlay — its transcript, re-condensed per
+  run): the same "click a child, see its history" semantics as a case row. Action chips hover-reveal on the
+  row: run · headless · schedule (inline picker) · history · delete.
+- Parked runs = always-visible needs-action rows atop their desk's workflows section; the ✋ badge pins the
+  section open. The `workflows` command / `OPEN_WORKFLOWS` leg stay aliases: pin + reveal the Rail.
+- Divergences that stay: a workflow is never an input target; cadence attaches only to workflows; cases
+  cascade-die with the desk while workflows orphan-and-survive.
+- Named for later (NOT built): "distill this case" (case → workflow), and runs landing as cases (run → case),
+  which would make run history a list of addressable case references.
 
 ---
 
