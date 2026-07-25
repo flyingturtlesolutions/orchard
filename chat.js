@@ -13402,7 +13402,9 @@ async function _rehydrateConversation(conv) {
   // vitals card + incident cards; the Front desk shows at most ONE attention chip; other desks a pointer.
   void _maybeRenderConnCard();        // Front desk → the attention CHIP (the card moved to the Admin view)
   void _maybeRenderAdminDesk();       // Admin desk → the vitals card + open-incident cards
-  void _maybeWarnDeskConnections();   // any other desk → a dependency POINTER (no duplicate report surface)
+  // TL-2 (v2.74.1792, DESIGN_panel_surfaces.md §14.2) — the desk-connection warning bubble is DELETED: the
+  // fact is already carried channel-correctly by the Admin incident CASE + the Rail badge (§7). A status claim
+  // must never persist in a transcript — it outlives its own truth.
   // v2.74.1623 — REVIVE a parked wizard on its OWN desk's reopen: the page re-asserts over the freshly painted
   // thread (v1615) and the phase lock re-applies. Mid-run detours survive whole — a step that finished while the
   // user was inspecting a case comes back at 'ran' with its result and the review bar.
@@ -13809,23 +13811,10 @@ async function _maybeRenderIncidentCase() {
     else if (inc.cls === 'drift' && inc.groundId) _healRelearnBar(el, { groundId: inc.groundId, recipeId: inc.recipeId || '', host: inc.origin || '', name: inc.name || 'that read' });
   }
 }
-async function _maybeWarnDeskConnections() {
-  if (!_currentConversationId || _currentConversationId === OVERVIEW_ID || _currentConversationId === ADMIN_ID) return;
-  const conns = _boundConnections();
-  const origins = (Array.isArray(conns) ? conns : []).map((c) => c && (c.origin || c.label)).filter(Boolean);
-  if (!origins.length) return;
-  let r = null;
-  try { r = await _orchReq('CONN_LIST', {}); } catch { return; }
-  if (!r || r.success === false) return;
-  const attn = attentionOrigins(r.registry || {}, origins);
-  if (!attn.length) return;
-  // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — desks get AT MOST A POINTER (the CP-3 duplication fix): one line
-  // scoped to THIS desk's own dependencies, linking to the Admin desk (the single vitals authority). TRANSIENT
-  // (never finalized → never persisted): a status nudge, not transcript history.
-  const m = appendMessage({ role: 'assistant', body: `⚠ ${attn.map((a) => `${a.origin} looks ${a.status === 'wrong-account' ? 'signed in as the wrong account' : 'signed out'}`).join('; ')} — this view's rides will fail until you sign in. See the Admin view.` });
-  const bar = _orchActionBar(m);
-  bar.appendChild(_mkBtn('Open Admin view', () => { void _openAdminDesk(); }));
-}
+// TL-2 (v2.74.1792, §14.2) — _maybeWarnDeskConnections is DELETED (it appended a status bubble + button into
+// the transcript on every affected desk open — VT-2 said pointer, the timeline review said even that is the
+// wrong surface). The Admin case + Rail badge carry the fact; a desk-local hint, if ever proven necessary
+// live, is a TRANSIENT composer chip (§4), never a message.
 // CP-4 / VT-2 (v2.74.1571) — live transitions: the SW broadcasts CONN_STATUS_CHANGED on a REAL change (never
 // heartbeat ticks). VT-2b (v2.74.1587) — the transition lands in its CASE (the incident's own timeline carries
 // the story + the sign-in bar), never as a line in the Admin desk thread (live 1586: the requirement was a case).
