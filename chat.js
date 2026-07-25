@@ -764,21 +764,30 @@ async function _renderRailListNow() {
   // _wfByConv: declared after it, the reference hit the temporal dead zone and every render threw.
   const _wfByConv = new Map();
   try {
+    // v2.74.1780 (user ruling) — workflows belong to the CLASS: every bank resolves to a class before desks
+    // read it. A bank keyed by a live desk's instanceId (pre-ruling legacy) belongs to THAT desk's class; a
+    // bank keyed by an appId IS class-keyed; a bank matching no live desk (stamped orphans, dead keys) belongs
+    // to the class of desks generally — it shows on every desk, exactly as the landing merge always has.
+    // Items are stamped with their bank key so run/schedule/delete address the right store (DK-8k own-key rule).
     const banks = await listAllWorkflows();
-    const byKey = new Map(banks.filter((b) => b && !b.orphaned && Array.isArray(b.items) && b.items.length).map((b) => [String(b.appId), b.items]));
-    for (const c of all) {
-      if (!c || !c.appId || c.parentId) continue;   // desks only
-      // v2.74.1779 (live: icon vanished) — a desk's bank keys by instanceId OR appId (the DK-8k dual-key
-      // reality _workflowKeys() sweeps); instanceId-only matching missed appId-keyed banks. Merge both,
-      // deduped by id/contentId (the record's own key wins downstream via wf.appId).
+    const desks = all.filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev');
+    const byClass = new Map();   // classId → items
+    const unclaimed = [];
+    for (const b of banks) {
+      if (!b || !Array.isArray(b.items) || !b.items.length) continue;
+      const key = String(b.appId);
+      const stamped = b.items.map((w) => (w && !w.appId) ? { ...w, appId: key } : w).filter(Boolean);
+      const owner = desks.find((c) => String(c.instanceId) === key || String(c.appId) === key);
+      if (owner) (byClass.get(String(owner.appId)) || byClass.set(String(owner.appId), []).get(String(owner.appId))).push(...stamped);
+      else unclaimed.push(...stamped);
+    }
+    for (const c of desks) {
       const merged = []; const seen = new Set();
-      for (const k of [c.instanceId, c.appId].filter(Boolean).map(String)) {
-        for (const w of (byKey.get(k) || [])) {
-          const dk = w && (w.id || w.contentId);
-          if (!w || (dk && seen.has(dk))) continue;
-          if (dk) seen.add(dk);
-          merged.push(w);
-        }
+      for (const w of [...(byClass.get(String(c.appId)) || []), ...unclaimed]) {
+        const dk = w.id || w.contentId;
+        if (dk && seen.has(dk)) continue;
+        if (dk) seen.add(dk);
+        merged.push(w);
       }
       if (merged.length) _wfByConv.set(c.id, merged);
     }
@@ -5957,7 +5966,7 @@ async function _startWorkflowWizard() {
   if (_wfWizard) _wfAbandon();   // v1623 — a NEW wizard replaces a parked one; the outgoing one's ≥2 proven steps draft-keep
   _dismissDeskLanding();
   const convId = String(_currentConversationId);   // v1620 — pin BEFORE the awaits (a switch mid-await must not mis-pin)
-  const appId = _memoryId();
+  const appId = _workflowClassKey();   // v1780 — a new workflow banks to the CLASS, never the instance
   const tab = await _orchActiveTab();
   // WW-1b (v2.74.1620) — RESUME the newest DRAFT: an abandoned wizard's proven steps come back instead of dying
   // with the page (the 194814 risk: two proven steps at 'banked', never named — a close lost them). Honest limit:
@@ -7896,7 +7905,7 @@ function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null 
 // record (the replay) or would RECALL one (workflowMatch — the same matcher the front door suggests with), the
 // flywheel is already closed → no offer. Load failure → offer anyway (saveWorkflow dedups by content id regardless).
 async function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
-  const appId = _memoryId();
+  const appId = _workflowClassKey();   // v1780 — banks to the CLASS
   const autonomous = Array.isArray(steps) && steps.some((s) => s && (s.kind === 'connector' || s.kind === 'fanout'));
   const subAsks = (Array.isArray(clauses) ? clauses : []).map((c) => c && c.text).filter(Boolean);
   if (!appId || !autonomous || subAsks.length < 2 || !String(ask || '').trim()) return;
@@ -7935,8 +7944,13 @@ async function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
 // instanceId is stamped between the two moments (setup completing, a reload rehydrating a patched record). Writes
 // stay canonical (`_memoryId()` at write time); reads sweep both keys so a drifted record is still found. The
 // `WORKFLOW ▸ banked / recall miss` traces make the next divergence diagnosable from a decisions download.
+// v2.74.1780 (user ruling: workflows belong to the CLASS, never a desk instance) — the workflow HOME key is
+// the desk's class id (appId/preset). Recreate a Warranty desk and its class's workflows are simply there —
+// no orphan ceremony, no re-key-on-schedule. Instance ids remain READ keys (legacy banks written before the
+// ruling), swept by _workflowKeys and folded to the class in the Rail sweep.
+function _workflowClassKey() { return String(_currentConversationAppId || _memoryId() || ''); }
 function _workflowKeys() {
-  return [...new Set([_currentConversationInstanceId, _currentConversationAppId].filter(Boolean).map(String))];
+  return [...new Set([_currentConversationAppId, _currentConversationInstanceId].filter(Boolean).map(String))];
 }
 async function _loadWorkflowsMerged() {
   const out = [];
@@ -8251,7 +8265,7 @@ async function _wfSetSchedule(wf, wfKey, minutes) {
   // orphan tag drops); everything else (run/history/delete) works fine against the old bank and never re-keys.
   try {
     if (!_workflowKeys().includes(String(wfKey))) {
-      const dest = _memoryId();
+      const dest = _workflowClassKey();   // v1780 — re-keys land on the CLASS, never the instance
       await saveWorkflow(dest, { ...wf, orphanedFrom: undefined });
       await deleteWorkflow(wfKey, wf.id);
       wfKey = dest; wf.orphanedFrom = undefined;
