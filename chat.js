@@ -8361,7 +8361,16 @@ function _railWorkflowRow(row, parentConv) {
       bumpWorkflowRun(wfKey, wf.id).catch(() => {});
       if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }   // CD-1a — a due tier-'panel' run fulfills the schedule
       const _p2 = _wfReplayPlan(wf);
-      if (!_p2.runnable) { _wfReplayStopped(host, wf, _p2); _railRunBusy--; return; }
+      if (!_p2.runnable) {
+        // bcp v1825 — the stop must be VISIBLE: wf-run-live was hiding the body _wfReplayStopped writes into,
+        // the observer stayed attached, and chip 0 glowed forever.
+        try { _mo.disconnect(); } catch { /* */ }
+        host.classList.remove('wf-run-live');
+        _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.remove('step-done'); });
+        _wfReplayStopped(host, wf, _p2);
+        _railRunBusy--;
+        return;
+      }
       const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
       _walkAbortFlag.requested = false;
       const _pb2 = _progressBubble(host);   // PS-9 — step/tick/elapsed ride the card
