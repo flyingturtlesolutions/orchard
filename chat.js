@@ -780,24 +780,25 @@ async function _renderRailListNow() {
   try {
     // v2.74.1780 (user ruling) — workflows belong to the CLASS: every bank resolves to a class before desks
     // read it. A bank keyed by a live desk's instanceId (pre-ruling legacy) belongs to THAT desk's class; a
-    // bank keyed by an appId IS class-keyed; a bank matching no live desk (stamped orphans, dead keys) belongs
-    // to the class of desks generally — it shows on every desk, exactly as the landing merge always has.
-    // Items are stamped with their bank key so run/schedule/delete address the right store (DK-8k own-key rule).
+    // bank keyed by an appId IS class-keyed. v1814 (user ruling) — cards appear ONLY under their parent desk:
+    // a bank matching NO live desk (stamped orphans, dead keys) shows nowhere in the rail (the everywhere-
+    // merge of 1780 is gone; such workflows remain recallable through _loadWorkflowsMerged until a desk of
+    // their class exists again). Items are stamped with their bank key so run/schedule/delete address the
+    // right store (DK-8k own-key rule).
     const banks = await listAllWorkflows();
     const desks = all.filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev');
     const byClass = new Map();   // classId → items
-    const unclaimed = [];
     for (const b of banks) {
       if (!b || !Array.isArray(b.items) || !b.items.length) continue;
       const key = String(b.appId);
-      const stamped = b.items.map((w) => (w && !w.appId) ? { ...w, appId: key } : w).filter(Boolean);
       const owner = desks.find((c) => String(c.instanceId) === key || String(c.appId) === key);
-      if (owner) (byClass.get(String(owner.appId)) || byClass.set(String(owner.appId), []).get(String(owner.appId))).push(...stamped);
-      else unclaimed.push(...stamped);
+      if (!owner) continue;   // v1814 — no parent desk, no card
+      const stamped = b.items.map((w) => (w && !w.appId) ? { ...w, appId: key } : w).filter(Boolean);
+      (byClass.get(String(owner.appId)) || byClass.set(String(owner.appId), []).get(String(owner.appId))).push(...stamped);
     }
     for (const c of desks) {
       const merged = []; const seen = new Set();
-      for (const w of [...(byClass.get(String(c.appId)) || []), ...unclaimed]) {
+      for (const w of (byClass.get(String(c.appId)) || [])) {
         const dk = w.id || w.contentId;
         if (dk && seen.has(dk)) continue;
         if (dk) seen.add(dk);
