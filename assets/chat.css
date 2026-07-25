@@ -1831,20 +1831,23 @@ textarea {
    section peek expanded every child at once). The composed model: the button's hover previews the COMPACT
    list (1783 — leave the button, it closes); pin the section to browse; hover ONE card and its detail slides
    open. The 150ms open transition-delay is the intent gate; focus-within opens a card for keyboard users. */
-/* v1804 — the expanded body indents to the START of the WORKFLOW label (past the leaf-glyph column). */
-.wf-row-detail { padding-left: 13px; }
 .wf-row-detail {
   height: 0;
   overflow: hidden;
   opacity: 0;
-  transition: height 340ms cubic-bezier(0.45, 0, 0.2, 1), opacity 260ms ease 60ms;   /* CLOSE (v1799: height, JS-driven) */
+  padding-left: 0;
+  transition: height 340ms cubic-bezier(0.45, 0, 0.2, 1), opacity 260ms ease 60ms, padding-left 300ms cubic-bezier(0.22, 1, 0.36, 1);   /* CLOSE (v1799); padding rides the pin shift (v1805) */
 }
 .rail-item.is-workflow:hover .wf-row-detail,
 .rail-item.is-workflow.detail-pinned .wf-row-detail,
 .rail-item.is-workflow:focus-within .wf-row-detail {
   opacity: 1;
-  transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease 150ms;   /* OPEN (the JS 150ms timer is the height's intent gate) */
+  transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease 150ms, padding-left 300ms cubic-bezier(0.22, 1, 0.36, 1);   /* OPEN */
 }
+/* v1805 (user directive) — PINNING is the shift: on click the body indents to the WORKFLOW label's start and
+   the spacing between the text blocks doubles, as ONE transition (same curve+duration on both properties,
+   no stagger). Hover-peek stays compact and un-indented. */
+.rail-item.is-workflow.detail-pinned .wf-row-detail { padding-left: 13px; }
 /* v2.74.1785 (user directive) — each STEP is highlighted: its own pill row (accented number + soft chip
    background) sliding in with the theme's stagger as the card opens. */
 .wf-row-steps {
@@ -1871,7 +1874,7 @@ textarea {
   white-space: nowrap;
   transform: translateX(-8px);
   opacity: 0;
-  transition: transform 260ms cubic-bezier(0.45, 0, 0.2, 1) 40ms, opacity 240ms ease 40ms, background var(--t-fast);   /* CLOSE lingers 40ms (v1797) */
+  transition: transform 260ms cubic-bezier(0.45, 0, 0.2, 1) 40ms, opacity 240ms ease 40ms, margin 300ms cubic-bezier(0.22, 1, 0.36, 1), background var(--t-fast);   /* CLOSE lingers (v1797); margin rides the pin shift (v1805) */
 }
 .wf-row-steps li:hover { background: rgba(167, 139, 250, 0.18); }
 .rail-item.is-workflow:hover .wf-row-steps li,
@@ -1887,6 +1890,15 @@ textarea {
 .rail-item.is-workflow:focus-within .wf-row-steps li:nth-child(3) { transition-delay: 230ms; }
 .rail-item.is-workflow:hover .wf-row-steps li:nth-child(n+4),
 .rail-item.is-workflow:focus-within .wf-row-steps li:nth-child(n+4) { transition-delay: 270ms; }
+/* v1805 — the pinned state: doubled block spacing, ONE transition, no stagger (overrides the hover delays). */
+.rail-item.is-workflow.detail-pinned .wf-row-steps li,
+.rail-item.is-workflow.detail-pinned:hover .wf-row-steps li {
+  margin: 6px 0;
+  transform: translateX(0);
+  opacity: 1;
+  transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease, margin 300ms cubic-bezier(0.22, 1, 0.36, 1), background var(--t-fast);
+  transition-delay: 0ms;
+}
 .wf-row-sched { margin-top: 2px; font-size: 0.85em; color: var(--c-text-subtle); }
 /* TL-1 (v2.74.1791, §14.2) — the section's trailing ＋ Workflow row: the creation door that survives a thread. */
 .rail-wf-add { color: var(--c-text-subtle); cursor: pointer; }
