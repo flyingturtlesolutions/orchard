@@ -1879,6 +1879,9 @@ textarea {
 .rail-item.is-workflow:hover .wf-row-steps li:nth-child(n+4),
 .rail-item.is-workflow:focus-within .wf-row-steps li:nth-child(n+4) { transition-delay: 270ms; }
 .wf-row-sched { margin-top: 2px; font-size: 0.85em; color: var(--c-text-subtle); }
+/* TL-1 (v2.74.1791, §14.2) — the section's trailing ＋ Workflow row: the creation door that survives a thread. */
+.rail-wf-add { color: var(--c-text-subtle); cursor: pointer; }
+.rail-wf-add:hover .rail-item-title { color: var(--c-text); }
 @media (prefers-reduced-motion: reduce) {
   .wf-row-detail,
   .wf-row-steps li { transition: none; }

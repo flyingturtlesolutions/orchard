@@ -24,7 +24,7 @@ import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.7
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, namesDeclaredLeg, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
 import { buildDeskLanding } from './Core/deskLanding.js';   // DL-1 (v2.74.1600) — the desk LAUNCH page (pure assembly; proven sources only)
@@ -54,7 +54,8 @@ import { armable as rideArmable, hostRideInventory, formatHostRideInventory } fr
 import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 — TR-1 meta vs act split
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
-import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
+import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
+import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1791 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from
@@ -863,6 +864,22 @@ async function _renderRailListNow() {
     g.appendChild(el);
     _grpWfs = (row.wfCount > 0) ? _mkSection(g, 'rail-sec-wfs', _expandedWfs.has(row.id)) : null;
     _grpCases = row.hasChildren ? _mkSection(g, 'rail-sec-cases', row.expanded) : null;
+    // TL-1 (v2.74.1791, §14.2) — creation stays reachable with a thread up: the section ends in a ＋ Workflow
+    // row (the landing's card now shows only in true launch state). Parked + workflow rows insert BEFORE it.
+    if (_grpWfs) {
+      const add = document.createElement('div');
+      add.className = 'rail-item is-subtask rail-wf-add';
+      add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>';
+      add.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        _closeRail();
+        const pc = byId.get(row.id);
+        if (pc && pc.id !== _currentConversationId) await _openConvFullTimeline(pc);
+        _promptWorkflowIntent();
+      });
+      _wireRowKeyboard(add, () => add.click(), 'New workflow');
+      _grpWfs.appendChild(add);
+    }
     container.appendChild(g);
     _wireSectionPeek(el.querySelector('.rail-item-wf'), _grpWfs && _grpWfs.parentElement);
     _wireSectionPeek(el.querySelector('.rail-item-cases'), _grpCases && _grpCases.parentElement);
@@ -876,7 +893,7 @@ async function _renderRailListNow() {
     }
     if (row.role === 'new-app') { _grpCases = _grpWfs = null; container.appendChild(_historyNewAppRow()); continue; }
     if (row.role === 'workflow') {   // v2.74.1777 — a desk child, same as a case row
-      if (_grpWfs) _grpWfs.appendChild(_railWorkflowRow(row, byId.get(row.parentId)));
+      if (_grpWfs) _grpWfs.insertBefore(_railWorkflowRow(row, byId.get(row.parentId)), _grpWfs.querySelector('.rail-wf-add'));
       continue;
     }
     const conv = byId.get(row.id);
@@ -892,7 +909,7 @@ async function _renderRailListNow() {
     if (row.role === 'app' && (row.hasChildren || row.wfCount > 0)) {
       _startGroup(el, row);
       // needs-action rows ride at the TOP of the workflows section: parked runs (approve/cancel inline)
-      if (_grpWfs && conv.instanceId) for (const p of (_parkedFull[conv.instanceId] || [])) _grpWfs.appendChild(_railParkedRow(p));
+      if (_grpWfs && conv.instanceId) for (const p of (_parkedFull[conv.instanceId] || [])) _grpWfs.insertBefore(_railParkedRow(p), _grpWfs.querySelector('.rail-wf-add'));
       continue;
     }
     _grpCases = _grpWfs = null;
@@ -7977,6 +7994,20 @@ async function _loadWorkflowsMerged() {
   } catch { /* the orphan merge must never hide the desk's own workflows */ }
   return out;
 }
+// v2.74.1791 — every DECLARED leg name, from the pure catalogs (no IO, no storage): ride recipes, drive
+// artifacts, builtin/self legs. Feeds the reachability guard below. Taught capabilities are deliberately absent
+// — they are user-authored and may legitimately share a workflow's phrasing; the catalogs are ours.
+let _LEG_NAMES = null;
+function _declaredLegNames() {
+  if (_LEG_NAMES) return _LEG_NAMES;
+  const names = [];
+  try { for (const r of CONNECTOR_RECIPES) if (r && r.name) names.push(r.name); } catch { /* */ }
+  try { for (const d of DRIVE_ARTIFACTS) if (d && d.name) names.push(d.name); } catch { /* */ }
+  try { for (const l of BUILTIN_LEGS) if (l && l.name) names.push(l.name); } catch { /* */ }
+  _LEG_NAMES = names;
+  return names;
+}
+
 async function _matchWorkflow(goal) {
   if (!_workflowKeys().length) return null;
   const workflows = await _loadWorkflowsMerged();
@@ -7986,6 +8017,16 @@ async function _matchWorkflow(goal) {
   if (workflows.length) { try { _orchLog(`WORKFLOW ▸ recall miss "${String(goal).slice(0, 40)}" keys=${_workflowKeys().join('+')} (${workflows.length} saved)`); } catch { /* */ } }
   const candidates = workflowCandidates(workflows);
   if (!candidates.length || !workflowSharesVocab(goal, candidates)) return null;   // near-miss gate — no LLM otherwise
+  // v2.74.1791 — THE REACHABILITY GUARD. This semantic fallback is CLASS-BLIND: it sees only workflows, so it
+  // can never answer "that isn't a workflow ask". Live (trace 201711) it claimed "review a warranty task on the
+  // page" at conf 0.72 — the EXACT name of a declared drive artifact — and the artifact, armed and projecting a
+  // palette leg the whole time, has never hydrated once. Declining hands the ask to interpret, which offers the
+  // real leg; the lexical matcher above is precise by construction and is deliberately NOT guarded.
+  const _named = namesDeclaredLeg(goal, _declaredLegNames());
+  if (_named) {
+    try { _orchLog(`WORKFLOW ▸ semantic match DECLINED — "${String(goal).slice(0, 40)}" names the declared leg "${_named}" (reachability guard → interpret)`); } catch { /* */ }
+    return null;
+  }
   try {
     const res = await _orchReq('MATCH_WORKFLOW', { goal, candidates });
     const m = res && res.match;
@@ -8080,7 +8121,7 @@ async function _renderWorkflows() {
   await _openRail();
 }
 
-// PS-2 — the inline schedule picker for an overlay row (the message-row _wfScheduleBar stays for the launch card).
+// PS-2/TL-1 — the inline schedule picker for a rail workflow row (the message-row bar died with the launch cards).
 function _wfScheduleInline(row, wf, wfKey, rerender) {
   const old = row.querySelector('.wf-ov-actions'); if (!old) return;
   const cur = (wf.trigger && wf.trigger.minutes && wf.trigger.enabled) ? wf.trigger.minutes : 0;
@@ -8105,7 +8146,8 @@ function _railWorkflowRow(row, parentConv) {
   const _t = workflowTier(wf);
   const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
   const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
-  const meta = steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '');
+  const _from = (wf.orphanedFrom && wf.orphanedFrom.deskName) ? ' · from “' + String(wf.orphanedFrom.deskName).slice(0, 40) + '”' : '';   // TL-1 — provenance shows only OFF-class (an orphan; on-class it is stale post-1780)
+  const meta = steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '') + _from;
   // v2.74.1781 (user directive) — the hover-expand theme continues INTO the card: hovering a workflow row
   // slides open its detail (the itemized steps + the schedule), same grid animation, intent delay in CSS.
   const nextDue = (wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0)
@@ -8283,25 +8325,8 @@ async function _wfSetSchedule(wf, wfKey, minutes) {
   return { ok, wfKey };
 }
 
-// CD-4 — the launch-card schedule bar: replace the row's bar with the interval picker; each choice writes
-// through _wfSetSchedule. "Off" clears the cadence.
-function _wfScheduleBar(row, wf, wfKey) {
-  try { const old = row.querySelector('.orch-actions'); if (old) old.remove(); } catch { /* */ }
-  const bar = _orchActionBar(row);
-  const cur = (wf.trigger && wf.trigger.minutes && wf.trigger.enabled) ? wf.trigger.minutes : 0;
-  const set = async (minutes) => {
-    const r = await _wfSetSchedule(wf, wfKey, minutes);
-    wfKey = r.wfKey;
-    try { bar.remove(); } catch { /* */ }
-    _setMessageBody(row, r.ok
-      ? `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  ${minutes > 0 ? `— now ${_wfScheduleLabel(wf)}.` : '— schedule removed.'}`
-      : 'Couldn’t update the schedule — try again.');
-  };
-  for (const [label, mins] of [['Every hour', 60], ['Every 4h', 240], ['Every day', 1440]]) {
-    bar.appendChild(_mkBtn(`${cur === mins ? '● ' : ''}${label}`, () => set(mins)));
-  }
-  bar.appendChild(_mkBtn(cur ? 'Turn off' : 'No schedule', () => set(0)));
-}
+// TL-1 (v2.74.1791) — _wfScheduleBar (the launch-card message-row picker) is DELETED with the cards; the rail
+// rows' _wfScheduleInline + the shared _wfSetSchedule writer are the surviving pickers.
 
 // ORCH-CB — COLD ground: the LLM planner couldn't bind a plan, but a STRUCTURED ask still has shape. Comprehend it
 // from the ask ALONE (substrate-free) and show it as a plan-to-learn — every part a gap — instead of collapsing to
@@ -10206,7 +10231,10 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     }
     const why = _errWord(d && (d.reason || d.error), 'a step failed');   // v1591
     _setMessageBody(msg, `Opened ${host}, but couldn’t finish “${leg.name || 'the walk'}” — ${why}. The page is open where it stopped.`);
-    return false;
+    // v2.74.1791 — a PRECONDITION failure is not evidence about the capability (the walk never ran a step), so it
+    // banks NO outcome — the same carve-out a user CANCEL already gets. Without this, one signed-out run taught
+    // "this capability doesn't work" and permanently steered later asks away from it (live traces 203241/203602).
+    return (d && d.precondition) ? 'precondition' : false;
   }
   // §20 (v2.74.1288) — HEADER-REPLAY session-ride: a harvested cross-origin Bearer read (cookie-ride can't reach it) runs
   // via SESSION_REPLAY on the app tab, carrying the page-captured auth headers. Reuses the connector ANSWER-SHAPE render.
@@ -10672,7 +10700,10 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     if (cleg) {
       const ok = await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema) });
       _orchFinalize(msg);
-      if (ok !== 'cancelled') _bankCapabilityOutcome(goal, d.capabilityId, ok !== false, turn.memoryId);   // AL-3e — bank the OUTCOME; a user CANCEL is neither success nor failure (v1338, review C)
+      // AL-3e — bank the OUTCOME. A user CANCEL is neither success nor failure (v1338, review C); v2.74.1791 — nor
+      // is a PRECONDITION failure (the page never became ready, e.g. signed out) — the walk ran no step, so it is
+      // no evidence about the capability. Note `ok !== false` would otherwise score the sentinel as a SUCCESS.
+      if (ok !== 'cancelled' && ok !== 'precondition') _bankCapabilityOutcome(goal, d.capabilityId, ok !== false, turn.memoryId);
       return true;
     }
   }
@@ -13402,11 +13433,15 @@ async function _renderDeskLanding(conv) {
     // otherwise _enterConversation() and steal the page right after a revive). The exit paths re-render it.
     if (_wfWizard && _wfWizard.convId === String(conv.id)) return;
     if (!isAdmin && !(conv.appId && !conv.parentId)) return;
-    if ((conv.messages || []).some((m) => m && m.role === 'user')) return;   // the launch state ends at the first operator ask
-    let workflows = [];
-    if (!isAdmin) { try { workflows = (await _loadWorkflowsMerged()) || []; } catch { workflows = []; } }
-    // v2.74.1722 — orphaned workflows arrive ALREADY MERGED in `workflows` (_loadWorkflowsMerged): each renders as
-    // an ordinary card, tagged "from <desk>". The v1721 recovery card is gone (user ruling: no adoption ceremony).
+    // TL-1 (v2.74.1791, §14.2) — HARD launch-state gate: for a work desk ANY thread message (a fan-out summary,
+    // a run bubble — assistant counts) means the landing never renders; it must not interleave with a thread.
+    // The DOM check covers messages appended this session that haven't landed in the store snapshot yet.
+    // Admin keeps the user-role gate (its vitals card is an assistant message and must not suppress the landing).
+    if (isAdmin ? (conv.messages || []).some((m) => m && m.role === 'user') : (conv.messages || []).length > 0) return;
+    try { if (!isAdmin) { const _mc = $('messages'); if (_mc && _mc.querySelector('.message')) return; } } catch { /* */ }
+    // TL-1 — the workflow LAUNCH CARDS are retired: the Rail workflows section (§8.4) is the one workflow
+    // surface (the landing card grid keeps ＋ Workflow + the alias/command cards only).
+    const workflows = [];
     const def = (() => { try { return builtinApp(conv.presetId || conv.appId) || null; } catch { return null; } })();
     const spec = buildDeskLanding({
       title: conv.title || (def && def.name) || '',
@@ -13430,64 +13465,8 @@ async function _renderDeskLanding(conv) {
         // workflow can fire on a clock, an accidental manual run is a more expensive misclick than an accidental
         // open" — that clause is live since v1692, so the body now opens the RUN HISTORY (§6) and only the ▶ chip
         // runs. Non-workflow cards (command / ＋ workflow) keep run-on-click — they're deterministic doors.
-        if (c.kind === 'workflow') {
-          // §5 / CD-4 (v2.74.1724, live report "workflow card doesn't have all icons/functions") — the card
-          // carries the FULL action set, not just ▶: run · headless (tier-'sw') · schedule · delete, with the
-          // body opening run history (§5's ruling). Each chip stops propagation so the body-open never doubles.
-          const wf = c.wf || {};
-          const wfKey = wf.appId || _memoryId();
-          const d = document.createElement('div');
-          d.className = 'suggestion-card wf-card';
-          d.innerHTML = `<div class="suggestion-card-name">${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
-          const acts = document.createElement('div'); acts.className = 'wf-card-actions';
-          const chip = (label, titleTxt, fn) => {
-            const b = document.createElement('button');
-            b.className = 'wf-card-act'; b.type = 'button'; b.title = titleTxt; b.textContent = label;
-            b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(b); });
-            acts.appendChild(b); return b;
-          };
-          chip('▶', 'Run this workflow', async (b) => {
-            b.disabled = true;   // the v1343 double-click rule
-            _dismissDeskLanding();
-            const tab = await _orchActiveTab();
-            bumpWorkflowRun(wfKey, wf.id).catch(() => {});
-            const _p3 = _wfReplayPlan(wf);
-            const _m3 = appendMessage({ role: 'assistant', body: '' });
-            if (!_p3.runnable) { _wfReplayStopped(_m3, wf, _p3); return; }
-            const _st3 = _wfFreshChainState(); const _t3 = Date.now();   // §6.5 (v1746)
-            _walkAbortFlag.requested = false;
-            const _pb3 = _progressBubble(_m3);   // PS-9 — the elapsed ticker rides the run bubble
-            _orchRunChain(_m3, { tabId: (tab && typeof tab.id === 'number') ? tab.id : null, clauses: _p3.clauses, firstMatch: null, ask: wf.ask, state: _st3 }).then(() => _wfRecordPanelRun(wf, _t3, _p3.clauses.length, _st3)).catch(() => { /* */ }).finally(() => _pb3.done());
-          });
-          if (workflowTier(wf) === 'sw') chip('⚡', 'Run in the background (headless)', async (b) => {
-            b.disabled = true;
-            _dismissDeskLanding();
-            const _mh = appendMessage({ role: 'assistant', body: '' });
-            _setMessageBody(_mh, `Running “${escHtml(wf.name || wf.ask)}” in the background…`, { markdown: true });
-            let res = null;
-            try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
-            const v = res && res.verdict;
-            _setMessageBody(_mh, (res && res.success !== false)
-              ? (v === 'parked' ? '⚠ Stopped at a write — type `workflows` to approve it.' : `Ran headless → ${v === 'complete' ? 'completed' : (v || 'finished')}. Its run shows in the card’s history.`)
-              : `Couldn’t run headless — ${_errWord(res && res.error)}.`, { markdown: true });
-          });
-          chip('⏱', wf.trigger && wf.trigger.enabled ? 'Change or remove the schedule' : 'Run this on a schedule', () => {
-            _dismissDeskLanding();
-            const row = appendMessage({ role: 'assistant', body: '' });
-            _setMessageBody(row, `⏱ Schedule “${escHtml(wf.name || wf.ask)}” — pick how often it should run:`, { markdown: true });
-            _wfScheduleBar(row, wf, wfKey);   // the tested picker, incl. the v1722 orphan re-key
-          });
-          chip('🗑', 'Delete this workflow', async () => {
-            if (!confirm(`Delete “${wf.name || wf.ask}”? This can’t be undone.`)) return;   // §5 — confirmation required
-            try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
-            try { d.remove(); } catch { /* */ }
-            try { _orchLog(`WORKFLOW ▸ deleted "${String(wf.name || wf.ask).slice(0, 40)}" (launch card)`); } catch { /* */ }
-          });
-          d.appendChild(acts);
-          d.addEventListener('click', () => { void _renderWorkflowRuns(wf); });   // §5 — body → history (v1743: the OVERLAY covers the landing, which stays intact beneath — closing reveals it)
-          grid.appendChild(d);
-          continue;
-        }
+        // TL-1 (v2.74.1791) — the c.kind === 'workflow' branch is GONE with the launch cards (§14.2);
+        // the Rail workflows section owns rendering + actions now.
         const b = document.createElement('button');
         b.className = 'suggestion-card';
         b.innerHTML = `<div class="suggestion-card-name">${escHtml(c.title)}</div><div class="suggestion-card-summary">${escHtml(c.sub)}</div>`;
