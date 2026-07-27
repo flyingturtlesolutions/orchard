@@ -839,6 +839,7 @@ async function _renderRailListNow() {
       }
       if (merged.length) _wfByConv.set(c.id, merged);
     }
+    window.__wfLandingCache = _wfByConv;   // v2.74.1842 — the landing reads the SAME class-owned map the Rail just built (one source, no second loader)
   } catch { /* section-only — never blocks the Rail */ }
 
   // CV-3c (v2.74.1168, DESIGN_conversations.md §7) — render the flush-left ACCORDION (Core/railTree.js): an
@@ -14040,9 +14041,12 @@ async function _renderDeskLanding(conv) {
     // Admin keeps the user-role gate (its vitals card is an assistant message and must not suppress the landing).
     if (isAdmin ? (conv.messages || []).some((m) => m && m.role === 'user') : (conv.messages || []).length > 0) return;
     try { if (!isAdmin) { const _mc = $('messages'); if (_mc && _mc.querySelector('.message')) return; } } catch { /* */ }
-    // TL-1 — the workflow LAUNCH CARDS are retired: the Rail workflows section (§8.4) is the one workflow
-    // surface (the landing card grid keeps ＋ Workflow + the alias/command cards only).
-    const workflows = [];
+    // v2.74.1842 (user directive, reversing TL-1's retirement) — workflow cards RETURN to the landing: the
+    // user asked "where are my workflows?" at the What-would-you-like-to-do page (live 07-27). The Rail section
+    // stays the canonical surface; the landing shows the SAME class-owned list the Rail built (§ rulings
+    // v1777/v1780 — never keyed by instanceId), read from the cache the Rail render just populated. No second
+    // loader, so the two surfaces cannot disagree; an empty/unbuilt cache degrades to the TL-1 behaviour.
+    const workflows = (window.__wfLandingCache && window.__wfLandingCache.get(String(conv.id))) || [];
     const def = (() => { try { return builtinApp(conv.presetId || conv.appId) || null; } catch { return null; } })();
     const spec = buildDeskLanding({
       title: conv.title || (def && def.name) || '',
