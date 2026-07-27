@@ -209,6 +209,23 @@ export function createConnectionsHandlers({ invokeSgHandler } = {}) {
       })().catch((e) => { try { sendResponse({ success: false, error: (e && e.message) || String(e) }); } catch { /* */ } });
       return true;
     },
+    // OB-4 (v2.74.1850) — the heartbeat RECEIVER: the panel pings every 10s with its last user action. A gap
+    // over 25s means the panel was frozen, closed, or reloading; logging it ON THE NEXT PING names the stall
+    // with duration + last action (the 07-27 microtask freeze would have produced: "PANEL ▸ silent 47s (last:
+    // Run workflow)"). SW-memory only — an idle SW restart forgets the stamp, and the first ping after a
+    // restart is deliberately NOT judged (no baseline).
+    PANEL_PING: (payload, _sender, sendResponse) => {
+      try {
+        const now = Date.now();
+        const prev = globalThis.__ahubPanelPingAt || 0;
+        globalThis.__ahubPanelPingAt = now;
+        if (prev && (now - prev) > 25_000) {
+          Logger.info('background', `PANEL ▸ silent ${Math.round((now - prev) / 1000)}s (last: ${String(payload?.last || '?').slice(0, 60)})`);
+        }
+      } catch { /* a heartbeat must never throw */ }
+      sendResponse({ success: true });
+      return false;
+    },
     // On-demand refresh ("Check now" / Overview open): probe every probe-bearing origin with an open tab, no age gate.
     CONN_CHECK: (_payload, _sender, sendResponse) => {
       (async () => {

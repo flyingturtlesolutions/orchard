@@ -2636,6 +2636,12 @@ async function _runEachChild(children, directive, onStep) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONC, tasks.length) }, worker));
+  // OB-3 (v2.74.1850) — the CHILD ROLL-UP: each case runs a full chain whose receipts die inside the child;
+  // the parent reduced it all to done/needs-you. One line per fan-out surfaces the set to the parent trace.
+  try {
+    const _d = results.filter((r) => r && r.status === 'done').length;
+    _orchLog(`CHILDREN ▸ ${results.length} ran · ${_d} done · ${results.length - _d} need you`);
+  } catch { /* the roll-up must never break the fan-out */ }
   return results;
 }
 
@@ -3300,15 +3306,36 @@ async function _executeTask(cap, paramValues) {
 // ChatAPI.match: on a grounded HIT we run/confirm/disambiguate here; on any MISS or error we return false and
 // the existing routed flow takes over unchanged. The grounded substrate and the legacy capabilities coexist.
 const _orchReq = (type, payload) => new Promise((resolve) => {
+  // OB-2 (v2.74.1849) — THE ROUND-TRIP CONFESSES. This wrapper always had a 120s timeout, but it resolved null
+  // SILENTLY: a hung panel→SW round-trip became a two-minute stall and then a null no caller could tell apart
+  // from an ordinary miss — the Rail-freeze family wore exactly this face for three diagnoses. Timeout and
+  // port-error now emit one SPAN ▸ line naming the message type and elapsed ms. Behaviour is unchanged (same
+  // null, same timing); the only addition is that the trace can no longer contain a 2-minute hole with no name.
   let done = false;
-  const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 120000);
+  const _t0 = Date.now();
+  const timer = setTimeout(() => {
+    if (!done) {
+      done = true;
+      try { _orchLog(`SPAN ▸ ORCHREQ · FAILED · ${Date.now() - _t0}ms · cause=timeout · ${String(type)}`); } catch { /* */ }
+      resolve(null);
+    }
+  }, 120000);
   try {
     chrome.runtime.sendMessage({ type, payload }, (res) => {
       if (done) return; done = true; clearTimeout(timer);
+      if (chrome.runtime.lastError) { try { _orchLog(`SPAN ▸ ORCHREQ · FAILED · ${Date.now() - _t0}ms · cause=port · ${String(type)}`); } catch { /* */ } }
       resolve(chrome.runtime.lastError ? null : res);
     });
-  } catch { if (!done) { done = true; clearTimeout(timer); resolve(null); } }
+  } catch { if (!done) { done = true; clearTimeout(timer); try { _orchLog(`SPAN ▸ ORCHREQ · FAILED · ${Date.now() - _t0}ms · cause=threw · ${String(type)}`); } catch { /* */ } resolve(null); } }
 });
+
+// OB-4 (v2.74.1850) — THE PANEL HEARTBEAT (the watcher cannot share a heart with what it watches): a ping
+// every 10s carrying the last user-visible action. The SW logs the GAP on the next ping after a stall, so a
+// frozen panel (the 07-27 microtask loop — which no in-panel confessor can ever report) gets NAMED with its
+// duration and last action, at recovery if not sooner. Best-effort; a dead SW just misses pings.
+let __lastPanelAction = 'panel-open';
+try { document.addEventListener('click', (e) => { try { __lastPanelAction = (e.target && (e.target.title || e.target.className || e.target.tagName) || 'click').toString().slice(0, 60); } catch { /* */ } }, { capture: true, passive: true }); } catch { /* */ }
+try { setInterval(() => { try { chrome.runtime.sendMessage({ type: 'PANEL_PING', payload: { at: Date.now(), last: __lastPanelAction } }, () => { void chrome.runtime.lastError; }); } catch { /* */ } }, 10_000); } catch { /* */ }
 
 // v2.74.818 — write a decision line (e.g. the ROUTE a turn took + its cues) into the background's PERSISTED ring
 // buffer, so a chat-side routing decision shows in the downloaded trace (the sidepanel's own console isn't logged).
@@ -8723,6 +8750,11 @@ function _railWorkflowRow(row, parentConv) {
         const _chip = _chips[Number(r.index) - 1];
         if (_chip && r.outcome === 'no-op') { _chip.style.outline = '2px solid var(--border-warning, #BA7517)'; _chip.style.outlineOffset = '1px'; _chip.title = `ran — nothing created or updated${r.skipped ? ` (${r.skipped} already existed)` : ''}`; }
         else if (_chip && (r.outcome === 'stopped' || r.outcome === 'failed')) { _chip.style.outline = '2px solid var(--border-danger, #A32D2D)'; _chip.style.outlineOffset = '1px'; _chip.title = r.note || r.outcome; }
+        // v2.74.1848 (live report: "none of the changes are evident") — the HAPPY path was deliberately left
+        // looking unchanged, which made the whole arc invisible on a clean run. An ok-with-effect chip now gets
+        // a green ring + the set arithmetic as its hover title, so a receipt-driven success is DISTINGUISHABLE
+        // from the old prose-parsed one at a glance — and every outcome state now has a mark.
+        else if (_chip && r.outcome === 'ok' && ((r.created || 0) + (r.updated || 0)) > 0) { _chip.style.outline = '2px solid var(--border-success, #3B6D11)'; _chip.style.outlineOffset = '1px'; _chip.title = `rows ${r.rowsIn ?? '?'}→${r.rowsOut ?? '?'} · ${r.created || 0} new${r.updated ? `, ${r.updated} updated` : ''}`; }
       } catch { /* cosmetic — never breaks the run */ } };
       _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
         .then(() => { _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); }); _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2); })
