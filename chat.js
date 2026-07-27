@@ -52,7 +52,7 @@ import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 �
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable, hostRideInventory, formatHostRideInventory } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard; v1761 — TR-1 meta host inventory
 import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 — TR-1 meta vs act split
-import { stepReceiptLine, mayDeclareFilter } from './Core/stepReceipt.js';
+import { stepReceiptLine, mayDeclareFilter, buildStepReceipt, renderStepReceipt } from './Core/stepReceipt.js';
 import { renderSpan, createRunLedger, renderNoEffect } from './Core/runLedger.js';   // OB-1 (v2.74.1831) — paired EXIT lines + the turn-level no-effect backstop   // v2.74.1828 receipt (STEP ▸); v1829 — mayDeclareFilter is a COST GATE for the branch consult, never a decider
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
@@ -1405,7 +1405,15 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     // input lock don't outlive the desk. Same for a pending intent-first prompt (CD-3).
     if (_wfWizard && (_wfWizard.convId === String(conv.id) || childIds.includes(_wfWizard.convId))) _wfAbandon();
     if (_wfIntentPending && (_wfIntentPending === String(conv.id) || childIds.includes(_wfIntentPending))) { _wfIntentPending = null; releaseComposer('workflow-intent'); }   // PS-5
-    await ConversationStore.delete(conv.id);
+    // v2.74.1844 (live report: "noticeable delay between clicking delete and the rail updating") — OPTIMISTIC
+    // removal. The old order was cascade-delete (one storage write per child) → full storage re-read → Rail
+    // rebuild, and the row sat unchanged through all of it. The row now leaves the DOM the moment the delete is
+    // committed to; the authoritative _renderRailList() below repaints truth (including the children). If the
+    // cascade THROWS, the row is restored before rethrowing — a failed delete must not fake success.
+    try { item.style.display = 'none'; } catch { /* cosmetic */ }
+    try {
+      await ConversationStore.delete(conv.id);
+    } catch (e) { try { item.style.display = ''; } catch { /* */ } throw e; }
     _expandedApps.delete(conv.id);
     // AP-3 fix (v2.74.1220) — the cascade also removed this app's sub-conversations, so reset the panel if the ACTIVE
     // conversation was the app OR one of its now-deleted children (else you'd be left viewing a conversation that's gone).
@@ -8032,12 +8040,17 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
       // 07-25 over-action (2 rows in → 2 cases out under "for each WITHOUT …") visible instead of silent.
       // When BRANCH lands and genuinely narrows the set, it passes filterApplied: true here.
       try {
-        _orchLog(stepReceiptLine({
+        // WC-1 (v2.74.1845) — SUBSCRIBE, DON'T PARSE: the card registers window.__wfStepHook and receives the
+        // STRUCTURED receipt the chain already computes, instead of regex-scraping "Step N" out of prose via a
+        // MutationObserver (the mechanism that froze the panel for three days). Best-effort: no hook, no cost.
+        const _rcpt = buildStepReceipt({
           index: i + 1, total, kind: 'fanout', clause: clause.text,
           declared: _foFilter ? _foFilter.declared : '', filterApplied: !!_foFilter, unknownRows: _foFilter ? _foFilter.unknown() : 0,
           rowsIn: fo.rowsIn, rowsOut: fo.rowsOut, created: fo.created, skipped: fo.skipped, stopped: fo.stopped,
           note: _fanoutSlotLedger(fo),
-        }));
+        });
+        _orchLog(renderStepReceipt(_rcpt));
+        try { if (typeof window.__wfStepHook === 'function') window.__wfStepHook(_rcpt); } catch { /* the hook must never break the run */ }
         _ledgerDecision(`fan-out step ${i + 1}/${total}: ${String(clause.text).slice(0, 90)}`);
       } catch { /* a receipt must never break the run it is reporting on */ }
       if (!fo.ok) { _orchFinalize(msg); return; }   // v1505 — settle + persist the failure line (was an unfinalized exit)
@@ -8666,6 +8679,10 @@ function _railWorkflowRow(row, parentConv) {
     });
     try { _mo.observe(host, { childList: true, subtree: true, characterData: true }); } catch { /* */ }
     _railRunBusy++;
+    // WC-3 (v2.74.1847) — the COLLAPSED row says a run is happening: _railRunBusy always knew, the row never
+    // showed it, so a closed detail looked idle mid-run. An inset accent bar (inline, CSS var, both modes) —
+    // cleared on every exit below. No stylesheet dependency, no animation, nothing for the observer to see.
+    try { item.style.boxShadow = 'inset 2px 0 0 var(--fill-accent, #378ADD)'; } catch { /* cosmetic */ }
     try {
       const tab = await _orchActiveTab();
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
@@ -8680,22 +8697,44 @@ function _railWorkflowRow(row, parentConv) {
         _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.remove('step-done'); });
         _wfReplayStopped(host, wf, _p2);
         _railRunBusy--;
+        try { item.style.boxShadow = ''; } catch { /* */ }
         return;
       }
       const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
       _walkAbortFlag.requested = false;
       const _pb2 = _progressBubble(host);   // PS-9 — step/tick/elapsed ride the card
       _pbRef = _pb2;   // v1824 — the observer streams the chain's live text into the tick region
+      // WC-1 (v2.74.1845) — the RECEIPT drives the chips: outcome, not position. ok-with-effect advances past
+      // the step; no-op/stopped hold and NAME themselves in the tick region (the visual half of
+      // LESSON[silence-is-not-success] — a checkmark that is identical for "did the work" and "did nothing"
+      // lies in pixels). The observer stays for prose activity; receipts win when both fire.
+      window.__wfStepHook = (r) => { try {
+        if (r && Number.isFinite(Number(r.index))) _markStep(Number(r.index) - (r.outcome === 'ok' ? 0 : 1));
+        const bits = [];
+        if (r.rowsIn != null || r.rowsOut != null) bits.push(`rows ${r.rowsIn == null ? '' : r.rowsIn}→${r.rowsOut == null ? '?' : r.rowsOut}`);
+        if (r.outcome === 'no-op') bits.push(`ran · nothing new${r.skipped ? ` (${r.skipped} already open)` : ''}`);
+        else if (r.outcome === 'stopped') bits.push('stopped');
+        else if (r.created) bits.push(`${r.created} new case${r.created === 1 ? '' : 's'}`);
+        if (bits.length && _pbRef) _pbRef.tick(bits.join(' · '));
+        // WC-2 (v2.74.1846) — the OUTCOME lands on the chip itself, not just the tick text: no-op = amber ring
+        // (ran, produced nothing), stopped/failed = red ring + the cause as a hover title. Inline styles on
+        // purpose (CSS vars, both modes) — the chip classes are lane-owned and this must not depend on a
+        // stylesheet edit landing in step. An ok chip is left to the existing step-done treatment.
+        const _chip = _chips[Number(r.index) - 1];
+        if (_chip && r.outcome === 'no-op') { _chip.style.outline = '2px solid var(--border-warning, #BA7517)'; _chip.style.outlineOffset = '1px'; _chip.title = `ran — nothing created or updated${r.skipped ? ` (${r.skipped} already existed)` : ''}`; }
+        else if (_chip && (r.outcome === 'stopped' || r.outcome === 'failed')) { _chip.style.outline = '2px solid var(--border-danger, #A32D2D)'; _chip.style.outlineOffset = '1px'; _chip.title = r.note || r.outcome; }
+      } catch { /* cosmetic — never breaks the run */ } };
       _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
         .then(() => { _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); }); _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2); })
         .catch(() => { /* */ })
         .finally(() => {
           try { _mo.disconnect(); } catch { /* */ }
+          window.__wfStepHook = null;   // WC-1 — the hook dies with the run; a stale hook must not tick a dead card
           _chips.forEach((c) => c.classList.remove('step-running'));   // a failed run keeps its ✓s honest — only finished steps stay marked
           host.classList.remove('wf-run-live');   // the body now shows the RESULT
-          _pb2.done(); _railRunBusy--; if (_detail) _slideOpen(_detail);
+          _pb2.done(); _railRunBusy--; try { item.style.boxShadow = ''; } catch { /* */ } if (_detail) _slideOpen(_detail);
         });
-    } catch { _railRunBusy--; try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
+    } catch { _railRunBusy--; try { item.style.boxShadow = ''; } catch { /* */ } try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
   }, { once: true }));
   if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
     _closeRail();
