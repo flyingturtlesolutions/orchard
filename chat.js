@@ -8061,6 +8061,27 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
       // doesn't live on the active tab — it rides the app's OWN logged-in origin. Try the app's connectors before
       // declaring the step un-runnable; stash the structured result in st.lastValue so a following "open each…"
       // (Slice B) can fan out over it. Gated on bound connections → non-connector apps skip the extra interpret.
+      // v2.74.1836 — A PINNED CONNECTOR STEP WITH NO BOUND CONNECTION MUST SAY SO, NOT VANISH.
+      //
+      // A connector pin forces m = null on purpose (v1728, so a page HIT can't detour the step away from its
+      // pin), which lands here — and the door below is gated on having a bound connection. With none, the step
+      // fell straight through logging NOTHING. Live 07-25: `WORKFLOW ▸ step 1 PINNED → …` then 15 hours of
+      // silence. Live 07-26 19:09, once the backstop existed: the same shape, `RUN ▸ no-effect … 3ms` — the
+      // duration proving it never started rather than hung. Both grounds were signed out, so the gate was empty.
+      //
+      // This is the honest stop the run always owed: name the origin, say why, and say what fixes it. Silence
+      // here reads as success, which is the one thing it is not.
+      if (_pinConn && !_boundConnections().length) {
+        const _pinHost = String(_pin.capabilityId).split('@')[1] || 'the connected site';
+        try { _orchLog(renderSpan({ name: 'STEP', outcome: 'skipped', cause: 'no-bound-connection', detail: `pinned ${_pin.capabilityId}` })); } catch { /* */ }
+        // v2.74.1837 (PR-0, DESIGN_presence.md §3) — DO NOT conflate "signed out" with "not bound". Live 07-27
+        // 09:44: the app resolved the signed-IN presence case at :47 and this gate refused at :56, four times
+        // over a minute. The user WAS signed in; the missing thing was the desk BINDING. The old text sent them
+        // to sign into a site they were already inside. Name the binding, not the session.
+        _setMessageBody(msg, `${total > 1 ? `Stopped at step ${i + 1} — this` : 'This'} step rides **${escHtml(_pinHost)}**, but this conversation has no connection bound to it. Add the connection here and run it again — if you are already signed in to ${escHtml(_pinHost)}, signing in again will not help.`, { markdown: true });
+        _orchFinalize(msg);
+        return;
+      }
       if (_boundConnections().length) {
         // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
         // run's whole first clause showed one static line while 121 reads ran.
