@@ -52,6 +52,8 @@ import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 �
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable, hostRideInventory, formatHostRideInventory } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard; v1761 — TR-1 meta host inventory
 import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 — TR-1 meta vs act split
+import { stepReceiptLine, mayDeclareFilter } from './Core/stepReceipt.js';
+import { renderSpan, createRunLedger, renderNoEffect } from './Core/runLedger.js';   // OB-1 (v2.74.1831) — paired EXIT lines + the turn-level no-effect backstop   // v2.74.1828 receipt (STEP ▸); v1829 — mayDeclareFilter is a COST GATE for the branch consult, never a decider
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
@@ -2263,19 +2265,103 @@ async function _spawnSubTasks(listText) {
   _orchFinalize(msg);
 }
 
+// v2.74.1832 — ONE splitter call per clause, shared by the read block and the spawn. Before this the spec was
+// fetched inside _fanOutFromList only, so the read that runs FIRST could not see it — which is why the model
+// never got to name the collection and a regex did it instead.
+async function _fanoutSpecFor(clauseText) {
+  try {
+    const r = await _orchReq('FANOUT_SPEC', { clause: clauseText });
+    return (r && r.spec) || null;
+  } catch { return null; }   // best-effort: a failure falls back to the legacy regex, reported by the READ line
+}
+
+// FS-6 (v2.74.1830) — the SLOT LEDGER: for every slot the splitter filled, did anything consume it?
+//
+// This exists because of the rule in Core/fanoutPersonaPrompt.js: a slot the model fills and nothing reads is
+// WORSE than no slot, since from outside it looks like the feature works — which is precisely the bug this
+// session diagnosed (a filter declared, recorded, quietly ignored). Six slots were added at once, and three of
+// them (title/destination/order) have NO consumer yet, so they MUST say so on every run rather than reading as
+// silently honoured. `title` in particular stays unwired on purpose: case titles are the identity key the
+// already-open dedup uses, so applying a naming rule would silently change whether a re-run opens new cases or
+// skips them all — the no-op failure from the 07-25 traces. That needs designing, not a one-liner.
+function _fanoutSlotLedger(fo) {
+  const sp = (fo && fo.spec && typeof fo.spec === 'object') ? fo.spec : null;
+  if (!sp) return '';
+  const applied = new Set();
+  if (sp.task) applied.add('task');                                   // → the per-child directive
+  if (sp.persona) applied.add('persona');                             // → composed into each child's seed
+  if (fo.gated) applied.add('gate');                                  // → suppressed the auto-run
+  if (fo.noteWritten) { if (sp.note) applied.add('note'); if (sp.priority) applied.add('priority'); }
+  const bits = [];
+  if (sp.collection) applied.add('collection');   // consumed by the read block as the read-shaped ask
+  for (const k of ['collection', 'task', 'persona', 'note', 'gate', 'title', 'destination', 'order', 'priority']) {
+    if (sp[k]) bits.push(applied.has(k) ? k : `${k}=DECLARED-NOT-APPLIED`);
+  }
+  return bits.length ? `slots: ${bits.join(', ')}` : '';
+}
+
+// PP-1 REACH (v2.74.1829) — resolve a fan-out clause`s FILTER through the MODEL, not a regex.
+//
+// The gap this closes: BRANCH was never missing. Core/branchClause.js, interpret`s `branch` intent, the
+// BRANCH ▸ marker and _runBranchClause are ALL built — but isFanoutAsk is a LEXICAL gate that claims
+// "for each … open a case" before any interpret runs ("don`t waste an ORCH_MATCH on it"), so the semantic
+// layer that would have caught the filter never saw the clause. Three live runs (07-25 15:23/15:35/16:08)
+// opened cases for rows the user had explicitly excluded, with no error line anywhere. Built-but-unreachable
+// is worse than unbuilt: the router substitutes a WRONG ACT instead of reporting a gap.
+//
+// mayDeclareFilter is a COST GATE ONLY — no filter grammar → no model call → behaviour identical to before.
+// When it fires the MODEL authors the predicate (interpret already normalizes it via normalizeBranchVerdict).
+// Evaluation is deterministic and LOCAL (evaluateDataCondition — no network, nothing leaves the panel) and
+// keeps the three-outcome discipline: a row we cannot judge is UNKNOWN — excluded and COUNTED, never quietly
+// treated as a match. Any failure returns null, which is exactly the old behaviour, reported by the receipt.
+async function _resolveFanoutFilter(clauseText, tabId) {
+  if (!mayDeclareFilter(clauseText)) return null;
+  let raw = null; let retrieved = [];
+  try {
+    const r = await _orchReq('INTERPRET_ASK', { ask: clauseText, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
+    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; }
+  } catch { return null; }
+  const d = raw ? normalizeInterpretDecision(raw, { retrieved }) : null;
+  const verdict = (d && d.branch && d.branch.kind === 'branch') ? d.branch : null;
+  if (!verdict) return null;
+  let unknown = 0;
+  const declared = (verdict.arms || []).map((a) => a && a.label).filter(Boolean).join(' / ') || 'branch';
+  const test = (row) => {
+    const { scope } = _branchScopeFor(row);
+    const deterministic = makeBranchEvaluator({ evaluate: evaluateDataCondition, scope, lookup: (nm) => scope.get(nm), onUnknown: () => {} });
+    const res = evalBranch(row, verdict, (a) => deterministic(a));
+    if (res.outcome === 'unknown') { unknown++; return false; }
+    return res.outcome === 'arm';
+  };
+  try { _orchLog(`BRANCH ▸ fan-out filter resolved via interpret → ${verdict.arms.length} arm(s) [${declared}]`); } catch { /* */ }
+  return { declared, test, unknown: () => unknown };
+}
+
 // CV-4-full (Slice B) — fan a PRIOR connector read (st.lastValue from a chain's Slice-A step) out into one child
 // conversation per item. Reuses the explicit-list fan-out core; the ONLY new bit is ENUMERATING the list from the
 // read (itemLabels) instead of a typed comma-list. Capped + honest ("N of M" — never a silent truncation). Sets
 // `msg` to the outcome and returns {ok, summary}; ok:false → the chain stops with the message already shown.
 // UNTRUSTED: each label becomes a sub-task title/seed (escaped on render), never an instruction.
-async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', lifecycle = 'persistent', leg = null } = {}) {
+async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', lifecycle = 'persistent', leg = null, filterRow = null, spec = null } = {}) {
   const _rp = total > 1 ? `Ran ${i} of ${total}. ` : '';   // v2.74.1618 — a single-clause chain (a wizard step) drops the scaffolding
   const { app, error } = await _fanoutParentApp();
-  if (error) { const s = `${_rp}${error}`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  if (error) { const s = `${_rp}${error}`; _setMessageBody(msg, s); return { ok: false, summary: s, stopped: true }; }
   // DK-8e (v2.74.1496) — STRUCTURED items (label + record detail), not display labels: each case is born holding
   // its record + join ids (the live gap: cases were empty shells that re-fetched from a mangled label).
-  const { items: foItems, total: n, capped } = fanoutItems(value, cap, { displayId: _legDisplayId(leg) });
-  if (!foItems.length) { const s = `${_rp}Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  const { items: _foAll, total: n, capped } = fanoutItems(value, cap, { displayId: _legDisplayId(leg) });
+  if (!_foAll.length) { const s = `${_rp}Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s, rowsIn: 0, rowsOut: 0 }; }
+  // PP-1 door (v2.74.1829) — THE PREDICATE PARAMETER THIS FUNCTION NEVER HAD. A `for each <filter>, open a
+  // case` clause used to arrive with its filter reduced to prose, so the fan-out ran over EVERY row and opened
+  // cases for records the user had explicitly excluded (live 07-25, three runs). The caller resolves the
+  // predicate through interpret’s `branch` verdict and hands it down as a row test. Unresolved → null → the
+  // old behaviour, reported honestly by the receipt instead of silently widened. A row the test THROWS on is
+  // excluded, never included: the safe direction for an unknown filter is fewer rows (LESSON, findings 15:36).
+  const foItems = filterRow ? _foAll.filter((it) => { try { return filterRow(it.row || it.fields || {}) === true; } catch { return false; } }) : _foAll;
+  if (!foItems.length) {
+    const s = `${_rp}No items matched — ${_foAll.length} row${_foAll.length === 1 ? '' : 's'} came in and this step’s filter excluded ${_foAll.length === 1 ? 'it' : 'them all'}. Nothing opened.`;
+    _setMessageBody(msg, s);
+    return { ok: true, summary: s, rowsIn: _foAll.length, rowsOut: 0, created: 0, skipped: 0 };   // a filter that matches nothing SUCCEEDED; it did not fail
+  }
   // DK-8f (v2.74.1497) — the dossier DRILLS: a LIST row is a summary (the live gap round 2 — no vendor explanation,
   // no issued date); the item's FULL record lives behind the source leg's declared `drill` (vs_warranty_task by
   // TaskId). Pull it per case at spawn — the case is born with the DETAIL record. Best-effort per item (a failed
@@ -2323,18 +2409,39 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
   // split: the lexical innerDirective reads "in the customer's voice" as the "in a …" wrapper and drops the persona.
   // Behind the personaHint cost gate (no LLM otherwise). The persona composes into each child's SEED so every worker
   // ADOPTS it; the extracted task becomes the per-child directive. Best-effort — falls back to innerDirective + app seed.
-  let directive = innerDirective(clause);
+  const _legacyDirective = innerDirective(clause);   // v1833 — a FALLBACK now, kept only for when the splitter call fails
+  let directive = _legacyDirective;
   let childApp = app;
-  if (personaHint(clause)) {
-    try {
-      const r = await _orchReq('FANOUT_SPEC', { clause });
-      const spec = r && r.spec;
-      if (spec) {
-        if (spec.task) directive = spec.task;
-        if (spec.persona) childApp = { ...app, seed: composeSeed(app.seed, spec.persona) };
+  // FS-6 (v2.74.1830) — the personaHint COST GATE is gone. It only ever fired for persona-bearing asks, so
+  // "open a case with 1 as the first message" never reached the splitter at all and the literal marker was
+  // dropped with no trace (findings 07-25). Gating a SEMANTIC extraction behind a regex is the same mistake
+  // this whole session has been about, one layer down; a fan-out already pays 2 rides per item plus a brief,
+  // so one splitter call is noise beside it. Best-effort throughout — a failure keeps innerDirective + the
+  // app's own seed, exactly as before.
+  let _spec = spec;   // v1832 — the chain already fetched it; do not pay for a second call
+  try {
+    if (!_spec) { const r = await _orchReq('FANOUT_SPEC', { clause }); _spec = (r && r.spec) || null; }
+    if (_spec) {
+      // v2.74.1833 — THE MODEL'S EMPTY ANSWER IS AN ANSWER. The directive is seeded from the lexical
+      // innerDirective and used to be replaced only when _spec.task was truthy, so a model returning task:'' — which
+      // MEANS "there is no per-item work here" — could not overwrite a non-empty regex guess. Live 07-26 18:28:
+      // the splitter correctly said no task, the regex leftover won, and every child re-ran the PARENT'S read
+      // with its own title glued on (2 wasted interprets + 2 wasted rides per run). Once the splitter has
+      // answered it is the decider, empty or not; the regex now fills in ONLY when the call itself failed.
+      if (_legacyDirective && !_spec.task) {
+        try { _orchLog(`TASK   ▸ no per-item task (model); the regex would have run "${_legacyDirective}" in every case`); } catch { /* */ }
+      } else if (_spec.task && _legacyDirective && _spec.task !== _legacyDirective) {
+        try { _orchLog(`TASK   ▸ per-item task from model "${_spec.task}" (regex would have said "${_legacyDirective}")`); } catch { /* */ }
       }
-    } catch { /* extraction is best-effort; keep innerDirective + the app's own seed */ }
-  }
+      directive = _spec.task || '';
+      if (_spec.persona) childApp = { ...app, seed: composeSeed(app.seed, _spec.persona) };
+    }
+  } catch { /* extraction is best-effort; keep innerDirective + the app's own seed */ }
+  // GATE — the one slot whose failure direction is asymmetric: miss a note and a marker is lost; miss a gate
+  // and per-item WORK runs unreviewed, once per row. So a declared hold SUPPRESSES the auto-run directive.
+  // The cases are still opened (that is the review surface); what is withheld is the doing.
+  const _gated = !!(_spec && _spec.gate);
+  if (_gated && directive) { try { _orchLog(`GATE   ▸ fan-out held — "${_spec.gate}" (cases opened; the per-item work is NOT auto-run)`); } catch { /* */ } directive = ''; }
   // FC-0 (v2.74.1552, DESIGN_conversation_focus.md) — each case is BORN WITH FOCUS: its record as a PINNED
   // structured entry (fields + leg provenance), the code-plane twin of the seed's prose CASE_RECORD. "show this
   // ticket" then dereferences structure instead of re-parsing prose (the 133636/144407 mis-route class).
@@ -2349,11 +2456,34 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
   // (the drilled fields) rather than the requestor's-voice CASE_BRIEF narrative, which omits field names.
   const _brief = !isFieldDisplayAsk(clause);
   const { created, skipped } = await _createSubTasks(childApp, foItems, { brief: _brief });   // DK-8k — already-open cases skip (dedup by title under this desk)
+  // FS-6 (v2.74.1830) — NOTE / PRIORITY: literal text the user asked to RECORD, written into each case ahead of
+  // its record. This is the slot "open a case with 1 as the first message" always needed and never had: the case
+  // verdict carries only scope/title/cap, and the directive path executes rather than writes, so a bare value
+  // had nowhere to land and was dropped silently (findings 07-25).
+  //
+  // Rendered as the USER'S OWN WORDS, deliberately marked. Everything else in a case comes out of the vendor's
+  // system; an annotation that renders identically to a record field destroys the one distinction that lets a
+  // reader tell "what I said about this" from "what the record says" — the same rule caseClause.js already puts
+  // on `title` ("never rendered as a fact about a record"). Trusted input (the user's own clause, never page
+  // text) and it still goes out through the escape-first markdown path.
+  _ledgerEffect('case', created.length);   // OB-1 — a ZERO here is the signal: tried and produced nothing
+  let _noteWritten = 0;
+  if (_spec && (_spec.note || _spec.priority) && created.length) {
+    const _bits = [];
+    if (_spec.priority) _bits.push(`**${escHtml(String(_spec.priority))}**`);
+    if (_spec.note) _bits.push(escHtml(String(_spec.note)));
+    const _body = `> _You asked me to note:_ ${_bits.join(' — ')}`;
+    for (const c of created) {
+      if (!c || !c.id) continue;
+      try { await _persistChildMessage(c.id, 'assistant', _body); _noteWritten++; } catch { /* a note must never sink the spawn */ }
+    }
+    try { _orchLog(`CASE   ▸ note written to ${_noteWritten}/${created.length} case(s)`); } catch { /* */ }
+  }
   // EPHEMERAL (v2.74.1262) — a REDUCE over the set: the workers run → the parent SYNTHESIZES their findings → the
   // workers CLOSE (delete). No durable sub-tasks; the deliverable is the summary. Auto-runs (the ask was the intent).
   if (lifecycle === 'ephemeral' && created.length) {
     await _runEphemeralFanout(childApp, created, directive || 'summarize', msg);
-    return { ok: true, summary: `Synthesized ${created.length} (ephemeral workers closed).` };
+    return { ok: true, summary: `Synthesized ${created.length} (ephemeral workers closed).`, rowsIn: _foAll.length, rowsOut: foItems.length, created: created.length, skipped, spec: _spec, gated: _gated, noteWritten: _noteWritten };
   }
   // PERSISTENT with a per-child DIRECTIVE ("research each …", "respond …") → AUTO-RUN it in every child: the worker
   // RESOLVES (this populates each durable thread), then STAYS open. v2.74.1265 — was an offer-button in the parent, so
@@ -2362,12 +2492,12 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
     // DK-8i (v2.74.1501) — the run's own status line ("N done, K need you") IS the meta summary; returning it keeps
     // it alive through the chain-end readouts join (it used to be overwritten by `Ran "…" in N.`).
     const ran = await _runPersistentFanout(childApp, created, directive, msg, { suffix: capped ? ` (capped at ${cap} of ${n})` : '' });
-    return { ok: true, summary: ran || `Ran “${directive}” in ${created.length}.` };
+    return { ok: true, summary: ran || `Ran “${directive}” in ${created.length}.`, rowsIn: _foAll.length, rowsOut: foItems.length, created: created.length, skipped, spec: _spec, gated: _gated, noteWritten: _noteWritten };
   }
   // DK-8i (v2.74.1501) — the desk gets the operator's LEDGER line (what was accomplished), never the record dump.
   const summary = fanoutSummary({ found: n, opened: created.length, skipped, capped, source: (leg && (leg.name || leg.does)) || '', deskTitle: app.title, titles: created.map((c) => c.title) });
   _setMessageBody(msg, summary);
-  return { ok: created.length > 0 || skipped > 0, summary };   // DK-8k — all-already-open is a SUCCESS (idempotent), not a failed clause
+  return { ok: created.length > 0 || skipped > 0, summary, rowsIn: _foAll.length, rowsOut: foItems.length, created: created.length, skipped, spec: _spec, gated: _gated, noteWritten: _noteWritten };   // DK-8k — all-already-open is a SUCCESS (idempotent), not a failed clause
 }
 
 // CV-4-map — persist a message INTO a child conversation (not the visible panel). upsert appends; the write refreshes
@@ -7709,7 +7839,43 @@ async function _resolveNavUrl(text) {
   return null;
 }
 
-async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null, offers = true, onRetry = null }) {
+// OB-1 (v2.74.1831) — THE TURN BACKSTOP. Every silent failure in this arc ended a chain having touched no
+// artifact and raised no error: the pinned connector step (15h of nothing), the vanished fan-out step 4 (16s),
+// the branch dispatch (53s). That is ONE checkable condition, so it is checked ONCE here rather than
+// instrumented path by path — a per-path line only ever catches the paths someone thought of.
+//
+// A thin wrapper, deliberately: _orchRunChainInner has many early returns, and a finally is the only way an
+// exit cannot be missed. Reads only; it can add a line but never change what the chain did.
+let _runLedger = null;
+const _ledgerEffect = (kind, n) => { try { if (_runLedger) _runLedger.effect(kind, n); } catch { /* */ } };
+const _ledgerDecision = (t) => { try { if (_runLedger) _runLedger.decision(t); } catch { /* */ } };
+// v2.74.1834 — rows a READ returned. Tracked apart from effects so the backstop can tell a step that DID its
+// job (a read) from one that got nowhere; shape-defensive because a leg value may be an array, a wrapper, or
+// a single record, and an over-count here only ever buys extra silence on a working read.
+const _rowCount = (v) => {
+  if (Array.isArray(v)) return v.length;
+  if (v && typeof v === 'object') {
+    for (const k of ['items', 'rows', 'results', 'data', 'value']) if (Array.isArray(v[k])) return v[k].length;
+    return 1;
+  }
+  return v == null ? 0 : 1;
+};
+const _ledgerRead = (v) => { try { if (_runLedger) _runLedger.read(_rowCount(v)); } catch { /* */ } };
+async function _orchRunChain(msg, opts) {
+  const _t0 = Date.now();
+  const _prev = _runLedger;              // nested chains (a fan-out child running its own) must not clobber the parent
+  _runLedger = createRunLedger();
+  try {
+    return await _orchRunChainInner(msg, opts);
+  } finally {
+    try {
+      const _line = renderNoEffect(_runLedger, { ms: Date.now() - _t0, ask: (opts && opts.ask) || '' });
+      if (_line) _orchLog(_line);
+    } catch { /* the backstop must never break the run it reports on */ }
+    _runLedger = _prev;
+  }
+}
+async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null, offers = true, onRetry = null }) {
   // v2.74.1616 — `offers:false` = a WIZARD-owned run: the chain still runs + renders into msg identically, but its
   // conversational chrome stays off — no teach offers (the wizard renders its OWN show-me door; the chain's
   // _resumeAfterDemo seam would continue in the thread behind the page and strand the wizard's phase machine) and
@@ -7799,16 +7965,34 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       // clause uses (its ID layer honors the each-mode: "foreach division" → divisionId="each", the headless
       // full sweep, merged group-tagged rows as ONE value) — then fan out over what it returned. A fan-out that
       // FOLLOWS a read keeps consuming st.lastValue unchanged.
+      let _foSpec = null;   // v1832 — computed once per clause; the read block and the spawn share it
       if (st.lastValue == null && _boundConnections().length) {
         // v2.74.1547 — enumerate with the READ-shaped ask, not the raw spawn phrase: the leg-picker's interpret
         // read "open new warranty tasks in a new case" as REVIEW_QUEUE with an `every` schedule param (live
         // 121110 — the schedule misread, one layer deeper). fanoutReadAsk strips the spawn grammar
         // ("foreach division, open new warranty tasks in a new case" → "foreach division, list new warranty
         // tasks") so the picker sees collection + quantifier + filters only.
-        const _readAsk = fanoutReadAsk(clause.text) || clause.text;
+        // v2.74.1832 — THE MODEL NAMES THE COLLECTION; the regex is now only a fallback.
+        //
+        // fanoutReadAsk strips spawn grammar to build a read-shaped ask. It also strips OUR artifact word out
+        // of the USER'S nouns: "get open warranty CASES and for each, open a case with 1" arrived at interpret
+        // as "get and for each, with 1 as the first message", which correctly produced a clarify at conf 0.2 —
+        // twice, on two consecutive live runs (07-26 17:31, 17:51). The model already separates the read from
+        // the spawn cleanly and keeps the user's own vocabulary, so it decides and the regex only fills in.
+        // Disagreement is LOGGED rather than resolved: whichever is wrong, the trace should say so.
+        _foSpec = await _fanoutSpecFor(clause.text);
+        const _legacyRead = fanoutReadAsk(clause.text) || null;
+        const _readAsk = (_foSpec && _foSpec.collection) || _legacyRead || clause.text;
+        try {
+          if (_foSpec && _foSpec.collection && _legacyRead && _legacyRead !== _foSpec.collection) {
+            _orchLog(`READ   ▸ collection from model "${_foSpec.collection}" (regex would have said "${_legacyRead}")`);
+          } else if (!(_foSpec && _foSpec.collection) && _legacyRead) {
+            _orchLog(`READ   ▸ no collection from model — falling back to the regex read "${_legacyRead}"`);
+          }
+        } catch { /* */ }
         const cr = await _chainConnectorRun(_readAsk, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
         if (cr && cr.ok) {
-          st.lastValue = cr.value; st.lastLeg = cr.leg;
+          st.lastValue = cr.value; st.lastLeg = cr.leg; _ledgerRead(cr.value);
           // v1621 (live 201423) — the pre-read RAN and found 0 items (the interpret GUESSED an unbound filter:
           // "list task instructions…" named no status; the read ran status=new → 0 rows while the user meant
           // open → 24). "The previous step returned no list" would be a lie here — there was no previous step.
@@ -7822,7 +8006,25 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         else if (cr && !cr.ok) { _setMessageBody(msg, `${_ranPfx(i)}Couldn’t ${cr.leg ? _legFailName(cr.leg) : 'read the list to fan out over'}${cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
       }
       const _foCap = fanoutLimit(clause.text);   // DK-8g — "open the first as a case" / "open 3 cases" caps the spawn (the single-case test primitive)
-      const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
+      // v2.74.1829 — ask the MODEL for this clause’s filter BEFORE fanning out (see _resolveFanoutFilter).
+      const _foFilter = await _resolveFanoutFilter(clause.text, tabId);
+      if (!_foSpec) _foSpec = await _fanoutSpecFor(clause.text);
+      const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}), ...(_foFilter ? { filterRow: _foFilter.test } : {}), ...(_foSpec ? { spec: _foSpec } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
+      // v2.74.1828 — THE RECEIPT. One `STEP ▸` line per fan-out: rows in→out, the predicate the clause DECLARED
+      // and whether it was APPLIED, and the artifact ledger. Emitted BEFORE the !ok exit so a stopped step is
+      // accounted for too. `filterApplied` is deliberately NOT passed: the fan-out has no predicate support, so
+      // a declared filter reports DECLARED-NOT-APPLIED — which is the honest state, and the line that makes the
+      // 07-25 over-action (2 rows in → 2 cases out under "for each WITHOUT …") visible instead of silent.
+      // When BRANCH lands and genuinely narrows the set, it passes filterApplied: true here.
+      try {
+        _orchLog(stepReceiptLine({
+          index: i + 1, total, kind: 'fanout', clause: clause.text,
+          declared: _foFilter ? _foFilter.declared : '', filterApplied: !!_foFilter, unknownRows: _foFilter ? _foFilter.unknown() : 0,
+          rowsIn: fo.rowsIn, rowsOut: fo.rowsOut, created: fo.created, skipped: fo.skipped, stopped: fo.stopped,
+          note: _fanoutSlotLedger(fo),
+        }));
+        _ledgerDecision(`fan-out step ${i + 1}/${total}: ${String(clause.text).slice(0, 90)}`);
+      } catch { /* a receipt must never break the run it is reporting on */ }
       if (!fo.ok) { _orchFinalize(msg); return; }   // v1505 — settle + persist the failure line (was an unfinalized exit)
       // DK-8i (v2.74.1501) — the desk transcript is the operator's LEDGER: a read CONSUMED by a case spawn drops its
       // row dump from the desk (the rows live in the cases; fo.summary carries the found-count) — the live UX round:
@@ -7906,7 +8108,27 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           continue;   // st.lastValue unchanged: a case RECORDS the working set, it does not replace it
         }
         if (cr && cr.branch) {   // PP-1 (v1661) — door A′, the execution half. Supplies the prior exactly as its siblings do.
-          const brr = await _runBranchClause(msg, cr.branch, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+          // OB-1 (v2.74.1831) — THE PAIRED EXIT. `DISPATCH ▸ branch → chain` was an entry line with no matching
+          // exit, so a failure here read as 53 seconds of nothing (live 07-26) and the trace could not tell
+          // "the read failed" from "the evaluator threw" from "it never started". The finally makes the exit
+          // unskippable on every return path — the same discipline markEngineBusy already uses for tabs.
+          const _brT0 = Date.now();
+          let _brr = null;
+          try {
+            _brr = await _runBranchClause(msg, cr.branch, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+          } finally {
+            const _rows = (_brr && Array.isArray(_brr.rows)) ? _brr.rows.length : null;
+            try {
+              _orchLog(renderSpan({
+                name: 'BRANCH', ms: Date.now() - _brT0,
+                outcome: (_brr && _brr.ok) ? (_rows === 0 ? 'no-effect' : 'ok') : 'failed',
+                // The cause code that turns one sentence back into four distinguishable situations.
+                cause: (_brr && _brr.ok) ? '' : ((_brr && _brr.reason) || (_brr ? 'branch-not-ok' : 'threw-or-never-returned')),
+                detail: `${(cr.branch.arms || []).length} arm(s)${_rows == null ? '' : ` · ${_rows} row(s) out`}`,
+              }));
+            } catch { /* an exit line must never break the run it reports on */ }
+          }
+          const brr = _brr;
           if (!brr || !brr.ok) return;
           if (brr.text) { st.readouts.push(brr.text); st.lastReadoutIdx = st.readouts.length - 1; }
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'branch', clause: clause.text, intent: clause.text });
@@ -7951,7 +8173,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         }
         if (cr && cr.ok) {
           const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results', displayId: _legDisplayId(cr.leg) });
-          st.lastValue = cr.value;
+          st.lastValue = cr.value; _ledgerRead(cr.value);
           st.lastLeg = cr.leg;   // DK-8f — the SOURCE leg rides along (its `drill` marker lets a following fan-out pull each item's FULL record)
           st.readouts.push(lines ? lines.join('\n') : `Ran “${clause.text}”.`);
           st.lastReadoutIdx = st.readouts.length - 1;   // DK-8i — this readout's slot (dropped if a spawn consumes the read)

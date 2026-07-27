@@ -132,7 +132,15 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     // There is deliberately no clarify fallback: `normalizeCaseVerdict` accepts `{}`, so a bare "open a case for
     // each of those" is actionable as-is. Asking a question there would be asking about something already known.
     const c = normalizeCaseVerdict(d.case || d);
-    if (c) return { ...base, case: c };
+    // PP-1 REACH (v2.74.1829) — a per-item action may CARRY A FILTER. "for each task that HAS a vendor
+    // explanation, open a case" is one clause naming two things: WHICH rows (a branch predicate) and WHAT to
+    // do with them (a case). Before this, only the 'branch' INTENT preserved the predicate, so the filter was
+    // dropped at the door and the fan-out opened cases for rows the user had excluded — silently, three live
+    // runs (findings 07-25). Additive on purpose: the intent still routes to the case door exactly as before,
+    // the filter simply survives beside it for the executor to narrow with. Absent/malformed → undefined, and
+    // the caller reports DECLARED-NOT-APPLIED rather than widening.
+    const cFilter = normalizeBranchVerdict(d.branch);
+    if (c) return { ...base, case: c, ...(cFilter ? { branch: cFilter } : {}) };
     return { ...base, intent: 'clarify', question: 'What should I open a case about?', why: why || 'case-underspecified' };
   }
   if (intent === 'clarify') {

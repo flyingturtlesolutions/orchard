@@ -108,7 +108,12 @@ describe('mirrorSync — content-script mirrors agree with their Core canonicals
       return map;
     };
     const core = entries(ICAP, 'DOM_EVENT_KIND');
-    const cs = entries(CS, 'const _IM_EVENT_KIND');
+    // v2.74.1835 — the content script's top-level declarations became  so the file survives RE-INJECTION:
+    // a top-level let/const in a CLASSIC script creates a global lexical binding at PARSE time, which collides
+    // on the second injection and throws before the file's own runtime guard can run (live: "Identifier
+    // '__ahubActionObservation' has already been declared"). This test is about the event-kind MAP matching
+    // Core, not about which keyword declares it — match any of the three so it stops pinning an incidental.
+    const cs = entries(CS, '(?:var|let|const) _IM_EVENT_KIND');
     for (const [k, v] of Object.entries(cs)) assert.equal(core[k], v, `CS maps ${k}→${v} but Core maps ${k}→${core[k]}`);
     const omitted = Object.keys(core).filter((k) => !(k in cs));
     assert.deepEqual(omitted, ['focusout'], `documented omission is exactly focusout, got: ${omitted.join(',')}`);

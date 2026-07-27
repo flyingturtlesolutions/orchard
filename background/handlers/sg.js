@@ -12,6 +12,7 @@
 import * as Outcomes from '../../Core/outcomes.js';
 import { Logger } from '../../Core/Logger.js';
 import { coverComplete } from '../../Core/cover.js';
+import { describeFanoutSpec } from '../../Core/fanoutPersonaPrompt.js';   // FS-6 (v2.74.1830) — log every declared fan-out slot, not just task/persona
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
@@ -1110,7 +1111,7 @@ export function createSgMessageHandlers(ctx) {
         const clause = String(payload?.clause ?? '').trim();
         if (!clause) { sendResponse({ success: true, spec: { task: '', persona: null } }); return; }
         const spec = await AnthropicService.extractFanoutSpec({ clause });
-        Logger.info('fanout', `FANOUT_SPEC "${clause.slice(0, 50)}" → task="${spec.task}" persona=${spec.persona ? `"${spec.persona}"` : 'none'}`);
+        Logger.info('fanout', `FANOUT_SPEC "${clause.slice(0, 50)}" → ${describeFanoutSpec(spec) || 'no slots declared'}`);   // FS-6 — all eight slots, not just task/persona
         sendResponse({ success: true, spec });
       } catch (err) {
         Logger.error('background', `FANOUT_SPEC failed: ${err.message}`);

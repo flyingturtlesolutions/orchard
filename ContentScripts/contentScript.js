@@ -1547,7 +1547,7 @@ function _diffObservationSnapshots(before, after, mutations, firstMutationTs, st
 
 // Module-scope state for in-flight observation. Single observation per
 // content-script context — engine is single-threaded per step.
-let __ahubActionObservation = null;
+var __ahubActionObservation = null;
 
 async function _computeAccessibilityProfile(el) {
   if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
@@ -1661,7 +1661,7 @@ function _nameSimilarityForRecovery(authored, current) {
 // reject the fuzzy match (likely too different to be the same
 // landmark). Tunable; could become a parameter if drift patterns
 // warrant per-Ground tuning.
-const _FUZZY_NAME_THRESHOLD = 0.65;
+var _FUZZY_NAME_THRESHOLD = 0.65;
 
 /**
  * v2.74.270 — Returns structured recovery candidates with the
@@ -2458,7 +2458,7 @@ async function handleClickByLabel(selector, value) {
  * This selector captures the actually-clickable element so CLICK_BY_LABEL
  * lands on the thing that DOES something.
  */
-const _CLICKABLE_DESCENDANTS_SEL = 'a, button, [role="button"], [role="link"], [tabindex]';
+var _CLICKABLE_DESCENDANTS_SEL = 'a, button, [role="button"], [role="link"], [tabindex]';
 
 /** Find the first clickable option inside a container, in priority order. */
 function _findFirstOptionCandidate(container) {
@@ -3145,7 +3145,7 @@ function handleEnter(selector) {
 // "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Backspace",
 // "Delete", "Home", "End", "PageUp", "PageDown", " " (space), or a
 // single printable character.
-const _KEY_CODE_MAP = Object.freeze({
+var _KEY_CODE_MAP = Object.freeze({
   'Enter'     : { code: 'Enter',      keyCode: 13 },
   'Escape'    : { code: 'Escape',     keyCode: 27 },
   'Esc'       : { code: 'Escape',     keyCode: 27, key: 'Escape' },
@@ -3590,7 +3590,7 @@ function detectRepeatingContentBlocks() {
 // v2.74.563 — includes ALL `button`s (not just [type=submit]): a bare <button> inside a <form> is a
 // default-submit per HTML, and BambooHR-style forms use one. _describeFormControl returns null for
 // non-submit buttons, so nav/toggle buttons stay with the band scan — only the real submit is kept.
-const FORM_CONTROL_SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button';
+var FORM_CONTROL_SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button';
 function _ffStrip(s) { return String(s || '').replace(/\s*\*\s*$/, '').replace(/\s{2,}/g, ' ').trim(); }
 // Concrete selector for the REAL control (not a wrapper). Preference order, most→least durable:
 //   1. [name="…"] — the FORM-CANONICAL identifier. It's author-controlled and submitted to the server,
@@ -5736,8 +5736,8 @@ async function closeOpenOverlays() {
 // _computeA11yRole / _computeAccessibleName / _computeHierarchicalContext). Sensitive values NEVER leave the
 // page — a local gate redacts password/payment fields before sending. Pure scrub/classify lives in
 // Core/observedTrace.js (the background applies it); this side only extracts DOM identity.
-let _obsRec = { active: false };
-const _OBS_SENSITIVE = /pass(word|code)|(^|[^a-z])pin([^a-z]|$)|\bssn\b|social.?security|credit.?card|card.?number|(^|[^a-z])cc-?(num|number|csc|cvv|cvc)|security.?code|\bcvv\b|\bcvc\b|account.?number|routing.?number/i;
+var _obsRec = { active: false };
+var _OBS_SENSITIVE = /pass(word|code)|(^|[^a-z])pin([^a-z]|$)|\bssn\b|social.?security|credit.?card|card.?number|(^|[^a-z])cc-?(num|number|csc|cvv|cvc)|security.?code|\bcvv\b|\bcvc\b|account.?number|routing.?number/i;
 
 // OBS-3b — the element IS live when the user acts, so capture a rich identity HERE (the demonstration can't
 // be re-profiled later — it spans pages). rect/text/attributes populate the durable Landmark record so it
@@ -5829,9 +5829,9 @@ function _obsOptionVocabulary(domKind, el, target) {
 // category click vanished from the trace). Persist navigating actions to sessionStorage SYNCHRONOUSLY (it
 // survives a same-origin navigation); the next page flushes them on re-arm. The background dedups by `uid`, so a
 // live-delivered action and its buffered copy never double-count.
-let _obsClientSeq = 0;
-const _obsFrameSalt = Math.random().toString(36).slice(2, 8);   // v2.74.955 (CR-H5) — two frames share seq ranges AND can stamp the same Date.now(); the salt keeps cross-frame uids collision-free
-const _OBS_BUF_KEY = '__ahub_obs_navbuf';
+var _obsClientSeq = 0;
+var _obsFrameSalt = Math.random().toString(36).slice(2, 8);   // v2.74.955 (CR-H5) — two frames share seq ranges AND can stamp the same Date.now(); the salt keeps cross-frame uids collision-free
+var _OBS_BUF_KEY = '__ahub_obs_navbuf';
 function _obsBufferAction(payload) {
   try { const buf = JSON.parse(sessionStorage.getItem(_OBS_BUF_KEY) || '[]'); buf.push(payload); sessionStorage.setItem(_OBS_BUF_KEY, JSON.stringify(buf.slice(-50))); } catch { /* */ }
 }
@@ -5928,13 +5928,13 @@ function _obsSend(domKind, el, rawValue) {
   // place, watch for the SPA boundary so an XHR filter/search is segmented and gets an in-place postcondition.
   if (domKind === 'keypress' || domKind === 'submit' || (domKind === 'click' && _obsIsCommitClick(el, target))) _obsArmSwapWatch();
 }
-const _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };
-const _obsOnInput  = (e) => { try { const el = e.target; const tag = el && el.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') _obsSend(tag === 'SELECT' ? 'change' : 'input', el, el.value); } catch { /* */ } };
-const _obsOnSubmit = (e) => { try { if (e.target) _obsSend('submit', e.target, null); } catch { /* */ } };
+var _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };
+var _obsOnInput  = (e) => { try { const el = e.target; const tag = el && el.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') _obsSend(tag === 'SELECT' ? 'change' : 'input', el, el.value); } catch { /* */ } };
+var _obsOnSubmit = (e) => { try { if (e.target) _obsSend('submit', e.target, null); } catch { /* */ } };
 // OBS — capture ENTER in a field (submit-via-keyboard). Many sites handle Enter with a key listener and
 // never fire a native `submit`, so the search would otherwise go unrecorded. Only Enter on a text field /
 // contenteditable (typing is captured via input; buttons get a click); it replays as a KEY action.
-const _obsOnKey = (e) => {
+var _obsOnKey = (e) => {
   try {
     if (e.key !== 'Enter' || e.isComposing) return;
     const el = e.target; const tag = el && el.tagName;
@@ -5944,8 +5944,8 @@ const _obsOnKey = (e) => {
 // OBS-4 — debounced SCROLL capture (not every pixel): record where the viewport settled, so a demonstration
 // that scrolls (to read or reach content) is visible in the trace. Replay reaches elements via SCROLL_TO
 // normalizers, so this is for trace fidelity, not pixel-replay.
-let _obsScrollT = null;
-const _obsOnScroll = () => {
+var _obsScrollT = null;
+var _obsOnScroll = () => {
   if (!_obsRec.active) return;
   if (_obsScrollT) clearTimeout(_obsScrollT);
   _obsScrollT = setTimeout(() => {
@@ -5959,8 +5959,8 @@ const _obsOnScroll = () => {
 // `selector_present` postcondition (the in-place analog of url_matches). Conservative: armed only for unambiguous
 // commits (Enter / native submit / a commit-named button), fires only on a SIGNIFICANT swap, and bails if a
 // navigation happened first (the nav boundary already split there).
-let _obsSwapObs = null, _obsSwapSettleT = null, _obsSwapCapT = null, _obsSwapUrl = '', _obsSwapAdds = null;
-const _OBS_SWAP_MIN_NODES = 5;   // a results swap adds many nodes; a spinner / class-toggle / focus ring does not
+var _obsSwapObs = null, _obsSwapSettleT = null, _obsSwapCapT = null, _obsSwapUrl = '', _obsSwapAdds = null;
+var _OBS_SWAP_MIN_NODES = 5;   // a results swap adds many nodes; a spinner / class-toggle / focus ring does not
 function _obsArmSwapWatch() {
   if (!_obsRec.active || typeof MutationObserver !== 'function' || !document.body) return;
   _obsDisarmSwapWatch();
@@ -6057,17 +6057,17 @@ function _obsStop() {
 // other adapters). Core/mirrorSync.test.js pins exactly this contract (CR-I2, v2.74.926). NEVER reads
 // a field's .value; a `type` carries inputType + a length DELTA only, withheld entirely for sensitive
 // fields. Listeners are attached capture-phase + wrapped so a bug can never break the host page.
-const _IM_EVENT_KIND = { click: 'click', auxclick: 'click', dblclick: 'dblclick', input: 'type', submit: 'submit', focusin: 'focus' };
-let _imOn = false;
-let _imTargets = [];
-let _imAttached = false;
+var _IM_EVENT_KIND = { click: 'click', auxclick: 'click', dblclick: 'dblclick', input: 'type', submit: 'submit', focusin: 'focus' };
+var _imOn = false;
+var _imTargets = [];
+var _imAttached = false;
 // v2.74.955 (CR-H5) — per-ELEMENT type-debounce timers. One shared timer meant fast field-to-field
 // typing (<400ms) cancelled the first field's pending event entirely. WeakMap keys the timer by element;
 // the companion Set tracks pending elements so detach can clear them (a WeakMap is not iterable).
-const _imTypeTimers = new WeakMap();
-const _imTypePending = new Set();
-const _imLen = new WeakMap();
-const _imListeners = {};
+var _imTypeTimers = new WeakMap();
+var _imTypePending = new Set();
+var _imLen = new WeakMap();
+var _imListeners = {};
 
 function _imSensitive(el) {
   try {
@@ -6170,7 +6170,7 @@ function _imDetach() {
 // `const { type, payload }` destructure the listener performed, block-style cases keep their own
 // braces (block scoping preserved), and the return value keeps the sendResponse channel open
 // exactly as the case's `return true` did. Unknown types return false (the old default).
-const MESSAGE_HANDLERS = {
+var MESSAGE_HANDLERS = {
 
   'RECORD_START': (message, _sender, sendResponse) => {
     const { type, payload } = message; void type; void payload;
@@ -8688,36 +8688,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 //   (d) tagName.className — only when class doesn't look generated.
 //   (e) Structural fallback — tagName + nth-of-type chain (≤4 levels).
 
-let __pickerActive       = false;
-let __pickerSessionId    = '';
-let __pickerOverlay      = null;
-let __pickerLastTarget   = null;
-let __pickerOnMouseMove  = null;
-let __pickerOnClick      = null;
-let __pickerOnKeyDown    = null;
-let __pickerOnContextMenu = null;
+var __pickerActive       = false;
+var __pickerSessionId    = '';
+var __pickerOverlay      = null;
+var __pickerLastTarget   = null;
+var __pickerOnMouseMove  = null;
+var __pickerOnClick      = null;
+var __pickerOnKeyDown    = null;
+var __pickerOnContextMenu = null;
 // v2.72.61 — Block pre-click events too. Frameworks (React, Vue, etc.)
 // often bind to pointerdown/mousedown/touchstart and run their handlers
 // before the browser fires `click`. Even with preventDefault on click,
 // the framework's handler has already executed. To stop this we
 // intercept the early events at capture phase and block them.
-let __pickerOnPointerDown = null;
-let __pickerOnMouseDown   = null;
-let __pickerOnPointerUp   = null;
-let __pickerOnMouseUp     = null;
-let __pickerOnTouchStart  = null;
-let __pickerOnTouchEnd    = null;
+var __pickerOnPointerDown = null;
+var __pickerOnMouseDown   = null;
+var __pickerOnPointerUp   = null;
+var __pickerOnMouseUp     = null;
+var __pickerOnTouchStart  = null;
+var __pickerOnTouchEnd    = null;
 // v2.72.5 (Pass 3c.1) — mode + container for field-scoped picking.
-let __pickerMode             = 'target';
-let __pickerContainerSelector = '';
+var __pickerMode             = 'target';
+var __pickerContainerSelector = '';
 // v2.72.6 (Pass 3c.2) — return all candidates instead of just one.
-let __pickerMultiCandidate   = false;
+var __pickerMultiCandidate   = false;
 // v2.72.93 — Label-extraction mode. 'single' (default) returns a single
 // element's label via extractElementLabel; 'container' enumerates option
 // children and returns a comma-list. Used for CLICK_BY_LABEL container
 // picks so the saved pickedLabel reads as a list of options instead of
 // a wall of concatenated textContent.
-let __pickerLabelMode        = 'single';
+var __pickerLabelMode        = 'single';
 
 // v2.74.163 — Frame info attached to every PICK_RESULT so the sidepanel
 // can route per-frame at save time. Top-frame picks return null (the
@@ -9183,7 +9183,7 @@ function stopPicker(notify, cancelled) {
 // marker, separate state). Position is absolute in document coords so
 // the overlays scroll naturally with the page.
 
-let __perspectiveOverlays = [];
+var __perspectiveOverlays = [];
 
 function showPerspectiveOverlays(landmarks) {
   clearPerspectiveOverlays();
@@ -9268,7 +9268,7 @@ function clearPerspectiveOverlays() {
 // Order matters slightly — the picker tries them in sequence and returns
 // the first match that's uniqueMatch'd. We put the most common /
 // most-conventional first.
-const TEST_MARKER_ATTRS = [
+var TEST_MARKER_ATTRS = [
   'data-testid',
   'data-test-id',
   'data-test',
@@ -9854,7 +9854,7 @@ function extractContainerLabel(container) {
 //   _snapState = null when inactive
 //   _snapState = { sessionId, dragging, startX, startY, rectEl,
 //                  onMouseDown, onMouseMove, onMouseUp, onKeyDown }
-let _snapState = null;
+var _snapState = null;
 
 function startSnap(sessionId) {
   if (_snapState) stopSnap(false);
@@ -10031,7 +10031,7 @@ function showCaptureFlash(rect) {
 //   • Tab navigation re-injects the content script, so leftover
 //     overlays from a prior page are naturally garbage-collected.
 
-let _obsOverlayState = null;   // { rootEl } or null
+var _obsOverlayState = null;   // { rootEl } or null
 
 function showObservationOverlay(payload) {
   if (!payload) return;

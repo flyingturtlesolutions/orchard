@@ -244,3 +244,41 @@ describe('interpret — the confidence-disposition tables SEAL the gate (v2.74.1
     }
   });
 });
+
+describe('PP-1 REACH (v2.74.1829) — a per-item ACTION carries its FILTER', () => {
+  const WHEN = { type: 'record_field_non_empty', binding: 'item', fieldName: 'VendorExplanation' };
+
+  it('a case intent preserves a valid branch predicate beside its case verdict', () => {
+    const d = normalizeInterpretDecision({
+      intent: 'case', case: {}, confidence: 0.9,
+      branch: { arms: [{ label: 'has explanation', when: WHEN }] },
+    });
+    assert.equal(d.intent, 'case');            // routing is UNCHANGED — this is additive, not a re-route
+    assert.ok(d.case, 'the case verdict still comes through');
+    assert.equal(d.branch.kind, 'branch');
+    assert.equal(d.branch.arms.length, 1);
+    assert.equal(d.branch.arms[0].label, 'has explanation');
+  });
+
+  it('no branch offered → no branch key (the executor then reports DECLARED-NOT-APPLIED, never widens)', () => {
+    const d = normalizeInterpretDecision({ intent: 'case', case: {}, confidence: 0.9 });
+    assert.equal(d.intent, 'case');
+    assert.equal(d.branch, undefined);
+  });
+
+  it('a MALFORMED branch is dropped rather than half-applied, and never breaks the case', () => {
+    const d = normalizeInterpretDecision({
+      intent: 'case', case: {}, confidence: 0.9,
+      branch: { arms: [{ label: 'no assertion' }] },   // `when` missing → normalizeBranchVerdict rejects it
+    });
+    assert.equal(d.intent, 'case');
+    assert.ok(d.case);
+    assert.equal(d.branch, undefined);
+  });
+
+  it('the branch INTENT is untouched by this change', () => {
+    const d = normalizeInterpretDecision({ intent: 'branch', branch: { arms: [{ label: 'open', when: WHEN }] }, confidence: 0.9 });
+    assert.equal(d.intent, 'branch');
+    assert.equal(d.branch.arms[0].label, 'open');
+  });
+});
