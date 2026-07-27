@@ -10,7 +10,8 @@
  */
 
 import { Logger } from '../../Core/Logger.js';
-import { REG_KEY, authSignal, applySignal, heartbeatTargets, pickSignInTab } from '../../Core/connectionPresence.js';
+import { REG_KEY, authSignal, applySignal, heartbeatTargets, pickSignInTab, presenceOf } from '../../Core/connectionPresence.js';
+import { gate as presenceGate } from '../../Core/presence.js';   // PR-2 (v2.74.1839, DESIGN_presence.md §2.1) — the two load-bearing asymmetries live in Core, tested
 import { signInLandingPath } from '../../Core/connectorRecipes.js';   // v1701 — the human console path (Zendesk agent = /agent), so a fresh sign-in tab reaches the agent auth, not the help centre
 
 // VT-4 (v2.74.1572, DESIGN_vitals.md §3.2) — SW-side transition subscribers (the CONN_STATUS_CHANGED broadcast
@@ -117,13 +118,95 @@ function _wireConnReverify(invokeSgHandler) {
   } catch { /* tabs.onUpdated unavailable — the sweep still catches it, just slower */ }
 }
 
+// PR-1 (v2.74.1839, DESIGN_presence.md §3) — COOKIE invalidation: the third event source, next to the tab-load
+// re-verify above and the ride funnel. It exists for exactly the gap the v1706 comment names: a session that
+// expires with NO tab load and NO ride — the cookie removal IS the event, and the poll would sleep through it.
+//
+// Division of labour with the tab-load wire: sign-IN always loads pages, so that direction is already covered;
+// this listener acts on the REMOVAL direction only (`removed === true` — expiry/deletion/eviction).
+//
+// ENVELOPE ONLY (§5): domain + cause. The cookie's VALUE is never read, stored, logged, or passed on — reading
+// it grants no new capability (the browser already attaches it to every ride) but creates a portable credential.
+// The record goes out of scope inside this listener; nothing downstream receives it.
+//
+// This never DECIDES sign-out (Core/presence.invalidate semantics: a cookie change is not evidence, only doubt):
+// it marks the moment and hands off to the SAME probe funnel every other signal uses — the probe's transition is
+// what opens the incident. Only a fresh belief is worth invalidating; 30s/host debounce absorbs analytics churn.
+function _wireCookieInvalidate(invokeSgHandler) {
+  try {
+    if (!chrome.cookies || !chrome.cookies.onChanged || typeof invokeSgHandler !== 'function') return;
+    const _at = new Map();   // host → last invalidation stamp
+    chrome.cookies.onChanged.addListener((info) => {
+      if (!info || info.removed !== true) return;
+      const d = String((info.cookie && info.cookie.domain) || '').replace(/^\./, '').toLowerCase();
+      if (!d) return;
+      const cause = String(info.cause || 'removed');
+      (async () => {
+        const reg = await _read();
+        const key = Object.keys(reg).find((h) => h === d || h.endsWith('.' + d) || d.endsWith('.' + h));
+        if (!key || presenceOf(reg[key], Date.now()) !== 'fresh') return;   // only fresh→stale is news
+        const last = _at.get(key) || 0;
+        if (Date.now() - last < 30_000) return;
+        _at.set(key, Date.now());
+        Logger.info('conn', `PRESENCE ▸ ${key} · stale · cookie ${cause} → re-probe`);
+        const open = await _openOrigins();
+        const targets = heartbeatTargets(reg, open.filter((o) => o === key), { now: Date.now(), minAgeMs: 0, cap: 1 });
+        if (targets.length) await _probeTargets(invokeSgHandler, targets);   // no open tab → no probe, ever; the sweep backstop covers it
+      })().catch(() => { /* best-effort — the sweep still catches it, just slower */ });
+    });
+  } catch { /* cookies API unavailable (permission not granted yet) — behaviour is exactly pre-PR-1 */ }
+}
+
 /** The CONN_* handler map (merged into the SW dispatch like every domain). */
 export function createConnectionsHandlers({ invokeSgHandler } = {}) {
   _wireConnReverify(invokeSgHandler);
+  _wireCookieInvalidate(invokeSgHandler);
   return {
     // The registry, verbatim (statuses + ages; identityName is display-only). The panel renders the Overview card.
     CONN_LIST: (_payload, _sender, sendResponse) => {
       _read().then((registry) => sendResponse({ success: true, registry, now: Date.now() }));
+      return true;
+    },
+    // PR-2 (v2.74.1839, DESIGN_presence.md §3) — the point-of-use consult. ONE belief: this reads the SAME
+    // registry the Admin desk renders, which is the whole point (live 07-27 09:44 — presence said fresh, the
+    // work's gate consulted a different store and refused four runs over a minute).
+    //
+    //   fresh          → proceed, NO probe (zero added latency on the common path — §2.1)
+    //   else, open tab → ONE probe, 4s cap; the re-read registry is the verdict
+    //   probe fails / no tab / inconclusive → PROCEED and let the real request arbitrate: a failed probe is
+    //     evidence about the network, not the session (a csrf prewarm took 10s live on 07-27 00:11), and a
+    //     stale NEGATIVE refusing work that would succeed is the exact failure this spec exists to prevent.
+    //   Only a CONFIRMED signed-out (or wrong-account — acting as the wrong identity is worse than not acting)
+    //     returns proceed:false.
+    // `readOnly: true` skips the probe entirely — PR-3's per-item consult uses it between fan-out items.
+    PRESENCE_CHECK: (payload, _sender, sendResponse) => {
+      (async () => {
+        const host = String(payload?.host || '').toLowerCase();
+        const readOnly = !!payload?.readOnly;
+        const now = Date.now();
+        const reg = await _read();
+        const key = host ? Object.keys(reg).find((h) => h === host || h.endsWith('.' + host) || host.endsWith('.' + h)) : null;
+        const raw = key ? presenceOf(reg[key], now) : 'unknown';
+        let state = raw === 'wrong-account' ? 'signed-out' : raw;
+        let confirmed = null;
+        if (!readOnly && state !== 'fresh' && key) {
+          const open = await _openOrigins();
+          const targets = heartbeatTargets(reg, open.filter((o) => o === key), { now, minAgeMs: 0, cap: 1 });
+          if (targets.length) {
+            try {
+              await Promise.race([_probeTargets(invokeSgHandler, targets), new Promise((r) => setTimeout(r, 4000))]);
+              const after = presenceOf((await _read())[key], Date.now());
+              confirmed = after === 'fresh' ? true : ((after === 'signed-out' || after === 'wrong-account') ? false : 'failed');
+              state = after === 'wrong-account' ? 'signed-out' : after;
+            } catch { confirmed = 'failed'; }
+          } else {
+            confirmed = 'failed';   // no open tab → no probe, ever — proceed, the request arbitrates
+          }
+        }
+        const v = presenceGate({ state, checkedAt: (key && reg[key] && reg[key].lastVerifiedAt) || null }, { confirmed });
+        Logger.info('conn', `PRESENCE ▸ ${key || host || '?'} · ${state} · ${v.reason}`);
+        sendResponse({ success: true, host: key || host, state, proceed: v.proceed, reason: v.reason });
+      })().catch((e) => { try { sendResponse({ success: false, error: (e && e.message) || String(e) }); } catch { /* */ } });
       return true;
     },
     // On-demand refresh ("Check now" / Overview open): probe every probe-bearing origin with an open tab, no age gate.

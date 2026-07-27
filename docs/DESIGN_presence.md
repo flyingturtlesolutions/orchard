@@ -1,6 +1,15 @@
 # DESIGN_presence.md — session presence: one belief, event-invalidated, checked where it matters
 
-**Status:** spec (v2.74.1837). Nothing below is built. PR-0 is the live bug; the rest is the model it implies.
+**Status:** BUILT v2.74.1837–1839 except PR-4's predictive half. PR-0 ✓ (v1837, superseded by PR-5's gate) ·
+model ✓ (`Core/presence.js`, 13 tests, v1838) · PR-1 ✓ (`_wireCookieInvalidate`, connections.js — removal
+direction only, envelope only, hands off to the probe funnel) · PR-2 ✓ (`PRESENCE_CHECK`, connections.js —
+fresh = zero probes; only confirmed signed-out blocks) · PR-3 ✓ (readOnly consult in the fan-out drill loop) ·
+PR-5 ✓ for the pinned path (the gate consults the registry, not `_boundConnections()`) · PR-6 ✓ (`PRESENCE ▸`
+in `_DECISION_RE`). **PR-4 predictive warning deliberately unwired:** naming WHICH cookie's expiry is the
+session's requires exactly the auth-scheme knowledge §5 forbids; the expiry EVENT direction is covered by PR-1
+(`cause=expired`), and `minutesLeft()` stands ready should a probe ever report expiry. Live verification owed:
+a Rail run with no bound connection (expect `PRESENCE ▸ … pinned step proceeds without a desk binding`, then
+rides), and a sign-out mid-drill (expect the PR-3 break line).
 
 ---
 

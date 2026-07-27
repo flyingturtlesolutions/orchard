@@ -2383,6 +2383,20 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
         const row = foItems[k].row || {};
         const joinId = row[dj.from];
         if (joinId == null || joinId === '') continue;
+        // PR-3 (v2.74.1839, DESIGN_presence.md §3) — MID-RUN consult. A long fan-out can lose its session
+        // halfway (these sessions lapse several times a day); a start-of-run check cannot see that. readOnly:
+        // no probe, just the registry — PR-1's cookie listener and the ride funnel keep it current, so this is
+        // one cheap message per item. Only an ESTABLISHED signed-out breaks (stale proceeds — the asymmetry);
+        // the drill is best-effort by contract, so remaining cases keep their ROW dossiers, stated honestly.
+        if (k > 0) {
+          try {
+            const _pc = await _orchReq('PRESENCE_CHECK', { host: (leg.tool && leg.tool.origin) || '', readOnly: true });
+            if (_pc && _pc.success !== false && _pc.state === 'signed-out') {
+              try { _orchLog(`PRESENCE ▸ ${(leg.tool && leg.tool.origin) || '?'} · signed-out · session lapsed mid-run — drill stopped after ${k}/${foItems.length} (remaining cases keep row dossiers)`); } catch { /* */ }
+              break;
+            }
+          } catch { /* the consult is best-effort, like the drill it guards */ }
+        }
         _setMessageBody(msg, `${total > 1 ? `Step ${i + 1} of ${total}: ` : ''}Pulling the full record ${k + 1}/${foItems.length} (${foItems[k].label})…`);
         const dr = await _rideExecOnce(viaLeg, { [dj.param || 'id']: joinId }, { groundId: leg.tool.groundId || null });
         if (dr.ok) {
@@ -8071,18 +8085,31 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
       //
       // This is the honest stop the run always owed: name the origin, say why, and say what fixes it. Silence
       // here reads as success, which is the one thing it is not.
+      // v2.74.1839 (PR-2 + PR-5, DESIGN_presence.md §3) — THE GATE CONSULTS PRESENCE, NOT THE BINDING STORE.
+      // The v1837 stop distinguished "not bound" from "signed out" honestly, but it still REFUSED on a fact
+      // (the desk binding) that says nothing about whether the ride would work: the pinned fast path resolves
+      // its leg from GET_RIDE_RECIPES and rides the browser session — no bound connection involved. So for a
+      // PINNED step the binding store is retired as a gate. PRESENCE_CHECK reads the SAME registry the Admin
+      // desk renders (one belief, §2), probes only when stale-or-negative, and only a CONFIRMED signed-out
+      // stops the run — a failed check proceeds, because a stale negative refusing work that would succeed is
+      // the 09:44 failure itself. Done-condition from the spec: a resolved presence case can no longer coexist
+      // with a refusal here.
+      let _presenceProceed = false;
       if (_pinConn && !_boundConnections().length) {
-        const _pinHost = String(_pin.capabilityId).split('@')[1] || 'the connected site';
-        try { _orchLog(renderSpan({ name: 'STEP', outcome: 'skipped', cause: 'no-bound-connection', detail: `pinned ${_pin.capabilityId}` })); } catch { /* */ }
-        // v2.74.1837 (PR-0, DESIGN_presence.md §3) — DO NOT conflate "signed out" with "not bound". Live 07-27
-        // 09:44: the app resolved the signed-IN presence case at :47 and this gate refused at :56, four times
-        // over a minute. The user WAS signed in; the missing thing was the desk BINDING. The old text sent them
-        // to sign into a site they were already inside. Name the binding, not the session.
-        _setMessageBody(msg, `${total > 1 ? `Stopped at step ${i + 1} — this` : 'This'} step rides **${escHtml(_pinHost)}**, but this conversation has no connection bound to it. Add the connection here and run it again — if you are already signed in to ${escHtml(_pinHost)}, signing in again will not help.`, { markdown: true });
-        _orchFinalize(msg);
-        return;
+        const _pinHost = String(_pin.capabilityId).split('@')[1] || '';
+        let pr = null;
+        try { pr = await _orchReq('PRESENCE_CHECK', { host: _pinHost }); } catch { pr = null; }
+        if (pr && pr.success !== false && pr.proceed === false) {
+          try { _orchLog(renderSpan({ name: 'STEP', outcome: 'skipped', cause: 'confirmed-signed-out', detail: `pinned ${_pin.capabilityId}` })); } catch { /* */ }
+          _setMessageBody(msg, `${total > 1 ? `Stopped at step ${i + 1} — this` : 'This'} step rides **${escHtml(_pinHost || 'the connected site')}**, and a live check says that session is signed out. Sign in there and run it again — this case closes itself once the site is back.`, { markdown: true });
+          _orchFinalize(msg);
+          return;
+        }
+        // proceed on: confirmed fresh · stale/unknown (request arbitrates) · probe failed · PRESENCE_CHECK itself failed
+        _presenceProceed = true;
+        try { _orchLog(`PRESENCE ▸ ${_pinHost || '?'} · ${(pr && pr.state) || 'unchecked'} · ${(pr && pr.reason) || 'check-failed-proceeding'} — pinned step proceeds without a desk binding`); } catch { /* */ }
       }
-      if (_boundConnections().length) {
+      if (_boundConnections().length || _presenceProceed) {
         // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
         // run's whole first clause showed one static line while 121 reads ran.
         const cr = await _chainConnectorRun(clause.text, { tabId, pinnedKey: _pinConn ? _pin.capabilityId : null, pinnedGroundId: _pinConn ? (_pin.groundId || null) : null, pinnedBindings: _pinConn ? (_pin.bindings || null) : null, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
@@ -8610,12 +8637,31 @@ function _railWorkflowRow(row, parentConv) {
     // strip the step prefix (the chips carry that) and stream the remainder into the reporter's tick
     // region, so per-item progress ('Pulling the full record 3/12…', 'Working 2/5…') shows under the chips.
     let _pbRef = null;
+    // v2.74.1840 — THE FREEZE (live, three reports: Rail play → panel locks solid after INTERPRET_ASK, no
+    // RIDE_RESOLVE, no RUN ▸ — the chain never runs another statement). The v1824 observer watches `host`
+    // (childList+subtree+characterData) and its callback calls `_pbRef.tick(...)` — but the progress bubble
+    // LIVES INSIDE `host`, so the tick write is itself a mutation the observer sees. Observer callbacks are
+    // MICROTASKS: a callback that mutates its own observed subtree re-queues itself before the event loop can
+    // run anything else → infinite microtask loop → the panel freezes the moment the chain's first body write
+    // lands (right after interpret returns — exactly the live window). The elapsed ticker (one write/second,
+    // also inside host) keeps it fed even when the chain is quiet.
+    // Two guards, both required: `_echo` drops the mutations our OWN tick causes (cleared on a MACROtask, so
+    // the microtask-delivered echo lands while it is still set), and `_lastAct` dedupes so identical text never
+    // re-ticks (the ticker's per-second writes would otherwise re-echo the same activity line forever).
+    let _echo = false;
+    let _lastAct = '';
     const _mo = new MutationObserver(() => {
+      if (_echo) return;
       const t = (host.querySelector('.message-body')?.textContent || '').trim();
       const m = t.match(/Step (\d+)/);
       if (m) _markStep(Number(m[1]) - 1);
       const activity = t.replace(/^Step \d+(?: of \d+)?:?\s*/, '').trim();
-      if (_pbRef && activity) _pbRef.tick(activity.length > 90 ? activity.slice(0, 90) + '…' : activity);
+      if (_pbRef && activity && activity !== _lastAct) {
+        _lastAct = activity;
+        _echo = true;
+        try { _pbRef.tick(activity.length > 90 ? activity.slice(0, 90) + '…' : activity); }
+        finally { setTimeout(() => { _echo = false; }, 0); }
+      }
     });
     try { _mo.observe(host, { childList: true, subtree: true, characterData: true }); } catch { /* */ }
     _railRunBusy++;
