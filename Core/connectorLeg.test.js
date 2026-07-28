@@ -3,8 +3,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey } from './connectorLeg.js';
+import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey, missingRequiredParams } from './connectorLeg.js';
 import { toOfferedLeg } from './palette.js';
+import { CONNECTOR_RECIPES } from './connectorRecipes.js';   // v2.74.1854 — the pre-flight gate proves itself against the REAL catalog
 
 describe('hintToSafety — hints may only RAISE caution (§9)', () => {
   it('destructive → gated (always, even alongside readOnly)', () => {
@@ -194,5 +195,38 @@ describe('PM (v2.74.1633) — joinKey threads recipe → leg.tool (Invariant #3 
     assert.deepEqual(recipeToLeg({ ...BASE, joinKey: ['AddressLine1', '', 'ContactEmail'] }).tool.joinKey, ['AddressLine1', 'ContactEmail']);
     assert.deepEqual(recipeToLeg({ ...BASE, joinKey: 'AddressLine1' }).tool.joinKey, ['AddressLine1']);
     assert.equal(recipeToLeg({ ...BASE }).tool.joinKey, null);
+  });
+});
+
+describe('v2.74.1854 — missingRequiredParams: the pre-flight gate reads the A-0a contract', () => {
+  const TOOL = { params: [
+    { name: 'query', required: true },
+    { name: 'divisionId', required: false },
+    { name: 'handle', required: true },
+  ], urlParam: { name: 'handle' } };
+  it('blank / whitespace / missing required → named; optional blanks stay legal (divisionId:"" = current)', () => {
+    assert.deepEqual(missingRequiredParams(TOOL, { query: '', divisionId: '' }), ['query']);
+    assert.deepEqual(missingRequiredParams(TOOL, { query: '   ' }), ['query']);
+    assert.deepEqual(missingRequiredParams(TOOL, {}), ['query']);
+    assert.deepEqual(missingRequiredParams(TOOL, { query: 'smart switch' }), []);
+  });
+  it('the urlParam slot is the EXECUTOR’s to fill from the ride tab — never reported missing', () => {
+    assert.deepEqual(missingRequiredParams(TOOL, { query: 'x' }), []);   // `handle` absent yet not reported
+  });
+  it('strict `required === true` only: builtin string-array params and truthy non-boolean never fire', () => {
+    assert.deepEqual(missingRequiredParams({ params: ['section', 'find'] }, {}), []);
+    assert.deepEqual(missingRequiredParams({ params: [{ name: 'q', required: 'yes' }] }, {}), []);
+  });
+  it('0 and false are VALUES, not blanks; junk shapes → []', () => {
+    assert.deepEqual(missingRequiredParams({ params: [{ name: 'n', required: true }] }, { n: 0 }), []);
+    assert.deepEqual(missingRequiredParams({ params: [{ name: 'b', required: true }] }, { b: false }), []);
+    assert.deepEqual(missingRequiredParams(null, null), []);
+    assert.deepEqual(missingRequiredParams({}, undefined), []);
+  });
+  it('the live 205935 case against the REAL catalog: shopify_search_products query:"" → [query]', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r && r.id === 'shopify_search_products');
+    assert.ok(rec, 'recipe exists');
+    assert.deepEqual(missingRequiredParams(rec, { query: '' }), ['query']);
+    assert.deepEqual(missingRequiredParams(rec, { query: 'smart switch' }), []);
   });
 });

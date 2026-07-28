@@ -96,6 +96,28 @@ function recipeParamSchema(params) {
 }
 
 /**
+ * v2.74.1854 — the PRE-FLIGHT required-param check (live 205935: "list all available products" bound query:""
+ * and the call was SPENT before Shopify's "Variable $q of type String! … invalid value" came back). The A-0a
+ * discipline made `required` an explicit boolean on every catalog param precisely so it is knowable BEFORE the
+ * wire — this is the first runtime reader. PURE. Returns the names of declared `required === true` params whose
+ * bound value is missing or blank (after trim). Strict `=== true` matches the house convention
+ * (driveArtifacts paramSchema does the same), so drive/taught params with required:false — where blank is a
+ * CONTRACT ("" skips the label-click, "" means current division) — can never false-positive. The urlParam slot
+ * (e.g. {handle}) is excluded: the EXECUTOR fills it from the ride tab, never the binder.
+ */
+export function missingRequiredParams(tool, params = {}) {
+  const declared = (tool && Array.isArray(tool.params)) ? tool.params : [];
+  const urlP = (tool && tool.urlParam && tool.urlParam.name) || null;
+  const out = [];
+  for (const p of declared) {
+    if (!p || p.required !== true || !p.name || p.name === urlP) continue;
+    const v = (params && typeof params === 'object') ? params[p.name] : undefined;
+    if (v == null || String(v).trim() === '') out.push(p.name);
+  }
+  return out;
+}
+
+/**
  * A session-ride recipe → a client-side connector leg. A recipe is a curated (or later learned) endpoint binding:
  *   { id, name, does, app, origin, endpoint, method?('GET'), write?(false), destructive?(false),
  *     body?(write body TEMPLATE — fillBody substitutes its {param}s), params?:[{name,type?,enum?,required?}] }

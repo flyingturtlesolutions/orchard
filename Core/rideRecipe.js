@@ -64,6 +64,11 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   // record (no empty keys), so a plain Zendesk-read record is byte-identical to before.
   if (e.write === true) rec.write = true;
   if (e.destructive === true) rec.destructive = true;                 // kept explicit too (safetyClass already encodes it)
+  // v2.74.1855 — appHost rides hop 1 (found by the hop SEAL on its first run: all 60 entries projected
+  // tool.appHost:null on the seeded path while the curated twin kept it — the executor reads appHost for
+  // ride-tab discovery breadth, rideTabUrlPatterns' `*.appHost` wildcard, and the sign-in hint wording).
+  // Catalog-owned mechanical field: mergeRecipes refreshes it on catalog upgrade (not in _USER_FIELDS).
+  if (e.appHost) rec.appHost = _host(e.appHost);
   // PP-3 (v1661) — Invariant #3 hop 1: leaves our boundary (a message a real person receives). Hop 2 is
   // automatic (harvestedRecipeLegs spreads the record).
   //

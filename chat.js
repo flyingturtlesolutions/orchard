@@ -45,7 +45,7 @@ import { loadProposals, addProposals, decideProposal, pendingCounts } from './Se
 import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick; v1381 — pendings survive sweeps
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
-import { recipeToLeg } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`)
+import { recipeToLeg, missingRequiredParams } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
 import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
@@ -5608,6 +5608,17 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
       return { ok: true, value: { results: tagged } };
     }
   }
+  // v2.74.1854 — PRE-FLIGHT required-param gate (live 205935: query:"" spent a real call to learn what the
+  // catalog already declared). This is the choke point for every non-IL dispatch (chain · map fan-out · fleet ·
+  // routines · workbench · proposal re-checks): a blank REQUIRED param can only produce a wire error, so fail
+  // honestly before any HTTP. Blank OPTIONAL params stay legal (divisionId:"" = current division).
+  {
+    const _miss = missingRequiredParams(leg && (leg.tool || leg), params);
+    if (_miss.length) {
+      try { _orchLog(`INVOKE ▸ missing required ${_miss.join(',')} → no call spent [${(leg.tool && leg.tool.recipeId) || leg.key || ''}]`); } catch { /* */ }
+      return { ok: false, error: 'missing-required-param', detail: _miss.join(', '), hint: `needs ${_miss.map((x) => `\`${x}\``).join(', ')}` };
+    }
+  }
   const plan = planExec(leg, params, { tabId, groundId });
   if (!plan || !plan.ok || !plan.channel) return { ok: false, error: 'no executor' };
   let res = null;
@@ -6979,7 +6990,9 @@ async function _testLeg(n, params) {
   if (_m !== 'GET' && _m !== 'HEAD' && !_gqlRead) {   // defense-in-depth: NEVER auto-fire a non-GET that isn't a proven read-only GraphQL query (§9 write belt)
     _setMessageBody(m, `Leg #${n} “${e.name}” is a **${_m}** — the workbench never auto-fires a non-GET write. Arm it with \`verify ${n}\` and run it through a view’s confirm gate.`, { markdown: true }); _orchFinalize(m); return;
   }
-  const need = ((recipe.params) || []).filter((p) => p && p.required && !(params && Object.prototype.hasOwnProperty.call(params, p.name))).map((p) => p.name);
+  // v2.74.1854 — the presence-only check missed BLANK values (query:"" passed hasOwnProperty and spent the
+  // call); missingRequiredParams is the one shared reader of the A-0a `required` contract.
+  const need = missingRequiredParams(recipe, params || {});
   if (need.length) { _setMessageBody(m, `**${e.name}** needs ${need.map((x) => `\`${x}\``).join(', ')} — run \`test ${n} ${need.map((x) => `${x}=…`).join(' ')}\`.`, { markdown: true }); _orchFinalize(m); return; }
   _setMessageBody(m, `Testing **${e.name}** — ${leg.tool.method} ${leg.tool.endpoint} on ${e.host}…`, { markdown: true });
   const res = await _runConnectorLeg(leg, params || {}, { groundId: e.groundId });
@@ -10830,6 +10843,21 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     if (rp.each) {
       if (leg.mode !== 'ask') { _setMessageBody(msg, `“each” only works for reads — a write stays one ${String(rp.each.name).replace(/Id$/i, '') || 'item'} per confirm. Name one and I’ll set up that write.`); return false; }
       return _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each: rp.each });
+    }
+  }
+  // v2.74.1854 — PRE-FLIGHT required-param gate, the CLARIFY door (live 205935: "list all available products"
+  // → interpret read "all" as no filter → query:"" → the call was spent and died server-side). Every fill layer
+  // has now had its chance (interpret binding → focus fill → _resolveRideParams) — a required param STILL blank
+  // can only produce a wire error, so ask the user instead. Strict-true declarations only: blank OPTIONAL
+  // params ("" = current division; drive slots skip-on-blank by contract) are untouched.
+  if (leg.domain === 'connector') {
+    const _miss = missingRequiredParams(leg.tool || leg, params);
+    if (_miss.length) {
+      try { _orchLog(`IL ▸ missing required ${_miss.join(',')} → clarify (no call spent) [${leg.key || (leg.tool && leg.tool.recipeId) || ''}]`); } catch { /* */ }
+      const _decl = ((leg.tool && leg.tool.params) || leg.params || []);
+      const _ask1 = _miss.map((n) => { const d = _decl.find((p) => p && p.name === n); return `**${n}**${d && d.hint ? ` (${String(d.hint).slice(0, 80)})` : ''}`; }).join(' and ');
+      _setMessageBody(msg, `**${leg.name || leg.key}** needs ${_ask1} — tell me and I’ll run it.`, { markdown: true });
+      return false;
     }
   }
   const panel = IL_PANEL_LEGS[leg.key];

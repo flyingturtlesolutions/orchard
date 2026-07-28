@@ -1,0 +1,35 @@
+# tools/law-ledger/baseline.csv — v2.74.1855 — the FROZEN historical baseline for the falsification protocol.
+# One row per incident EPISODE. Labels were human-coded ONCE from logs/run/findings.md (anchor names the entry);
+# any row is disputable by its anchor — corrections move thresholds mechanically (the formulas live in ledger.cjs).
+# label_confidence: high = the findings entry states the class explicitly; med = classed by reading the entry.
+# Rows keep anchors comma-free (the parser splits on commas).
+class,stage,sev,status,vfirst,vclosed,passes,anchor,label_confidence
+claiming,clerks,live,closed,1520,1561,1,bare `details` fell to router → junk taskId http-500 (v1561 note),med
+claiming,clerks,live,closed,1583,1584,1,_showSection ate "show dashboard" (v1584),high
+claiming,clerks,live,closed,1584,1585,1,_fieldFollowup answered "show dashboard" as a field (v1585),high
+claiming,clerks,live,closed,1590,1597,1,bare-miss ate console commands "add leg"/"legs" (v1597),high
+claiming,clerks,live,closed,1540,1543,1,fan-out ask reached LLM → REVIEW_QUEUE misroute (v1543),high
+claiming,clerks,live,closed,1370,1378,1,bare `show` with one pending → interpret asked "Which ticket?" (v1378),high
+claiming,clerks,live,closed,1370,1377,1,bare `reject <why>` → "say that a different way" (v1377),high
+claiming,clerks,live,closed,1780,1789,2,workflow matcher claimed the drive-artifact phrase (20:16 pass → v1789),high
+claiming,clerks,live,closed,1851,1852,1,FIELD_FOLLOWUP claimed "what was their last order" (v1852),high
+hop-drop,palette,live,closed,1420,1428,1,palette projection dropped ride markers (v1428),high
+hop-drop,palette,live,closed,1425,1430,1,cookie-ride auth dropped on seeded path (v1430),high
+hop-drop,palette,live,closed,1428,1432,1,itemUrl dropped — seeded ground lost "show X" (v1432),high
+hop-drop,palette,live,closed,1432,1434,1,add-missing-only merge froze seeded grounds at seed-time shape (v1434),high
+hop-drop,palette,live,closed,1661,1680,1,outward:false dropped at hop 1 — approved create still queued (v1680),high
+hop-drop,palette,live,closed,1690,1755,2,leg-identity split me.vendorsuite vs me.drhorton (gl 104907 → v1755),high
+silent-exit,receipts,silent,closed,810,818,1,MERGE_GROUNDS missing from _DECISION_RE (v818),high
+silent-exit,receipts,silent,closed,825,832,1,WALK ▸ missing from _DECISION_RE (v832),high
+silent-exit,receipts,silent,closed,875,882,1,bindClauseParams missing from _DECISION_RE (v882),high
+silent-exit,receipts,silent,closed,890,898,1,four markers at once missing from _DECISION_RE (v898),high
+silent-exit,receipts,live,closed,1550,1560,1,INVOKE channel logged NOTHING between dispatch and shape (v1560),high
+silent-exit,receipts,silent,closed,1665,1674,2,INVOKE flooded decisions view — 242 of 246 lines (v1670→v1674),high
+silent-exit,receipts,live,closed,1790,1798,5,drive section-wait 22s silent timeout — five passes to name (v1798),high
+silent-exit,receipts,live,closed,1824,1830,2,pinned connector step logged pin then NOTHING (07-25 → SPAN line),high
+silent-exit,receipts,live,closed,1845,1851,3,SESSION_REPLAY channel silent on needs-handle ×3 asks (07-27 → v1851),high
+silent-exit,receipts,live,open,1847,,1,RIDE_EACH 121-division results vanished — no terminal receipt (07-27),high
+poisoned-lesson,receipts,live,closed,1789,1796,3,env failure banked as capability verdict — forget:/self-heal arc (v1790→v1796),high
+drive-walk,execution,live,closed,1553,1812,8,"show this ticket" saga — selectors/race/gate across eight passes (v1555→v1812),high
+csrf-cold,execution,live,closed,1758,1853,5,csrf cold-start arc — no-url-param → TTL wedge → belief bank (v1758→v1853),high
+pinned-replay,execution,live,closed,1725,1755,3,pinned connector replay dead since birth — key mismatch (v1728→v1755),high
