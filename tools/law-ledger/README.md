@@ -42,7 +42,11 @@ only for `sev=live` episodes, so Experiment B is scoped accordingly.
   drop-class found and fixed same-commit** (`appHost` — absent on all 60 seeded projections); 1 undeclared
   entry field (`console`) mapped to its named consumer; both red-proof directions seen red before green.
 
-**Experiment B — logbook glass** (LEARNED write-side lines + trace-lint + the RIDE_EACH receipt; NOT YET LANDED).
+**Experiment B — logbook glass** (LANDED v1856): `LEARNED ▸ banked` lines at all six goal-memory write sites ·
+`tools/trace-lint/` (silent exits machine-detected, 5 rules, calibrated twice against live traces — it flags
+exactly the 07-27 founding incident and nothing else across five archived windows) · the fan-out's two
+unnarrated exits now speak (`RIDE_EACH ▸ rendered/exit`). The post-registration lifetime window opens at v1856;
+the ride-each backlog episode (vfirst=1847) is excluded from the next-5 by the version bound.
 - Prediction 1 (lifetime, `sev=live` episodes only): ≥4 of the next 5 live `stage=receipts` episodes close with
   `passes=1`. Historical P(one-pass | live) = 1/4 → observing ≥4/5 has p ≈ 0.016 under no-change.
   **Falsified if ≤2 of 5** are one-pass (if the law were true at p₁≈0.8, P(≤2/5) ≈ 0.06 — an unlikely miss).

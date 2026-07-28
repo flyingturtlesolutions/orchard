@@ -739,13 +739,17 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // at the content-script boundary (belt #2) — a mutation document always needs the write gate.
           const isGqlRead = !!(payload && payload.gql === true && method === 'POST' && payload.body && typeof payload.body === 'object' && isReadOnlyGql(payload.body.query));
           const isWrite = (method !== 'GET' && method !== 'HEAD') && !isGqlRead;
-          if (isWrite && !(payload && payload.confirmed === true)) { sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
+          // v2.74.1857 — EVERY early exit names itself (`INVOKE ▸ blocked …`, the family the two narrated exits
+          // already used). The lint's first ritual catch (gl 103120, 74 min after Experiment B landed): a
+          // dispatch died in one of these bare sendResponses and the trace could not say WHICH — an exit that
+          // doesn't say its name is the receipts-stage defect class itself.
+          if (isWrite && !(payload && payload.confirmed === true)) { try { Logger.info('ride', `INVOKE ▸ blocked write-needs-confirm [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
 
           let origin = fillEndpoint(String((payload && payload.origin) || ''), args).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const appHost = String((payload && payload.appHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           // v2.74.1758 — bare host + `*.` wildcard (Chrome's `*.host` misses the bare host; Shopify appHost IS the host).
           const urlPatterns = rideTabUrlPatterns(origin, appHost);
-          if (!urlPatterns.length) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
+          if (!urlPatterns.length) { try { Logger.info('ride', `INVOKE ▸ blocked session-no-recipe (no url patterns) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const expectedAccount = (payload && payload.account) || null;
 
           // 1) Prefer an already-open, live, logged-in tab (the user's real context) — §16 default path.
@@ -759,7 +763,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           //    appHost-only with no remembered instance can't guess the subdomain → the classic no-tab surface.
           if (!tab) {
             const coldOrigin = origin || _lastOriginByAppHost.get(appHost) || '';
-            if (!coldOrigin) { sendResponse({ success: false, error: 'no-authenticated-tab', host: appHost || origin, hint: `open ${appHost || origin} and sign in` }); return; }
+            if (!coldOrigin) { try { Logger.info('ride', `INVOKE ▸ blocked no-authenticated-tab @${appHost || origin} [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'no-authenticated-tab', host: appHost || origin, hint: `open ${appHost || origin} and sign in` }); return; }
             origin = coldOrigin;
             const got = await _acquireEphemeralTab(origin);
             ephemeralOrigin = origin; ephemeral = true;
@@ -785,7 +789,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
 
           if (typeof ensureContentScript === 'function') {
             const ok = await ensureContentScript(tab.id);
-            if (!ok) { sendResponse({ success: false, error: 'no-content-script', origin }); return; }
+            if (!ok) { try { Logger.info('ride', `INVOKE ▸ blocked no-content-script @${origin} [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'no-content-script', origin }); return; }
           }
 
           // CX-7 — tab-URL params: fill e.g. {handle} from the RIDE TAB's own URL (admin.shopify.com/store/<handle>/…).
@@ -854,6 +858,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             if (op && op.sha) args.op_sha = op.sha;
             else {
               try { await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: _csrfSnifferFunc }); } catch { /* */ }
+              try { Logger.info('ride', `INVOKE ▸ blocked op-not-captured (${String(payload.persistedOp)}) @${origin}`); } catch { /* */ }
               sendResponse({ success: false, error: 'op-not-captured', origin, hint: `do one ${String(payload.persistedOp)} by hand in the admin (e.g. create any customer) while this tab stays open — Orchard captures the operation and can replay it from then on` });
               return;
             }
@@ -883,6 +888,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               if (payload && payload.headless === true) {
                 // CP-1 — the clock's skip still teaches the registry (Overview explains WHY the sweep skipped).
                 void reportAuthSignal({ origin, status: 'signed-out', cause: 'not-logged-in', source: 'ride', probePath, probeAccept: 'identity' });
+                try { Logger.info('ride', `INVOKE ▸ blocked not-logged-in (headless) @${origin}`); } catch { /* */ }
                 sendResponse({ success: false, error: 'not-logged-in', origin, hint: `sign in to ${origin} to continue` });
                 return;
               }
@@ -894,6 +900,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               const resumed = await _waitForReauth({ tabId: tab.id, origin, probe: () => fetchViaHealed(tab.id, probeUrl, 'GET', null, false, '', _probeExtra), expectedAccount });   // CX-10 — reauth poll carries the routing header too
               if (!resumed) {
                 const isWrong = verdict.status === STATUS.WRONG_ACCOUNT;
+                try { Logger.info('ride', `INVOKE ▸ blocked ${isWrong ? 'wrong-account' : 'not-logged-in'} (reauth declined) @${origin}`); } catch { /* */ }
                 sendResponse({ success: false, reauth: true, error: isWrong ? 'wrong-account' : 'not-logged-in', origin,
                   hint: isWrong ? 'signed in as a different account — switch to continue' : `sign in to ${origin} to continue` });
                 return;
@@ -912,7 +919,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // v2.74.1433 — a `{param}` STILL in the path after fill = a missing REQUIRED param (the interpret binder left it
           // unbound). NEVER send it: `{taskId}` URL-encodes to %7BtaskId%7D and the app returns http-500. Refuse honestly,
           // naming the param — the same discipline the SESSION_REPLAY twin now enforces (keep both in lockstep).
-          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
+          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { try { Logger.info('ride', `INVOKE ▸ blocked needs-${_miss[1]} (unfilled endpoint param) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
           let body = undefined;
           const contentType = String((payload && payload.contentType) || '');
@@ -1028,6 +1035,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             sendResponse({ ...(reply || { success: false, error: 'no-reply' }), ...(_heal && _heal.suspect ? { driftSuspect: true, driftGroundId: (payload && payload.groundId) || null, driftRecipeId: (payload && payload.recipeId) || null } : {}) });
           }
         } catch (e) {
+          try { Logger.info('ride', `INVOKE ▸ blocked ${String((e && e.message) || 'invoke-session-failed').slice(0, 80)} (exception)`); } catch { /* */ }
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });
         } finally {
           if (ephemeralOrigin) _releaseEphemeralTab(ephemeralOrigin);   // idle-close (a burst reuses first; a re-auth-focused tab was promoted out)
@@ -1316,10 +1324,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           }
           const contentType = (isWrite || isGqlRead) ? String((payload && payload.contentType) || '') : '';
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
-          if (!path) { sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
+          if (!path) { try { Logger.info('ride', `SESSION_REPLAY ▸ blocked replay-missing-fields [${(payload && payload.recipeId) || '?'}]`); } catch { /* v2.74.1857 — every exit names itself */ } sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
           // v2.74.1433 — an unfilled `{param}` reaching here is a missing required param; never dispatch it (a literal
           // {taskId} → the app's http-500 "server rejected"). Refuse, naming the param. Twin of the INVOKE_SESSION guard.
-          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
+          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { try { Logger.info('ride', `SESSION_REPLAY ▸ blocked needs-${_miss[1]} (unfilled endpoint param) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
           { const _bmiss = reqBody && reqBody.match(/\{(me)\}/); if (_bmiss) { sendResponse({ success: false, error: 'needs me', hint: 'could not resolve your identity on this app — open its tab logged-in and retry' }); return; } }
           const url = `https://${apiHost}${path.startsWith('/') ? path : '/' + path}`;
           let out = null;

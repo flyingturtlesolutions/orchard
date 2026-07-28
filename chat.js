@@ -2174,7 +2174,10 @@ async function _seedInstanceMemory(instanceId, presetId) {
     try { baseline = (presetId && builtinApp(presetId)?.baseline) || []; } catch { /* */ }
     const seeded = seedInstanceFromPreset(presetItems, { baseline });
     for (const d of seeded) await recordGoalItem(instanceId, d);
-    if (seeded.length) { try { console.info(`[chat] §10.1 seeded ${seeded.length} baseline rule(s) into instance from preset ${presetId || '—'}`); } catch { /* */ } }
+    if (seeded.length) {
+      try { console.info(`[chat] §10.1 seeded ${seeded.length} baseline rule(s) into instance from preset ${presetId || '—'}`); } catch { /* */ }
+      try { _orchLog(`LEARNED ▸ banked ${seeded.length} seed rule(s) — preset ${presetId || '—'} (seed-down)`); } catch { /* v2.74.1856 — Experiment B: memory writes speak */ }
+    }
   } catch (e) { try { console.warn('[chat] seed-down failed:', e?.message); } catch { /* */ } }
 }
 
@@ -7826,7 +7829,10 @@ async function _rejectProposal(id, reason) {
   // A reasoned rejection is a LEARNING SIGNAL — banked as an observation-tier delta the ratchet can corroborate.
   // FL-9 (v1370) — the learning delta carries the TARGETS: the 09:02→09:08 live re-proposal was unfixable by
   // memory alone because the delta never said WHICH item the rejection covered.
-  if (reason) { try { await recordGoalItem(inst, { kind: 'delta', trigger: `proposing "${p.name}"`, body: `The user rejected "${p.name}"${p.targets && p.targets.length ? ` on ${p.targets.join(', ')}` : ''}: ${reason}`, provenance: 'proposal-reject' }); } catch { /* */ } }
+  if (reason) {
+    try { await recordGoalItem(inst, { kind: 'delta', trigger: `proposing "${p.name}"`, body: `The user rejected "${p.name}"${p.targets && p.targets.length ? ` on ${p.targets.join(', ')}` : ''}: ${reason}`, provenance: 'proposal-reject' }); } catch { /* */ }
+    try { _orchLog(`LEARNED ▸ banked reject lesson — "${String(p.name || '').slice(0, 40)}" (proposal-reject)`); } catch { /* v2.74.1856 — Experiment B */ }
+  }
   _setMessageBody(msg, `✗ Rejected ${p.name}${reason ? ` — noted: “${reason}”` : ''}.`);
   _orchFinalize(msg);
 }
@@ -8615,6 +8621,7 @@ async function _renderDistill() {
         try {
           if (rule) {
             await recordGoalItem(presetMemoryKey(presetId), rule);
+            try { _orchLog(`LEARNED ▸ banked preset rule — "${String(abstracted.body || '').slice(0, 40)}" (distill-up → ${presetId})`); } catch { /* v2.74.1856 — Experiment B */ }
             if (c.id) await promoteGoalItem(instanceId, c.id, { confirmedByHuman: true });   // canonize the instance copy → marked done, won't re-offer
             ok = true;
           }
@@ -10399,6 +10406,9 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   const ranTo = i;   // exclusive — where the loop actually got to
   try { _orchLog(`RIDE_EACH ▸ ${leg.tool.recipeId || leg.key} × ${ranTo - started} (${started + 1}–${ranTo} of ${total})${stopped ? ' STOPPED' : ''} → ${items.length} ok, ${failed} failed, ${items.reduce((n, it) => n + it.rows.length, 0)} row(s)`); } catch { /* */ }
   if (!items.length && !stopped) {
+    // v2.74.1856 — Experiment B: every fan-out EXIT speaks (the 07-27 14:38 silence — a 121-division tally with
+    // no terminal line — is the trace-lint's founding fixture; render calls are trace-invisible, receipts aren't).
+    try { _orchLog(`RIDE_EACH ▸ exit — total failure (0 ok, ${failed} tried)`); } catch { /* */ }
     _setMessageBody(msg, `Couldn’t read ${legName} for any ${noun} (${failed} tried) — the session may have expired; click into the site’s tab and re-ask.`);
     return false;   // total failure → no resume point (continuing would just fail again)
   }
@@ -10467,6 +10477,9 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
     secs.push(`Paused at ${ranTo}/${total} — say “continue” for the rest (${remaining} more).`);
   }
   _setMessageBody(msg, [head, ...secs].join('\n\n'));
+  // v2.74.1856 — Experiment B: the RENDERED terminal receipt (the tally line says what was fetched; this says
+  // what was DELIVERED — the seam the 07-27 "vanished rows" pass could not distinguish from a silent death).
+  try { _orchLog(`RIDE_EACH ▸ rendered ${totalRows} row(s) · ${nonEmpty.length}/${view.length} ${noun} group(s)${remaining > 0 ? ` · paused ${ranTo}/${total}` : ''}`); } catch { /* */ }
   // FL-1d/CX-9j — the merged, group-TAGGED rows ground follow-ups ("which division has the most?"): shallow-tag
   // each row with its group label (copies — the originals untouched), capped.
   const tagged = [];
@@ -11164,6 +11177,7 @@ function _offerRememberRule(msg, goal) {
   bar.appendChild(_mkBtn('Remember this rule', async () => {
     bar.remove();
     try { await recordGoalItem(appId, rule); } catch { /* */ }
+    try { _orchLog(`LEARNED ▸ banked standing rule — "${String(rule.body || '').slice(0, 40)}" (offered)`); } catch { /* v2.74.1856 — Experiment B */ }
     _orchFinalize(appendMessage({ role: 'assistant', body: `Got it — I’ll remember: “${rule.body}”${rule.trigger ? ` (when ${rule.trigger})` : ''}.` }));
   }));
 }
@@ -11245,6 +11259,11 @@ function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null) {
   if (!appId) return;
   const item = capabilityOutcomeItem(goal, capabilityId, ok);
   if (!item) return;
+  // v2.74.1856 — Experiment B (law-ledger README): the WRITE side of goal memory speaks. The poisoned-lesson
+  // wedge (v1790-96) took three passes precisely because what got banked was invisible at write time — the
+  // lesson only surfaced when interpret quoted it back. Value-scrubbed: provenance/conf + the goal head, never
+  // the body.
+  try { _orchLog(`LEARNED ▸ banked ${item.provenance || item.kind || 'outcome'}${item.confidence != null ? ` conf=${item.confidence}` : ''} — "${String(goal).slice(0, 40)}"`); } catch { /* */ }
   try { recordGoalItem(appId, item).catch(() => { /* best-effort */ }); } catch { /* */ }
 }
 async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = null, connectionsOverride = null } = {}) {
@@ -12517,6 +12536,7 @@ async function sendChatMessage() {
     const rule = standingRuleFromText(_mRemember[1]);
     if (!rule) { _setMessageBody(m, 'Tell me a rule to remember, e.g. “remember: keep replies under 3 sentences”.'); _orchFinalize(m); return; }
     try { await recordGoalItem(_memoryId(), rule); } catch { /* */ }   // AP-0 — a standing rule banks to THIS instance
+    try { _orchLog(`LEARNED ▸ banked standing rule — "${String(rule.body || '').slice(0, 40)}" (user: remember)`); } catch { /* v2.74.1856 — Experiment B */ }
     const when = rule.trigger ? ` when ${rule.trigger}` : '';
     _setMessageBody(m, `Got it — I’ll remember to ${rule.body}${when}. Type “memory” to review this view’s rules.`);
     _orchFinalize(m); return;

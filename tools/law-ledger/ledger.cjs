@@ -116,7 +116,7 @@ function experimentVerdicts(baselineEpisodes, liveEpisodes, { toV }) {
   };
   const exps = [
     { id: 'A', cls: 'claiming', landedV: null, note: 'door registry (not yet landed)' },
-    { id: 'B', cls: 'silent-', landedV: null, note: 'logbook glass (not yet landed)' },
+    { id: 'B', cls: 'silent-', landedV: 1856, note: 'logbook glass (LEARNED banked lines · trace-lint · fan-out receipts)' },
     { id: 'C', cls: 'hop-drop', landedV: 1855, note: 'hop seal (Core/hopSeal.test.js)' },
   ];
   return exps.map((x) => {
