@@ -5614,7 +5614,9 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
   try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
   // v2.74.1759 — CSRF-cold (idle admin after reload): one silent retry after a short pause. The executor already
   // soft-wakes + re-sniffs; this covers the race where the SPA's token landed just after the first reply.
-  if (res && res.success === false && isCsrfColdFailure({ error: res.error, hint: res.hint, csrf: leg.tool && leg.tool.csrf })) {
+  // v2.74.1853 — but NOT when the executor says the sniff was DRY (`csrfNoToken`): re-invoking re-runs the same
+  // experiment on the same idle tab (live 201402: two ~50s ladders per ask) — nothing changed, fail honestly.
+  if (res && res.success === false && !res.csrfNoToken && isCsrfColdFailure({ error: res.error, hint: res.hint, csrf: leg.tool && leg.tool.csrf })) {
     try { _orchLog(`INVOKE ▸ csrf-cold retry ${(leg.tool && leg.tool.recipeId) || leg.key || ''}`); } catch { /* */ }
     await new Promise((r) => setTimeout(r, 600));
     try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
@@ -11028,7 +11030,9 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
   // v2.74.1759 — CSRF-cold: keep the turn, show a warming line, one silent retry (don't ask the user to retype).
-  if (res && res.success === false && isCsrfColdFailure({ error: res.error, hint: res.hint, csrf: leg.tool && leg.tool.csrf })) {
+  // v2.74.1853 — skipped when the executor says the sniff was DRY (`csrfNoToken`) — a re-invoke is the same
+  // experiment on the same idle tab; the warm bar below is the honest next move instead.
+  if (res && res.success === false && !res.csrfNoToken && isCsrfColdFailure({ error: res.error, hint: res.hint, csrf: leg.tool && leg.tool.csrf })) {
     _setMessageBody(msg, 'Warming the session…');
     try { _orchLog(`IL ▸ csrf-cold retry ${leg.key || (leg.tool && leg.tool.recipeId) || ''}`); } catch { /* */ }
     await new Promise((r) => setTimeout(r, 600));
@@ -11039,6 +11043,10 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${res && res.error ? ` — ${_errWord(res.error)}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);
     // RH-1b (v2.74.1568) — the INVOKE_SESSION tick marked this recipe drift-suspect → propose the relearn arm.
     if (res && res.driftSuspect && res.driftGroundId) _healRelearnBar(msg, { groundId: res.driftGroundId, recipeId: res.driftRecipeId || '', host: (leg.tool && (leg.tool.sessionHost || leg.tool.appHost || leg.tool.origin)) || '', name: leg.name || (leg.tool && leg.tool.recipeId) || 'that read', retryAsk: ask });
+    // v2.74.1853 — the csrf-cold dead end gets an AFFORDANCE, not coaching (live 201402: "click anywhere in the
+    // admin tab" read as "retry the ask" — two ~50s ladders, no click). The button reloads the ride tab (boot
+    // traffic IS the guaranteed capture) and re-sends this same ask through the front door.
+    if (res && res.csrfNoToken) _csrfWarmBar(msg, { host: (leg.tool && (leg.tool.sessionHost || leg.tool.appHost || leg.tool.origin)) || '', retryAsk: ask });
     return false;
   }
   if (leg.domain === 'connector') {
@@ -14231,6 +14239,31 @@ function _connSignInBar(msg, origins, { retryAsk = null, onRetry = null } = {}) 
 // the five-second diff with ✓ Apply / Dismiss (EDIT_RIDE_RECIPE op:heal/healDismiss — reads only, enforced
 // server-side). Apply + a retryAsk → the original ask re-runs immediately: RH-1d's verify-on-first-use (success
 // clears driftSuspect → `HEAL ▸ cleared`; failure keeps the suspicion honest).
+// v2.74.1853 — Tier-2b of the csrf plan (findings 2026-07-27): the “Warm & retry” affordance on a sniff-dry
+// csrf-cold failure. Reloading the ride tab is a GUARANTEED re-capture (the document_start tee catches the
+// SPA's boot traffic; the CSRF_TOKEN_SEEN push banks it durably), and putting the reload behind the USER'S
+// click needs no unsaved-work gate. On warmed, the ask re-sends through the front door — the RH-1d idiom,
+// same gates as typing it.
+function _csrfWarmBar(msg, { host = '', retryAsk = '' } = {}) {
+  if (!host) return;
+  const bar = _orchActionBar(msg);
+  const btn = _mkBtn(`⟳ Warm ${host} & retry`, async () => {
+    btn.disabled = true; btn.textContent = `Reloading ${host}…`;
+    let r = null;
+    try { r = await _orchReq('RELOAD_RIDE_TAB', { host }); } catch { /* */ }
+    if (!r || r.success === false) {
+      btn.disabled = false;
+      btn.textContent = r && r.error === 'no-tab' ? `open ${host} first, then click again` : '⟳ Warm & retry (didn’t take — try once more)';
+      return;
+    }
+    if (r.warmed === false) { btn.disabled = false; btn.textContent = `reloaded — still no token (are you signed in to ${host}?)`; return; }
+    bar.remove();
+    const input = $('chat-input');
+    if (retryAsk && input) { input.value = retryAsk; sendChatMessage(); }   // RH-1d — the retry IS a normal ask (same gates as typing it)
+  });
+  bar.appendChild(btn);
+}
+
 function _healRelearnBar(msg, { groundId, recipeId = '', host = '', name = 'that read', retryAsk = '' } = {}) {
   if (!groundId || !host) return;
   const line = document.createElement('div');

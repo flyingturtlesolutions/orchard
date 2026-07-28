@@ -61,7 +61,16 @@ window.__agentHubContentScriptLoaded = true;
       try {
         if (ev.source !== window || ev.origin !== location.origin) return;
         const d = ev.data && ev.data.__ahub_sniffed_csrf;
-        if (d && d.token && d.host === location.host) window.__ahubSniffCsrfTok = { token: String(d.token).slice(0, 400), at: Date.now() };
+        if (d && d.token && d.host === location.host) {
+          window.__ahubSniffCsrfTok = { token: String(d.token).slice(0, 400), at: Date.now() };
+          // v2.74.1853 — PUSH each NEW token to the SW bank (throttle: value-change only). Pull-only left
+          // between-ask captures solely in this world, where an extension reload strands them; an orphaned
+          // context's push throws 'context invalidated' and dies in the catch — the fresh script re-pushes.
+          if (window.__ahubCsrfPushedTok !== window.__ahubSniffCsrfTok.token) {
+            window.__ahubCsrfPushedTok = window.__ahubSniffCsrfTok.token;
+            try { chrome.runtime.sendMessage({ type: 'CSRF_TOKEN_SEEN', payload: { host: location.host, token: window.__ahubSniffCsrfTok.token } }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
+          }
+        }
         const o = ev.data && ev.data.__ahub_sniffed_op;
         if (o && o.sha && o.name && o.host === location.host && /^[a-f0-9]{16,64}$/i.test(String(o.sha)) && /^\w{1,60}$/.test(String(o.name))) {
           window.__ahubSniffOps[String(o.name)] = { sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null, at: Date.now() };
@@ -6339,7 +6348,15 @@ var MESSAGE_HANDLERS = {
           try {
             if (ev.source !== window || ev.origin !== location.origin) return;
             const d = ev.data && ev.data.__ahub_sniffed_csrf;
-            if (d && d.token && d.host === location.host) window.__ahubSniffCsrfTok = { token: String(d.token).slice(0, 400), at: Date.now() };
+            if (d && d.token && d.host === location.host) {
+              window.__ahubSniffCsrfTok = { token: String(d.token).slice(0, 400), at: Date.now() };
+              // v2.74.1853 — same push as the eager document_start wiring (only one of the two ever wires,
+              // guarded by __ahubSniffCsrfWired — keep the bodies identical).
+              if (window.__ahubCsrfPushedTok !== window.__ahubSniffCsrfTok.token) {
+                window.__ahubCsrfPushedTok = window.__ahubSniffCsrfTok.token;
+                try { chrome.runtime.sendMessage({ type: 'CSRF_TOKEN_SEEN', payload: { host: location.host, token: window.__ahubSniffCsrfTok.token } }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
+              }
+            }
             const o = ev.data && ev.data.__ahub_sniffed_op;
             if (o && o.sha && o.name && o.host === location.host && /^[a-f0-9]{16,64}$/i.test(String(o.sha)) && /^\w{1,60}$/.test(String(o.name))) {
               window.__ahubSniffOps[String(o.name)] = { sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null, at: Date.now() };

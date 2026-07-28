@@ -18,6 +18,7 @@ import { pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, assessProbe, rideAc
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
+import { registerConnTransitionListener } from './connections.js';   // v2.74.1853 — presence is the csrf bank's TRUE lifecycle clock (signed-out → the session-bound token is certainly dead)
 import { BROKER_CATALOG } from '../../Core/brokerCatalog.js';   // v1342 — UNLINK clears this provider's liveTools cache entries
 import { pkcePair, authorizeUrl, parseAuthRedirect } from '../../Core/oauthLink.js';   // MP-3 — the pure client half of the link dance (§5.2 pinned contract)
 import { providerScopes } from '../../Core/mcpServers.js';                             // MP-3 — one dance grants every server the provider fronts
@@ -351,7 +352,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   // caches it); we cache per-origin here too. The SPA fires its own calls continuously while the admin is open, so
   // a token usually appears within seconds; an idle tab may need one interaction (the failure hint says so). ──
   const _sniffedCsrf = new Map();               // origin → { token, at }
-  const CSRF_TTL_MS = 20 * 60e3;
+  // v2.74.1853 — VALIDATE-ON-USE (findings 2026-07-27 correction): 20 minutes was a VALIDITY guess that expired
+  // our copy while Shopify still honored the token (the 19:46→20:12 live wedge). Validity is now decided by the
+  // server — a 403 clears the bank via the v1759 cold-ladder (the recovery that already existed); this TTL is
+  // HYGIENE only (don't serve a token across days; presence signed-out clears it sooner — see the transition
+  // listener below the prewarm).
+  const CSRF_TTL_MS = 24 * 3600e3;
   function _csrfSnifferFunc() {
     try {
       if (window.__ahubCsrfSniff) return; window.__ahubCsrfSniff = true;
@@ -561,6 +567,22 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     }
     return { hosts: summary };
   }
+
+  // v2.74.1853 — the causal invalidation the 20-min TTL was approximating: a transition INTO signed-out on a
+  // sniff-class host certainly kills its session-bound token, so clear the bank at that moment (and no other) —
+  // a fresh sign-in's boot traffic re-banks via the document_start tee + the CSRF_TOKEN_SEEN push. Advisory by
+  // VT-4 contract: a subscriber never breaks the write.
+  try {
+    registerConnTransitionListener((t) => {
+      try {
+        if (!t || t.to !== 'signed-out') return;
+        const host = String(t.origin || '').toLowerCase();
+        if (!csrfSniffHosts().includes(host)) return;
+        void _clearBankedCsrf(host);
+        try { Logger.info('conn', `VITALS ▸ csrf bank cleared — ${host} signed out`); } catch { /* */ }
+      } catch { /* VT-4 — never break the transition */ }
+    });
+  } catch { /* */ }
 
   return {
     // CP-1/2 (v2.74.1506) — probe ONE origin's auth via its OPEN tab (the heartbeat / Check-now unit). No open tab
@@ -783,11 +805,25 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               try {
                 const list = await readRideRecipes(payload.groundId);
                 const rec = Array.isArray(list) ? list.find((r) => r && r.id === payload.recipeId) : null;
-                const banked = rec && rec.lastUrlArgs && rec.lastUrlArgs[payload.urlParam.name];
+                let banked = rec && rec.lastUrlArgs && rec.lastUrlArgs[payload.urlParam.name];
+                // v2.74.1851 (live 07-27 17:56: "search shopify for <email>" → needs handle, WITH a Shopify tab
+                // open) — the bank was keyed PER-RECIPE, which is chicken-and-egg: a leg cannot bank the handle
+                // until it succeeds, and cannot succeed without one. But {handle}/{portalId} is a fact about the
+                // ORIGIN (your store slug, your portal), not about one recipe — so fall back to ANY recipe on
+                // this Ground that banked the SAME param name. Same trust class throughout: every value in
+                // lastUrlArgs came from a real workspace tab, never from the model.
+                if ((banked == null || banked === '') && Array.isArray(list)) {
+                  const sib = list.find((r) => r && r.lastUrlArgs && r.lastUrlArgs[payload.urlParam.name] != null && r.lastUrlArgs[payload.urlParam.name] !== '');
+                  if (sib) { banked = sib.lastUrlArgs[payload.urlParam.name]; try { Logger.info('conn', `RIDE_TAB ▸ {${payload.urlParam.name}} from sibling leg ${sib.id} (no tab match, none banked on ${payload.recipeId})`); } catch { /* */ } }
+                }
                 if (banked != null && banked !== '') args[payload.urlParam.name] = String(banked);
               } catch { /* */ }
             }
             if (args[payload.urlParam.name] == null) {
+              // v2.74.1851 — say WHAT was considered. The old failure was a bare "needs handle" with no record of
+              // which tabs were looked at, whether one was DISCARDED (Chrome sleeps unfocused tabs — invisible to
+              // the user, who still sees the tab), or whether a URL simply carried no /store/<slug>/ segment.
+              try { Logger.info('conn', `RIDE_TAB ▸ {${payload.urlParam.name}} UNRESOLVED · ${tabs.length} candidate tab(s) · ${tabs.filter((t) => t && t.discarded).length} discarded · 0 matched ${payload.urlParam.pattern} · none banked on this Ground`); } catch { /* */ }
               sendResponse({ success: false, error: 'no-url-param', origin, hint: `open your ${appHost || origin} workspace (a /store/… page) so the {${payload.urlParam.name}} can be read from the tab` });
               return;
             }
@@ -897,16 +933,25 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
           // v1401 / v1759 — cold `no-csrf` or http-40x with sniff: drop stale bank, soft-wake, force re-mint, retry once.
+          // v2.74.1853 — but only when there WAS a token to invalidate: an initial acquire that already woke the
+          // tab and sniffed NOTHING makes a second identical wake pointless (same idle SPA, same dry well, ~12s
+          // ago — live 201402 spent ~50s/ask rediscovering the 403). Fail fast instead, and say so on the reply
+          // (`csrfNoToken`) so the panel skips ITS silent re-invoke too and offers the warm affordance.
           if (reply && reply.success === false && isCsrfColdFailure({ error: reply.error, hint: reply.hint, csrf: payload && payload.csrf })) {
             await _clearBankedCsrf(origin);
-            try { Logger.info('ride', `INVOKE ▸ csrf-cold warm → retry [${payload.recipeId || ''}]`); } catch { /* */ }
-            const tok2 = await _acquireSniffedCsrf(tab.id, origin, { force: true, wake: true });
+            let tok2 = null;
+            if (csrfTok) {
+              try { Logger.info('ride', `INVOKE ▸ csrf-cold warm → retry [${payload.recipeId || ''}]`); } catch { /* */ }
+              tok2 = await _acquireSniffedCsrf(tab.id, origin, { force: true, wake: true });
+            } else {
+              try { Logger.info('ride', `INVOKE ▸ csrf-cold — sniff dry, fast-fail [${payload.recipeId || ''}] (no second wake)`); } catch { /* */ }
+            }
             if (tok2) {
               csrfTok = tok2;
               reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), 'x-csrf-token': tok2 } });
             }
             if (reply && reply.success === false && isCsrfColdFailure({ error: reply.error, hint: reply.hint, csrf: payload && payload.csrf })) {
-              reply = { ...reply, hint: 'no CSRF token yet — click anywhere in the admin tab once (it fires a request Orchard reads), then retry' };
+              reply = { ...reply, csrfNoToken: !tok2, hint: 'no CSRF token yet — use “Warm & retry” below, or click once in the admin tab and re-ask' };
             }
           }
           // CX-7b — HASH_STALE (the spec's deploy-rotation trap): a persisted-op 404/406 means the store's op hash
@@ -989,6 +1034,56 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
         }
       })();
       return true;   // async — keep the sendResponse channel open
+    },
+
+    // v2.74.1853 — the PUSH half of the capture pipeline: the tab tee captures organically while the user works,
+    // but pull-only (GET_SNIFFED_CSRF at invoke time) left between-ask tokens solely in the tab, where an
+    // extension reload strands them (the isolated world is discarded — the 19:46→20:12 live wedge). The relay
+    // now pushes each NEW token; banking on arrival makes any click/browse durable within ms. Sender-validated:
+    // accepted only from the tab whose host it claims, and only for csrf-sniff recipe hosts. Token value is
+    // never logged (banked/cleared lines carry the host only).
+    'CSRF_TOKEN_SEEN': (payload, sender, sendResponse) => {
+      (async () => {
+        try {
+          const host = String((payload && payload.host) || '').toLowerCase();
+          const token = (payload && payload.token) ? String(payload.token).slice(0, 400) : '';
+          let senderHost = '';
+          try { senderHost = new URL((sender && sender.tab && sender.tab.url) || '').host.toLowerCase(); } catch { /* */ }
+          if (!host || !token || host !== senderHost || !csrfSniffHosts().includes(host)) { sendResponse({ success: false }); return; }
+          const prev = _sniffedCsrf.get(host);
+          _sniffedCsrf.set(host, { token, at: Date.now() });
+          await _persistCsrf(host, token);
+          if (!prev || prev.token !== token) { try { Logger.info('conn', `VITALS ▸ csrf banked ${host} (push)`); } catch { /* */ } }
+          sendResponse({ success: true });
+        } catch { sendResponse({ success: false }); }
+      })();
+      return true;
+    },
+
+    // v2.74.1853 — the consent affordance behind the panel's “Warm & retry” button: reload the ride tab ON THE
+    // USER'S CLICK — a reload is a guaranteed re-capture (the document_start tee catches the SPA's boot traffic;
+    // the push above banks it), and user-initiated means no unsaved-work gate is needed. Waits for complete + a
+    // short grace so the boot requests actually fire before the caller re-asks.
+    'RELOAD_RIDE_TAB': (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const host = String((payload && payload.host) || '').toLowerCase();
+          if (!host || !csrfSniffHosts().includes(host)) { sendResponse({ success: false, error: 'not-a-sniff-host' }); return; }
+          const rec = recipeForOrigin(host);
+          const patterns = rideTabUrlPatterns(host, (rec && rec.appHost) || host);
+          let tabs = [];
+          try { tabs = await chrome.tabs.query({ url: patterns }); } catch { tabs = []; }
+          const tab = pickRideTab(tabs, { urlParam: (rec && rec.urlParam) || null });
+          if (!tab) { sendResponse({ success: false, error: 'no-tab', hint: `open ${host} first` }); return; }
+          try { Logger.info('ride', `INVOKE ▸ csrf warm-reload ${host} (user click)`); } catch { /* */ }
+          try { await chrome.tabs.reload(tab.id); } catch { /* */ }
+          try { await _waitTabComplete(tab.id); } catch { /* */ }
+          await new Promise((r) => setTimeout(r, 1500));
+          const tok = await _acquireSniffedCsrf(tab.id, host, {});
+          sendResponse({ success: true, warmed: !!tok });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'reload-failed' }); }
+      })();
+      return true;
     },
 
     // CX-5b (v2.74.1306) — INVOKE_CONNECTOR (OAuth/MCP broker, §5/§7): the model SELECTED a broker tool; we hand
