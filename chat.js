@@ -7663,7 +7663,9 @@ async function _fieldFollowup(text) {
   // with a junk taskId → http-500. A bare ask ≤4 words is safe here: it acts only on a literal field/details match.
   // v2.74.1561 — apostrophes allowed ("the homeowner's phone" previously failed the class and fell to the router);
   // `list <field>` joins the verb set (live: the user reached fields only via the bare form).
-  const mv = t.match(/^(?:what(?:'s|\s+is|\s+are)?|show\s+me|give\s+me|read|list)\s+(?:the\s+|its\s+)?([\w][\w\s\/'’-]{1,40}?)\s*\??$/i);
+  // v2.74.1852 — past-tense copulas join the frame so the copula stops leaking into the captured term
+  // (live 194840: "what was their last order" matched bare-`what` and probed the field "was last order").
+  const mv = t.match(/^(?:what(?:'s|\s+is|\s+are|\s+was|\s+were)?|show\s+me|give\s+me|read|list)\s+(?:the\s+|its\s+)?([\w][\w\s\/'’-]{1,40}?)\s*\??$/i);
   const bare = !mv && /^[\w][\w\s\/'’-]{0,40}\??$/.test(t) && t.replace(/\?+$/, '').trim().split(/\s+/).length <= 4
     ? t.replace(/\?+$/, '').trim() : null;
   // v2.74.1526 — an EXPLICIT field reference ("what does the field, X say?", "the X field") names X regardless of
@@ -7711,8 +7713,20 @@ async function _fieldFollowup(text) {
     // field/details match", so a bare MISS has no claim). The honest-absence answer stays for the EXPLICIT forms —
     // a named-field reference, a verbed read, or an "any <X>?" probe (the v1526 anti-fabrication net) — where the
     // user unambiguously asked THIS record for a field.
-    const fieldProbe = fieldRefOk || !!mv || (!!bare && /^any\b/i.test(q));
-    if (!fieldProbe) return false;   // bare miss / genuinely conversational → normal routing
+    // v2.74.1852 — supersedes the v1597 list for mv: a VERBED read that matches NO field now FALLS THROUGH to
+    // routing too (live 194840: "what was their last order" / "what was in the order" died here as "no such
+    // field" while shopify_orders_for_customer — which served that exact ask on 07-24 — sat unreached). A
+    // followup that matches no field has no class knowledge; the router has the palette. The anti-fabrication
+    // guarantee this branch held for mv since v1526 now lives DOWNSTREAM of interpret: a fieldread resolve goes
+    // through the gated clause (absent → honest refusal naming the fields) and the v1753 answer-fence blocks
+    // prose about unfetched data. Terminal honest-absence remains ONLY for the unambiguous this-record probes —
+    // an explicit "field" reference (fieldRefOk) and the "any <X>?" form. REVISIT-IF: a fabricated field value
+    // re-appears live on an mv phrasing — tighten at the answer-fence, not by re-terminalizing this branch.
+    const fieldProbe = fieldRefOk || (!!bare && /^any\b/i.test(q));
+    if (!fieldProbe) {
+      if (mv) { try { _orchLog(`FIELD_FOLLOWUP ▸ "${q}" → no field match — fall through to routing`); } catch { /* */ } }
+      return false;   // verbed/bare miss / genuinely conversational → normal routing (the router owns cross-tool asks)
+    }
     const labels = Object.entries(obj)
       .filter(([, v]) => v != null && v !== '' && !(typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length))
       .map(([k]) => nice(k));
