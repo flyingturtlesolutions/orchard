@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { nounForParam, contextSpecsFor, contextAskFor, contextAnswerLine } from './contextAnswer.js';
+import { nounForParam, contextSpecsFor, contextAskFor, contextAnswerLine, viaTargets } from './contextAnswer.js';
 import { resolveRideParam } from './rideParamResolve.js';
 
 // The real catalog shape: ONE shared spec, declared on the CONSUMER legs, keyed to the state read by `via`.
@@ -102,5 +102,23 @@ describe('contextAnswer — the answer', () => {
   });
   it('drops the parenthetical when the id IS the label', () => {
     assert.doesNotMatch(contextAnswerLine({ noun: 'region', resolved: { value: 'EMEA', label: 'EMEA' }, total: 1 }), /\(/);
+  });
+});
+
+describe('contextAnswer — viaTargets: the write-through key (v2.74.1880)', () => {
+  it('collects every endpoint some resolve spec names as its via', () => {
+    const t = viaTargets(CATALOG);
+    assert.ok(t.has('/api/VendorSuite/State'));
+    assert.equal(t.size, 1, 'one via across the fixture, however many legs declare it');
+  });
+  it('is BROADER than contextSpecsFor — a via with no defaultPath still deserves a refresh', () => {
+    const noDefault = [{ id: 'a', resolve: { q: { via: '/x', id: 'Id' } } }];
+    assert.equal(contextSpecsFor('/x', noDefault).length, 0, 'nothing to ANSWER with');
+    assert.ok(viaTargets(noDefault).has('/x'), 'but the cache still wants the fresh payload');
+  });
+  it('ignores recipes with no resolve spec, and degenerate input', () => {
+    assert.equal(viaTargets([{ id: 'vs_state', endpoint: '/api/VendorSuite/State' }]).size, 0, 'being a via TARGET is not self-declared');
+    assert.equal(viaTargets(null).size, 0);
+    assert.equal(viaTargets([]).size, 0);
   });
 });

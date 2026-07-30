@@ -186,3 +186,27 @@ export function resolveFieldKey(keysOrRecord, phrase) {
   }
   return miss;
 }
+
+/**
+ * v2.74.1882 — IS THE "TERM" ACTUALLY A FIELD? PURE.
+ *
+ * The interpret door emits `{field, term}` and the term is a SUB-PART selector: "the DEAKO part of Instructions".
+ * That works when the user named a section of a field they can see. It fails when the door INVENTED the pair — and
+ * live 210342 it did, twice, for a structural reason: `Core/interpretPrompt.js` ships no record-field vocabulary, so
+ * the model's only source of field names is the transcript. At 21:01 the only names it had ever been shown were
+ * `Instructions` and `VendorExplanation`; `IsPaid` had not rendered yet and `Priority` never did. So
+ * "is it paid yet?" became `{field:'VendorExplanation', term:'paid'}` and "is this one an emergency?" became
+ * `{field:'Instructions', term:'emergency'}` — a boolean answer turned into a substring hunt through a paragraph,
+ * reported as `0 found, 1 whole-field`, which renders as a completed read.
+ *
+ * The guard cannot live at the door (it has no field list to check against). It lives here, where the record's keys
+ * ARE in hand, and is applied by the caller ONLY after a TOTAL miss — so the legitimate section-of-a-note case is
+ * untouched. Returns the key the TERM names, when that is a different field from the one chosen; else ''.
+ */
+export function termFieldKey(keysOrRecord, term, chosenKey) {
+  const t = _s(term);
+  if (!t) return '';
+  const r = resolveFieldKey(keysOrRecord, t);
+  if (!r || !r.key || r.ambiguous) return '';
+  return r.key === chosenKey ? '' : r.key;
+}

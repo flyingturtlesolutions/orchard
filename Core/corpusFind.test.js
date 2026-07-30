@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyQuery, matchRow, findInRows, filterRows, scanCells, estimateScan, findVerdict, partitionFields, isReferentialQuery, MEASURED_MS_PER_READ } from './corpusFind.js';
+import { classifyQuery, matchRow, findInRows, filterRows, scanCells, estimateScan, findVerdict, partitionFields, isReferentialQuery, noMatchLine, scanNegativeLine, MEASURED_MS_PER_READ } from './corpusFind.js';
 
 // The real VendorSuite row shape (structure from the drill's own `label` list; values fabricated).
 const FIELDS = {
@@ -231,5 +231,78 @@ describe('corpusFind — referential queries never become searches (v2.74.1879)'
   it('empty is referential — there is nothing to search for either way', () => {
     assert.equal(isReferentialQuery(''), true);
     assert.equal(isReferentialQuery(null), true);
+  });
+});
+
+// v2.74.1887 — the no-match sentence. The live defect: a CONTENT phrase searched against nine id/address fields
+// reported "No match … across all 121 divisions", which is a corpus-wide negative over a surface that cannot hold
+// the phrase (gl 2026-07-30 08:50, three times in ninety seconds).
+const VS_LABELS = ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName', 'TicketId', 'TaskId', 'JobNumber', 'SearchField'];
+
+describe('noMatchLine — the negative names the surface it searched', () => {
+  it('an IDENTIFIER keeps the confident wording the partition earns', () => {
+    const s = noMatchLine({ query: '4451622', labelFields: VS_LABELS, span: 'all 121 divisions', status: 'open' });
+    assert.equal(s, 'No match for “4451622” across all 121 divisions (status: open).');
+  });
+  it('a TEXT phrase names the fields it scanned and does NOT claim the corpus', () => {
+    const s = noMatchLine({ query: 'leaking dishwasher', labelFields: VS_LABELS, span: 'all 121 divisions', status: 'open', rowCount: 18 });
+    assert.match(s, /Nothing in all 121 divisions \(status: open\) has “leaking dishwasher”/);
+    assert.match(s, /what a list row carries — address line1 · city state zip · task number · claim number · project name \(\+4 more\)/);
+    assert.ok(!/No match for/.test(s), 'the confident identifier wording must not appear');
+  });
+  it('a TEXT miss offers the per-record read — the composed next step, with the row count', () => {
+    const s = noMatchLine({ query: 'soft switch', labelFields: VS_LABELS, span: 'all 121 divisions', status: 'open', rowCount: 18 });
+    assert.match(s, /can’t rule them out/);
+    assert.match(s, /read the instructions on each/);
+    assert.match(s, /the 18 rows I did read/);
+  });
+  it('one row reads singular; zero rows drops the offer entirely', () => {
+    assert.match(noMatchLine({ query: 'soft switch', labelFields: VS_LABELS, span: 'Raleigh', rowCount: 1 }), /the 1 row I did read/);
+    assert.ok(!/read the instructions/.test(noMatchLine({ query: 'soft switch', labelFields: VS_LABELS, span: 'Raleigh', rowCount: 0 })));
+  });
+  it('no label list → no invented claim about what was searched', () => {
+    const s = noMatchLine({ query: 'soft switch', span: 'all 121 divisions' });
+    assert.equal(s, 'Nothing in all 121 divisions has “soft switch”.');
+  });
+  it('the resume hint survives on both kinds', () => {
+    assert.match(noMatchLine({ query: '4451622', span: 'divisions 1–40 of 121', remaining: 81 }), /Say “continue” for the rest \(81 more\)\./);
+    assert.match(noMatchLine({ query: 'soft switch', span: 'divisions 1–40 of 121', remaining: 81 }), /Say “continue” for the rest \(81 more\)\./);
+  });
+});
+
+// v2.74.1888 — the SCAN's two negatives. The live sentence (gl 09:32) was "Searched all 484 division/status
+// combinations — “soft switch” isn’t in any of them. The number may be wrong…" for a two-word DESCRIPTION.
+describe('scanNegativeLine — the same rule at the scan doors', () => {
+  const TEXTF = ['AddressLine1', 'CityStateZip', 'ProjectName', 'SearchField'];
+  it('an IDENTIFIER over a partition keeps the confident wording it earns', () => {
+    const s = scanNegativeLine({ query: '4451622', plan: 484, coverage: 'partition', cellNoun: 'division/status combination' });
+    assert.match(s, /^Searched all 484 division\/status combinations — “4451622” isn’t in any of them\./);
+    assert.match(s, /The number may be wrong/);
+  });
+  it('a TEXT query does NOT get "the number may be wrong" — the live defect', () => {
+    const s = scanNegativeLine({ query: 'soft switch', plan: 484, coverage: 'partition', searchedFields: TEXTF, cellNoun: 'division/status combination' });
+    assert.ok(!/number may be wrong/.test(s), 'a description is not a number');
+    assert.ok(!/isn’t in any of them/.test(s), 'no corpus-wide content claim');
+  });
+  it('a TEXT query names the searchable text and says what it cannot rule out', () => {
+    const s = scanNegativeLine({ query: 'soft switch', plan: 484, searchedFields: TEXTF, cellNoun: 'division/status combination' });
+    assert.match(s, /I read all 484 division\/status combinations/);
+    assert.match(s, /the searchable text on a row is address line1 · city state zip · project name · search field/);
+    assert.match(s, /lives on each record — so this can’t rule that out/);
+  });
+  it('a SELECTION adds the slice limit on both kinds', () => {
+    assert.match(scanNegativeLine({ query: '4451622', plan: 5, coverage: 'selection', slicePhrase: '**the open queue**' }), /\*\*the open queue\*\* only covers part of the records/);
+    assert.match(scanNegativeLine({ query: 'soft switch', plan: 5, coverage: 'selection', slicePhrase: '**the open queue**', searchedFields: TEXTF }), /And \*\*the open queue\*\* only covers part of the records\./);
+  });
+  it('the cache-age caveat rides both kinds', () => {
+    const stale = ' (12 of 484 from reads up to 90s old)';
+    assert.match(scanNegativeLine({ query: '4451622', plan: 484, stale }), /90s old/);
+    assert.match(scanNegativeLine({ query: 'soft switch', plan: 484, searchedFields: TEXTF, stale }), /90s old/);
+  });
+  it('no fields seen (every read failed or every cell empty) → no invented claim about the surface', () => {
+    assert.ok(!/searchable text/.test(scanNegativeLine({ query: 'soft switch', plan: 484 })));
+  });
+  it('singular cell count reads correctly', () => {
+    assert.match(scanNegativeLine({ query: '4451622', plan: 1 }), /Searched all 1 combination —/);
   });
 });

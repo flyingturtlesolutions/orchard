@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { payloadPaths, payloadShapeLine } from './payloadShape.js';
+import { payloadPaths, payloadShapeLine, payloadShapeKey } from './payloadShape.js';
 
 // The payload this exists for — the one I claimed three times carried `access.DefaultDivision.Id` without ever
 // having seen it. (Structure from the HAR scrub; values fabricated.)
@@ -79,5 +79,32 @@ describe('payloadShape — degenerate input', () => {
   });
   it('never throws on a bare leaf', () => {
     assert.equal(payloadPaths(undefined).paths.length, 1);
+  });
+});
+
+// v2.74.1888 — the COMPARISON key, which is not the line. v1887's "re-emit when the shape changes" gate counted an
+// array LENGTH as part of the shape, so an empty list and a one-row list re-printed (live 09:30: four lines for one
+// recipe in fifteen seconds, three marked "shape CHANGED" for `[0]` vs `[1].SearchField…`).
+describe('payloadShapeKey — lengths are worth SEEING, worthless for DECIDING', () => {
+  it('an empty list and a populated one of the same row shape share a key', () => {
+    const empty = { results: [] };
+    const one = { results: [{ TaskId: 1, AddressLine1: 'x' }] };
+    const two = { results: [{ TaskId: 1, AddressLine1: 'x' }, { TaskId: 2, AddressLine1: 'y' }] };
+    assert.equal(payloadShapeKey(one), payloadShapeKey(two), 'row count is not a shape change');
+    assert.notEqual(payloadShapeKey(empty), '', 'an empty list still has a key');
+  });
+  it('a genuinely different shape still differs', () => {
+    assert.notEqual(
+      payloadShapeKey({ results: [{ TaskId: 1 }] }),
+      payloadShapeKey({ access: { User: { Id: 1 } } }),
+      'the state payload and the rows payload are different shapes',
+    );
+  });
+  it('the LINE keeps the real length (that is the point of showing it)', () => {
+    assert.match(payloadShapeLine('r', { results: [{ a: 1 }, { a: 2 }] }), /\[2\]/);
+  });
+  it('a scalar/null payload has no key', () => {
+    assert.equal(payloadShapeKey(null), '');
+    assert.equal(payloadShapeKey(7), '');
   });
 });

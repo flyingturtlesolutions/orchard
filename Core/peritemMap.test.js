@@ -267,3 +267,87 @@ describe('peritemMap — v1757 unwrapMapPrior (gl 133556 map→map seam)', () =>
     assert.deepEqual(u.rows, src);
   });
 });
+
+describe('peritemMap — v1882: the shape fallback must not guess, and a tie must not claim a schema', () => {
+  // The REAL vs_warranty_task detail record (PAYLOAD ▸ 210342:69) — note it carries NO phone field at all, which is
+  // why the fallback fired live and returned the SearchField index blob as "the homeowner phone".
+  const REC = {
+    SearchField: '3955 gallery chase|217710000|briarwood|4451622|01|cumming, ga 30028|0051 / - / -|01|295|4451622-01-01',
+    TaskId: 10171475, TicketId: 4451622, BusinessUnitId: 3492595, TaskNumber: '01', ClaimNumber: '01',
+    Age: '295', IsPaid: true, DateCreated: '2025-10-07T12:59:34.787', IssueDate: '2025-10-07T12:59:34.787',
+    VendorId: 217710000, VendorExplanation: 'reached out to schedule 42966', Instructions: 'Deako to call h/owner',
+  };
+  it('THE LIVE DUMP: "homeowner phone" returns null, not the search index', () => {
+    // v1882-b — this now holds through `_looksPhone`'s anchoring ALONE. A qualifier gate was tried and reverted:
+    // it deleted the correct answer for the same ask against a record that DOES hold a phone (see below).
+    assert.equal(pickFieldPath([REC], 'homeowner phone', 'homeowner phone'), null);
+    assert.equal(pickFieldPath([REC], 'phone', 'homeowner phone'), null, 'nor through the ladder rung that drops the qualifier');
+  });
+  it('and a QUALIFIED ask still resolves when the record really holds the value — the reverted gate broke this', () => {
+    assert.deepEqual(pickFieldPath([{ TicketId: 4451622, Cell: '9195550134' }], 'phone', 'homeowner phone'), { path: 'Cell', matchedBy: 'shape' });
+    assert.deepEqual(pickFieldPath([{ Id: 1, Contact: 'sam@x.com' }], 'email', 'homeowner email'), { path: 'Contact', matchedBy: 'shape' });
+  });
+  it('a concatenated index is never a phone, and neither is a timestamp', () => {
+    assert.equal(pickFieldPath([{ Blob: 'a|b|c|217710000|d' }], 'phone', 'phone'), null);
+    assert.equal(pickFieldPath([{ When: '2025-10-07T12:59:34.787' }], 'phone', 'phone'), null);
+    assert.equal(pickFieldPath([{ Id: 4451622 }], 'phone', 'phone'), null, 'a 7-digit id is not a phone');
+  });
+  it('but a REAL shape fallback still resolves — the guard must not blunt the feature', () => {
+    assert.deepEqual(pickFieldPath([{ Id: 5, Mobile: '919-555-0134' }], 'phone', 'phone'), { path: 'Mobile', matchedBy: 'shape' });
+    assert.deepEqual(pickFieldPath([{ Id: 5, Contact: 'sam@x.com' }], 'email', 'email'), { path: 'Contact', matchedBy: 'shape' });
+  });
+  it('THE LIVE TIE: "PO number" reports the orphan token, so the caller need not claim a PO field exists', () => {
+    const r = pickFieldPath([REC], 'number', 'PO number');
+    assert.equal(r.ambiguous, true);
+    assert.deepEqual(r.orphan, ['po']);
+    assert.deepEqual(r.candidates.map((c) => c.path), ['TaskNumber', 'ClaimNumber']);
+  });
+  it('the orphan is computed over ALL candidates — over the tied pair alone it DENIED a present field', () => {
+    // "any project number on this?" tied TaskNumber|ClaimNumber and reported orphan ["project"], rendering
+    // "nothing matches project" while ProjectName sat on the same record. Truthful now: no orphan, so the caller
+    // asks which rather than denying.
+    const withProject = { ...REC, ProjectName: 'Briarwood', ProjectCode: 'C1' };
+    assert.deepEqual(pickFieldPath([withProject], 'number', 'project number').orphan, []);
+    assert.deepEqual(pickFieldPath([withProject], 'number', 'PO number').orphan, ['po'], 'and a token that really is absent still reports');
+  });
+  it('a bare "number"/"id" ask has NO orphan — it is a genuine ambiguity and must still ask', () => {
+    assert.deepEqual(pickFieldPath([REC], 'number', 'number').orphan, []);
+    const v = pickFieldPath([REC], 'vendor', 'vendor');
+    assert.deepEqual(v.orphan, []);
+    assert.deepEqual(v.candidates.map((c) => c.path), ['VendorId', 'VendorExplanation']);
+  });
+  it('askPhrase DEFAULTS to fieldPhrase, so every pre-v1882 caller is unchanged', () => {
+    assert.deepEqual(pickFieldPath([REC], 'instructions'), { path: 'Instructions', matchedBy: 'name' });
+    assert.deepEqual(pickFieldPath([REC], 'number').orphan, []);
+  });
+});
+
+describe('peritemMap — v1885: a short token must match a WHOLE WORD', () => {
+  // Live 074157 got two different answers from the SAME ask on two records, because `_carried`'s substring test finds
+  // "po" inside ap-po-intments. Whether the orphan fired depended on an unrelated field's spelling.
+  const BASE = { SearchField: 'x', TaskId: 1, TicketId: 2, TaskNumber: '01', ClaimNumber: '01', JobNumber: '9', AllowedAmount: 214 };
+  it('"po" is orphaned whether or not the record carries Appointments', () => {
+    assert.deepEqual(pickFieldPath([{ ...BASE, Appointments: [{ Start: 'x' }] }], 'number', 'PO number').orphan, ['po']);
+    assert.deepEqual(pickFieldPath([BASE], 'number', 'PO number').orphan, ['po']);
+  });
+  it('a token of 4+ chars still matches by substring, so no false denial returns', () => {
+    assert.deepEqual(pickFieldPath([{ ...BASE, ProjectName: 'Briarwood' }], 'number', 'project number').orphan, []);
+    assert.deepEqual(pickFieldPath([{ ...BASE, CostCode: '71020' }], 'number', 'code number').orphan, []);
+  });
+  it('a short token still matches when it IS a camel WORD of the key — the floor needed word-splitting, not just a length', () => {
+    // My first draft of this test asserted `_norm` camel-splits. It does not (`TaskId` -> "taskid"), so a 4-char floor
+    // alone made every SHORT REAL token orphaned: "id number" reported "nothing matches id" on a record full of ids.
+    // `keyWords` (camel-split, carried per candidate) is what makes the floor correct rather than merely strict.
+    assert.deepEqual(pickFieldPath([BASE], 'number', 'id number').orphan, [], 'TaskId/TicketId carry "id" as a word');
+    assert.deepEqual(pickFieldPath([{ ...BASE, PoRef: 'X1' }], 'number', 'po number').orphan, [], 'PoRef carries "po" as a word');
+  });
+  it('the ANCHOR alone rejects every non-phone shape — which is why the delimiter guard was deleted, not repaired', () => {
+    // The guard read "same delimiter twice = a joined index" and was corrupt (a raw 0x01 for the backreference) since
+    // v1882. Repairing it showed it could never decide anything: `_DIGITS` strips only [\s.()+-], so a joined value
+    // keeps its pipes and fails ^\d{10,11}$ regardless. Pinned here so nothing re-adds it as "defence in depth".
+    for (const v of ['3955 gallery chase|217710000|briarwood|4451622', '1234567890|1234567890', '2025-10-07T12:59:34.787', '4451622', 'call; 9195550134'])
+      assert.equal(pickFieldPath([{ X: v }], 'phone', 'phone'), null, v);
+    for (const v of ['919-555-0134', '9195550134', '(919) 555 0134'])
+      assert.deepEqual(pickFieldPath([{ X: v }], 'phone', 'phone'), { path: 'X', matchedBy: 'shape' }, v);
+  });
+});

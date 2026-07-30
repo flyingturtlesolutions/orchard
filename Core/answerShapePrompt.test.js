@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readShapeFacts, buildAnswerShapeMessages, parseAnswerShapeOutput } from './answerShapePrompt.js';
+import { readShapeFacts, buildAnswerShapeMessages, parseAnswerShapeOutput, ensureScopeNamed, payloadMetrics, sumMetrics, unsupportedCountClaim } from './answerShapePrompt.js';
 
 const TICKETS = { results: [
   { id: 64863, subject: 'Conversation with Carolina', status: 'open', description: 'a long private ticket body that must NOT leave' },
@@ -150,5 +150,145 @@ describe('readShapeFacts — a flat record is still a record (v2.74.1862)', () =
     assert.equal(readShapeFacts({ rows: [{ id: 1 }, { id: 2 }] }).kind, 'list');
     assert.equal(readShapeFacts({ rows: [{ id: 1 }, { id: 2 }] }).count, 2);
     assert.equal(readShapeFacts({ ticket: { id: 7, subject: 'x' } }).count, 1);
+  });
+});
+
+// v2.74.1887 — the two claims the SHAPER is now held to: the DECLARED id, and a named scope.
+// The live pair (gl 2026-07-30 08:50): one record, two renders — `renderConnectorLines` said #4889637 (TicketId, the
+// declaration's first choice) while the shaper said "Warranty task #01" (TaskNumber), because only the renderer was
+// ever handed `displayId`.
+const VS_ROW = { TaskId: 10878575, TicketId: 4889637, TaskNumber: '01', ClaimNumber: '03', AddressLine1: '804 Driftwood Ln', TaskStatus: 'open' };
+
+describe('readShapeFacts — the declared displayId reaches the facts (v1887)', () => {
+  it('a single record: the sample id is the first present key the recipe declared', () => {
+    const f = readShapeFacts({ results: [VS_ROW] }, { displayId: ['TicketId', 'TaskNumber'] });
+    assert.equal(f.count, 1);
+    assert.equal(String(f.sample[0].id), '4889637');
+  });
+  it('WITHOUT the declaration the generic scan picks another id — the live disagreement, pinned', () => {
+    const f = readShapeFacts({ results: [VS_ROW] });
+    assert.notEqual(String(f.sample[0].id), '4889637');
+  });
+  it('a LIST sample carries it on every row', () => {
+    const f = readShapeFacts({ results: [VS_ROW, { ...VS_ROW, TicketId: 4889638, TaskNumber: '02' }] }, { displayId: ['TicketId', 'TaskNumber'] });
+    assert.deepEqual(f.sample.map((s) => String(s.id)), ['4889637', '4889638']);
+  });
+  it('falls back to the next declared key when the first is absent, then to the generic scan', () => {
+    const noTicket = { TaskId: 10878575, TaskNumber: '01', AddressLine1: 'x' };
+    assert.equal(String(readShapeFacts({ results: [noTicket] }, { displayId: ['TicketId', 'TaskNumber'] }).sample[0].id), '01');
+    assert.ok(readShapeFacts({ results: [noTicket] }, { displayId: ['Nope'] }).sample[0].id != null);
+  });
+});
+
+describe('ensureScopeNamed — a count claim names its scope, deterministically (v1887)', () => {
+  it('appends the scope label to a bare count', () => {
+    assert.equal(ensureScopeNamed('Yes, there is 1 open item: a warranty claim.', ['Atlanta West']),
+      'Yes, there is 1 open item: a warranty claim (in Atlanta West).');
+  });
+  it('leaves an answer that already names it alone — including a different case', () => {
+    const a = 'There is 1 open warranty task in Atlanta West.';
+    assert.equal(ensureScopeNamed(a, ['Atlanta West']), a);
+    assert.equal(ensureScopeNamed('1 open task in atlanta west', ['Atlanta West']), '1 open task in atlanta west');
+  });
+  it('fires on a yes/no existence claim with no digits', () => {
+    assert.equal(ensureScopeNamed('No open warranty tasks right now.', ['Raleigh']), 'No open warranty tasks right now (in Raleigh).');
+  });
+  it('does NOT fire on a summary that makes no quantity claim — the marker must stay readable', () => {
+    const a = 'The task is at 804 Driftwood Ln and is awaiting a vendor.';
+    assert.equal(ensureScopeNamed(a, ['Atlanta West']), a);
+  });
+  it('no label, a junk label, or an each/all sweep → untouched', () => {
+    assert.equal(ensureScopeNamed('There is 1 open task.', []), 'There is 1 open task.');
+    assert.equal(ensureScopeNamed('There is 1 open task.', ['ea']), 'There is 1 open task.');
+    assert.equal(ensureScopeNamed('There is 1 open task.', ['each']), 'There is 1 open task.');
+    assert.equal(ensureScopeNamed('There are 18 across all 121 divisions.', ['all']), 'There are 18 across all 121 divisions.');
+  });
+  it('handles a missing terminal period and an empty answer', () => {
+    assert.equal(ensureScopeNamed('1 open task', ['Raleigh']), '1 open task (in Raleigh)');
+    assert.equal(ensureScopeNamed('', ['Raleigh']), '');
+    assert.equal(ensureScopeNamed(null, ['Raleigh']), null);
+  });
+});
+
+// v2.74.1888 — the STATS payload, verbatim from `PAYLOAD ▸ [vs_warranty_stats]` (gl 09:32). The live answer was
+// "1 open warranty task in Atlanta West" while the list leg read that division EMPTY 26 seconds earlier: the counts
+// live in a nested container the record projection drops, and `count:1` is the number of records read.
+const STATS = { Key: 'warranty', Type: 8, DivisionStatistics: {
+  newwarrantytasks: { Key: 'newwarrantytasks', StatisticType: 1, Count: 3, DivisionId: 83, ItemValue: null, ItemComment: null },
+  openwarrantytasks: { Key: 'openwarrantytasks', StatisticType: 2, Count: 0, DivisionId: 83, ItemValue: null, ItemComment: null },
+  fixedwarrantytasks: { Key: 'fixedwarrantytasks', StatisticType: 3, Count: 7, DivisionId: 83, ItemValue: null, ItemComment: null },
+} };
+
+describe('payloadMetrics — the numbers the record projection cannot see (v1888)', () => {
+  it('lifts a nested Count and names it by the bucket that holds it', () => {
+    assert.deepEqual(payloadMetrics(STATS), { newwarrantytasks: 3, openwarrantytasks: 0, fixedwarrantytasks: 7 });
+  });
+  it('ZERO is a measurement — the live open count was 0 and must not be dropped as falsy', () => {
+    assert.equal(payloadMetrics(STATS).openwarrantytasks, 0);
+    assert.ok('openwarrantytasks' in payloadMetrics(STATS));
+  });
+  it('ignores numbers that are not measures — ids, type codes, statistic types', () => {
+    const m = payloadMetrics(STATS);
+    assert.ok(!('Type' in m) && !('DivisionId' in m) && !('StatisticType' in m));
+  });
+  it('a top-level measure names itself', () => {
+    assert.deepEqual(payloadMetrics({ Total: 12, Name: 'x' }), { Total: 12 });
+  });
+  it('never descends an array — a list quantity is `count`, and per-row values must not leak here', () => {
+    assert.deepEqual(payloadMetrics([{ Count: 5 }]), {});
+    assert.deepEqual(payloadMetrics({ rows: [{ Count: 5 }, { Count: 6 }] }), {});
+  });
+  it('a record payload yields NO metrics — the discriminator the fan aggregate relies on', () => {
+    assert.deepEqual(payloadMetrics(VS_ROW), {});
+    assert.deepEqual(payloadMetrics({ ...VS_ROW, AllowedAmount: 0, Age: '001' }), {});
+  });
+  it('sumMetrics adds by label across a fan', () => {
+    assert.deepEqual(sumMetrics([{ open: 1, new: 2 }, { open: 3 }, null, { new: 4, other: 1 }]), { open: 4, new: 6, other: 1 });
+    assert.deepEqual(sumMetrics([]), {});
+  });
+});
+
+describe('readShapeFacts + the shaper message carry the metrics (v1888)', () => {
+  it('the stats payload is an OBJECT with metrics, not an empty husk', () => {
+    const f = readShapeFacts(STATS);
+    assert.equal(f.kind, 'object');
+    assert.deepEqual(f.metrics, { newwarrantytasks: 3, openwarrantytasks: 0, fixedwarrantytasks: 7 });
+  });
+  it('THE LIVE BUG, pinned: the model now receives the counts (before, it saw only count:1)', () => {
+    const user = buildAnswerShapeMessages({ ask: 'total open warranty tasks?', facts: readShapeFacts(STATS), scope: 'divisionId=Atlanta West (83)' }).user;
+    assert.match(user, /"openwarrantytasks":0/);
+    assert.match(user, /"metrics"/);
+  });
+  it('the prompt tells the model what `count` is NOT', () => {
+    const sys = buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts(STATS) }).system;
+    assert.match(sys, /number of RECORDS read/);
+    assert.match(sys, /never substitute "count"/);
+  });
+  it('a plain list is untouched — no metrics key, exact count', () => {
+    const f = readShapeFacts({ results: [VS_ROW, { ...VS_ROW, TicketId: 4889638 }] });
+    assert.equal(f.kind, 'list');
+    assert.equal(f.count, 2);
+    assert.ok(!('metrics' in f));
+  });
+});
+
+describe('unsupportedCountClaim — no metric, no number (v1888)', () => {
+  const husk = readShapeFacts({ Key: 'warranty', Type: 8 });
+  it('fires on a quantity ask over a metric-less single record that states a figure', () => {
+    assert.equal(unsupportedCountClaim({ ask: 'total open warranty tasks?', facts: husk, answer: '1 open warranty task in Atlanta West.' }), true);
+    assert.equal(unsupportedCountClaim({ ask: 'how many are open?', facts: husk, answer: 'There is 1 open item.' }), true);
+  });
+  it('does NOT fire once the metrics are there — the fixed path stays open', () => {
+    assert.equal(unsupportedCountClaim({ ask: 'total open warranty tasks?', facts: readShapeFacts(STATS), answer: 'No open warranty tasks in Atlanta West.' }), false);
+  });
+  it('does NOT fire on a LIST — its count is exact and IS the answer', () => {
+    const list = readShapeFacts({ results: [VS_ROW, { ...VS_ROW, TicketId: 2 }] });
+    assert.equal(unsupportedCountClaim({ ask: 'how many open tasks?', facts: list, answer: 'There are 2 open tasks.' }), false);
+  });
+  it('does NOT fire when the ask wants no quantity', () => {
+    assert.equal(unsupportedCountClaim({ ask: 'what is the address?', facts: husk, answer: '804 Driftwood Ln.' }), false);
+  });
+  it('does NOT fire on an answer that states no figure', () => {
+    assert.equal(unsupportedCountClaim({ ask: 'how many are open?', facts: husk, answer: 'I could not find that number in what came back.' }), false);
   });
 });

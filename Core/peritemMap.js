@@ -10,8 +10,31 @@
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+// Camel/underscore-aware word split: `TaskId` → ['task','id'], `Lot_Block_Phase` → ['lot','block','phase'].
+const _camelWords = (k) => String(k == null ? '' : k).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[^A-Za-z0-9]+/g, ' ').toLowerCase().trim().split(' ').filter(Boolean);
 const _EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
-const _PHONE_RE = /(?:\+?\d[\s.-]?){7,}/;
+// v2.74.1882 — A PHONE GRAMMAR, not a digit run. The old `/(?:\+?\d[\s.-]?){7,}/` had no upper bound, no delimiter
+// grammar and no sanity check, so it matched a 9-digit id sitting inside VendorSuite's concatenated `SearchField`
+// index — and the value-shape fallback below then returned that whole pipe-joined blob as "the homeowner phone"
+// (live 210342, 21:02:07). A phone is 10-11 digits after punctuation is stripped, and nothing that carries a repeated
+// field delimiter or reads as an ISO timestamp is a phone number.
+const _DIGITS = (s) => String(s).replace(/[\s.()+-]/g, '');
+const _ISO_RE = /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+// v2.74.1885 — REPAIRED. This line was written by a script whose \t and \1 were interpreted as escapes, so
+// v2.74.1885 — A DELIMITER GUARD WAS HERE, WAS CORRUPT, AND IS NOW DELETED RATHER THAN REPAIRED. It read
+// `/([|;\t])[^|;\t]*\1/` — "the same delimiter twice means a joined index" — except a script escape wrote a literal
+// TAB and a raw 0x01 in place of the class and the backreference, so it required a 0x01 in the value and had been
+// INERT since v1882. Repairing it revealed it can never decide anything: `_DIGITS` strips only `[\s.()+-]`, so any
+// pipe/semicolon/tab-joined value still carries those characters and fails the `^\d{10,11}$` anchor on its own. A
+// guard that cannot fire is the class this log keeps finding, so it goes rather than staying for reassurance.
+// The ISO check is kept as an explicit, readable rejection: the anchor happens to reject a timestamp too (the T and
+// the colons survive `_DIGITS`), so this is documentation-by-code rather than a load-bearing branch — stated plainly
+// instead of implied, which is the difference between a redundant check and a dead one.
+function _looksPhone(s) {
+  if (_ISO_RE.test(s)) return false;
+  const d = _DIGITS(s);
+  return /^\d{10,11}$/.test(d);
+}
 
 // Stopwords stripped from the field phrase — possessives/articles the user says but the FIELD never carries
 // ("its homeowner's email" → [homeowner, email]).
@@ -51,7 +74,12 @@ export function normalizeMapVerdict(raw) {
 function _candidatePaths(row) {
   const out = [];
   if (!row || typeof row !== 'object') return out;
-  const push = (path, val) => { out.push({ path, keyNorm: _norm(path.split('.').pop()), val }); };
+  // v2.74.1885 — `keyWords` is the CAMEL-SPLIT word list, carried alongside `keyNorm` and used only by `_carried`.
+  // `_norm` squashes non-alphanumerics but does not split camelCase, so `TaskId` becomes "taskid" — one word. That is
+  // fine for the scorer (which substring-matches) and fatal for a word-level test: with only a substring path, a
+  // 4-char floor made every SHORT REAL token orphaned ("id number" reported "nothing matches id" on a record full of
+  // ids). The floor needs word-splitting to be correct, not just a length rule.
+  const push = (path, val) => { const k = path.split('.').pop(); out.push({ path, keyNorm: _norm(k), keyWords: _camelWords(k), val }); };
   for (const [k, v] of Object.entries(row)) {
     push(k, v);
     const inner = Array.isArray(v) ? (v[0] && typeof v[0] === 'object' ? v[0] : null) : (v && typeof v === 'object' ? v : null);
@@ -64,7 +92,7 @@ function _shapeMatches(typeTok, val) {
   const s = String(val == null ? '' : val);
   if (!s) return false;
   if (typeTok === 'email') return _EMAIL_RE.test(s);
-  if (typeTok === 'phone') return _PHONE_RE.test(s);
+  if (typeTok === 'phone') return _looksPhone(s);
   if (typeTok === 'zip') return /\b\d{5}(?:-\d{4})?\b/.test(s);
   return false;
 }
@@ -77,18 +105,23 @@ function _shapeMatches(typeTok, val) {
 // silent tie-break picked whichever key the API happened to list first, so the same ask could look up phones
 // tomorrow. Candidates that never yielded a SCALAR in the sample (a container like `Contacts`, an always-null
 // field) are excluded — they can't be a lookup key, and picking one dead-ends every row at "no value".
-export function pickFieldPath(rows, fieldPhrase) {
+// v2.74.1882 — `askPhrase` is the ORIGINAL ask; `fieldPhrase` may be a rung of `fieldPhraseCandidates`' ladder, which
+// drops leading words. Without it this function cannot tell "PO number" from a bare "number": the ladder hands it
+// "number", every token matches, and a tie between TaskNumber and ClaimNumber looks earned while the one token that
+// carried the ask's meaning ("po") is gone. Defaults to `fieldPhrase` so every existing caller is unchanged.
+export function pickFieldPath(rows, fieldPhrase, askPhrase = fieldPhrase) {
   const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === 'object');
   if (!list.length) return null;
   const ptoks = _contentTokens(fieldPhrase);
   if (!ptoks.length) return null;
+  const asked = _contentTokens(askPhrase);
   const typeTok = ptoks.find((t) => _TYPE.has(t)) || null;
   // Sample the first few rows so a null-in-row-0 field still gets seen.
   const sample = list.slice(0, 5);
   const cands = new Map();   // path → {path, keyNorm, vals:[]}
   for (const row of sample) {
     for (const c of _candidatePaths(row)) {
-      const e = cands.get(c.path) || { path: c.path, keyNorm: c.keyNorm, vals: [] };
+      const e = cands.get(c.path) || { path: c.path, keyNorm: c.keyNorm, keyWords: c.keyWords || [], vals: [] };
       if (c.val != null && c.val !== '' && typeof c.val !== 'object') e.vals.push(c.val);
       cands.set(c.path, e);
     }
@@ -112,13 +145,45 @@ export function pickFieldPath(rows, fieldPhrase) {
     if (sc > 0) scored.push({ c, sc });
   }
   scored.sort((a, b) => b.sc - a.sc);
+  // Which of the ORIGINAL ask's tokens does a candidate actually carry? An ORPHAN is a token the user said that no
+  // tied candidate has. It does not change the outcome — the caller still asks — but it changes what may be CLAIMED:
+  // "PO number" ties TaskNumber|ClaimNumber on the generic token "number" while "po" is absent from the record, and
+  // saying *"'PO number' matches more than one field"* asserts a PO field exists and merely needs disambiguating.
+  // Reporting the orphan lets the caller offer the same candidates without the false schema claim.
+  // v2.74.1885 — A SHORT TOKEN MUST MATCH A WHOLE WORD. Substring matching on a 2-character token means almost any
+  // key "carries" it: live 074157 the same ask got two different answers on two records because "po" is inside
+  // ap-**po**intments, so `Appointments` being present decided whether the orphan fired. Record-dependent
+  // non-determinism, and worse than the consistent overclaim it replaced. The floor is not a new idea —
+  // `fieldPhraseCandidates` (Core/fieldRead.js:126) already refuses to emit a single-word rung under 4 chars for
+  // exactly this reason. When v1883 widened the orphan's SCOPE from the tied pair to all candidates it should have
+  // brought that floor with it.
+  const _MIN_SUBSTR = 4;
+  const _carried = (c) => asked.filter((t) => (c.keyWords || []).includes(t) || c.keyNorm.split(' ').includes(t) || (t.length >= _MIN_SUBSTR && c.keyNorm.includes(t)));
   const top = scored[0];
   if (top && top.sc >= 40) {
     const tied = scored.filter((x) => x.sc === top.sc);
-    if (tied.length > 1) return { ambiguous: true, candidates: tied.slice(0, 4).map((x) => ({ path: x.c.path })) };   // v1626 — ask, never guess
+    if (tied.length > 1) {
+      // v2.74.1882-b — ORPHAN OVER **ALL** CANDIDATES, not just the tied pair. Computed over the pair alone it said
+      // "nothing matches project" for "any project number on this?" while ProjectId, ProjectCode and ProjectName were
+      // all on the record — trading an overclaim for a FALSE DENIAL, which is the same fabricated-schema class the
+      // change exists to remove. The honest question is "does the record hold this token anywhere", and the function
+      // already answers it twelve lines down.
+      const orphan = asked.filter((t) => ![...cands.values()].some((c) => _carried(c).includes(t)));
+      return { ambiguous: true, orphan, candidates: tied.slice(0, 4).map((x) => ({ path: x.c.path })) };   // v1626 — ask, never guess
+    }
     return { path: top.c.path, matchedBy: 'name' };
   }
   // Value-shape fallback: no confident name match, but a TYPE token → the key whose sampled values match the shape.
+  // v2.74.1882-b — A QUALIFIER GATE WAS TRIED HERE AND REVERTED. The idea was: if the ask carried a non-type token no
+  // candidate key has ("homeowner" in "homeowner phone"), skip the fallback. Adversarial review killed it on two
+  // counts. (1) It contributes NOTHING to the live defect — `_looksPhone`'s anchoring alone returns null for the
+  // SearchField blob, so the gate only ever changes the outcome where a genuine shape match EXISTS, i.e. where it
+  // deletes correct answers: `{TicketId, Cell:'9195550134'}` + "homeowner phone" → null, a false absence after
+  // burning a per-row drill enrichment. And a qualifier is the NORM, not the exception — every fieldread ask in the
+  // live trace carried one. (2) It was a GLOBAL existence test, not a per-candidate constraint, so adding any
+  // qualifier-bearing key reopened the hole: `{…, HomeownerName, ProjectCode:'4451622-01-01'}` + "homeowner phone"
+  // returned the composite id. The correct constraint is per-candidate and belongs in the scan below, not as a
+  // precondition on it — left undone deliberately rather than shipped wrong.
   if (typeTok) {
     let vb = null, vn = 0;
     for (const c of cands.values()) {
@@ -245,7 +310,10 @@ export function valueShapeMismatch(values, hint) {
   if (!wantsEmail && !wantsPhone) return null;                                  // an untyped search — nothing to contradict
   const half = Math.ceil(vals.length / 2);
   const looksEmail = vals.filter((v) => _EMAIL_RE.test(v)).length >= half;
-  const looksPhone = vals.filter((v) => _PHONE_RE.test(v)).length >= half;
+  // v2.74.1882 — the same phone grammar as the shape fallback. `_PHONE_RE`'s unbounded digit-run said "looks like a
+  // phone" about a column of ids, which is exactly the mismatch this function exists to catch — so tightening it
+  // makes the detector STRICTER in the honest direction rather than changing its contract.
+  const looksPhone = vals.filter((v) => _looksPhone(v)).length >= half;
   if (wantsEmail && !looksEmail) return looksPhone ? 'phone-for-email' : 'not-email';
   if (wantsPhone && !looksPhone) return looksEmail ? 'email-for-phone' : 'not-phone';
   return null;

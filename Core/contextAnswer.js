@@ -32,6 +32,30 @@ export function nounForParam(param) {
 }
 
 /**
+ * Every endpoint some resolve spec names as its `via`. PURE.
+ *
+ * v2.74.1880 — the WRITE-THROUGH key. `_rideResolveVia` caches these payloads to resolve params, and until now the
+ * cache was only ever written by its OWN fetch, so an explicit read of the same endpoint (a "which division am I
+ * in" ask invokes `vs_state` for real) refreshed nothing: the answer on screen could be current while the scope
+ * every subsequent read defaults to stayed up to ten minutes old. Two paths to the same payload, only one of them
+ * learning from it. This set is how a caller recognises "the thing I just read IS what the resolver caches".
+ * Broader than `contextSpecsFor`, deliberately: that one needs a `defaultPath` to have an answer to give, while a
+ * cache refresh is worth doing for any via-target.
+ */
+export function viaTargets(catalog) {
+  const out = new Set();
+  for (const r of (Array.isArray(catalog) ? catalog : [])) {
+    const specs = (r && r.resolve && typeof r.resolve === 'object') ? r.resolve : null;
+    if (!specs) continue;
+    for (const spec of Object.values(specs)) {
+      const via = spec && spec.via ? String(spec.via).trim() : '';
+      if (via) out.add(via);
+    }
+  }
+  return out;
+}
+
+/**
  * The resolve specs for which THIS recipe is the state source — i.e. the payload just read is the object
  * `defaultPath` indexes into. Deduped by param name (one catalog spec is shared by every consumer leg, so the
  * same {param, spec} pair is reached many times over). PURE.

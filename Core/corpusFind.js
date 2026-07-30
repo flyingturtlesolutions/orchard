@@ -222,3 +222,68 @@ export function findVerdict({ matches = [], planned = 0, scanned = 0, failed = 0
   if (coverage !== 'partition') return { outcome: 'inconclusive', reason: 'coverage', ...base };
   return { outcome: 'none', ...base };
 }
+
+// `AddressLine1` → "address line1"; `Lot_Block_Phase` → "lot block phase". The product's field voice elsewhere.
+const _humanField = (k) => String(k == null ? '' : k).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * v2.74.1887 — THE NO-MATCH SENTENCE, and it NAMES THE SURFACE IT SEARCHED. PURE.
+ *
+ * Live (gl 2026-07-30 08:50) three asks in ninety seconds:
+ *     get any open warranty request that mentions a leaking dishwasher → "No match for “leaking dishwasher”
+ *                                                                        across all 121 divisions (status: open)."
+ * The filter runs over `drill.label`, which for `vs_warranty_tasks` is nine identifier/address fields
+ * (AddressLine1 · CityStateZip · TaskNumber · ClaimNumber · ProjectName · TicketId · TaskId · JobNumber ·
+ * SearchField). A description phrase cannot appear in ANY of them — task prose lives in `Instructions` /
+ * `VendorExplanation` on the DETAIL leg — so the scan was a guaranteed miss reported as a corpus-wide negative.
+ *
+ * `coverage: 'partition'` licences "isn't in any of them" for MEMBERSHIP (is this id in the corpus). It does not
+ * extend to CONTENT, because the searchable surface is not in the projection that was scanned. So an IDENTIFIER
+ * keeps the confident wording it earned, and a TEXT query says what it looked at and what it therefore cannot rule
+ * out — plus the composed next step, which turns a false negative into an offer.
+ */
+/**
+ * v2.74.1888 — THE SCAN'S NEGATIVE, for both FIND doors. PURE.
+ *
+ * `noMatchLine` below fixed this claim at the each-filter door and I marked the class closed on six unit tests. The
+ * very next live run took a DIFFERENT door — interpret left `divisionId` blank instead of binding `each`, so the ask
+ * walked the drill ladder into the synthetic scan — and got the untouched sentence:
+ *     "Searched all 484 division/status combinations — “soft switch” isn’t in any of them.
+ *      The number may be wrong, or the task may belong to an account you don’t have access to."
+ * Three defects in one line: the corpus-wide claim over a surface that cannot hold the phrase; *"the NUMBER may be
+ * wrong"* about a two-word description, with `kind=text` printed one line above it in the same trace; and 484 reads
+ * spent to get there. There were always THREE negatives in that block (`outcome==='none'`, `reason==='coverage'`, and
+ * the each-filter's) and I patched one — the lesson from the entry immediately before, broken while acting on it.
+ *
+ * So both scan negatives render HERE, and the identifier wording — which the partition genuinely earns, and which the
+ * v1879 "the number may be wrong" case exists for — is reachable only when the query IS an identifier.
+ */
+export function scanNegativeLine({ query = '', plan = 0, coverage = 'partition', slicePhrase = '', searchedFields = [], stale = '', cellNoun = 'combination' } = {}) {
+  const q = String(query == null ? '' : query);
+  const cells = `${plan} ${cellNoun}${plan === 1 ? '' : 's'}`;
+  const partition = coverage === 'partition';
+  if (classifyQuery(q).kind === 'identifier') {
+    return partition
+      ? `Searched all ${cells} — “${q}” isn’t in any of them${stale}. The number may be wrong, or the record may belong to an account you don’t have access to.`
+      : `Searched every one of the ${cells} available to me and didn’t find “${q}” — but ${slicePhrase || 'that list'} only covers part of the records, so it may exist outside it. Name a narrower scope if you know one.`;
+  }
+  const shown = (Array.isArray(searchedFields) ? searchedFields : []).filter((f) => typeof f === 'string' && f).map(_humanField);
+  const where = shown.length ? ` — the searchable text on a row is ${shown.slice(0, 5).join(' · ')}${shown.length > 5 ? ` (+${shown.length - 5} more)` : ''}` : '';
+  const limit = partition ? '' : ` And ${slicePhrase || 'that list'} only covers part of the records.`;
+  return `I read all ${cells} and none of them has “${q}” in its text${where}${stale}. A description or a note isn’t on these rows — it lives on each record — so this can’t rule that out.${limit}`;
+}
+
+export function noMatchLine({ query = '', labelFields = [], span = 'the rows read', status = '', rowCount = 0, remaining = 0 } = {}) {
+  const q = String(query == null ? '' : query);
+  const scope = `${span}${status ? ` (status: ${status})` : ''}`;
+  const tail = remaining > 0 ? ` Say “continue” for the rest (${remaining} more).` : '';
+  if (classifyQuery(q).kind === 'identifier') return `No match for “${q}” across ${scope}.${tail}`;
+  const fields = (Array.isArray(labelFields) ? labelFields : []).filter((f) => typeof f === 'string' && f);
+  const shown = fields.slice(0, 5).map(_humanField);
+  const more = fields.length > shown.length ? ` (+${fields.length - shown.length} more)` : '';
+  const searched = shown.length ? ` in what a list row carries — ${shown.join(' · ')}${more}` : '';
+  const offer = rowCount > 0
+    ? ` Descriptions and notes aren’t in the list — they’re on each record — so this can’t rule them out: say “read the instructions on each” to check the ${rowCount} row${rowCount === 1 ? '' : 's'} I did read.`
+    : '';
+  return `Nothing in ${scope} has “${q}”${searched}.${offer}${tail}`;
+}

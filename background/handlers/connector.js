@@ -25,7 +25,7 @@ import { providerScopes } from '../../Core/mcpServers.js';                      
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
 import { armRideAuthCapture, markEngineBusy } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js); FL-1c — SHOW_SOURCES busy-marks its driven navigation (Invariant #2)
 import { reportAuthSignal } from './connections.js';   // CP-1 (v2.74.1506) — every auth outcome feeds the connections registry (one write door)
-import { payloadShapeLine } from '../../Core/payloadShape.js';   // v1872 — the keys-only response shape, once per recipe per session (Invariant #1: `PAYLOAD ▸`)
+import { payloadShapeLine, payloadShapeKey } from '../../Core/payloadShape.js';   // v1872 — the keys-only response shape (Invariant #1: `PAYLOAD ▸`); v1888 — payloadShapeKey: the length-normalised comparison key, so a list's length is not a "new shape"
 import { assessLiveness } from '../../Core/connectionPresence.js';   // CP-1 — the json-liveness probe verdict (the ride-outcome→signal classifier moved into the VT-0 funnel, Core/vitals.js)
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
@@ -34,7 +34,7 @@ const _managed = new Map();                 // origin → { tabId, timer }
 const _lastOriginByAppHost = new Map();     // appHost → last concrete origin seen (lets a cold start open the right host)
 // v2.74.1872 — recipeIds whose response shape has already been logged. Same SW lifetime as the registry above,
 // which is the right scope: a reload is exactly when you want to re-see the shapes.
-const _payloadShapeSeen = new Set();
+const _payloadShapeSeen = new Map();   // v1887 — recipeId → the last PAYLOAD line emitted (keyed on the SHAPE, not on "seen")
 
 const _clearTimer = (rec) => { if (rec && rec.timer) { clearTimeout(rec.timer); rec.timer = null; } };
 async function _tabAlive(tabId) { try { const t = await chrome.tabs.get(tabId); return !!(t && t.id != null); } catch { return false; } }
@@ -1036,18 +1036,39 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             // roll-up cannot express.
             if (!(payload && payload.quiet && _ok)) {
               Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${_ok ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}`);
-              // v2.74.1872 — the KEYS-ONLY shape of what came back, ONCE PER RECIPE PER SESSION. `object{2}` above
-              // says a fetch succeeded and nothing about its structure, which is why "correct fetch, wrong field
-              // reaches prose" kept getting diagnosed as a routing bug — the one stage with no instrument absorbs
-              // the blame. A response's shape is a property of the RECIPE, not of the call, so once is enough and
-              // a 121-division fan-out costs one line, not 121. Paths + leaf TYPES only, never values; PII-shaped
-              // keys masked (Core/payloadShape.js). Limitation, stated: a recipe whose shape VARIES between calls
-              // (empty list vs populated) is only ever seen in its first form this session.
+              // v2.74.1872 — the KEYS-ONLY shape of what came back. `object{2}` above says a fetch succeeded and
+              // nothing about its structure, which is why "correct fetch, wrong field reaches prose" kept getting
+              // diagnosed as a routing bug — the one stage with no instrument absorbs the blame. Paths + leaf TYPES
+              // only, never values; PII-shaped keys masked (Core/payloadShape.js). A quiet fan-out skips this whole
+              // block, so a 121-division sweep still costs zero lines.
+              //
+              // v2.74.1887 — KEYED ON THE SHAPE, NOT ON "SEEN", and this is the second time the gate has been the
+              // bug rather than the instrument. A boolean per recipe hid the payload exactly when it was wanted:
+              // `vs_warranty_stats` had been logged in an earlier SW lifetime, so the two turns whose count
+              // contradicted the LIST leg (gl 08:50 — "1 open in Atlanta West" against `array[0]`) each printed
+              // nothing, and the contradiction stayed undiagnosable for a third pass. Comparing the LINE also
+              // retires the limitation this comment used to state: a recipe whose shape VARIES between calls (empty
+              // list vs populated, a nested container that only appears when non-empty) now emits each distinct form
+              // once instead of only its first, and says which are re-emissions.
+              // v2.74.1888 — TWO CORRECTIONS to that gate, both from its own first live run.
+              // (a) The key is the LENGTH-NORMALISED shape (`Core/payloadShape.payloadShapeKey`): array lengths are in
+              //     every path, so an empty list and a one-row list looked like different shapes and re-printed.
+              // (b) The key and the LABEL carry the ENDPOINT, because a resolve-via read borrows the CONSUMER's
+              //     recipeId — live, the `vs_state` access blob printed as `[vs_warranty_tasks]` and then alternated
+              //     with the real rows, which alone guaranteed a "changed" every turn. The endpoint's tail is enough
+              //     to tell them apart and is a path template, never data.
               const _rid = (payload && payload.recipeId) || null;
-              if (_ok && _rid && !_payloadShapeSeen.has(_rid)) {
-                _payloadShapeSeen.add(_rid);
-                const _pl = payloadShapeLine(_rid, reply && reply.value);
-                if (_pl) Logger.info('ride', _pl);
+              if (_ok && _rid) {
+                const _ep = String((payload && payload.endpoint) || '');
+                const _tail = _ep ? _ep.split('/').filter(Boolean).slice(-2).join('/') : '';
+                const _seenKey = `${_rid}|${_ep}`;
+                const _shapeKey = payloadShapeKey(reply && reply.value);
+                if (_shapeKey && _payloadShapeSeen.get(_seenKey) !== _shapeKey) {
+                  const _changed = _payloadShapeSeen.has(_seenKey);
+                  _payloadShapeSeen.set(_seenKey, _shapeKey);
+                  const _pl = payloadShapeLine(`${_rid}${_tail ? ` …/${_tail}` : ''}`, reply && reply.value);
+                  if (_pl) Logger.info('ride', _changed ? `${_pl}  (shape CHANGED for this endpoint)` : _pl);
+                }
               }
             }
           } catch { /* observability must never break the call */ }

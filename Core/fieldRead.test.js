@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates, resolveFieldKey } from './fieldRead.js';
+import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey } from './fieldRead.js';
 
 // Shaped after the real VendorSuite `Instructions` (HAR-verified): a date header, a numbered item with a
 // label ending in a colon, a lettered sub-item. Tabs are real in the source.
@@ -196,5 +196,34 @@ describe('fieldRead — resolveFieldKey: one answer to "what is this field calle
     for (const k of [null, undefined, [], {}, 'nope', 7]) assert.doesNotThrow(() => resolveFieldKey(k, 'x'));
     for (const p of [null, undefined, '', 7, {}]) assert.doesNotThrow(() => resolveFieldKey(REC, p));
     assert.equal(resolveFieldKey(REC, '').key, '');
+  });
+});
+
+describe('fieldRead — v1882: termFieldKey, for when the DOOR invented the {field, term} pair', () => {
+  // Live 210342: interpret is shipped no record-field vocabulary, so its only source of field names is the
+  // transcript. At 21:01 the only names it had seen were Instructions and VendorExplanation — IsPaid had not
+  // rendered yet — so "is it paid yet?" became {field:'VendorExplanation', term:'paid'} and the reply hunted the
+  // word "paid" through a paragraph while IsPaid:true sat unread.
+  const REC = { SearchField: 'x', TaskId: 1, IsPaid: true, Priority: 'Normal', TaskStatus: 'Open', Instructions: 'Deako to call h/owner', VendorExplanation: 'reached out 42966' };
+  it('THE LIVE CASE: term "paid" IS a field, and not a part of VendorExplanation', () => {
+    assert.equal(termFieldKey(REC, 'paid', 'VendorExplanation'), 'IsPaid');
+  });
+  it('declines when the term names no field — a synonym gap is not a field ("emergency" ≠ Priority)', () => {
+    assert.equal(termFieldKey(REC, 'emergency', 'Instructions'), '');
+  });
+  it('LEAVES THE LEGITIMATE CASE ALONE: a real section of a note is not a field', () => {
+    assert.equal(termFieldKey(REC, 'deako', 'Instructions'), '');
+  });
+  it('never re-enters on the field it already chose', () => {
+    assert.equal(termFieldKey(REC, 'instructions', 'Instructions'), '');
+    assert.equal(termFieldKey(REC, 'Instructions', 'Instructions'), '');
+  });
+  it('declines on an AMBIGUOUS term rather than picking — the caller keeps its own tie handling', () => {
+    assert.equal(termFieldKey({ TaskNumber: '01', ClaimNumber: '01' }, 'number', 'Instructions'), '');
+  });
+  it('degenerate input is safe', () => {
+    assert.equal(termFieldKey(REC, '', 'Instructions'), '');
+    assert.equal(termFieldKey(REC, null, 'Instructions'), '');
+    assert.equal(termFieldKey(null, 'paid', 'X'), '');
   });
 });

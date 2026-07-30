@@ -69,6 +69,21 @@ export function payloadPaths(value, { maxDepth = 5, maxPaths = 44 } = {}) {
   return { paths, truncated: total > paths.length, total, stopped };
 }
 
+/**
+ * v2.74.1888 — THE COMPARISON KEY, which is NOT the line. PURE.
+ *
+ * v1887 made the emit gate "re-print when the shape CHANGES", which was the right call — it produced the stats-payload
+ * diagnosis on its first turn — and it is too sensitive as written: ARRAY LENGTHS are part of a path, so an empty list
+ * and a one-row list read as different shapes. Live 09:30 that cost four lines for one recipe in fifteen seconds,
+ * three of them marked "shape CHANGED" for `[0]` vs `[1].SearchField…`. Lengths are worth SEEING and worthless for
+ * DECIDING, so the key normalises them out and the line keeps them.
+ */
+export function payloadShapeKey(value, opts) {
+  if (!value || typeof value !== 'object') return '';
+  const { paths } = payloadPaths(value, opts);
+  return paths.map((p) => p.replace(/\[\d+\]/g, '[n]')).join('|');
+}
+
 /** The trace line. `PAYLOAD ▸ [recipeId] a.b:number · a.c[12].Name:string · …+9 more`. PURE. */
 export function payloadShapeLine(recipeId, value, opts) {
   if (!value || typeof value !== 'object') return null;   // a scalar/null reply has no shape worth a line (`:null` says nothing)
