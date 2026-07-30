@@ -51,6 +51,13 @@ const ENTRY_FIELD_MAP = new Set([
   'itemUrl', 'listUrl', 'displayId', 'joinKey', 'writeMap', 'pulse', 'drill', 'resolve',
   // consumed upstream of the leg, by name:
   'console',           // signInLandingPath (connectorRecipes.js:926) — the human sign-in landing path (v1704 ZD `/agent`); a connections-flow field, never a leg field
+  // v2.74.1877 — `coverage` is read by `coverageOf()` (Core/synthEntity.js) from the CATALOG, keyed by recipe id,
+  // and DELIBERATELY never reaches the leg. That is the design, not an oversight: it decides whether a completed
+  // scan may say "isn't in any of them" (a partition) or only "not in what I read" (a selection), and putting it
+  // on the leg would expose it to the three-hop drop this seal exists to catch. Reading from the catalog makes the
+  // seeded path irrelevant, and an unknown recipe resolves to `selection` — so a DROP would weaken a sentence
+  // rather than falsify one. The seal caught its absence here on the first run, which is the ratchet working.
+  'coverage',          // coverageOf (Core/synthEntity.js) — partition-vs-selection; catalog-read by id, never a leg field, fail-safe when absent
 ]);
 
 const ENTRIES = CONNECTOR_RECIPES.filter((e) => e && e.id && e.appHost);

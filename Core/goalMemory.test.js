@@ -7,6 +7,7 @@ import {
   ITEM_KINDS, EPISTEMIC, TIERS, tierRank, nextTier,
   normalizeBelief, normalizeDelta, normalizeMemoryItem, isBelief, isDelta,
   canPromote, promote, standingRuleFromText, capabilityOutcomeItem, looksLikeStandingRule, retireActFailDeltas,
+  capabilityShapeKey, retireStaleShapeDeltas,   // v2.74.1870 — a verdict must not outlive the code it judged
 } from './goalMemory.js';
 
 describe('goalMemory — enums + tier helpers', () => {
@@ -242,5 +243,53 @@ describe('goalMemory — retireActFailDeltas (v2.74.1523, the re-teach consumes 
     assert.equal(next.length, 2);
     assert.deepEqual(retireActFailDeltas(null, ASK), { items: [], removed: 0 });
     assert.deepEqual(retireActFailDeltas([failFor(ASK)], '').removed, 0);
+  });
+});
+
+// v2.74.1870 — A VERDICT MUST NOT OUTLIVE THE CODE IT JUDGED (the gap v1810 named and nothing closed). Live
+// 192848: `read warranty task 4867009` — working end to end by then — clarified at 0.4 citing a lesson banked
+// four routing versions earlier, and because it clarified the honest miss never rendered, so the cross-division
+// button could not be reached for a fourth consecutive pass.
+describe('capabilityShapeKey / retireStaleShapeDeltas (v2.74.1870)', () => {
+  const LEG = { key: 'me.vs.task@host', tool: { endpoint: '/api/Task/{taskId}' }, params: ['taskId'] };
+  it('the key is leg + endpoint + sorted param names — the routing surface a failure is ABOUT', () => {
+    assert.equal(capabilityShapeKey(LEG), 'me.vs.task@host|/api/Task/{taskId}|taskId');
+    assert.equal(capabilityShapeKey({ ...LEG, params: ['b', 'a'] }), capabilityShapeKey({ ...LEG, params: ['a', 'b'] }),
+      'param ORDER is not part of the shape — only the set');
+    assert.equal(capabilityShapeKey(null), '');
+    assert.equal(capabilityShapeKey({}), '');
+  });
+  it('paramSchema counts too (a projected leg carries its requirements there, not in params[])', () => {
+    const viaSchema = { key: 'k', tool: { endpoint: '/e' }, paramSchema: { properties: { q: {}, r: {} } } };
+    assert.equal(capabilityShapeKey(viaSchema), 'k|/e|q,r');
+  });
+  it('an act-fail whose shape MOVED retires; the same shape survives', () => {
+    const fail = { id: '1', kind: 'delta', provenance: 'act-fail', ref: 'me.vs.task@host', shape: capabilityShapeKey(LEG) };
+    assert.equal(retireStaleShapeDeltas([fail], { 'me.vs.task@host': capabilityShapeKey(LEG) }).removed, 0, 'unchanged routing keeps its lesson');
+    const moved = capabilityShapeKey({ ...LEG, tool: { endpoint: '/api/Tasks/{divisionId}/{status}' } });
+    const out = retireStaleShapeDeltas([fail], { 'me.vs.task@host': moved });
+    assert.equal(out.removed, 1, 'the endpoint moved — the verdict was about code that no longer exists');
+    assert.deepEqual(out.items, []);
+  });
+  it('NARROW by construction: no map, absent ref, or a pre-v1870 lesson without a shape all SURVIVE', () => {
+    const withShape = { id: '1', kind: 'delta', provenance: 'act-fail', ref: 'r', shape: 'old' };
+    const preV1870 = { id: '2', kind: 'delta', provenance: 'act-fail', ref: 'r' };            // no shape banked
+    assert.equal(retireStaleShapeDeltas([withShape], null).removed, 0, 'no shapes map → nothing retires');
+    assert.equal(retireStaleShapeDeltas([withShape], {}).removed, 0, 'ref not in the palette → absence is not change');
+    assert.equal(retireStaleShapeDeltas([preV1870], { r: 'new' }).removed, 0, 'silence is not evidence of staleness');
+  });
+  it('only act-fail is touched — beliefs and user rules are never retired by shape', () => {
+    const belief = { id: '1', kind: 'belief', provenance: 'act-ok', ref: 'r', shape: 'old' };
+    const rule = { id: '2', kind: 'delta', body: 'keep replies terse', shape: 'old' };
+    assert.equal(retireStaleShapeDeltas([belief, rule], { r: 'new' }).removed, 0);
+  });
+  it('a FAILURE banks its shape; a SUCCESS does not need one', () => {
+    const bad = capabilityOutcomeItem('read task 5', 'me.vs.task@host', false, LEG);
+    assert.equal(bad.provenance, 'act-fail');
+    assert.equal(bad.shape, capabilityShapeKey(LEG));
+    const good = capabilityOutcomeItem('read task 5', 'me.vs.task@host', true, LEG);
+    assert.equal(good.provenance, 'act-ok');
+    assert.equal(good.shape, undefined, 'a positive belief is not retired by routing change — it is suppressed by evidence');
+    assert.equal(capabilityOutcomeItem('g', 'r', false).shape, undefined, 'no leg → no shape, and the lesson still banks');
   });
 });

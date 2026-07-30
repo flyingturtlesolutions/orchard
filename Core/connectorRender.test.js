@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
+import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -453,5 +453,36 @@ describe('CX-9k — displayId reaches the case surfaces (dossierLines + fanoutIt
     const { items } = fanoutItems({ results: [ROW, { ...ROW, TicketId: 555 }] }, 20, { displayId: ['TicketId'] });
     assert.ok(items[0].detail.startsWith('Id: 4867009'), items[0].detail.split('\n')[0]);
     assert.ok(items[1].detail.startsWith('Id: 555'));
+  });
+});
+
+describe('connectorRender — rowsFromValue: a single record IS a collection of one (v2.74.1879)', () => {
+  // The live shape, four times over (174833 · 190346 · 194001): a warranty task DETAIL record. `primaryList`
+  // returns null for it by design — its Appointments[] is a child collection, not "the data list" — and nine
+  // consumers read that null as "nothing to read", answering "the list came back empty" about a record they held.
+  const TASK = { TaskId: 10835071, TicketId: '4867009', AddressLine1: '1091 Misty Creek Drive', Status: 'Closed', Appointments: [{ Start: 'x', IsCanceled: false }] };
+  it('a record root yields ONE row — not zero', () => {
+    assert.equal(primaryList(TASK), null, 'primaryList still declines, correctly');
+    const rows = rowsFromValue(TASK);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].TicketId, '4867009', 'and it is the TASK, not its Appointments[]');
+  });
+  it('a real list is still the list', () => {
+    const listed = { results: [{ TaskId: 1 }, { TaskId: 2 }, { TaskId: 3 }] };
+    assert.equal(rowsFromValue(listed).length, 3);
+  });
+  it('a list wins over the record fallback when both could apply', () => {
+    const both = { Id: 7, Name: 'container', items: [{ Id: 1 }, { Id: 2 }] };
+    const rows = rowsFromValue(both);
+    assert.equal(rows.length, 2, 'the child list is the collection here, not the container');
+  });
+  it('an EMPTY list stays empty — the caller’s honest-empty must survive', () => {
+    assert.deepEqual(rowsFromValue({ results: [] }), []);
+    assert.deepEqual(rowsFromValue({}), []);
+    assert.deepEqual(rowsFromValue(null), []);
+    assert.deepEqual(rowsFromValue(undefined), []);
+  });
+  it('a bare array passes through', () => {
+    assert.equal(rowsFromValue([{ Id: 1 }, { Id: 2 }]).length, 2);
   });
 });

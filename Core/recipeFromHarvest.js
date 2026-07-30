@@ -203,6 +203,34 @@ export function pathAligns(recipeEndpoint, candEndpoint) {
   if (!rs.length || rs.length !== cs.length) return false;
   return rs.every((seg, i) => seg.includes('{') || cs[i].includes('{') || seg.toLowerCase() === cs[i].toLowerCase());
 }
+/**
+ * Drop palette legs whose endpoint is a CONCRETE INSTANCE of another leg's template. PURE.
+ *
+ * v2.74.1879 — live 194001: `how many jobs am I sitting on` routed to
+ * `harvest_get_api_vendor_dashboard_statistic_83` and answered *"You have 1 job."* Division **83 is in the leg id**:
+ * that leg can only ever answer for Atlanta West, and it outranked the curated `vs_warranty_stats` at
+ * `/api/Vendor/Dashboard/Statistic/{divisionId}/Warranty`, which takes the division as a parameter and could have
+ * answered for any of the 121. A harvested capture froze one call and then shadowed the general form of itself.
+ *
+ * The templated leg strictly DOMINATES: it can do everything the frozen instance can, plus the rest of the axis. So
+ * this drops rather than demotes. `pathAligns` (above, the route-heal matcher — the template IS the pattern) already
+ * decides instance-of, which is why this is six lines and not a new idea.
+ * Narrow by construction: same host, same method, the survivor must be templated, the dropped one must NOT be.
+ */
+export function dropShadowedLegs(legs) {
+  const list = Array.isArray(legs) ? legs.filter(Boolean) : [];
+  const ep = (l) => String((l.tool && l.tool.endpoint) || '');
+  const host = (l) => String((l.tool && (l.tool.appHost || l.tool.origin)) || '').toLowerCase();
+  const method = (l) => String((l.tool && l.tool.method) || 'GET').toUpperCase();
+  const templated = list.filter((l) => ep(l).includes('{'));
+  if (!templated.length) return list;
+  return list.filter((l) => {
+    const e = ep(l);
+    if (!e || e.includes('{')) return true;                       // templated legs are never the shadowed one
+    return !templated.some((t) => host(t) === host(l) && method(t) === method(l) && pathAligns(ep(t), e));
+  });
+}
+
 
 /**
  * Score a TEMPLATED candidate shape ({method, endpoint}) against a recipe record. PURE, deterministic integers.

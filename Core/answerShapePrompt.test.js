@@ -123,3 +123,32 @@ describe('answerShapePrompt — parseAnswerShapeOutput', () => {
     assert.deepEqual(parseAnswerShapeOutput('{"answer":""}'), { answer: null, showList: false });
   });
 });
+
+// v2.74.1862 — the FLAT-RECORD probe. Live 172156/172205: vs_versions returned eleven real fields and the
+// shaper told the user "No VendorSuite build version data is available" — the husk class (v1436, v1561) one
+// probe earlier, and the only variant that licenses asserting ABSENCE.
+describe('readShapeFacts — a flat record is still a record (v2.74.1862)', () => {
+  const VERSIONS = { AccountManagementVersion: '1.2', WarrantyVersion: '3.4', WebVersion: '5.6', Environment: 'PROD', ServiceMachineName: 'SVC01' };
+  it('THE LIVE CASE: a payload of plain scalars counts as ONE record, not empty', () => {
+    const f = readShapeFacts(VERSIONS);
+    assert.equal(f.kind, 'object');
+    assert.equal(f.count, 1, 'count:0 is what made the shaper deny the data it was holding');
+    assert.equal(f.sampleN, 1);
+  });
+  it('and its VALUES survive the projection — the answer must be able to state them', () => {
+    const shown = JSON.stringify(readShapeFacts(VERSIONS).sample[0]);
+    assert.match(shown, /PROD/);
+    assert.match(shown, /3\.4/);
+  });
+  it('`empty` is reserved for payloads that genuinely have no content', () => {
+    for (const v of [null, undefined, {}, { a: '', b: null }, []]) {
+      assert.equal(readShapeFacts(v).kind, 'empty', `${JSON.stringify(v)} should read empty`);
+      assert.equal(readShapeFacts(v).count, 0);
+    }
+  });
+  it('lists and enveloped records are untouched by the fallback', () => {
+    assert.equal(readShapeFacts({ rows: [{ id: 1 }, { id: 2 }] }).kind, 'list');
+    assert.equal(readShapeFacts({ rows: [{ id: 1 }, { id: 2 }] }).count, 2);
+    assert.equal(readShapeFacts({ ticket: { id: 7, subject: 'x' } }).count, 1);
+  });
+});

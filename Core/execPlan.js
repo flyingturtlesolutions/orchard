@@ -31,6 +31,12 @@ const keyOf = legRef;
  */
 export function planExec(leg, params = {}, ctx = {}) {
   const plan = _planExec(leg, params, ctx);
+  // v2.74.1862 — carry the leg's PARAM SCHEMA on a session-ride payload so the executor's unfilled-param refusal
+  // can name the legal values it already knows ("which status? new / open / fixed / closed" instead of a bare
+  // "tell me which status"). Declaration-only — never values, never a new decision; the executor reads `enum`.
+  if (plan && plan.ok && plan.channel === 'INVOKE_SESSION' && leg && leg.paramSchema) {
+    plan.payload = { ...plan.payload, paramSchema: leg.paramSchema };
+  }
   // v2.74.1115 — stamp the human NAME so the panel's HITL confirm names WHICH capability ("run 'Search for
   // media content'…?") instead of a uuid; harmless on the dispatch path.
   const name = (leg && (leg.name || leg.key || leg.capabilityId || leg.op)) || null;

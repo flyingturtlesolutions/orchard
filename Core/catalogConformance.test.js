@@ -10,11 +10,12 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  auditGateAxes, auditIdentity, auditRecipeLegibility, auditPaletteSafety, runCatalogAudit,
+  auditGateAxes, auditIdentity, auditRecipeLegibility, auditPaletteSafety, auditRouterLegibility, runCatalogAudit,
   PALETTE_SAFETY, WRITE_VERB_RE, isWriteShaped,
 } from './catalogConformance.js';
 import { CONNECTOR_RECIPES } from './connectorRecipes.js';
 import { BUILTIN_LEGS } from './palette.js';
+import { ROUTER_HINTS } from './routerHints.js';   // v2.74.1862 — the router-facing hints the legibility audit seals
 import { SAFETY_CLASSES, safetyClassForMethod } from './rideRecipe.js';
 
 describe('catalogConformance — the REAL catalog is clean (A-0a born green, kept green)', () => {
@@ -40,7 +41,7 @@ describe('catalogConformance — the REAL catalog is clean (A-0a born green, kep
   });
 
   it('the aggregate sweep is clean and counts what it swept', () => {
-    const { violations, counts } = runCatalogAudit({ recipes: CONNECTOR_RECIPES, legs: BUILTIN_LEGS });
+    const { violations, counts } = runCatalogAudit({ recipes: CONNECTOR_RECIPES, legs: BUILTIN_LEGS, hints: ROUTER_HINTS });   // v1862 — the sweep now includes router legibility, so it needs the hints
     assert.deepEqual(violations, []);
     assert.equal(counts.recipes, CONNECTOR_RECIPES.length);
     assert.equal(counts.legs, BUILTIN_LEGS.length);
@@ -111,5 +112,41 @@ describe('catalogConformance — the safety DERIVATION and enums stay closed (th
     assert.ok(isWriteShaped({ key: 'X', name: 'Delete a record' }), 'name verbs still count');
     assert.ok(!isWriteShaped({ key: 'OPEN_CASE', name: 'Open a case' }), '"open" deliberately absent — a case stays cheap (PP-3)');
     assert.ok(!isWriteShaped({ key: 'REVIEW_QUEUE', name: 'Review queue' }), 'review is analysis, not a write');
+  });
+});
+
+// v2.74.1862 — ROUTER LEGIBILITY. The gap this closes was invisible to every check above precisely because they
+// all read the catalog against ITSELF; this one reads it against what the ROUTER actually receives.
+describe('auditRouterLegibility (v2.74.1862) — authored text the router never sees is a violation', () => {
+  it('the REAL catalog is clean — every clipped does declares a routerHint', () => {
+    assert.deepEqual(auditRouterLegibility(CONNECTOR_RECIPES, ROUTER_HINTS), []);
+  });
+  it('every declared hint fits the budget it exists to fit', () => {
+    for (const [id, h] of Object.entries(ROUTER_HINTS)) assert.ok(h.length <= 140, `${id}: ${h.length} chars`);
+  });
+  // STANDING RED-PROOFS — each asserts the check can FAIL, so it is a check and not a hope.
+  it('a clipped does with NO hint is caught, and the message names the shortfall', () => {
+    const long = `x${'y'.repeat(200)} — ${'z'.repeat(200)}`;
+    const v = auditRouterLegibility([{ id: 'clipme', does: long }], {});
+    assert.equal(v.length, 1);
+    assert.match(v[0], /clipme/);
+    assert.match(v[0], /routerHint/);
+  });
+  it('the same entry WITH a hint passes', () => {
+    const long = `x${'y'.repeat(200)} — ${'z'.repeat(200)}`;
+    assert.deepEqual(auditRouterLegibility([{ id: 'clipme', does: long }], { clipme: 'short and pointed' }), []);
+  });
+  it('an over-budget hint is caught — a hint too long to render is the bug it prevents', () => {
+    const v = auditRouterLegibility([{ id: 'a', does: 'short' }], { a: 'q'.repeat(141) });
+    assert.equal(v.length, 1);
+    assert.match(v[0], /over the 140 budget/);
+  });
+  it('a hint naming no recipe is ROT, caught from the other direction', () => {
+    const v = auditRouterLegibility([{ id: 'a', does: 'short' }], { ghost: 'orphan' });
+    assert.equal(v.length, 1);
+    assert.match(v[0], /rot/);
+  });
+  it('a short does needs no hint (the common case stays quiet)', () => {
+    assert.deepEqual(auditRouterLegibility([{ id: 'a', does: 'a short does that fits' }], {}), []);
   });
 });

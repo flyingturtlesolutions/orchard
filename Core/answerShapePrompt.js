@@ -57,6 +57,20 @@ export function readShapeFacts(value, { sampleN = 12 } = {}) {
   }
   const single = (list && list.length === 1) ? list[0] : primaryObject(value);   // a single lookup → detailed
   if (single) return { kind: 'object', count: 1, sampleN: 1, sample: [detailed(single)] };
+  // v2.74.1862 — A FLAT RECORD IS STILL A RECORD. Live 172156/172205: `vs_versions` returned eleven real fields
+  // (WarrantyVersion, WebVersion, Environment, ServiceMachineName…) and BOTH probes above missed it — no list,
+  // and primaryObject looks for a nested record — so this fell to `empty`, the shaper was handed count:0, and
+  // it obeyed its own rule ("use the provided count VERBATIM") to tell the user *"No VendorSuite build version
+  // data is available"* over data it was holding. The same husk-class as v1436 (rows that matched no key
+  // vocabulary) and v1561 (contacts whose scalars were projected away), one probe earlier: the failure is
+  // always "the projection found nothing, so we reported nothing exists". A payload of plain scalars is a
+  // record with no envelope — every config / settings / health / totals read on any connector has this shape.
+  if (value && typeof value === 'object' && !Array.isArray(value)
+      && Object.values(value).some((v) => v != null && v !== '' && typeof v !== 'object')) {
+    return { kind: 'object', count: 1, sampleN: 1, sample: [detailed(value)] };
+  }
+  // Reaching here now means the payload GENUINELY has no content — which is what `empty` must be reserved for,
+  // because downstream it is licence to assert absence to the user.
   return { kind: 'empty', count: 0, sampleN: 0, sample: [] };
 }
 

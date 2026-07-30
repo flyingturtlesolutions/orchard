@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseUrl, pathKey, templatePath, templateQuery, isIdentityCall, recipesFromHarvest, isNoiseCapture, sanitizeCaptureHeaders, templateHeaders, pathAligns, scoreCandidateShape, matchCaptureToRecipe, healedShapeFor, recipeHealDiff, healProposalsFromCaptures } from './recipeFromHarvest.js';
+import { parseUrl, pathKey, templatePath, templateQuery, isIdentityCall, recipesFromHarvest, isNoiseCapture, sanitizeCaptureHeaders, templateHeaders, pathAligns, dropShadowedLegs, scoreCandidateShape, matchCaptureToRecipe, healedShapeFor, recipeHealDiff, healProposalsFromCaptures } from './recipeFromHarvest.js';
 
 describe('recipeFromHarvest — isNoiseCapture (v2.74.1300 recipe-worthiness)', () => {
   it('drops static asset GETs (JS bundles, fonts, images) + their cache-bust dups', () => {
@@ -250,5 +250,43 @@ describe('RH-1c (v2.74.1567) — match captures to drift-suspect recipes, propos
   });
   it('healedShapeFor: identical shape (nothing drifted) → null (no busywork proposal)', () => {
     assert.equal(healedShapeFor({ method: 'GET', endpoint: '/v3/calls' }, { method: 'GET', endpoint: '/v3/calls', params: [] }), null);
+  });
+});
+
+describe('recipeFromHarvest — dropShadowedLegs: a frozen instance never outranks its template (v2.74.1879)', () => {
+  const leg = (id, endpoint, extra = {}) => ({ key: id, tool: { recipeId: id, endpoint, method: 'GET', appHost: 'vendorsuite.drhorton.com', ...extra } });
+  // the live 194001 pair: the harvested capture froze division 83 into its own id and beat the general form
+  const CURATED = leg('vs_warranty_stats', '/api/Vendor/Dashboard/Statistic/{divisionId}/Warranty');
+  const FROZEN = leg('harvest_get_api_vendor_dashboard_statistic_83', '/api/Vendor/Dashboard/Statistic/83/Warranty');
+
+  it('drops the frozen instance and keeps the template', () => {
+    const out = dropShadowedLegs([FROZEN, CURATED]).map((l) => l.tool.recipeId);
+    assert.deepEqual(out, ['vs_warranty_stats']);
+  });
+  it('order does not matter', () => {
+    assert.equal(dropShadowedLegs([CURATED, FROZEN]).length, 1);
+  });
+  it('keeps a harvested leg with NO curated equivalent — that is the point of harvesting', () => {
+    const orphan = leg('harvest_get_api_something_else', '/api/Vendor/Something/Else');
+    assert.equal(dropShadowedLegs([orphan, CURATED]).length, 2);
+  });
+  it('never drops a templated leg, even if two templates align', () => {
+    const twin = leg('other_stats', '/api/Vendor/Dashboard/Statistic/{id}/Warranty');
+    assert.equal(dropShadowedLegs([CURATED, twin]).length, 2);
+  });
+  it('a different HOST or METHOD does not shadow', () => {
+    const otherHost = leg('h2', '/api/Vendor/Dashboard/Statistic/83/Warranty', { appHost: 'other.example.com' });
+    assert.equal(dropShadowedLegs([otherHost, CURATED]).length, 2);
+    const otherMethod = leg('h3', '/api/Vendor/Dashboard/Statistic/83/Warranty', { method: 'POST' });
+    assert.equal(dropShadowedLegs([otherMethod, CURATED]).length, 2);
+  });
+  it('a different path SHAPE does not shadow (segment count must match)', () => {
+    const deeper = leg('h4', '/api/Vendor/Dashboard/Statistic/83/Warranty/Extra');
+    assert.equal(dropShadowedLegs([deeper, CURATED]).length, 2);
+  });
+  it('degenerate input is safe', () => {
+    assert.deepEqual(dropShadowedLegs(null), []);
+    assert.deepEqual(dropShadowedLegs([]), []);
+    assert.equal(dropShadowedLegs([{ key: 'x' }]).length, 1, 'a leg with no tool/endpoint survives');
   });
 });

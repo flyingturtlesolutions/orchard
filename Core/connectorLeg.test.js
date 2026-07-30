@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey, missingRequiredParams } from './connectorLeg.js';
+import { recipeLegs } from './connectorRecipes.js';   // v2.74.1864 — real projected legs for the leg-shape assertions
 import { toOfferedLeg } from './palette.js';
 import { CONNECTOR_RECIPES } from './connectorRecipes.js';   // v2.74.1854 — the pre-flight gate proves itself against the REAL catalog
 
@@ -228,5 +229,34 @@ describe('v2.74.1854 — missingRequiredParams: the pre-flight gate reads the A-
     assert.ok(rec, 'recipe exists');
     assert.deepEqual(missingRequiredParams(rec, { query: '' }), ['query']);
     assert.deepEqual(missingRequiredParams(rec, { query: 'smart switch' }), []);
+  });
+});
+
+// v2.74.1864 — the reader shipped at v1854 read only `tool.params`, which exists on a RECIPE and nowhere on a
+// projected LEG — so both live callers (which pass a leg) got "nothing missing" for every connector leg it was
+// meant to guard. Inert for ten versions; found only when the v1863 redirect's status seed silently did nothing.
+describe('missingRequiredParams — reads a LEG as well as a recipe (v2.74.1864)', () => {
+  const legOf = (id) => recipeLegs({ trusted: true }).find((l) => l && l.tool && l.tool.recipeId === id);
+  it('THE INERT CASE: the v1854 shopify gate fires on a LEG now, exactly as it always did on a recipe', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_search_products');
+    assert.deepEqual(missingRequiredParams(rec, { query: '' }), ['query'], 'recipe shape — worked all along');
+    assert.deepEqual(missingRequiredParams(legOf('shopify_search_products'), { query: '' }), ['query'], 'leg shape — returned [] before this fix');
+  });
+  it('a resolver-backed param is never "missing" when blank — blank IS its declared value', () => {
+    // divisionId is required:true AND carries a `resolve` spec whose defaultPath means "your current division".
+    // Without this exemption, un-inerting the reader would have blocked the flagship ask with its own gate.
+    assert.deepEqual(missingRequiredParams(legOf('vs_warranty_tasks'), { divisionId: '', status: 'open' }), []);
+    assert.deepEqual(missingRequiredParams(legOf('vs_warranty_tasks'), { status: 'open' }), []);
+  });
+  it('a genuinely missing required param is still reported (the guard still guards)', () => {
+    assert.deepEqual(missingRequiredParams(legOf('vs_warranty_tasks'), { address: '4886921' }), ['status']);
+  });
+  it('the urlParam slot stays excluded on a leg (the executor fills it from the ride tab)', () => {
+    assert.deepEqual(missingRequiredParams(legOf('shopify_order'), { order: '69872' }), []);
+  });
+  it('junk in → [] out, from either shape', () => {
+    for (const x of [null, undefined, 0, 'x', {}]) assert.deepEqual(missingRequiredParams(x, {}), []);
+    assert.deepEqual(missingRequiredParams({ paramSchema: { required: ['a'] } }, { a: 'v' }), []);
+    assert.deepEqual(missingRequiredParams({ paramSchema: { required: ['a'] } }, {}), ['a']);
   });
 });

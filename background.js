@@ -1918,10 +1918,20 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 // v1467 (obs #7) — the read-only VIEWER pump (Studio/panel poll getters) drowned the trace: one Studio open emitted
 // ~60 `Message:` DEBUG lines (~40% of a day's exported log), burying the decision signal. These carry zero decision
 // content — drop them from the log entirely (the handlers still run; a FAILING getter logs from its own handler).
-const _QUIET_MSG = new Set(['GET_SITEMAP', 'GET_GROUND_CHROME', 'GET_OUTCOMES', 'GET_RIDE_RECIPES', 'GET_LOGS', 'LOG_ENTRY', 'GET_MONITOR_CONSENT', 'CAPABILITY_LIST_INVOCATIONS', 'GET_LEG_OVERVIEW', 'GET_RIDE_ARMED_GROUNDS']);
+// v2.74.1858 — PANEL_PING joins them (gl 121742: 444 of 508 lines — 87% of a 74-minute trace — were the
+// 10-second panel heartbeat, and the ring is FINITE: at 6 lines/min an idle panel evicts the very decisions a
+// later grab needs. Zero decision content by construction; the panel's liveness is already legible from the
+// work it does. Same rule as the v1674 per-item INVOKE drop, one level down: a marker that fires on a CLOCK
+// must never occupy the ring.)
+const _QUIET_MSG = new Set(['GET_SITEMAP', 'GET_GROUND_CHROME', 'GET_OUTCOMES', 'GET_RIDE_RECIPES', 'GET_LOGS', 'LOG_ENTRY', 'GET_MONITOR_CONSENT', 'CAPABILITY_LIST_INVOCATIONS', 'GET_LEG_OVERVIEW', 'GET_RIDE_ARMED_GROUNDS', 'PANEL_PING']);
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, payload } = message;
-  if (!_QUIET_MSG.has(type)) Logger.debug('background', `Message: ${type}`);
+  // v2.74.1861 — a QUIETED per-item call skips its dispatch line too. v1860 suppressed the fan-out's `INVOKE ▸`
+  // INFO lines but left this DEBUG line firing 1:1 — so a 121-way fan-out still wrote 121 ring entries and still
+  // evicted the window's earlier asks (gl 162926: the trace opens on 20 orphan `Message: INVOKE_SESSION` lines,
+  // the tail of a fan-out whose boot line and first asks were already gone). Half a fix is a fix that measures
+  // as done. Only the per-item flag is honored, so every ordinary dispatch still logs exactly as before.
+  if (!_QUIET_MSG.has(type) && !(payload && payload.quiet === true)) Logger.debug('background', `Message: ${type}`);
 
   // Registry dispatch (R1): SG handlers call sendResponse themselves (verbatim with the old switch); the
   // `.catch` is a safety net if a handler rejects before responding. Checked before the legacy switch;

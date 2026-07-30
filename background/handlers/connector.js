@@ -25,12 +25,16 @@ import { providerScopes } from '../../Core/mcpServers.js';                      
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
 import { armRideAuthCapture, markEngineBusy } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js); FL-1c — SHOW_SOURCES busy-marks its driven navigation (Invariant #2)
 import { reportAuthSignal } from './connections.js';   // CP-1 (v2.74.1506) — every auth outcome feeds the connections registry (one write door)
+import { payloadShapeLine } from '../../Core/payloadShape.js';   // v1872 — the keys-only response shape, once per recipe per session (Invariant #1: `PAYLOAD ▸`)
 import { assessLiveness } from '../../Core/connectionPresence.js';   // CP-1 — the json-liveness probe verdict (the ride-outcome→signal classifier moved into the VT-0 funnel, Core/vitals.js)
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
 const IDLE_CLOSE_MS = 8000;                 // close an Orchard-opened tab this long after its last ride (burst-reuse window)
 const _managed = new Map();                 // origin → { tabId, timer }
 const _lastOriginByAppHost = new Map();     // appHost → last concrete origin seen (lets a cold start open the right host)
+// v2.74.1872 — recipeIds whose response shape has already been logged. Same SW lifetime as the registry above,
+// which is the right scope: a reload is exactly when you want to re-see the shapes.
+const _payloadShapeSeen = new Set();
 
 const _clearTimer = (rec) => { if (rec && rec.timer) { clearTimeout(rec.timer); rec.timer = null; } };
 async function _tabAlive(tabId) { try { const t = await chrome.tabs.get(tabId); return !!(t && t.id != null); } catch { return false; } }
@@ -57,6 +61,21 @@ function _releaseEphemeralTab(origin) {
 }
 
 // Best-effort: wait for a freshly opened tab to finish loading, so the origin context (and a write's CSRF meta) exists.
+// v2.74.1862 — an unfilled-param refusal NAMES ITS CHOICES when the recipe declares an enum. Live 171211: "get
+// everything on that warranty task" bound an address but no status and got *"needs status. tell me which status
+// and I'll fetch it"* — honest, and a dead end, because nothing on screen says a status is one of four words.
+// DELIBERATELY NOT A DEFAULT: defaulting `status` to "open" would silently miss the closed task the sibling ask
+// actually wanted (live: task 4867009 is Closed), which is the confidently-wrong class this project refuses.
+// Ask, but ask answerably.
+function _enumHint(payload, name) {
+  try {
+    const props = payload && payload.paramSchema && payload.paramSchema.properties;
+    const vals = (props && props[name] && Array.isArray(props[name].enum)) ? props[name].enum.filter(Boolean).slice(0, 8) : [];
+    if (vals.length) return `which ${name}? ${vals.join(' / ')}`;
+  } catch { /* the hint is a courtesy — never break the refusal it decorates */ }
+  return `tell me which ${name} and I’ll fetch it`;
+}
+
 async function _waitTabComplete(tabId, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -919,7 +938,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // v2.74.1433 — a `{param}` STILL in the path after fill = a missing REQUIRED param (the interpret binder left it
           // unbound). NEVER send it: `{taskId}` URL-encodes to %7BtaskId%7D and the app returns http-500. Refuse honestly,
           // naming the param — the same discipline the SESSION_REPLAY twin now enforces (keep both in lockstep).
-          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { try { Logger.info('ride', `INVOKE ▸ blocked needs-${_miss[1]} (unfilled endpoint param) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
+          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { try { Logger.info('ride', `INVOKE ▸ blocked needs-${_miss[1]} (unfilled endpoint param) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: _enumHint(payload, _miss[1]) }); return; } }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
           let body = undefined;
           const contentType = String((payload && payload.contentType) || '');
@@ -1017,6 +1036,19 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             // roll-up cannot express.
             if (!(payload && payload.quiet && _ok)) {
               Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${_ok ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}`);
+              // v2.74.1872 — the KEYS-ONLY shape of what came back, ONCE PER RECIPE PER SESSION. `object{2}` above
+              // says a fetch succeeded and nothing about its structure, which is why "correct fetch, wrong field
+              // reaches prose" kept getting diagnosed as a routing bug — the one stage with no instrument absorbs
+              // the blame. A response's shape is a property of the RECIPE, not of the call, so once is enough and
+              // a 121-division fan-out costs one line, not 121. Paths + leaf TYPES only, never values; PII-shaped
+              // keys masked (Core/payloadShape.js). Limitation, stated: a recipe whose shape VARIES between calls
+              // (empty list vs populated) is only ever seen in its first form this session.
+              const _rid = (payload && payload.recipeId) || null;
+              if (_ok && _rid && !_payloadShapeSeen.has(_rid)) {
+                _payloadShapeSeen.add(_rid);
+                const _pl = payloadShapeLine(_rid, reply && reply.value);
+                if (_pl) Logger.info('ride', _pl);
+              }
             }
           } catch { /* observability must never break the call */ }
           // VT-0 (v2.74.1569) — the ONE outcome-funnel call (presence → drift, in order; DESIGN_vitals.md §4).
@@ -1327,7 +1359,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (!path) { try { Logger.info('ride', `SESSION_REPLAY ▸ blocked replay-missing-fields [${(payload && payload.recipeId) || '?'}]`); } catch { /* v2.74.1857 — every exit names itself */ } sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
           // v2.74.1433 — an unfilled `{param}` reaching here is a missing required param; never dispatch it (a literal
           // {taskId} → the app's http-500 "server rejected"). Refuse, naming the param. Twin of the INVOKE_SESSION guard.
-          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { try { Logger.info('ride', `SESSION_REPLAY ▸ blocked needs-${_miss[1]} (unfilled endpoint param) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
+          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { try { Logger.info('ride', `SESSION_REPLAY ▸ blocked needs-${_miss[1]} (unfilled endpoint param) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: _enumHint(payload, _miss[1]) }); return; } }
           { const _bmiss = reqBody && reqBody.match(/\{(me)\}/); if (_bmiss) { sendResponse({ success: false, error: 'needs me', hint: 'could not resolve your identity on this app — open its tab logged-in and retry' }); return; } }
           const url = `https://${apiHost}${path.startsWith('/') ? path : '/' + path}`;
           let out = null;

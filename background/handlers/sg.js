@@ -39,7 +39,8 @@ import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
 import { loadGoalItems } from '../../Services/Storage/GoalMemoryStore.js';   // AL-4 — read the app's goal memory (beliefs/deltas)
-import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — assemble the relevant standing rules + recall into a context block
+import { goalContextFor } from '../../Core/goalRetrieval.js';
+import { capabilityShapeKey } from '../../Core/goalMemory.js';   // v2.74.1870 — the routing shape a verdict judged, so a stale verdict retires at recall   // AL-4 — assemble the relevant standing rules + recall into a context block
 import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
@@ -95,6 +96,7 @@ import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
 import { isHybridSyncActive, forceResyncRecord, enqueueGroundTreeDelete, scheduleSyncRun } from '../../Services/Sync/SyncEngine.js';   // v2.74.822 — merge↔cloud-sync reconciliation (force-push canonical, tombstone absorbed)
+import { dropShadowedLegs } from '../../Core/recipeFromHarvest.js';   // v1879 — a frozen harvested instance never outranks the templated curated leg it shadows
 
 // T3X-2 — bind a cross-Ground sub-intent to a STRATEGY on its resolved Ground. Reuses the within-Ground matcher
 // (toCandidate → rankAndDecide) over that Ground's matcher-store capabilities, scoped to Strategies (a `workflow`
@@ -1814,7 +1816,11 @@ export function createSgMessageHandlers(ctx) {
         // v2.74.1340 (review A) — the §2.3 policy floor on the LIVE palette: a `forbidden`-safety leg is never
         // offerable to interpret (it previously ran only in the dormant Core/ilRun.js — the floor was unwired here).
         // The rule table stays empty until user routing-rules ship; the unrelaxable floor is what matters now.
-        const retrieved = policyFilter([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : []), ...fleetLegs, ...panelOfferedLegs()], { scope: { ground: groundId || null } });   // v1354 — CLEAR_CHAT joins (a typed "clear chat" used to fall through to the TEACH offer)
+        // v2.74.1879 — drop a harvested leg that is a frozen INSTANCE of a curated leg's template before the
+        // router ever sees it. Live 194001: `harvest_get_api_vendor_dashboard_statistic_83` (division 83 baked
+        // into the id, answerable for exactly one of 121) outranked the parameterised `vs_warranty_stats` and
+        // answered "You have 1 job." The general form dominates the instance, so this is a drop, not a demote.
+        const retrieved = policyFilter(dropShadowedLegs([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : []), ...fleetLegs, ...panelOfferedLegs()]), { scope: { ground: groundId || null } });   // v1354 — CLEAR_CHAT joins (a typed "clear chat" used to fall through to the TEACH offer)
         // v1467 (obs #5) — PALETTE ▸: what the router SAW, by source + scope tier (counts + tier keys only — body-blind).
         // The v1462 vocab-annihilation diagnosis took candidate-count arithmetic across two traces; this line is the
         // direct evidence: e.g. `PALETTE ▸ 93 leg(s) — rag:0 conn:0 ride[tab:17 global:45] broker:0 fleet:0 panel:1`.
@@ -1844,7 +1850,14 @@ export function createSgMessageHandlers(ctx) {
         // (recall-by-grid, v2.74.1201). Empty off-app.
         const om = appId ? (builtinApp(appId)?.objectModel || null) : null;
         let learned = '';
-        if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
+        // v2.74.1870 — hand recall the CURRENT shape of every leg in this palette, so an act-fail verdict about
+        // routing that has since changed retires before it can steer (live 192848: `read warranty task 4867009`
+        // — an ask that now works end to end — clarified at 0.4 citing a lesson banked four routing versions
+        // ago, and because it clarified the honest miss never rendered and the cross-division button could not
+        // be reached for a FOURTH pass). The palette is already built here; the shape derives from it.
+        const _shapes = {};
+        try { for (const l of (retrieved || [])) { if (l && l.key) { const s = capabilityShapeKey(l); if (s) _shapes[l.key] = s; } } } catch { /* recall still works without it */ }
+        if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om, shapes: _shapes }); } catch { /* */ } }
         const objects = describeObjectModel(om);
         const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history });
         // v1467 (obs #2) — name the CHOSEN LEG + bound param NAMES (never values) on the decision line. The wrong-leg

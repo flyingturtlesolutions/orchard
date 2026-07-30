@@ -141,13 +141,64 @@ export function looksLikeStandingRule(ask) {
  *     REPEATED failure of the same ask→capability accrues. Recall surfaces it as "this didn't work here — reconsider".
  * `goal` = the ask phrasing (the recall key, truncated). `capabilityId` = the tool. Returns null on missing args.
  */
-export function capabilityOutcomeItem(goal, capabilityId, ok) {
+/**
+ * v2.74.1870 — the SHAPE a verdict judged, so the verdict can die with it. PURE.
+ *
+ * v1810 named the gap ("a verdict must not outlive its subject") and nothing closed it: an act-fail banked while
+ * a capability was genuinely broken keeps steering long after the capability is rebuilt. Live 192848, four
+ * versions of VendorSuite routing later: `read warranty task 4867009` — an ask that now works end to end —
+ * clarified at 0.4 citing *"according to the learned memory, a previous attempt … "*, and because it clarified,
+ * the honest miss never rendered and the cross-division button could not be reached for a FOURTH pass. The
+ * lessons were correct when banked; they are simply about code that no longer exists.
+ *
+ * The key is the routing surface the failure was about — leg key + endpoint + the param NAMES it binds. Every
+ * one of those moved across v1860→v1869 (the redirect changed which leg runs, the catalog changed endpoints and
+ * hints, `machineOnly` changed the params). A clock-based expiry would have unblocked today too, but it decays
+ * CORRECT lessons at the same rate as stale ones; this retires exactly what changed and nothing else.
+ */
+export function capabilityShapeKey(leg) {
+  const t = (leg && typeof leg === 'object') ? (leg.tool || leg) : null;
+  if (!t) return '';
+  const key = _str((leg && leg.key) || t.recipeId);
+  const endpoint = _str(t.endpoint);
+  if (!key && !endpoint) return '';
+  const names = [
+    ...(Array.isArray(leg && leg.params) ? leg.params.map((p) => (p && p.name) || p) : []),
+    ...((leg && leg.paramSchema && leg.paramSchema.properties) ? Object.keys(leg.paramSchema.properties) : []),
+  ].filter(Boolean).map(String);
+  return `${key}|${endpoint}|${[...new Set(names)].sort().join(',')}`;
+}
+
+export function capabilityOutcomeItem(goal, capabilityId, ok, leg = null) {
   const g = _str(goal);
   const ref = _str(capabilityId);
   if (!g || !ref) return null;
+  const shape = capabilityShapeKey(leg);
   return ok
     ? { kind: 'belief', epistemic: 'observed', confidence: 0.7, body: g.slice(0, 160), ref, provenance: 'act-ok' }
-    : { kind: 'delta', confidence: 0.4, trigger: g.slice(0, 120), body: 'a saved capability was tried for this and didn\'t work — re-teach or pick a different approach', ref, provenance: 'act-fail' };
+    : { kind: 'delta', confidence: 0.4, trigger: g.slice(0, 120), body: 'a saved capability was tried for this and didn\'t work — re-teach or pick a different approach', ref, provenance: 'act-fail', ...(shape ? { shape } : {}) };
+}
+
+/**
+ * v2.74.1870 — drop act-fail lessons whose SHAPE no longer matches the live catalog. PURE.
+ * `shapesByRef` maps a capability ref → its current shape key. A lesson with no `shape` is PRE-v1870 and is
+ * kept (silence is not evidence of staleness); a lesson whose ref is absent from the map is kept too (the leg
+ * may simply not be projected right now — absence is not a change). Only a REF WE CAN SEE whose shape has
+ * MOVED retires, which is the narrowest reading of "the code it judged is gone".
+ * @returns {{ items: Array, removed: number }}
+ */
+export function retireStaleShapeDeltas(items, shapesByRef) {
+  const list = Array.isArray(items) ? items : [];
+  const map = (shapesByRef && typeof shapesByRef === 'object') ? shapesByRef : {};
+  const out = [];
+  let removed = 0;
+  for (const it of list) {
+    const stale = it && it.provenance === 'act-fail' && it.shape && it.ref
+      && Object.prototype.hasOwnProperty.call(map, it.ref) && map[it.ref] && map[it.ref] !== it.shape;
+    if (stale) { removed++; continue; }
+    out.push(it);
+  }
+  return { items: out, removed };
 }
 
 /**

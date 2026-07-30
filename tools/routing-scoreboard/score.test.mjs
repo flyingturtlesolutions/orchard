@@ -96,4 +96,64 @@ t('summaryLines renders without throwing and names violations', () => {
   assert.ok(lines.some((l) => /VIOLATION/.test(l)) && lines.some((l) => /forbidden/.test(l)));
 });
 
+
+// ── v2.74.1876: PARAM ASSERTIONS ─────────────────────────
+// The corpus asserted `expect.legId` and nothing else, so the live text-find failure ("warranty tasks on Misty
+// Creek" → bound divisionId instead of address) scored a clean HIT while dying live. Right leg, wrong slot.
+const _ENTRY = { ask: 'warranty tasks on Misty Creek', expect: { legId: 'vs_warranty_tasks' }, expectParams: { address: 'Misty Creek' }, mustNotBindParams: ['divisionId'] };
+const _dec = (params) => ({ intent: 'act', capabilityId: 'me.vendorsuite.vs_warranty_tasks@h', params });
+
+t('params: the right slot is a hit', () => {
+  assert.equal(scoreEntry(_ENTRY, _dec({ address: 'Misty Creek', status: 'open' })).status, 'hit');
+});
+t('params: right leg + WRONG SLOT is a miss, and the why names the slot', () => {
+  const w = scoreEntry(_ENTRY, _dec({ divisionId: 'Misty Creek', status: 'open' }));
+  assert.equal(w.status, 'miss');
+  assert.match(w.why, /divisionId/);
+});
+t('params: a leg-only entry is unaffected — this is exactly the old blind spot, pinned', () => {
+  assert.equal(scoreEntry({ ask: 'x', expect: { legId: 'vs_warranty_tasks' } }, _dec({ divisionId: 'Misty Creek' })).status, 'hit');
+});
+t('params: whitespace is not a binding', () => {
+  assert.equal(scoreEntry(_ENTRY, _dec({ address: '   ' })).status, 'miss');
+});
+t('params: router normalisation must not false-flag (case + superset value)', () => {
+  assert.equal(scoreEntry(_ENTRY, _dec({ address: '1091 MISTY CREEK DRIVE' })).status, 'hit');
+});
+t('params: a different value IS caught', () => {
+  assert.match(scoreEntry(_ENTRY, _dec({ address: 'Laurel Oaks' })).why, /does not carry/);
+});
+t('params: expectParams:true means any non-empty value', () => {
+  const any = { ask: 'x', expect: { legId: 'vs_warranty_tasks' }, expectParams: { address: true } };
+  assert.equal(scoreEntry(any, _dec({ address: 'anything' })).status, 'hit');
+  assert.equal(scoreEntry(any, _dec({ status: 'open' })).status, 'miss');
+});
+t('params: a breached NEGATIVE still outranks the param check', () => {
+  const fenced = { ..._ENTRY, mustNotResolve: ['vs_warranty_tasks'] };
+  assert.equal(scoreEntry(fenced, _dec({ divisionId: 'Misty Creek' })).status, 'violation');
+});
+t('params: no param assertion → unchanged behaviour', () => {
+  assert.equal(scoreEntry({ ask: 'x', expect: { legId: 'vs_warranty_tasks' } }, _dec({})).status, 'hit');
+});
+
+
+// ── v2.74.1878: the enumeration sentinel ────────────────
+// Live 190346, the gate's first meeting with a real decision: the router resolved `warranty tasks on Misty Creek`
+// to `{divisionId:"each", address:"Misty Creek"}` — the row filter right AND every division asked for, the best
+// available resolve — and `mustNotBindParams:['divisionId']` would have called it a MISS.
+t('sentinel: divisionId:"each" does NOT breach mustNotBindParams — it widens, it does not narrow', () => {
+  assert.equal(scoreEntry(_ENTRY, _dec({ divisionId: 'each', address: 'Misty Creek' })).status, 'hit');
+  for (const v of ['every', 'ALL', ' each ']) {
+    assert.equal(scoreEntry(_ENTRY, _dec({ divisionId: v, address: 'Misty Creek' })).status, 'hit', v);
+  }
+});
+t('sentinel: a real place-name in that slot is still a miss — the fix must not blunt the check', () => {
+  const w = scoreEntry(_ENTRY, _dec({ divisionId: 'Collinswood', address: 'Misty Creek' }));
+  assert.equal(w.status, 'miss');
+  assert.match(w.why, /must not narrow/);
+});
+t('sentinel: a POSITIVE expectParams is a different question — "each" answers it', () => {
+  assert.equal(scoreEntry({ ask: 'x', expect: { legId: 'vs_warranty_tasks' }, expectParams: { divisionId: true } }, _dec({ divisionId: 'each' })).status, 'hit');
+});
+
 console.log(`score.test ▸ ${n} checks passed`);

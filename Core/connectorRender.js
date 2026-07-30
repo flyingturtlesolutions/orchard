@@ -59,6 +59,26 @@ export function primaryList(value, _depth = 0) {
   return null;
 }
 
+/**
+ * THE COLLECTION READER: a read's value → rows, where a SINGLE RECORD is a collection of one. PURE.
+ *
+ * v2.74.1879 — the fourth live occurrence of one defect. `primaryList` returns null for a record-shaped root BY
+ * DESIGN (CX-9h above: a task detail's `Appointments[]` is a child collection, not "the data list") and it is right
+ * to. The consumers were wrong: nine sites did `primaryList(x) || []` and then treated the empty array as "nothing
+ * to read", so a fieldread/branch/map over a single record answered *"Nothing to read — the list came back empty"*
+ * two seconds after successfully reading that record. Live at 174833, 190346, 194001 and diagnosed to the line at
+ * v1873 — prescribed three times, built none of them, because each fix was per-call-site instead of one reader.
+ * `readShapeFacts` was taught the same lesson at v1862 and its siblings never were.
+ * A record root → `[record]`. A real list → the list. Nothing usable → `[]`, and the caller's honest-empty stands.
+ */
+export function rowsFromValue(value) {
+  const list = primaryList(value);
+  if (list && list.length) return list;
+  const one = primaryObject(value);
+  if (one) return [one];
+  return list || [];
+}
+
 /** The id of a result's PRIMARY record (the single item, or the first of a list), display-normalized (gid → its
  * numeric tail). PURE. CX-7e (v2.74.1393) — lets "show profile" open the record a lookup RETURNED (a customer found
  * by email) even though the read had no id param, the way "show ticket" opens a read_ticket {id}. Null if none. */

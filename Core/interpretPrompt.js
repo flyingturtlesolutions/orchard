@@ -12,6 +12,7 @@ import { renderRecentTurns } from './recentTurns.js';   // Q1 — render the rec
 import { sanitizeToolString } from './toolRetrieval.js';   // v2.74.1340 (review F) — sanitize AT RENDER: harvested-recipe / live-MCP name+does reach here unsanitized (only the RAG path pre-sanitized), so a crafted `does` could forge TOOL_CATALOG lines
 
 import { legRef } from './legRef.js';
+import { routerHintFor } from './routerHints.js';   // v2.74.1862 — the router-facing one-liner, authored for the 140-char budget the does-head is clipped by
 
 const _toolRef = legRef;
 
@@ -233,10 +234,17 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
     // load-bearing tails ("blank = your current division"), which TAUGHT the model a param it then asked about
     // (the flagship ask regressed hit→clarify). Same 140 ceiling — the budget was already priced in; this spends
     // what head-only left on the table.
+    // v2.74.1862 — a declared ROUTER HINT wins over the does-head. Measured: 22 of 60 curated entries are clipped
+    // by the budget above and 2,541 authored chars never reach the router — including two clauses whose absence
+    // caused live failures (a 500 from vs_task_contacts' lost "INTERNAL task id"; four runs of count-asks pulling
+    // the list because vs_warranty_stats' "NEVER the task list itself" was cut). A hint is authored FOR this
+    // budget, so it is never a fragment. Keyed by recipeId, which reaches SEEDED legs too — no hop threading, so
+    // invariant #3 has nothing to drop (Core/routerHints.js explains the choice). Same sanitize fence as `does`.
+    const _hint = routerHintFor((c && c.tool && c.tool.recipeId) || (c && c.recipeId));   // legs carry it on `tool` (palette.toOfferedLeg keeps the recipe as `tool`)
     const _segs = String((c && c.does) || '').split(' — ');
     let _head = _segs[0] || '';
     for (let si = 1; si < _segs.length && (_head.length + 3 + _segs[si].length) <= 140; si++) _head += ` — ${_segs[si]}`;
-    const doesHead = sanitizeToolString(_head, 140);
+    const doesHead = sanitizeToolString(_hint || _head, 140);
     const detail = (doesHead && doesHead.toLowerCase() !== label.toLowerCase()) ? `\n  detail: ${doesHead}` : '';
     return `- ref: ${ref}${irr}${selfMark}${connMark}${scopeMark}\n  does: ${label}${detail}${params}`;
   }).filter(Boolean);

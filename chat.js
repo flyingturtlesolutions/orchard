@@ -47,15 +47,19 @@ import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.j
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg, missingRequiredParams } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
-import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
+import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, drillTargetRedirect, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
+import { contextSpecsFor, contextAskFor, contextAnswerLine } from './Core/contextAnswer.js';
+   // v1872 — "which division am I in right now" answered from the RESOLVER's defaultPath, not the shaper
+import { classifyQuery, partitionFields, findInRows, filterRows, scanCells, estimateScan, findVerdict, isReferentialQuery, MEASURED_MS_PER_READ } from './Core/corpusFind.js';
+import { entityFor, coverageOf } from './Core/synthEntity.js';   // v1877 — the ENTITY the find generates from (drill block = entity graph) + partition-vs-selection   // v1875 — vs_task_find's pure half: query kind, field partition, scan cells, cost, verdict
 import { armable as rideArmable, hostRideInventory, formatHostRideInventory } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard; v1761 — TR-1 meta host inventory
 import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 — TR-1 meta vs act split
 import { stepReceiptLine, mayDeclareFilter, buildStepReceipt, renderStepReceipt } from './Core/stepReceipt.js';
-import { renderSpan, createRunLedger, renderNoEffect } from './Core/runLedger.js';   // OB-1 (v2.74.1831) — paired EXIT lines + the turn-level no-effect backstop   // v2.74.1828 receipt (STEP ▸); v1829 — mayDeclareFilter is a COST GATE for the branch consult, never a decider
+import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdict } from './Core/runLedger.js';   // OB-1 (v2.74.1831) — paired EXIT lines + the turn-level no-effect backstop   // v2.74.1828 receipt (STEP ▸); v1829 — mayDeclareFilter is a COST GATE for the branch consult, never a decider
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
 import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
@@ -4380,6 +4384,7 @@ function _sameGroundAsSource(target, srcLeg) {
 function _clauseError(kind, e, msg) {
   const m = (e && e.message) || String(e);
   try { _orchLog(`CLAUSE_ERROR ▸ ${kind}: ${m}`); } catch { /* */ }
+  _ledgerError();   // v2.74.1858 — a thrown clause IS the turn's failure; the backstop must not claim "nothing failed"
   try { _setMessageBody(msg, `That step couldn’t run — ${escHtml(m)}.`); _orchFinalize(msg); } catch { /* */ }
 }
 
@@ -4391,14 +4396,14 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
   // 1) the COLLECTION — identical contract to the map clause (piped prior read, else self-contained).
   let rows = [];
   let srcLeg = null;
-  if (fr.collection === 'prior' && priorValue != null) { rows = primaryList(priorValue) || []; srcLeg = priorLeg || null; }
+  if (fr.collection === 'prior' && priorValue != null) { rows = rowsFromValue(priorValue); srcLeg = priorLeg || null; }
   else {
     const readAsk = (fr.collection && fr.collection.readAsk) || goal;
     _setMessageBody(msg, 'Reading the list…');
     let cr = null;
     try { cr = await _chainConnectorRun(readAsk, { tabId }); } catch { cr = null; }
     if (!cr || !cr.ok) {
-      const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
+      const _prior = (priorValue != null) ? rowsFromValue(priorValue) : [];
       if (_prior.length) { rows = _prior; srcLeg = priorLeg || null; }
       else {
         _setMessageBody(msg, `Couldn’t read the list${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}. Name it explicitly (e.g. “for each open warranty task…”).`);
@@ -4406,7 +4411,7 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
         try { _orchLog(`FIELD_READ ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve`); } catch { /* */ }
         return { ok: false };
       }
-    } else { rows = primaryList(cr.value) || []; srcLeg = cr.leg || null; }
+    } else { rows = rowsFromValue(cr.value); srcLeg = cr.leg || null; }
   }
   if (!rows.length) { _setMessageBody(msg, 'Nothing to read — the list came back empty.'); _orchFinalize(msg); return { ok: false }; }
 
@@ -4621,7 +4626,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   // 'prior' clause fall through to re-reading a list from the literal phrase, and resolve nothing).
   let rows = [];
   let srcLeg = null;   // v2.74.1677 — the leg the rows came from; its declared displayId is what makes a row LABEL readable
-  if (br.collection === 'prior' && priorValue != null) { rows = primaryList(priorValue) || []; srcLeg = priorLeg || null; }
+  if (br.collection === 'prior' && priorValue != null) { rows = rowsFromValue(priorValue); srcLeg = priorLeg || null; }
   else {
     // v2.74.1668 (live trace 212655) — REFUSE THE SELF-RE-READ when the only thing to re-read with is the
     // branch ask ITSELF.
@@ -4645,9 +4650,9 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     _setMessageBody(msg, 'Reading the list…');
     let cr = null;
     try { cr = await _chainConnectorRun(readAsk, { tabId }); } catch { cr = null; }
-    if (cr && cr.ok) { rows = primaryList(cr.value) || []; srcLeg = cr.leg || null; }
+    if (cr && cr.ok) { rows = rowsFromValue(cr.value); srcLeg = cr.leg || null; }
     else {
-      const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
+      const _prior = (priorValue != null) ? rowsFromValue(priorValue) : [];
       if (_prior.length) { rows = _prior; srcLeg = priorLeg || null; }
       else {
         _setMessageBody(msg, `Couldn’t read the list to sort${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}. Name it explicitly (e.g. “for each open warranty task…”).`);
@@ -5067,7 +5072,7 @@ async function _runCaseClause(msg, cs, { tabId, priorValue = null, priorLeg = nu
   _walkAbortFlag.requested = false;
   _ilBusy(msg, true);
   const st = state || {};
-  const rows = (priorValue != null ? (primaryList(priorValue) || []) : []);
+  const rows = (priorValue != null ? rowsFromValue(priorValue) : []);
   const srcLeg = priorLeg || null;
   const scope = (cs && cs.scope === 'run') ? 'run' : 'item';
   try { _orchLog(`CASE   ▸ start scope=${scope} rows=${rows.length} title="${_str0(cs && cs.title).slice(0, 40)}"`); } catch { /* */ }
@@ -5260,7 +5265,7 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   let srcLeg = null;
   let _priorMode = 'plain';   // v2.74.1757 — 'plain' | 'source' | 'match' after unwrapMapPrior (gl 133556 map→map seam)
   if (map.collection === 'prior' && priorValue != null) {
-    rows = primaryList(priorValue) || [];
+    rows = rowsFromValue(priorValue);
     srcLeg = priorLeg || null;
     // v2.74.1757 (gl 133556) — a prior MAP stores table-join envelopes as lastValue. Resolving VS joinKey
     // paths against the envelope top-level always misses (`MAP ▸ no field — ""`). Unwrap: same-system
@@ -5280,7 +5285,7 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
     if (!cr || !cr.ok) {
       // v2.74.1630 (live 081843) — the collection read failed (or the LLM invented an unresolvable one: "for each
       // RESULT" → "get all results" → clarify). If a PRIOR read is piped in, USE IT — that's what the ask meant.
-      const _prior = (priorValue != null) ? (primaryList(priorValue) || []) : [];
+      const _prior = (priorValue != null) ? rowsFromValue(priorValue) : [];
       if (_prior.length) {
         rows = _prior; srcLeg = priorLeg || null;   // v1632 — the fallback keeps the enrich door open too
         const uw = unwrapMapPrior(rows, { targetSystem: system, itemField: map.itemField });
@@ -5296,7 +5301,7 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
         try { _orchLog(`MAP ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve to a read and no prior list was piped`); } catch { /* */ }
         return { ok: false };
       }
-    } else { rows = primaryList(cr.value) || []; srcLeg = cr.leg || null; }
+    } else { rows = rowsFromValue(cr.value); srcLeg = cr.leg || null; }
   }
   if (!rows.length) { _setMessageBody(msg, 'Nothing to map over — the list came back empty. If a filter got guessed wrong, name it.'); _orchFinalize(msg); return { ok: false }; }
   // 2) the FIELD — deterministic path resolution; a miss asks honestly (never a per-row guess).
@@ -5605,10 +5610,23 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
       // wrong-status was undecidable from the trace).
       const _fixed = Object.entries(params || {}).filter(([k, v]) => k !== rp.each.name && v != null && v !== '').map(([k, v]) => `${k}=${String(v).slice(0, 20)}`).join(', ');
       try { _orchLog(`RIDE_EACH ▸ ${leg.tool.recipeId || leg.key} × ${all.length} ${noun}(s) (chain${_fixed ? `, ${_fixed}` : ''}) → ${items.length} ok, ${failed} failed, ${items.reduce((n, it) => n + it.rows.length, 0)} row(s)`); } catch { /* */ }
-      if (!items.length) return { ok: false, error: `couldn’t read any ${noun} (${failed} tried)`, hint: 'the session may have expired — click into the site’s tab and retry' };
-      const tagged = [];
-      for (const it of items) for (const row of it.rows) { if (tagged.length >= 200) break; tagged.push({ [noun]: it.label, ...row }); }
-      return { ok: true, value: { results: tagged } };
+      if (!items.length) {
+        try { _orchLog(`RIDE_EACH ▸ exit — total failure (0 ok, ${failed} tried) [chain]`); } catch { /* */ }
+        _ledgerError(); return { ok: false, error: `couldn’t read any ${noun} (${failed} tried)`, hint: 'the session may have expired — click into the site’s tab and retry' };
+      }
+      // v2.74.1874 — the cap must be VISIBLE. It was a bare `break` whose only trace was a receipt reading
+      // "returned 200 row(s) from 121/121 division(s)" — which parses as complete, and did: the cross-division
+      // search filtered 200 of 1454 closed rows, found nothing, and told the user their task number was probably
+      // wrong. Any truncation a CONCLUSION rests on has to travel with the data to the sentence.
+      const _EACH_ROW_CAP = 200;
+      const tagged = []; let _seen = 0;
+      for (const it of items) for (const row of it.rows) { _seen++; if (tagged.length < _EACH_ROW_CAP) tagged.push({ [noun]: it.label, ...row }); }
+      const _truncated = _seen > tagged.length;
+      // v2.74.1869 — the CHAIN each-mode closes its span too. v1856 gave `_rideEachFanOut` (the panel path) its
+      // `rendered`/`exit` receipts and left this branch — the identical tally, one function over — unreceipted,
+      // which trace-lint flagged on the first run that used it (191641 line 606). Same rule, both fan-outs.
+      try { _orchLog(`RIDE_EACH ▸ returned ${tagged.length} row(s)${_truncated ? ` of ${_seen} — CAPPED at ${_EACH_ROW_CAP}` : ''} from ${items.length}/${all.length} ${noun}(s) [chain]`); } catch { /* */ }
+      return { ok: true, value: { results: tagged, truncated: _truncated, seen: _seen } };
     }
   }
   // v2.74.1854 — PRE-FLIGHT required-param gate (live 205935: query:"" spent a real call to learn what the
@@ -5616,16 +5634,17 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
   // routines · workbench · proposal re-checks): a blank REQUIRED param can only produce a wire error, so fail
   // honestly before any HTTP. Blank OPTIONAL params stay legal (divisionId:"" = current division).
   {
-    const _miss = missingRequiredParams(leg && (leg.tool || leg), params);
+    const _miss = missingRequiredParams(leg, params);   // v1864 — the LEG (it reads paramSchema; `leg.tool` alone never had the declarations)
     if (_miss.length) {
       try { _orchLog(`INVOKE ▸ missing required ${_miss.join(',')} → no call spent [${(leg.tool && leg.tool.recipeId) || leg.key || ''}]`); } catch { /* */ }
+      _ledgerError();   // v1858 — an honest refusal is still an accounted-for turn: the backstop must stay quiet
       return { ok: false, error: 'missing-required-param', detail: _miss.join(', '), hint: `needs ${_miss.map((x) => `\`${x}\``).join(', ')}` };
     }
   }
   const plan = planExec(leg, params, { tabId, groundId });
-  if (!plan || !plan.ok || !plan.channel) return { ok: false, error: 'no executor' };
+  if (!plan || !plan.ok || !plan.channel) { _ledgerError(); return { ok: false, error: 'no executor' }; }
   let res = null;
-  try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
+  try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { _ledgerError(); return { ok: false, error: (e && e.message) || 'failed' }; }
   // v2.74.1759 — CSRF-cold (idle admin after reload): one silent retry after a short pause. The executor already
   // soft-wakes + re-sniffs; this covers the race where the SPA's token landed just after the first reply.
   // v2.74.1853 — but NOT when the executor says the sniff was DRY (`csrfNoToken`): re-invoking re-runs the same
@@ -5633,9 +5652,11 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
   if (res && res.success === false && !res.csrfNoToken && isCsrfColdFailure({ error: res.error, hint: res.hint, csrf: leg.tool && leg.tool.csrf })) {
     try { _orchLog(`INVOKE ▸ csrf-cold retry ${(leg.tool && leg.tool.recipeId) || leg.key || ''}`); } catch { /* */ }
     await new Promise((r) => setTimeout(r, 600));
-    try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
+    try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { _ledgerError(); return { ok: false, error: (e && e.message) || 'failed' }; }
   }
-  if (!res || res.success === false) return { ok: false, error: res && res.error, hint: res && res.hint, detail: res && res.detail };
+  // v2.74.1858 — THE live case (gl 121742): two `INVOKE ▸ → FAIL Failed to fetch` legs whose failure never
+  // reached the ledger, so the turn's receipt claimed "nothing failed". A leg that failed IS the turn failing.
+  if (!res || res.success === false) { _ledgerError(); return { ok: false, error: res && res.error, hint: res && res.hint, detail: res && res.detail }; }
   return { ok: true, value: res.value };
 }
 
@@ -7946,6 +7967,15 @@ const _rowCount = (v) => {
   return v == null ? 0 : 1;
 };
 const _ledgerRead = (v) => { try { if (_runLedger) _runLedger.read(_rowCount(v)); } catch { /* */ } };
+// v2.74.1858 — the ledger's `error()` had ZERO producers (gl 121742: two `INVOKE ▸ … → FAIL` legs, and the
+// backstop still printed "…and nothing failed"). Two defects in one gap: the receipt asserted something the
+// system could not know, and renderNoEffect's `if (snap.errors > 0) return ''` suppression — the rule that
+// keeps the backstop quiet on already-diagnosable turns — was dead code. This is that producer.
+const _ledgerError = () => { try { if (_runLedger) _runLedger.error(); } catch { /* */ } };
+// v2.74.1859 — the finished run's snapshot, for the recorders that run in `.then()` AFTER _orchRunChain's
+// finally has restored the previous ledger. Panel chain runs are sequential, so one slot is enough; a nested
+// chain (a fan-out child) overwrites it only after its parent has already recorded.
+let _lastRunSnapshot = null;
 async function _orchRunChain(msg, opts) {
   const _t0 = Date.now();
   const _prev = _runLedger;              // nested chains (a fan-out child running its own) must not clobber the parent
@@ -7954,7 +7984,12 @@ async function _orchRunChain(msg, opts) {
     return await _orchRunChainInner(msg, opts);
   } finally {
     try {
-      const _line = renderNoEffect(_runLedger, { ms: Date.now() - _t0, ask: (opts && opts.ask) || '' });
+      // v2.74.1859 — ALWAYS a run-level terminal (was: only the no-effect backstop, which by design goes quiet
+      // on an errored turn — so the moment v1858 gave `error()` a producer, an errored replay ended with no run
+      // receipt at all; trace-lint caught it on the very next run). The no-effect wording is unchanged; ok /
+      // failed / partial are new. The snapshot is stashed for the recorders, which run AFTER this restore.
+      _lastRunSnapshot = (_runLedger && typeof _runLedger.snapshot === 'function') ? _runLedger.snapshot() : null;
+      const _line = renderRunReceipt(_runLedger, { ms: Date.now() - _t0, ask: (opts && opts.ask) || '' });
       if (_line) _orchLog(_line);
     } catch { /* the backstop must never break the run it reports on */ }
     _runLedger = _prev;
@@ -8530,6 +8565,25 @@ function _declaredLegNames() {
   return names;
 }
 
+// v2.74.1873 — THE SHORTCUT DRAWER IS RETIRED (user ruling, gl 130625). `_matchWorkflow` is a PRE-DOOR intercept:
+// it runs before INTERPRET_ASK and, on a hit, returns the turn to a confirm card so the router never sees the ask.
+// Live 130625 measured FIVE hijacks in one session against a bank of five junk test workflows — four LEXICAL hits
+// on "test two" (its saved ask text matched routine reads almost verbatim) and one SEMANTIC hit at conf 0.85
+// pairing "get the contact emails for that warranty task" with a workflow named "test 1". Three of four negative
+// probes from that session's ask list were consumed here, so they tested this door instead of the thing they
+// named; one was actually RUN and answered a routine read with "Nothing to do here — the last step came back
+// empty." The v1796 reachability guard exists for exactly this and could not fire: `namesDeclaredLeg` declines
+// only on a verbatim leg-name quote, and "contact emails for that warranty task" is a re-ordering of the leg name
+// "Warranty task contacts".
+//
+// RETIRING THE DOOR, NOT THE FEATURE. Workflows stay fully runnable deliberately — the Rail workflow card calls
+// `_wfReplayPlan` directly (chat.js:8780) and never routes through here; `_matchWorkflow` has exactly one caller.
+// What is switched off is the automatic interception of ordinary asks. Flip this back to `true` to restore, and
+// re-read the guard first: the door is only safe when a "none of these — this isn't a workflow ask" answer is
+// reachable, which is what the class-blind matcher structurally cannot say.
+const WF_RECALL_PREDOOR = false;
+let _wfRetiredNoted = false;   // the retirement is stated ONCE per session, not once per turn
+
 async function _matchWorkflow(goal) {
   if (!_workflowKeys().length) return null;
   const workflows = await _loadWorkflowsMerged();
@@ -8959,7 +9013,13 @@ async function _renderWorkflowRuns(wf) {
 async function _wfRecordPanelRun(wf, t0, total, st) {
   try {
     const done = (st && Array.isArray(st.ranSteps)) ? st.ranSteps.length : 0;
-    const verdict = done >= total ? 'complete' : (done > 0 ? 'partial' : 'failed');
+    // v2.74.1859 (user report, gl 132049: "the Rail card doesn't communicate actual run status") — the verdict
+    // was POSITIONAL: `done >= total ? complete : done > 0 ? partial : failed`, where `ranSteps` is pushed at
+    // DISPATCH time (`_record`), never on success. So a 1-step workflow whose only step failed recorded
+    // COMPLETE, and this run's 2-step replay recorded PARTIAL having produced nothing. `ranSteps` still
+    // supplies the counts; the VERDICT now comes from what happened (errors/effects/rows — v1858 gave those
+    // real producers). This is the v1780 card ruling ("outcomes, not position") applied to the DATA SOURCE.
+    const verdict = runVerdict(_lastRunSnapshot, { done, total });
     const lv = st && st.lastValue;
     const rows = Array.isArray(lv) ? lv.length : (lv && typeof lv === 'object' && Array.isArray(lv.rows) ? lv.rows.length : 0);
     await appendRunEntry(wf.id, {
@@ -10306,6 +10366,37 @@ async function _resolveRideParamsCore(leg, params, { tabId, groundId } = {}) {
       if (!eachPlan) eachPlan = { name, values: r.values, total: r.total, capped: r.capped };
       continue;
     }
+    // v2.74.1876 — THE INVERSE MIS-BIND REPAIR. CX-9e (above) migrates a value OUT of the drill's free-text slot
+    // INTO this param when it resolves as a real division. This is the other direction, and it is the live 174833
+    // defect: "warranty tasks on Misty Creek" bound `divisionId:"Misty Creek"` — because divisionId is REQUIRED and
+    // the value is place-shaped — so the resolver honestly answered *I don't know division "Misty Creek"* and the
+    // ask died before any drill ran. `address` was declared, optional, and hinted ("ANY identifier the user names —
+    // a STREET address, a TICKET number…"); the catalog was right and the binder was wrong, so this belongs here
+    // rather than in a prompt. A value that resolves as NEITHER a name NOR a code was never this param's — hand it
+    // to the row filter and let the param default. Narrow by construction: only on an UNKNOWN (never `ambiguous`,
+    // which means it matched too much and asking back is correct), only when the drill's slot is EMPTY, and it
+    // clears the param so the three-rung ladder resolves the scope as usual.
+    // Two guards found in the bug pass, both load-bearing:
+    //  · `!r.candidates.length` — the resolver returns closest-name hits for an unknown, so a MISSPELLED division
+    //    ("Raleig" → candidates:[Raleigh]) still gets the helpful ask-back. Migrating that would have traded a
+    //    one-line correction for an 11-second scan ending in "not found". Only a value that resembles no division
+    //    at all was never this param's.
+    //  · re-resolve, don't delete — my first draft did `delete out[name]`, which left {divisionId} UNSET. The
+    //    required-param gate exempts resolve-spec'd params (v1864), so nothing would have blocked it and the
+    //    endpoint would have filled as `/Tasks//open`. Blank → defaultPath is what "the scope defaults" means.
+    if (r.unknown && !(Array.isArray(r.candidates) && r.candidates.length) && mo && mo !== name && (out[mo] == null || String(out[mo]).trim() === '')) {
+      const moved = out[name];
+      out[mo] = moved;
+      out[name] = '';
+      const r2 = resolveRideParam(spec, '', state);
+      if (r2 && r2.value !== undefined) {
+        out[name] = r2.value;
+        if (r2.label) labels[name] = r2.label;
+        if (/division/i.test(name)) _divisionCtx = { value: String(r2.label || r2.value), at: Date.now() };
+      }
+      try { _orchLog(`RIDE_RESOLVE ▸ ${name} "${String(moved).slice(0, 24)}" resembles no ${name === 'divisionId' ? 'division' : name} → migrated to ${mo} (row filter); scope → ${r2 && r2.label ? r2.label : (out[name] || 'unset')}`); } catch { /* */ }
+      continue;
+    }
     if (r.ambiguous || r.unknown) {
       return { params: out, labels, each: eachPlan, needs: {
         param: name, noun: name === 'divisionId' ? 'division' : name, raw: out[name],
@@ -10316,6 +10407,13 @@ async function _resolveRideParamsCore(leg, params, { tabId, groundId } = {}) {
       const was = out[name];
       out[name] = r.value;
       if (r.label) labels[name] = r.label;
+      // v2.74.1868 — REMEMBER THE DIVISION HERE, where every connector call that resolves one passes through.
+      // `_contextDivision` read only `_lastGroundedRead`, so a DRILL destroyed the context: the details read
+      // becomes the last read and carries no divisionId, so the very next by-number ask fell back to the site
+      // default (live 184725 — "pull the full details for task id 4886921" searched Charlotte North seconds
+      // after a successful Raleigh drill). One slot, stamped at the single choke point, with the human LABEL
+      // preferred exactly as `_contextDivision` does.
+      if (/division/i.test(name)) _divisionCtx = { value: String(r.label || r.value), at: Date.now() };
       try { _orchLog(`RIDE_RESOLVE ▸ ${name} "${was == null ? '(default)' : was}" → ${r.value}${r.label ? ` (${r.label})` : ''}`); } catch { /* */ }
       // CX-9e — ECHO-BIND drop: the router bound the SAME place into both slots ("greensboro" division AND address).
       // A filter that merely repeats this param's raw value or resolved label is not a row filter — drop it so the
@@ -10397,7 +10495,12 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
       if (_rideEachAbort) break;
       const v = all[i];
       _setMessageBody(msg, `Reading ${legName} — ${i + 1}/${total} (${v.label})… (type “stop” to pause)`);
-      const r = await _rideExecOnce(leg, { ...params, [each.name]: v.value }, { tabId, groundId });   // DK-8b — the shared per-item executor
+      // v2.74.1860 — `quiet: true` at last (gl 155750: 121 per-item `INVOKE ▸` lines evicted the FIRST SIX asks
+      // of the window from the ring — their routing is now unknowable). The v1674 rule and the executor's own
+      // `quiet` parameter both existed; the CHAIN each-path passes it (chat.js:5600) and this panel each-path
+      // never did. The roll-up (`RIDE_EACH ▸ … → N ok, M failed`) already carries the successes; a per-item
+      // FAILURE still logs individually, which is the only part a roll-up cannot express.
+      const r = await _rideExecOnce(leg, { ...params, [each.name]: v.value }, { tabId, groundId, quiet: true });   // DK-8b — the shared per-item executor
       if (r.ok) items.push({ label: v.label, value: r.value, rows: _rideEachRows(r.value) });
       else failed++;
     }
@@ -10433,7 +10536,9 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
     return true;
   }
   if (dval != null && String(dval).trim() !== '') {
-    const matched = items.map((it) => ({ ...it, rows: filterRowsByText(it.rows, dj.label || [], dval) })).filter((it) => it.rows.length);
+    // v1876 — the shared matcher (see Core/corpusFind.filterRows): an IDENTIFIER now needs an exact id-field
+    // hit, so a street number can no longer open a task by being a substring of the joined row text.
+    const matched = items.map((it) => ({ ...it, rows: filterRows(it.rows, dval, dj.label || []).map((h) => h.row) })).filter((it) => it.rows.length);
     const nHits = matched.reduce((n, it) => n + it.rows.length, 0);
     try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} each-filter "${String(dval).slice(0, 40)}" → ${nHits} hit(s) in ${matched.length}/${items.length} ${noun}(s)`); } catch { /* */ }
     if (nHits === 1) {
@@ -10489,6 +10594,147 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   return true;
 }
 
+// v2.74.1875 — `vs_task_find`: THE FIRST SYNTHETIC LEG. VendorSuite has no search bar (user-confirmed), so
+// find-by-human-identifier does not exist as an endpoint and cannot be harvested — it has to be COMPOSED from
+// list-by-(division,status) plus a row filter. This is the impure half; everything decidable without a network
+// call is in Core/corpusFind.js (query kind · field partition · scan plan · cost · verdict) and tested there.
+//
+// It replaces the v1865 button. That button existed because the sweep was "far too expensive to run on every
+// miss" — measured then at 121 reads ≈ 3.5s, actually ~75s serial. v1874's inversion + concurrency put the full
+// 484-cell plan at ~7.6s, and at that price the fourth rung should simply RUN: a miss inside three resolved rungs
+// is a fact about the SCOPE, not about the record, so making the user click to discover that is making them do
+// the system's reasoning for it. The COST GATE survives, because the same scanner will carry the per-row shapes
+// (details-per-match, contacts-per-match) where cost is genuinely unbounded — for this shape it always passes.
+//
+// Two stages, and the split is deliberate: the scan only decides WHICH cell holds the row, then the ordinary
+// drill path re-runs scoped to it, so the record renders through exactly the code that renders every other
+// successful drill. No second renderer, no divergence.
+const _FIND_AUTO_MS = 20000;   // spend this much unasked; past it, state the price and let the user choose
+const _FIND_CONC = 8;
+const _slicePhrase = (s) => `the “${String(s || 'this list').slice(0, 48)}” list`;          // ONE constant: the estimate and the runner must agree, not coincidentally match
+
+async function _synthTaskFind(msg, { leg, ask, tabId, groundId, params, dval, statuses, labels, where = '', _drillTo = null, _redirected = false }) {
+  const { kind } = classifyQuery(dval);
+  // v2.74.1877 — READ THE ENTITY, don't be handed it. `entityFor` resolves the drill block into {matchOn, labels,
+  // joinFrom, paths, coverage} straight from the catalog, so this executor stops being VendorSuite-shaped and a
+  // second site becomes a DECLARATION rather than a code change (Core/synthEntity.js). The passed-in `labels`
+  // survive as the fallback for a harvested leg the catalog has never seen.
+  const _rid = (leg.tool && leg.tool.recipeId) || '';
+  const _ent = _rid ? entityFor(_rid, CONNECTOR_RECIPES) : null;
+  const _labels = (_ent && _ent.labels.length) ? _ent.labels : labels;
+  // COVERAGE decides whether a completed scan may conclude "isn't in any of them" or only "not in what I read".
+  // Catalog-read by id and SELECTION by default, so an undeclared or unknown collection weakens the sentence
+  // instead of falsifying it (Core/synthEntity.js — the declaration that stops this family exporting v1874's
+  // false-negative to Shopify's "open unfulfilled orders" and Zendesk's five overlapping views).
+  const _coverage = _rid ? coverageOf(_rid, CONNECTOR_RECIPES) : 'selection';
+  const _slice = (_ent && _ent.path && _ent.path.name) || (leg.name || 'this list');
+  const pool = await _resolveRideParamsCore(leg, { ...params, divisionId: 'each' }, { tabId, groundId });
+  const divisions = (pool && pool.each && Array.isArray(pool.each.values)) ? pool.each.values : [];
+  if (!divisions.length) {
+    try { _orchLog('FIND ▸ no axis to scan — division enumeration empty'); } catch { /* */ }
+    _setMessageBody(msg, 'I couldn’t list the divisions to search — the session may have lapsed. Click into the site’s tab and try again.');
+    return true;
+  }
+  // the division the drill already walked goes LAST: it is the one place we know the record isn't
+  const plan = scanCells({ divisions, statuses, deprioritize: (params && params.divisionId) });
+  const cost = estimateScan(plan, { kind, concurrency: _FIND_CONC });
+  try { _orchLog(`FIND ▸ "${String(dval).slice(0, 24)}" kind=${kind} plan=${cost.reads} cell(s) (${divisions.length}×${statuses.length}) est=${Math.round(cost.worstMs / 100) / 10}s`); } catch { /* */ }
+
+  // THE GATE. Inert for this shape by design — 484 cells estimate ~7.6s, well under the ceiling — but it is the
+  // mechanism the expensive shapes will need, and building it now means they inherit a proven one rather than
+  // getting a bolted-on threshold later. If it ever fires here, that is real news about the corpus.
+  if (cost.worstMs > _FIND_AUTO_MS) {
+    try { _orchLog(`FIND ▸ GATED — ${cost.reads} cell(s) ≈ ${Math.round(cost.worstMs / 1000)}s exceeds the ${_FIND_AUTO_MS / 1000}s auto-spend ceiling`); } catch { /* */ }
+    const bar = _orchActionBar(msg);
+    _setMessageBody(msg, `Not found${where}. Searching every division would take about ${Math.round(cost.worstMs / 1000)} seconds (${cost.reads} reads) — or name a division and it’s instant.`, { markdown: true });
+    bar.appendChild(_mkOnceBtn(`🔍 Search all ${divisions.length} divisions`, async () => {
+      bar.remove();
+      await _synthRunScan(msg, { leg, ask, tabId, groundId, params, dval, kind, plan, labels: _labels, coverage: _coverage, slice: _slice, _drillTo, _redirected });
+    }));
+    bar.appendChild(_mkBtn('Not now', () => { bar.remove(); }));
+    return true;
+  }
+  // `where` already carries its own leading " in" — re-adding it produced "Notin Atlanta West".
+  _setMessageBody(msg, `Not${where || ' there'} — checking the other ${divisions.length - 1} divisions…`);
+  return _synthRunScan(msg, { leg, ask, tabId, groundId, params, dval, kind, plan, labels: _labels, coverage: _coverage, slice: _slice, _drillTo, _redirected });
+}
+
+// The scan itself. Cells are pulled off the plan IN ORDER by a bounded worker pool, so division-outer locality
+// survives concurrency (the first lanes span two divisions, not the whole grid). An identifier stops every worker
+// on the first hit; a text query runs the plan out, because there may always be another match.
+async function _synthRunScan(msg, { leg, ask, tabId, groundId, params, dval, kind, plan, labels, coverage = 'selection', slice = 'this list', _drillTo, _redirected }) {
+  const _t0 = Date.now();   // v1878 — the observed rate rides on the receipt so drift self-reports (see MEASURED_MS_PER_READ)
+  let next = 0; let scanned = 0; let failed = 0; let stop = false;
+  let fields = null;            // id/text split, unioned from the rows themselves — no catalog annotation needed
+  const matches = [];
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('Stop', () => { stop = true; bar.remove(); }));
+  const worker = async () => {
+    while (next < plan.length && !stop) {
+      const cell = plan[next++];
+      let r = null;
+      try { r = await _rideExecOnce(leg, { ...params, divisionId: cell.division.value, status: cell.status }, { tabId, groundId, quiet: true }); } catch { r = null; }
+      scanned++;
+      if (!r || !r.ok) { failed++; continue; }
+      const rows = _rideEachRows(r.value);
+      // Partition from EVERY row seen, unioned — deriving it from rows[0] alone would blind the whole scan to a
+      // field that row happens to leave null (a task with no ClaimNumber would make claim-number queries
+      // unmatchable for the entire run).
+      for (const row of rows) {
+        const p = partitionFields(row, labels);
+        if (!fields) fields = { idFields: [], textFields: [] };
+        for (const k of ['idFields', 'textFields']) for (const f of p[k]) if (!fields[k].includes(f)) fields[k].push(f);
+      }
+      for (const hit of (fields ? findInRows(rows, dval, fields) : [])) {
+        matches.push({ ...hit, division: cell.division.label ?? cell.division.value, status: cell.status });
+        if (kind === 'identifier') { stop = true; break; }   // ids are unique — one is the answer, keep nothing else running
+      }
+      if (scanned % 8 === 0) { try { _setMessageBody(msg, `Searching… ${scanned}/${plan.length}`); } catch { /* cosmetic */ } }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(_FIND_CONC, plan.length) }, worker));
+  try { bar.remove(); } catch { /* */ }
+
+  // An identifier is unique, so it gets ONE answer: two lanes can both push a hit before `stop` propagates, and
+  // a "2 tasks match" list for a by-number lookup would be a confusing wrong shape rather than extra information.
+  const eff = (kind === 'identifier') ? matches.slice(0, 1) : matches;
+  const v = findVerdict({ matches: eff, planned: plan.length, scanned, failed, coverage });
+  // OBSERVED cost, printed next to the outcome: elapsed × lanes / reads is the per-read figure the estimate uses,
+  // so a stale constant is visible in the trace instead of needing to be recomputed by hand. 125ms survived two
+  // sessions of being 31% wrong because nothing ever said so out loud.
+  const _elapsed = Date.now() - _t0;   // captured ONCE — three reads of the clock in one template can disagree
+  const _obsMs = scanned ? Math.round((_elapsed * _FIND_CONC) / scanned) : 0;
+  try { _orchLog(`FIND ▸ ${v.outcome}${v.reason ? `/${v.reason}` : ''} (${coverage}) — ${scanned}/${plan.length} cell(s) read in ${(_elapsed / 1000).toFixed(1)}s (${_obsMs}ms/read vs ${MEASURED_MS_PER_READ} est), ${failed} failed, ${matches.length} match(es)${matches[0] ? ` · ${matches[0].division}/${matches[0].status} on ${matches[0].matchedOn}` : ''}`); } catch { /* */ }
+
+  if (v.outcome === 'one') {
+    const m = eff[0];
+    _setMessageBody(msg, `Found it in **${m.division}** (${m.status}) — matched on ${m.matchedOn}. Opening…`, { markdown: true });
+    // Re-enter the ORDINARY drill path scoped to the cell we found, carrying the redirect state. `_drillTo` rides
+    // because this is a CONTINUATION of the same request: without it a "contacts for task X" ask that escalated
+    // to a scan would land on the details leg instead (the v1866/1869/1871 flag-drop family, fourth instance).
+    return _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params: { ...params, divisionId: String(m.division), status: m.status }, _drillTo, _redirected });
+  }
+  if (v.outcome === 'many') {
+    const lines = eff.slice(0, 12).map((m) => `• **${m.division}** · ${m.status} · matched ${m.matchedOn}${m.row && m.row.AddressLine1 ? ` — ${m.row.AddressLine1}` : ''}`);
+    _setMessageBody(msg, `${eff.length} tasks match “${dval}”${eff.length > 12 ? ' (first 12)' : ''}:\n\n${lines.join('\n')}\n\nName one — a division, or its task number — and I’ll open it.`, { markdown: true });
+    return true;
+  }
+  // NEGATIVES. The verdict is a TYPE, not a sentence a later edit can overstate: only a complete, clean scan
+  // earns "isn't there" (v1874's defect was exactly this claim made over a truncated read).
+  if (v.outcome === 'none') {
+    _setMessageBody(msg, `Searched all ${plan.length} division/status combinations — “${dval}” isn’t in any of them. The number may be wrong, or the task may belong to an account you don’t have access to.`, { markdown: true });
+    return true;
+  }
+  if (v.reason === 'coverage') {
+    // The read was COMPLETE and still cannot settle it: the axes scanned are a selection of the corpus, not a
+    // partition of it. Naming the slice is the whole difference between an honest limit and v1874's false verdict.
+    _setMessageBody(msg, `Searched every ${plan.length} combination${plan.length === 1 ? '' : 's'} available to me and didn’t find “${dval}” — but **${_slicePhrase(slice)}** only covers part of the records, so it may exist outside that list. Name a narrower scope if you know one.`, { markdown: true });
+    return true;
+  }
+  _setMessageBody(msg, `Searched ${scanned} of ${plan.length} combinations without finding “${dval}”${failed ? `, and ${failed} read(s) failed` : ' (stopped early)'} — so part of the space went unchecked. ${failed ? 'Click into the site’s tab (the session may have lapsed) and retry' : 'Ask again to resume'} before concluding it isn’t there.`, { markdown: true });
+  return true;
+}
+
 // CX-9b — project the drill's VIA recipe (the details read) from the same Ground, riding the parent leg's transport.
 // Honors the §18 arm guard (a disabled/rejected details read is never drilled into). Null → the caller just renders
 // the list (drill is an enhancement, never a blocker).
@@ -10521,12 +10767,12 @@ async function _rideDrillLeg(parentLeg, viaId, groundId) {
 // the same transport. The model never joins; 0/many hits ask back honestly. One level only — a details read never
 // re-drills. Returns null when the drill doesn't apply (caller falls through to its normal render).
 const _drillWalk = new WeakMap();   // v2.74.1522 — per-reply set of statuses already searched (the id-shaped retry walk)
-async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, where = '', _drilled = false }) {
+async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, where = '', _drilled = false, _drillTo = null, _redirected = false }) {   // v1869 — _drillTo: the leg the ASK chose, when a redirect brought us here
   const dj = (leg.tool && leg.tool.drill) || null;
   const dval = (dj && dj.param && dj.from && dj.matchOn) ? params[dj.matchOn] : null;
   if (_drilled || !dj || dval == null || String(dval).trim() === '') return null;
   const rows = Array.isArray(value) ? value : [];
-  const hits = rows.length ? filterRowsByText(rows, dj.label || [], dval) : [];
+  const hits = rows.length ? filterRows(rows, dval, dj.label || []).map((h) => h.row) : [];   // v1876 — the shared matcher; identifiers are exact-field only
   if (hits.length === 1) {
     // v2.74.1519/1520 — the HUMAN-HANDOFF open: the drilled record can open ON THE SITE'S OWN PAGE so a field can
     // be updated by hand. The SPA has no per-item URL, so navigate-to-the-list + text-click IS the open (CX-9o);
@@ -10560,9 +10806,20 @@ async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, w
       await driveOpen(msg);
       return true;
     }
-    const viaLeg = await _rideDrillLeg(leg, dj.via, groundId);
+    // v2.74.1869 — LAND ON THE LEG THE ASK CHOSE. The drill's default target is `dj.via` (the details read), and
+    // v1863's redirect sent every machine-only-id ask through here — so a CONTACTS question arrived at the task
+    // record and was honestly told the answer was not there (live 191641, three in a row: "No phone number is
+    // available in this task record" · "No contact emails are present" · and a who-do-I-call answered from
+    // VendorExplanation, i.e. the vendor instead of the homeowner). All FALSE ABSENCES over data that exists on
+    // `vs_task_contacts`. The redirect moved the ID correctly and dropped the QUESTION: the sidecar legs in
+    // `drill.also` are exactly the ones a user names directly. `_drillTo` carries the original target here; it
+    // is honored only when the parent's own drill declares it (`via` or `also`), so it can never point anywhere
+    // the catalog has not already sanctioned.
+    const _sanctioned = [dj.via, ...(Array.isArray(dj.also) ? dj.also : [])].filter(Boolean);
+    const _wantId = (_drillTo && _sanctioned.includes(_drillTo)) ? _drillTo : dj.via;
+    const viaLeg = await _rideDrillLeg(leg, _wantId, groundId);
     if (!viaLeg) return null;   // details read unavailable/unarmed → fall back to the plain list render
-    try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} → ${dj.via} (${dj.param}=${hits[0][dj.from]}) match "${String(dval).slice(0, 40)}"`); } catch { /* */ }
+    try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} → ${_wantId}${_wantId !== dj.via ? ' (the leg the ask chose)' : ''} (${dj.param}=${hits[0][dj.from]}) match "${String(dval).slice(0, 40)}"`); } catch { /* */ }
     const _res = await _ilRunBuiltin(msg, { leg: viaLeg, ask, tabId, groundId, params: { [dj.param]: hits[0][dj.from] }, _drilled: true });
     try {
       if (_res === true && canOpen) {
@@ -10579,7 +10836,28 @@ async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, w
     // more read per step, bounded by the enum. Text values (addresses) never walk — their miss is a real miss in
     // the scoped list. `_drillWalk` (WeakMap on the reply node) is the tried-set across the re-entrant reads.
     const statusSlot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
-    if (/^\d{3,}$/.test(String(dval).trim()) && statusSlot && Array.isArray(statusSlot.enum) && statusSlot.enum.length && params.status != null) {
+    // v2.74.1876 — TEXT WALKS AND ESCALATES TOO. The v1522 rule above ("text values never walk — their miss is a
+    // real miss in the scoped list") was correct when a scoped list was all there was. It stopped being correct at
+    // v1875, when the scoped miss gained a corpus-wide fourth rung: an address absent from ONE division in ONE
+    // status is a fact about the scope, exactly as a ticket number is. The digit gate is why the synthetic leg's
+    // whole TEXT half was unreachable live (174833) while its tests passed — `partitionFields`' textFields, the
+    // `many` verdict and the candidate renderer were all dead code behind this one regex.
+    // v2.74.1879 — a REFERENTIAL value is a reference to the record at hand, never a string to look for. Live
+    // 194001: the model bound `taskId:"prior"` and the machinery below did everything right — redirect, four-status
+    // walk, then the automatic fourth rung spending 484 reads and 13.6s hunting the corpus for the word "prior",
+    // and telling the user their number was probably wrong. Refused BEFORE the walk (4 reads) and the scan (484),
+    // which is where the entire cost lives. The reply names the record we think they mean when there is one —
+    // resolving the referent outright belongs to the focus layer and is the better follow-up, but the difference
+    // between a clarifying question and 13 wasted seconds is this one branch.
+    if (isReferentialQuery(dval)) {
+      try { _orchLog(`RIDE_DRILL ▸ refused referential "${String(dval).slice(0, 24)}" — no walk, no scan (would have been ${(statusSlot && statusSlot.enum ? statusSlot.enum.length : 1)} + a full corpus plan)`); } catch { /* */ }
+      const _at = (_lastGroundedRead && _lastGroundedRead.itemId != null) ? String(_lastGroundedRead.itemId) : '';
+      _setMessageBody(msg, _at
+        ? `I’m not sure which one you mean — say its number or address. The last record I read was **${_at}**, if that’s the one.`
+        : 'I’m not sure which one you mean — say its number or address.', { markdown: true });
+      return true;
+    }
+    if (String(dval || '').trim() !== '' && statusSlot && Array.isArray(statusSlot.enum) && statusSlot.enum.length && params.status != null) {
       let tried = _drillWalk.get(msg);
       if (!tried) { tried = new Set(); _drillWalk.set(msg, tried); }
       tried.add(String(params.status));
@@ -10587,10 +10865,35 @@ async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, w
       if (next) {
         try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} "${String(dval).slice(0, 40)}" not in status=${params.status} → trying ${next}`); } catch { /* */ }
         _setMessageBody(msg, `Not in ${params.status} — checking ${next}…`);
-        return _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params: { ...params, status: next } });
+        // v2.74.1871 — the walk must CARRY the redirect's state. Live 195316 (v1870 loaded): the contacts
+        // redirect fired, then the first status miss re-entered here WITHOUT `_drillTo`, so by the time the row
+        // matched on `closed` the requested leg was forgotten and the drill fell back to `dj.via` — the details
+        // read — answering a contacts question from the task record all over again. `_redirected` rides too, so
+        // a re-entry can never be re-guarded. Third time a recursive path has dropped a flag it was handed
+        // (v1866 `_drilled`, v1869 `_drillTo`, this): the walk is a CONTINUATION of the same request, and a
+        // continuation inherits everything the request was carrying.
+        return _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params: { ...params, status: next }, _drillTo, _redirected });
       }
       _drillWalk.delete(msg);
-      _setMessageBody(msg, `No match for “${dval}”${where} in any status (${statusSlot.enum.join(' / ')}). Check the number or the division.`, { markdown: true });
+      // v2.74.1874 — A SCOPED MISS NAMES ITS SCOPE AS A LIMIT, NEVER AS A VERDICT. `where` is the division the
+      // three-rung ladder resolved (explicit → conversation context → the site's current division), and a miss
+      // inside a resolved scope is a fact about the SCOPE. "Check the number or the division" asserted something
+      // the search never established: live 130625 said exactly that about a record that existed, in a division
+      // the ask never named. Whether or not the sweep below runs, the sentence may only claim what was read.
+      _setMessageBody(msg, `No match for “${dval}”${where} in any status (${statusSlot.enum.join(' / ')})${where ? ' — that’s the only division I searched, so this doesn’t mean the record isn’t elsewhere' : ''}.`, { markdown: true });
+      // v2.74.1875 — THE SYNTHETIC FIND LEG replaces the v1865 button. The button existed because the sweep was
+      // "far too expensive to run on every miss" — measured then at 121 reads ≈ 3.5s, actually ~75s, and v1874's
+      // inversion + 8-way concurrency brought the full 484-cell plan to ~7.6s. At that price a fourth rung should
+      // just RUN: the user's ruling was that a miss inside three resolved rungs is a fact about the scope, not
+      // about the record, so making them click to find out is making them do the system's reasoning. The gate
+      // stays (estimate before spending) because the same scanner will carry the per-row shapes, where cost is
+      // unbounded — for THIS shape it simply always passes.
+      try {
+        const _divSlot = (leg.tool && leg.tool.resolve && leg.tool.resolve.divisionId) || null;
+        if (_divSlot && _divSlot.each === true) {
+          return await _synthTaskFind(msg, { leg, ask, tabId, groundId, params, dval, statuses: statusSlot.enum.map(String), labels: (dj && dj.label) || [], where, _drillTo, _redirected });
+        }
+      } catch { /* the escalation is an enhancement — never break the honest miss */ }
       return true;
     }
     // CX-9e (v1438) — an EMPTY list (no walk) skips the drill entirely: "no <status> tasks in <division>" (the
@@ -10616,16 +10919,64 @@ async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, w
 // division needn't be re-discovered by an expensive cross-division sweep — it rides on the last grounded read.
 // Returns the resolved divisionId (a string id like "32"), or null: no fresh read, an each-mode sweep (no single
 // division), or a stale read (past the follow-up window — a stale division must not leak into a fresh ask). PURE-ish.
+// v2.74.1868 — the division the conversation last WORKED IN, stamped at the resolver's single choke point so it
+// survives a drill (a details read carries no divisionId and used to wipe the context entirely).
+let _divisionCtx = null;   // { value, at }
+
+/**
+ * v2.74.1872 — THE CONTEXT ANSWER: "which division am I in right now", answered from the RESOLVER rather than
+ * the shaper, BEFORE the shaper gets the read. `access.DefaultDivision.Id` is already read on nearly every
+ * VendorSuite turn by the param binder — that IS the `RIDE_RESOLVE ▸ divisionId "(default)" → 32 (Raleigh)`
+ * line — so the answer is one `resolveRideParam` call on the payload just fetched: no LLM, no picking a field
+ * out of a 121-division blob. Six passes handed this to the shaper because the trace shows decisions and never
+ * payloads, so the residue kept landing on the one stage with no instrument. See Core/contextAnswer.js.
+ *
+ * Called from BOTH read tails (cookie-ride and header-replay) — the same "one helper, both renders" discipline
+ * the drill join follows, and the direct answer to the v1851 lesson: a curated leg rides INVOKE_SESSION while a
+ * seeded/harvested one rides SESSION_REPLAY, and a fix wired to one door is invisible on the other.
+ * Returns true when it ANSWERED (caller stops); false falls through to today's path unchanged.
+ */
+function _maybeContextAnswer(msg, { leg, ask, value }) {
+  try {
+    const specs = contextSpecsFor((leg && leg.tool && leg.tool.endpoint) || '', CONNECTOR_RECIPES);
+    const entry = specs.length ? contextAskFor(ask, specs) : null;
+    if (!entry) return false;
+    const resolved = resolveRideParam(entry.spec, '', value);        // blank raw → defaultPath: the binder's own call
+    const all = (entry.spec.each === true) ? resolveRideParam(entry.spec, 'each', value) : null;   // each-mode reused purely for the COUNT
+    const line = contextAnswerLine({
+      noun: entry.noun,
+      resolved,
+      total: (all && Number.isFinite(all.total)) ? all.total : undefined,
+      // the CONVERSATION's scope, stated only when it disagrees with the site's. Gated on the same /division/i
+      // predicate that STAMPS the slot (see _resolveRideParamsCore) — one such slot exists today, so this says
+      // plainly which nouns it can speak for instead of pretending to a general one.
+      conversation: (/division/i.test(entry.param) && _divisionCtx) ? _divisionCtx.value : null,
+    });
+    if (!line) {
+      try { _orchLog(`CONTEXT ▸ ${entry.noun} — ${entry.spec.defaultPath} empty in this reply, falling through to the shaper`); } catch { /* */ }
+      return false;
+    }
+    try { _orchLog(`CONTEXT ▸ ${entry.noun} → ${resolved.label ?? resolved.value} via ${entry.spec.defaultPath}${all && all.total ? ` (of ${all.total})` : ''}`); } catch { /* */ }
+    _setMessageBody(msg, line, { markdown: true });
+    return true;
+  } catch { return false; }   // an enhancement on the read path — never break the read
+}
 function _contextDivision() {
   const g = _lastGroundedRead;
-  if (!g || !g.params || (Date.now() - (g.at || 0)) > _FOLLOWUP_TTL) return null;
+  if (!g || !g.params || (Date.now() - (g.at || 0)) > _FOLLOWUP_TTL) return _divisionCtxFresh();
   const id = g.params.divisionId;
-  if (id == null || id === '' || String(id).toLowerCase() === 'each') return null;
+  if (id == null || id === '' || String(id).toLowerCase() === 'each') return _divisionCtxFresh();
   // v2.74.1534 — prefer the human LABEL ("Raleigh") over the internal id ("32"). The on-page division menu shows the
   // NAME, so a walk's CLICK_BY_LABEL {division} contains-matches "Raleigh" against "Raleigh - 495"; a bare id can't.
   // The drill path is unaffected — its param resolve maps a name OR an id to the internal id either way.
   const label = g.labels && g.labels.divisionId;
   return String((label != null && label !== '') ? label : id);
+}
+/** v2.74.1868 — the resolver-stamped fallback, bounded by the same follow-up window as the read-derived one. */
+function _divisionCtxFresh() {
+  if (!_divisionCtx || !_divisionCtx.value) return null;
+  if ((Date.now() - (_divisionCtx.at || 0)) > _FOLLOWUP_TTL) return null;
+  return String(_divisionCtx.value);
 }
 async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v2.74.1554 — no user echo here: the turn claims at sendChatMessage ENTRY (invariant #4); `ask` (the canonical phrase) still drives matching + alias recording. v1557 — opts.statusMsg: a thinking bubble the caller already showed; consumed (→ assistant) by whichever path acts
   const generic = ['site', 'page', 'tab', 'browser', 'web'].includes(siteWord);
@@ -10786,8 +11137,12 @@ function _shapeScope(params, labels) {
 
 // Dispatch a builtin leg JUDGE picked. A PANEL (ACT×Self) leg runs locally (above); a Browser/Self READ leg goes
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
-async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false }) {
+async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false, _redirected = false, _drillTo = null }) {   // v1869 — _drillTo survives a redirect so the drill lands on the leg the ASK chose
   const _askConvId = _currentConversationId;   // FC-6 — focus accretes to the conversation the ask was typed in
+  // v2.74.1863 — PROVENANCE SNAPSHOT, taken before any fill layer runs. Whatever is non-empty HERE was bound by
+  // the MODEL out of the ask; the focus/case fill and the ride resolvers only ever add below. That one bit is
+  // what the drill-target guard needs and what no amount of catalog wording could supply (see the guard below).
+  const _modelBound = new Set(Object.keys(params || {}).filter((k) => params[k] != null && params[k] !== ''));
   // v2.74.1597/1598 — the NAMED-SYSTEM fence: an ask that says a system's NAME ("search hubspot for…", "in
   // hubspot") must never silently run another system's leg (live 1596: it ran the ZENDESK search and reported
   // 25 tickets without naming the system — no HubSpot search leg exists). v1598 — this is TR-5's FIRST
@@ -10843,6 +11198,78 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       }
     }
   } catch { /* the focus fill is additive — binding proceeds as before */ }
+  // ── v2.74.1863 — THE DRILL-TARGET GUARD ─────────────────────────────────────────────────────────────────────
+  // A leg reachable only by an id that comes OUT of another leg's rows must not run on an id the MODEL supplied.
+  // Live 175843 proved text cannot hold this line: the model quoted the "never use a typed number" warning and
+  // picked the leg anyway, reasoned that "4867009 appears to be a task identifier", and — unanswerable by any
+  // wording — took a PRIOR REDIRECT'S SUCCESS as proof the number was internal. Both id kinds are 7-digit
+  // integers, so no value check separates them either. Provenance is the one thing that can: `_modelBound` above.
+  // The redirect target is DERIVED from the catalog's own drill declaration (Core/connectorRecipes.js
+  // drillTargetRedirect), so this protects `shopify_order` and every future drill pair for free — no new field.
+  // v2.74.1866 — `!_drilled` is LOAD-BEARING, not defensive. Live 183623: the guard fired on the DRILL'S OWN
+  // handoff (`_ilRunBuiltin(… params:{taskId: hits[0].TaskId}, _drilled:true)`, chat.js:10634) — the one call in
+  // the system that is GUARANTEED to hold a real internal id, because the drill just read it out of the matched
+  // row. The redirect then bounced it back to the list, re-defaulted the division to the current one, and lost
+  // the record the cross-division search had just found. `_modelBound` reads "non-empty at entry", which is true
+  // for a machine-supplied param too — `_drilled` is the bit that separates them, and it was already being
+  // passed. The guard's whole premise is provenance; it has to honor the provenance flag that already exists.
+  if (!_redirected && !_drilled && leg && leg.domain === 'connector' && leg.tool && leg.tool.recipeId) {
+    const _rd = drillTargetRedirect(leg.tool.recipeId);
+    const _val = _rd ? params[_rd.joinParam] : null;
+    if (_rd && _modelBound.has(_rd.joinParam) && _val != null && String(_val).trim() !== '') {
+      const _host = String((leg.tool && leg.tool.origin) || '');
+      let _parent = null;
+      try {
+        _parent = recipeLegs({ trusted: true }).find((l) => l && l.tool && l.tool.recipeId === _rd.parentId) || null;
+        if (_parent && _host) _parent = { ..._parent, key: _parent.key.includes('@') ? _parent.key : `${_parent.key}@${_host}`, tool: { ..._parent.tool, origin: _host } };
+      } catch { _parent = null; }
+      if (_parent) {
+        try { _orchLog(`RIDE_DRILL ▸ redirect ${leg.tool.recipeId} → ${_rd.parentId} (${_rd.joinParam}="${String(_val).slice(0, 24)}" was MODEL-bound — routed to \`${_rd.matchOn}\`)`); } catch { /* */ }
+        // Carry every param the parent also declares (a division/status the model named is still its answer),
+        // then put the user's identifier where the matcher accepts BOTH id kinds.
+        const _pKeys = new Set((_parent.params || []).map((p) => (p && p.name) || p));
+        const _pp = {};
+        for (const k of Object.keys(params || {})) if (_pKeys.has(k) && k !== _rd.joinParam) _pp[k] = params[k];
+        _pp[_rd.matchOn] = String(_val);
+        // A REQUIRED enum the model never bound (VendorSuite's `status`) dead-ends the redirect at the v1862
+        // ask-back — which is exactly what happened live at 18:21:37. Seed it with the first declared value and
+        // let the DRILL'S OWN STATUS WALK take over: gl 182219 shows that machinery already working
+        // ("…"4886921" not in status=open → trying new" → fixed → closed), so probing here would duplicate it at
+        // four times the cost. Seed one, and the walk searches the rest.
+        const _need = missingRequiredParams(_parent, _pp);
+        const _props = (_parent.paramSchema && _parent.paramSchema.properties) || {};
+        for (const _n of _need) {
+          const _vals = Array.isArray(_props[_n] && _props[_n].enum) ? _props[_n].enum.filter(Boolean) : [];
+          if (!_vals.length) continue;
+          _pp[_n] = _vals[0];
+          try { _orchLog(`RIDE_DRILL ▸ redirect seeded ${_n}="${_vals[0]}" (the drill walks the rest)`); } catch { /* */ }
+        }
+        return _ilRunBuiltin(msg, { leg: _parent, ask, tabId, groundId, params: _pp, _drilled, _redirected: true, _drillTo: leg.tool.recipeId });   // v1869 — carry the QUESTION, not just the id
+      }
+    }
+  }
+  // v2.74.1867 — THE CONTEXT DIVISION, at the interpret door too. `_contextDivision()` (v1533) has always fed
+  // the on-site drill (chat.js:10761 — "the case/last-read division beats the arbitrary default") and never the
+  // ordinary connector path, so an ask routed by interpret silently fell back to whatever division the SITE is
+  // currently on. Live 182219/183623: the site's current division had moved to Charlotte North between runs, so
+  // "get everything on that warranty task" searched all four statuses in a division the user had never worked in
+  // and reported an honest miss — while the conversation's own last read was in RALEIGH. Same family as the
+  // v1863 guard: the system holds the fact and the consumer never asked for it.
+  //
+  // NARROW BY CONSTRUCTION: only fills a division-class param the model left BLANK (an explicit "in Raleigh"
+  // always wins, and blank-means-current still holds when there is no context), only from a read inside the
+  // 10-minute follow-up window, and never over an `each` sweep. `_contextDivision` already prefers the human
+  // LABEL, which the resolver maps to an id exactly like a typed name.
+  if (leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve) {
+    for (const _p of Object.keys(leg.tool.resolve)) {
+      if (params[_p] != null && String(params[_p]).trim() !== '') continue;   // explicit or already bound → untouched
+      if (!/division/i.test(_p)) continue;                                     // the only context we can carry today
+      const _ctx = _contextDivision();
+      if (!_ctx) continue;
+      params[_p] = _ctx;
+      try { _orchLog(`FOCUS ▸ param fill ${_p} ← "${_ctx}" (conversation context, not the site default)`); } catch { /* */ }
+    }
+  }
   // CX-9b (v2.74.1434) — the ID layer: resolve marked params (divisionId et al.) BEFORE any branch, so every
   // transport (replay read/write, cookie-ride write, the planExec tail) dispatches canonical ids — and a write's
   // HITL preview shows the real request. On ambiguity/unknown the honest ask-back is already rendered.
@@ -10864,7 +11291,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   // can only produce a wire error, so ask the user instead. Strict-true declarations only: blank OPTIONAL
   // params ("" = current division; drive slots skip-on-blank by contract) are untouched.
   if (leg.domain === 'connector') {
-    const _miss = missingRequiredParams(leg.tool || leg, params);
+    const _miss = missingRequiredParams(leg, params);   // v1864 — the LEG, not its tool
     if (_miss.length) {
       try { _orchLog(`IL ▸ missing required ${_miss.join(',')} → clarify (no call spent) [${leg.key || (leg.tool && leg.tool.recipeId) || ''}]`); } catch { /* */ }
       const _decl = ((leg.tool && leg.tool.params) || leg.params || []);
@@ -10991,7 +11418,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     }
     // CX-9b — the drill join (shared helper; also hooked in the planExec tail below — both transports, v1435).
     {
-      const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: rr.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled });
+      const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: rr.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled, _drillTo, _redirected });
       if (dj !== null) return dj;
     }
     _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), value: rr.value };   // FL-1d — this read grounds the coming answer; CX-9j — the VALUE stays (panel memory) so a follow-up ("what are the instructions?") answers from THIS record; v1534 — labels carry the human division NAME for a follow-up on-site open
@@ -11004,6 +11431,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const flines = renderConnectorLines(rr.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
       if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
     }
+    if (_maybeContextAnswer(msg, { leg, ask, value: rr.value })) return true;   // v1872 — the twin call (see the helper: a seeded leg rides THIS door)
     let shaped = null;
     try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts, scope: _shapeScope(params, _resolvedLabels) }); } catch { /* best-effort */ }   // CX-9d — the applied filters ride along
     if (shaped && shaped.answer) { _setMessageBody(msg, `${shaped.answer}`); return true; }
@@ -11094,7 +11522,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // CX-9b (v2.74.1435) — the drill join on THIS transport too (the cookie-ride/INVOKE_SESSION read tail; the
     // replay branch above has the twin call — one helper, both renders).
     {
-      const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: res.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled });
+      const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: res.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled, _drillTo, _redirected });
       if (dj !== null) return dj;
     }
     // ANSWER-SHAPE (v2.74.1267) — the interrogator's final stage: match the answer to the QUESTION ("how many" → a
@@ -11111,6 +11539,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const flines = renderConnectorLines(res.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
       if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
     }
+    if (_maybeContextAnswer(msg, { leg, ask, value: res.value })) return true;
     let shaped = null;
     try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts, scope: _shapeScope(params, _resolvedLabels) }); } catch { /* shaper is best-effort → fall through to the render */ }   // CX-9d — the applied filters ride along
     if (shaped && shaped.answer) { _setMessageBody(msg, `${shaped.answer}`); return true; }
@@ -11247,7 +11676,7 @@ function _withBoundUrl(params) {
 // SUCCESS → an OBSERVED intent→capability belief (0.7), so a 2nd success ratchets it to 'confirmed' (the store now
 // settles on write). FAILURE → a low-confidence mismatch DELTA (§2), keyed separately so it can't corroborate the
 // positive. The body/ask phrasing is the recall key (a paraphrase MERGES → bumps evidence). Off-app → no-op.
-function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null) {
+function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null, _bankLeg = null) {   // v1870 — _bankLeg supplies the SHAPE a failure verdict is about, so it can retire when that shape moves
   // TRT-5 §5.2 (v2.74.1546) — the VISITOR FENCE: an off-desk turn's outcome never enters the desk's instance
   // memory (the desk's learned role stays coherent — its memory describes ITS work, not errands run from its
   // window). Ground/capability-level learning (aliases, outcomes stream, confirmations) is untouched — those are
@@ -11257,7 +11686,7 @@ function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null) {
   // completion time banked app A's outcome into app B's instance memory after a mid-flight switch (AP-0 defeated).
   const appId = memoryId || _memoryId();   // AP-0 — bank to THIS instance's memory
   if (!appId) return;
-  const item = capabilityOutcomeItem(goal, capabilityId, ok);
+  const item = capabilityOutcomeItem(goal, capabilityId, ok, _bankLeg);   // v1870 — bank the SHAPE the verdict judged
   if (!item) return;
   // v2.74.1856 — Experiment B (law-ledger README): the WRITE side of goal memory speaks. The poisoned-lesson
   // wedge (v1790-96) took three passes precisely because what got banked was invisible at write time — the
@@ -11271,13 +11700,19 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   if (!goal) { _orchFinalize(appendMessage({ role: 'assistant', body: 'usage: `i: <ask>` — the interpret front door (F-2 test).' })); return true; }
   // WF-1 — RECALL: a saved workflow strongly matches this ask → SUGGEST-and-confirm before interpreting. The "No"
   // button re-enters with suggestWorkflows:false (no loop). Off-app / no match → straight through, no cost.
-  if (suggestWorkflows) {
+  if (suggestWorkflows && WF_RECALL_PREDOOR) {
     const wf = await _matchWorkflow(goal);
     if (wf) {
       try { _orchLog(`WORKFLOW ▸ "${goal.slice(0, 50)}" → ${wf.name || wf.id || 'saved'} (${wf.subAsks.length} steps)`); } catch { /* */ }
       _offerWorkflowReplay(goal, wf);
       return true;
     }
+  } else if (suggestWorkflows && !_wfRetiredNoted && _workflowKeys().length) {
+    // A retired door still has to say so, or the next "why didn't my workflow trigger?" costs a diagnosis. Once
+    // per session and sync-only (`_workflowKeys` reads no storage and calls no model) — the whole point is that
+    // this door now costs nothing per turn.
+    _wfRetiredNoted = true;
+    try { _orchLog('WORKFLOW ▸ pre-door recall RETIRED (v1873) — saved workflows are not consulted automatically; run one from its Rail card'); } catch { /* */ }
   }
   // v2.74.1338 (review theme 1) — the TURN SNAPSHOT: capture the origin conversation's identity ONCE, before any
   // await. Every use below reads the snapshot, so a mid-flight app switch can't misroute the reply, mis-key the
@@ -11422,7 +11857,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
       // AL-3e — bank the OUTCOME. A user CANCEL is neither success nor failure (v1338, review C); v2.74.1796 — nor
       // is a PRECONDITION failure (the page never became ready, e.g. signed out) — the walk ran no step, so it is
       // no evidence about the capability. Note `ok !== false` would otherwise score the sentinel as a SUCCESS.
-      if (ok !== 'cancelled' && ok !== 'precondition') _bankCapabilityOutcome(goal, d.capabilityId, ok !== false, turn.memoryId);
+      if (ok !== 'cancelled' && ok !== 'precondition') _bankCapabilityOutcome(goal, d.capabilityId, ok !== false, turn.memoryId, cleg);   // v1870 — the leg carries the shape
       return true;
     }
   }
@@ -12624,11 +13059,25 @@ async function sendChatMessage() {
   // v2.74.905 — a TEMPLATE ask never routes: the 22:38 live run sent "{query}" literally — it typed
   // "{query}" into the page and accreted the template as an alias. Keep it in the input with the first
   // placeholder selected so typing replaces it.
-  const _ph = text.match(/\{([a-zA-Z0-9_]+)\}/);
+  // v2.74.1869 — TWO repairs to this guard, both found live (191641: `read warranty task [id]` was answered
+  // about task 4886921, silently substituted from the previous turn).
+  //   1. SQUARE brackets count. v905 matched `{…}` only, so the commonest placeholder form walked straight into
+  //      interpret, which filled it from RECENT_TURNS and answered a question the user never asked, about a task
+  //      it chose. v1656's rule was already right — "a bracketed placeholder means the user left a blank, and
+  //      the only correct response is to ask for the real one" — but its check reads the VALUE at the drill,
+  //      long after the substitution happened. This is the same rule at the ask, where nothing can fill it yet.
+  //   2. It now ANSWERS. v1554 moved the composer clear to entry, which quietly made this branch inert: it
+  //      selected a range in an empty input and returned, leaving the user's bubble with no reply at all. (The
+  //      inert-guard class again — the clear was correct and nothing re-checked what depended on it.) It does
+  //      NOT refill the composer: invariant #4 reserves that for the `seed:` flow, and a named refusal is worth
+  //      more than a re-populated box.
+  const _ph = text.match(/\{([a-zA-Z0-9_]{1,24})\}|\[([a-zA-Z0-9_]{1,24})\]/);
   if (_ph) {
-    const i = text.indexOf(_ph[0]);
-    input.focus();
-    try { input.setSelectionRange(i, i + _ph[0].length); } catch { /* */ }
+    const _phName = _ph[1] || _ph[2];
+    const m = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(m, `“${escHtml(_ph[0])}” is a placeholder, not a value — tell me the real ${escHtml(_phName)} and I’ll run it.`, { markdown: true });
+    _orchFinalize(m);
+    try { _orchLog(`CLARIFY ▸ placeholder "${_ph[0]}" refused at the ask (never bound from context)`); } catch { /* */ }
     return;
   }
 

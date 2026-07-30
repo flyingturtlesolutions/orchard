@@ -75,11 +75,25 @@ export function shouldConfirm(belief, { now = null } = {}) {
  *  • A stale NEGATIVE does not block on its own either. A stale positive costs one failed request that
  *    self-corrects; a stale negative refuses work that would have SUCCEEDED — which is exactly the 09:44
  *    failure this file exists to prevent. Only a CONFIRMED signed-out stops the run.
+ *
+ * v2.74.1859 — 'no-tab' is a THIRD confirm outcome, split out of 'failed' (user report, gl 132049: "why would
+ * a logged-out site run at all?"). The caller used to report "there was no tab to probe" with the same token as
+ * "the probe timed out", and since `failed` is checked FIRST, a ground with a CONFIRMED signed-out belief
+ * proceeded anyway — three traces in a row spent ~11s and a 17k-token interpret call to reach a guaranteed
+ * `NO-APP-TAB`. The two are not alike: a timeout is evidence about the network, while no-tab is DETERMINISTIC
+ * evidence that a session-ride cannot work, because the ride needs the very tab that was not found. So a
+ * failed probe still proceeds (the asymmetry is intact, and it is what that rule was written for), but a
+ * no-tab probe defers to the standing belief — which is the docstring's own rule: a CONFIRMED signed-out stops.
  */
 export function gate(belief, { confirmed = null } = {}) {
   const b = makeBelief(belief || {});
   if (confirmed === false) return { proceed: false, reason: 'confirmed-signed-out' };
   if (confirmed === true) return { proceed: true, reason: 'confirmed-fresh' };
+  if (confirmed === 'no-tab') {
+    return b.state === 'signed-out'
+      ? { proceed: false, reason: 'signed-out-no-tab' }        // known dead + nothing to ride → refuse in 14ms
+      : { proceed: true, reason: 'no-tab-proceeding' };        // unknown/stale → unchanged: the request arbitrates
+  }
   if (confirmed === 'failed') return { proceed: true, reason: 'probe-failed-proceeding' };
   if (b.state === 'fresh') return { proceed: true, reason: 'cached-fresh' };
   if (b.state === 'signed-out') return { proceed: false, reason: 'believed-signed-out' };

@@ -144,3 +144,35 @@ describe('goldenAsks — CLASS cross-checks: negatives verified against the cata
     assert.equal(s.waived, 0);
   });
 });
+
+// v2.74.1876 — CORPUS ROT, param edition. `expectParams`/`mustNotBindParams` name PARAM SLOTS, so an entry can
+// rot the same way one naming a deleted leg can: a renamed or removed param would make the assertion silently
+// unfalsifiable. Same discipline as the legId check above — rot is loud, not silent.
+describe('goldenAsks — param assertions name params that exist', () => {
+  const paramsFor = (legId) => {
+    const r = CONNECTOR_RECIPES.find((x) => x && x.id === legId);
+    if (!r) return null;
+    const names = new Set((Array.isArray(r.params) ? r.params : []).map((p) => p && p.name).filter(Boolean));
+    for (const k of Object.keys((r.resolve && typeof r.resolve === 'object') ? r.resolve : {})) names.add(k);
+    if (r.drill && r.drill.matchOn) names.add(r.drill.matchOn);
+    return names;
+  };
+  it('every asserted slot is a declared param of the expected leg', () => {
+    for (const e of GOLDEN_ASKS) {
+      const keys = [...Object.keys(e.expectParams || {}), ...(e.mustNotBindParams || [])];
+      if (!keys.length) continue;
+      const legId = e.expect && e.expect.legId;
+      assert.ok(legId, `"${e.ask}" asserts params but expects no legId — nothing to check them against`);
+      const declared = paramsFor(legId);
+      assert.ok(declared, `"${e.ask}" expects unknown leg ${legId}`);
+      for (const k of keys) assert.ok(declared.has(k), `"${e.ask}" asserts param "${k}", which ${legId} does not declare`);
+    }
+  });
+  it('an entry never demands and forbids the same slot', () => {
+    for (const e of GOLDEN_ASKS) {
+      for (const k of (e.mustNotBindParams || [])) {
+        assert.ok(!(e.expectParams && k in e.expectParams), `"${e.ask}" both expects and forbids ${k}`);
+      }
+    }
+  });
+});

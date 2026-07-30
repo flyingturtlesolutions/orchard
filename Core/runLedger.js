@@ -117,3 +117,53 @@ export function renderNoEffect(ledger, { ms, ask = '' } = {}) {
   if (a) bits.push(`ask: "${a.slice(0, 80)}"`);
   return `RUN ▸ ${bits.join(' · ')}`;
 }
+
+/**
+ * v2.74.1859 — THE RUN-LEVEL TERMINAL, always. PURE.
+ *
+ * `renderNoEffect` is a BACKSTOP by design: it stays quiet on an errored turn ("already diagnosable") and on a
+ * plain successful read. That made it the only run-level line — so the moment v1858 gave `error()` a producer,
+ * an errored replay ended with NO run receipt at all (caught by trace-lint on its very next run: the leg line
+ * accounts for the LEG, the run still owed its own). A span that opened must close, whatever the outcome.
+ *
+ * Delegates to the backstop for the no-effect signature (that wording is load-bearing and stays byte-identical),
+ * and otherwise states the outcome: failed · partial · ok. This is also the SOURCE OF TRUTH a run's recorded
+ * verdict should derive from — outcomes, never step positions (the v1780 card ruling, one layer down).
+ */
+export function renderRunReceipt(ledger, { ms, ask = '' } = {}) {
+  const snap = (ledger && typeof ledger.snapshot === 'function') ? ledger.snapshot() : null;
+  if (!snap) return '';
+  const backstop = renderNoEffect(ledger, { ms, ask });
+  if (backstop) return backstop;                       // the no-effect signature keeps its exact wording
+  const bits = [];
+  const made = snap.kinds.length ? snap.kinds.map((k) => `${k} ${snap.effects[k]}`).join(', ') : '';
+  if (snap.errors > 0 && snap.touched === 0) bits.push('failed — nothing was created, updated or written');
+  else if (snap.errors > 0) bits.push(`partial — ${made}`);
+  else bits.push(`ok${made ? ` — ${made}` : ''}`);
+  if (snap.errors > 0) bits.push(`${snap.errors} step(s) failed`);
+  const t = _ms(ms);
+  if (t != null) bits.push(`${t}ms`);
+  if (snap.rowsRead > 0) bits.push(`${snap.rowsRead} row(s) read`);
+  if (snap.lastDecision) bits.push(`last decision: ${snap.lastDecision}`);
+  const a = _s(ask);
+  if (a) bits.push(`ask: "${a.slice(0, 80)}"`);
+  return `RUN ▸ ${bits.join(' · ')}`;
+}
+
+/**
+ * v2.74.1859 — the recorded VERDICT for a run, derived from what happened. PURE.
+ * Replaces the positional `ranSteps.length >= total ? 'complete' : …` (chat.js `_wfRecordPanelRun`), which
+ * counted DISPATCHES: a 1-step workflow whose only step failed recorded `complete` on the Rail card, and this
+ * run's 2-step replay recorded `partial` having produced nothing. `ranSteps` still supplies the COUNTS.
+ */
+export function runVerdict(snapshot, { done = 0, total = 0 } = {}) {
+  const s = snapshot && typeof snapshot === 'object' ? snapshot : null;
+  const errors = s && Number.isFinite(s.errors) ? s.errors : 0;
+  const touched = s && Number.isFinite(s.touched) ? s.touched : 0;
+  const rows = s && Number.isFinite(s.rowsRead) ? s.rowsRead : 0;
+  const did = touched > 0 || rows > 0;
+  if (errors > 0) return did ? 'partial' : 'failed';   // something failed: only 'complete' is ruled out absolutely
+  if (!s) return done >= total && total > 0 ? 'complete' : (done > 0 ? 'partial' : 'failed');   // no ledger → the legacy positional read
+  if (!did) return 'failed';                            // no error recorded, but nothing happened either
+  return done >= total && total > 0 ? 'complete' : 'partial';
+}

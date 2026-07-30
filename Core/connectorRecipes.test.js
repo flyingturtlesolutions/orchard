@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, drillTargetRedirect, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
@@ -797,5 +797,50 @@ describe('connectorRecipes — askNamesOtherSystem (v2.74.1597: the named-system
   it('degrades: empty ask / unknown leg host → null', () => {
     assert.equal(askNamesOtherSystem('', 'deako.zendesk.com'), null);
     assert.equal(askNamesOtherSystem('search hubspot for x', ''), null);
+  });
+});
+
+// v2.74.1863 — the DRILL-TARGET REDIRECT. Live 175843 settled that catalog TEXT cannot keep a model out of a
+// leg whose id it cannot validate: it quoted the warning and overrode it, reasoned about which id kind the
+// number was, and finally took a prior redirect's SUCCESS as proof the typed number was internal. The redirect
+// door is derived from the catalog's own drill declarations, so it needs no new field and covers every pair.
+describe('drillTargetRedirect (v2.74.1863) — the door a user-named identifier belongs in', () => {
+  it('THE LIVE PAIR: both VendorSuite drill targets redirect to the LIST leg and its address matcher', () => {
+    assert.deepEqual(drillTargetRedirect('vs_warranty_task'), { parentId: 'vs_warranty_tasks', matchOn: 'address', joinParam: 'taskId' });
+    assert.deepEqual(drillTargetRedirect('vs_task_contacts'), { parentId: 'vs_warranty_tasks', matchOn: 'address', joinParam: 'taskId' },
+      'an `also` target is protected exactly like the `via` target — it takes the same id');
+  });
+  // v2.74.1868 — THIS ASSERTION USED TO CLAIM THE OPPOSITE, and the claim was the bug. v1863 keyed the redirect
+  // on drill MEMBERSHIP and I wrote "Shopify gets it for free" as if breadth were the proof. Live 184948 showed
+  // what free cost: `shopify_order` takes the ORDER NUMBER a person reads off the screen (no internal/display
+  // split exists there), so the redirect pushed 69872 into the UNFULFILLED queue — a filtered subset that
+  // cannot contain a fulfilled order — and answered "none match". The test moves with a corrected FACT about
+  // the world (the v1804 `#divisionMenu` precedent), not with a design being softened.
+  it('does NOT fire where a human can legitimately type the id (the v1863 over-reach, corrected)', () => {
+    assert.equal(drillTargetRedirect('shopify_order'), null,
+      'shopify_order takes the order NUMBER off the screen — redirecting it into the unfulfilled queue loses fulfilled orders');
+  });
+  it('fires only on a param DECLARED machineOnly — membership alone is not the property', () => {
+    const cat = [
+      { id: 'parent', drill: { via: 'child', param: 'id', matchOn: 'q' } },
+      { id: 'child', params: [{ name: 'id', required: true }] },                       // drilled into, but typeable
+    ];
+    assert.equal(drillTargetRedirect('child', cat), null);
+    cat[1].params[0].machineOnly = true;                                               // the same pair, declared
+    assert.deepEqual(drillTargetRedirect('child', cat), { parentId: 'parent', matchOn: 'q', joinParam: 'id' });
+  });
+  it('a LIST leg is not a drill target — it is the destination, never the source', () => {
+    assert.equal(drillTargetRedirect('vs_warranty_tasks'), null);
+    assert.equal(drillTargetRedirect('shopify_orders_queue'), null);
+  });
+  it('a bare `via` with no join spec cannot redirect (nothing to route the value INTO)', () => {
+    assert.equal(drillTargetRedirect('ticket_comments'), null, 'the Zendesk drills declare via only');
+  });
+  it('unknown ids and junk are null, never a throw', () => {
+    for (const x of ['nope', '', null, undefined, 0]) assert.equal(drillTargetRedirect(x), null);
+    assert.equal(drillTargetRedirect('vs_warranty_task', []), null, 'an empty catalog redirects nowhere');
+  });
+  it('never redirects a leg to ITSELF (a self-referential drill is inert, not a loop)', () => {
+    assert.equal(drillTargetRedirect('x', [{ id: 'x', drill: { via: 'x', param: 'p', matchOn: 'm' } }]), null);
   });
 });

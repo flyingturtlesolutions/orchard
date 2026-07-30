@@ -23,8 +23,13 @@ const RULES = [
     // flow and — under whole-file FIFO — absorbed the 14:38 founding incident's missing receipt (a later
     // unrelated turn paid the earlier turn's debt). Terminals must be lines only THIS span can emit.
     why: 'a fan-out tally must be followed by a delivery receipt (rendered / exit / its own drill filter)',
-    opener: /RIDE_EACH ▸ (?!rendered |exit )/,
-    terminals: [/RIDE_EACH ▸ (rendered |exit )/, /RIDE_DRILL ▸ .*each-filter .*hit\(s\)/, /RIDE_DRILL ▸ refused placeholder/],
+    // gl 202123 (toolchain-only, no version — manifest stays 1871) — the negative lookahead must list EVERY receipt form, or a receipt counts as an opener too.
+    // Live 202123: `RIDE_EACH ▸ cross-division new → 0 row(s), no match` retired the pending span (correct) and
+    // was then pushed as a NEW pending span (wrong), so the last sweep line always flagged. Both `cross-division`
+    // and `returned` were added to `terminals` when they were introduced and neither was added here — the two
+    // lists are one contract stated twice, and only one of them was updated.
+    opener: /RIDE_EACH ▸ (?!rendered |exit |cross-division |returned )/,
+    terminals: [/RIDE_EACH ▸ (rendered |exit |cross-division |returned )/, /RIDE_DRILL ▸ .*each-filter .*hit\(s\)/, /RIDE_DRILL ▸ refused placeholder/],
   },
   {
     id: 'workflow-run-receipt',
@@ -86,6 +91,12 @@ function main() {
     if (!v.length) { console.log(`${f}: clean (${RULES.length} rules)`); continue; }
     console.log(`${f}: ${v.length} silent exit(s)`);
     for (const x of v) console.log(`  line ${x.line} [${x.rule}] ${x.why}`);
+    // v2.74.1861 — ATTRIBUTION HONESTY. Matching is FIFO, so each terminal retires the OLDEST pending opener:
+    // with a deficit, the lines printed above are the most RECENT openers, which are usually innocent — the
+    // debt was incurred earlier (gl 162926 cost a diagnosis step exactly here: 18 flagged lines all had
+    // terminals directly beneath them, while the real orphans were 20 quieted fan-out dispatches at the head).
+    // The COUNT is exact; the line numbers are where the deficit surfaced, not where it started.
+    if (v.length > 2) console.log('  note: FIFO matching — the count is exact, but with a deficit these line numbers mark where it SURFACED; look earlier for openers whose terminal was suppressed or evicted.');
   }
   process.exit(total ? 1 : 0);
 }

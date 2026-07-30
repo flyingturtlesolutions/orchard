@@ -96,13 +96,76 @@ export function auditPaletteSafety(legs) {
   return out;
 }
 
+/**
+ * v2.74.1862 — ROUTER LEGIBILITY. `interpretPrompt` renders `detail:` from the does-head under a 140-char budget
+ * (split on ' — ', whole segments only), so a long `does` reaches the router as a FRAGMENT — measured 2026-07-28:
+ * 22 of 60 entries clipped, 2,541 authored chars invisible, two of them the direct cause of live failures (a 500,
+ * and four runs of count-asks pulling the wrong leg). Authoring into an invisible field is undetectable by every
+ * other check here, because they all read the catalog against ITSELF rather than against what the router receives.
+ *
+ * The rule: a clipped `does` must declare a `routerHint` (Core/routerHints.js). Both directions — a hint for a
+ * recipe that no longer exists is rot, and is also a violation. Mirrors the does-head accumulate EXACTLY; if that
+ * render changes, this must change with it (they are the same contract, stated twice on purpose — one enforces).
+ */
+export function auditRouterLegibility(recipes, hints = {}) {
+  const out = [];
+  const ids = new Set();
+  for (const r of (Array.isArray(recipes) ? recipes : [])) {
+    if (!r || !r.id) continue;
+    ids.add(String(r.id));
+    const does = String(r.does || '');
+    if (!does) continue;
+    const segs = does.split(' — ');
+    let head = segs[0] || '';
+    for (let i = 1; i < segs.length && (head.length + 3 + segs[i].length) <= 140; i++) head += ` — ${segs[i]}`;
+    const hint = Object.prototype.hasOwnProperty.call(hints, r.id) ? String(hints[r.id] || '') : '';
+    if (head.length < does.length && !hint) out.push(`${r.id}: \`does\` is clipped to ${head.length}/${does.length} chars at the router — declare a routerHint`);
+    if (hint && hint.length > 140) out.push(`${r.id}: routerHint is ${hint.length} chars — over the 140 budget it exists to fit`);
+  }
+  for (const id of Object.keys(hints || {})) {
+    if (!ids.has(String(id))) out.push(`routerHint "${id}" names no recipe — rot`);
+  }
+  return out;
+}
+
 /** The whole A-0a sweep in one call — {violations, counts} for a dashboard or a one-line log. PURE. */
-export function runCatalogAudit({ recipes = [], legs = [] } = {}) {
+/**
+ * v2.74.1877 — SYNTH READINESS. The synthetic-leg family generates from the entity graph the `drill` block already
+ * declares, and generation cannot CREATE readiness — it makes readiness visible. This reports, per entity, what a
+ * generated `find` would still be missing, so "can we find a Zendesk ticket by number?" is a catalog fact rather
+ * than something you discover when a generated leg answers nothing.
+ *
+ * Reported as ROT, not violations: an unready entity is not a defect, it is an undeclared opportunity. The one
+ * exception that IS a violation is a declared `coverage` on a recipe with no drill — a coverage claim about a
+ * corpus nothing scans is unfalsifiable, and an unfalsifiable claim about completeness is the class this whole
+ * family had to be protected from.
+ */
+export function auditSynthEntities(recipes, { entitiesFrom, findReadiness } = {}) {
+  if (typeof entitiesFrom !== 'function' || typeof findReadiness !== 'function') return [];
+  const out = [];
+  for (const r of (Array.isArray(recipes) ? recipes : [])) {
+    if (r && r.coverage && !(r.drill && r.drill.via)) {
+      out.push({ rule: 'synth-coverage-without-drill', id: r.id, why: `declares coverage:'${r.coverage}' but has no drill — nothing scans it, so the claim can never be checked` });
+    }
+  }
+  for (const e of entitiesFrom(recipes)) {
+    const { ready, missing } = findReadiness(e);
+    if (ready) continue;
+    out.push({ rule: 'synth-not-ready', id: e.key, rot: true, why: `no generated find (${e.paths.length} access path(s)): ${missing.join(' · ')}` });
+  }
+  return out;
+}
+
+export function runCatalogAudit({ recipes = [], legs = [], hints = {}, synth = null } = {}) {
   const violations = [
+    // synth readiness rides along when the caller supplies the entity layer — injected rather than imported so
+    // this module stays dependency-free and the audit list stays one place.
+    ...(synth ? auditSynthEntities(recipes, synth) : []),
     ...auditGateAxes(recipes),
     ...auditIdentity(recipes),
     ...auditRecipeLegibility(recipes),
     ...auditPaletteSafety(legs),
+    ...auditRouterLegibility(recipes, hints),
   ];
   return {
     violations,

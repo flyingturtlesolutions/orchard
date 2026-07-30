@@ -105,14 +105,40 @@ function recipeParamSchema(params) {
  * CONTRACT ("" skips the label-click, "" means current division) — can never false-positive. The urlParam slot
  * (e.g. {handle}) is excluded: the EXECUTOR fills it from the ride tab, never the binder.
  */
-export function missingRequiredParams(tool, params = {}) {
-  const declared = (tool && Array.isArray(tool.params)) ? tool.params : [];
-  const urlP = (tool && tool.urlParam && tool.urlParam.name) || null;
+/*
+ * v2.74.1864 — IT ALSO HAS TO READ A LEG. Shipped at v1854 reading only `tool.params` — an array of {name,
+ * required} that exists on a RECIPE and NOWHERE on a projected leg (recipeToLeg puts param NAMES on `leg.params`
+ * and the requirements in `leg.paramSchema.required`). Both live callers pass `leg.tool || leg`, so `declared`
+ * was `[]` and the gate returned "nothing missing" for every connector leg it has ever guarded. Caught only when
+ * the v1863 redirect's status probe silently did nothing (gl 182219) and the executor's own endpoint guard
+ * blocked instead — the FOURTH declared-thing-with-no-working-reader this week, and the one that was hiding
+ * inside a fix for the same class. Now normalizes: recipe shape (params[{name,required}]) OR leg shape
+ * (paramSchema.required), reading `urlParam` from whichever level carries it.
+ */
+export function missingRequiredParams(legOrRecipe, params = {}) {
+  const o = (legOrRecipe && typeof legOrRecipe === 'object') ? legOrRecipe : null;
+  if (!o) return [];
+  const tool = (o.tool && typeof o.tool === 'object') ? o.tool : o;
+  const urlP = (tool.urlParam && tool.urlParam.name) || (o.urlParam && o.urlParam.name) || null;
+  const objParams = [o.params, tool.params].find((p) => Array.isArray(p) && p.some((x) => x && typeof x === 'object' && x.name));
+  let names;
+  if (objParams) names = objParams.filter((p) => p && p.required === true && p.name).map((p) => p.name);
+  else {
+    const schema = o.paramSchema || tool.paramSchema;
+    names = (schema && Array.isArray(schema.required)) ? schema.required.filter(Boolean) : [];
+  }
+  // v2.74.1864 — a param with a declared `resolve` spec is NEVER "missing" when blank: blank is its documented
+  // value ("division optional — blank = your current one") and rideParamResolve fills it from `defaultPath`.
+  // This mattered the moment the reader above started working: `divisionId` is declared required:true, so the
+  // flagship "get open warranty tasks" would have been blocked by its own pre-flight gate. The urlParam slot is
+  // excluded for the same reason one level down — the executor fills it from the ride tab.
+  const resolved = (tool.resolve && typeof tool.resolve === 'object') ? tool.resolve : (o.resolve && typeof o.resolve === 'object' ? o.resolve : null);
   const out = [];
-  for (const p of declared) {
-    if (!p || p.required !== true || !p.name || p.name === urlP) continue;
-    const v = (params && typeof params === 'object') ? params[p.name] : undefined;
-    if (v == null || String(v).trim() === '') out.push(p.name);
+  for (const name of names) {
+    if (name === urlP) continue;
+    if (resolved && Object.prototype.hasOwnProperty.call(resolved, name)) continue;
+    const v = (params && typeof params === 'object') ? params[name] : undefined;
+    if (v == null || String(v).trim() === '') out.push(name);
   }
   return out;
 }

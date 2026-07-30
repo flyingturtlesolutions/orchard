@@ -67,6 +67,29 @@ describe('gate — the two asymmetries that the 09:44 failure taught', () => {
   it('fresh proceeds with no probe at all', () => {
     assert.deepEqual(gate(makeBelief({ state: 'fresh', checkedAt: T })), { proceed: true, reason: 'cached-fresh' });
   });
+
+  // v2.74.1859 — 'no-tab' split out of 'failed' (user report, gl 132049). The live shape: a signed-out belief,
+  // no tab to re-probe, `confirmed:'failed'` → proceed — and ~11s + a 17k-token interpret call burned to reach
+  // a guaranteed NO-APP-TAB, three traces running.
+  describe('no-tab is not a failed probe (v2.74.1859)', () => {
+    it('THE LIVE CASE: signed-out + nothing to probe STOPS — the standing belief is consulted at last', () => {
+      assert.deepEqual(gate(makeBelief({ state: 'signed-out' }), { confirmed: 'no-tab' }), { proceed: false, reason: 'signed-out-no-tab' });
+    });
+    it('the ANTI-BLOCKING asymmetry is untouched for every other belief', () => {
+      assert.deepEqual(gate(makeBelief({ state: 'stale' }), { confirmed: 'no-tab' }), { proceed: true, reason: 'no-tab-proceeding' });
+      assert.equal(gate(makeBelief({ state: 'unknown' }), { confirmed: 'no-tab' }).proceed, true);
+      assert.equal(gate(makeBelief({ state: 'fresh' }), { confirmed: 'no-tab' }).proceed, true);
+    });
+    it('a genuinely FAILED probe still proceeds even when signed-out — a timeout is not evidence', () => {
+      // The distinction that makes this safe: 'failed' = the network flaked (say nothing about the session);
+      // 'no-tab' = there is deterministically nothing to ride. Only the second may defer to the belief.
+      assert.deepEqual(gate(makeBelief({ state: 'signed-out' }), { confirmed: 'failed' }), { proceed: true, reason: 'probe-failed-proceeding' });
+    });
+    it('an explicit confirm still outranks it in both directions', () => {
+      assert.equal(gate(makeBelief({ state: 'signed-out' }), { confirmed: true }).proceed, true);
+      assert.equal(gate(makeBelief({ state: 'fresh' }), { confirmed: false }).proceed, false);
+    });
+  });
 });
 
 describe('minutesLeft / renderPresence — PR-4 + PR-6', () => {

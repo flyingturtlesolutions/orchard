@@ -145,3 +145,44 @@ describe('DK-7b (v2.74.1489) — eachCap guards ENUMERATION, not execution (wind
     assert.equal(r.capped, false);
   });
 });
+
+// v2.74.1862 — deictic words mean "the one I'm in", which is what BLANK already means here. Live 172159:
+// "show me this division's announcements" → divisionId:"this" → *I don't know division "this"*, while the
+// answer sat in defaultPath.
+describe('resolveRideParam — deixis resolves to the current context (v2.74.1862)', () => {
+  const SPEC = { id: 'Id', match: ['Id', 'Code', 'Name'], label: 'Name', defaultPath: 'access.DefaultDivision.Id', lists: ['divisions'] };
+  const ST = { access: { DefaultDivision: { Id: 32 } }, divisions: [{ Id: 32, Code: '495', Name: 'Raleigh' }, { Id: 83, Code: '210', Name: 'Atlanta West' }] };
+  it('THE LIVE CASE: "this" resolves like blank, not like an unknown name', () => {
+    assert.equal(resolveRideParam(SPEC, 'this', ST).value, 32);
+    assert.equal(resolveRideParam(SPEC, 'this', ST).unknown, undefined);
+  });
+  it('every deictic form, and case-insensitively', () => {
+    for (const w of ['that', 'the', 'current', 'my', 'our', 'Mine', 'CURRENT', ' this ']) {
+      assert.equal(resolveRideParam(SPEC, w, ST).value, 32, `"${w}" should mean the current division`);
+    }
+  });
+  it('a REAL value is never shadowed — only the bare word matches', () => {
+    assert.equal(resolveRideParam(SPEC, 'Raleigh', ST).value, 32);
+    assert.equal(resolveRideParam(SPEC, 'Atlanta West', ST).value, 83);
+    assert.equal(resolveRideParam(SPEC, '210', ST).value, 83);
+    assert.ok(resolveRideParam(SPEC, 'this division', ST).unknown, 'a longer phrase is still an honest miss, not a silent default');
+  });
+});
+
+// v2.74.1876 — THE DISCRIMINATOR the inverse mis-bind repair rests on (chat.js _resolveRideParamsCore). The repair
+// hands an unknown value to the drill's row filter instead of asking back — but ONLY when the value resembles no
+// division at all. `candidates` is what tells the two cases apart, so the repair is only as safe as this behaviour.
+describe('rideParamResolve — unknown values: place-name vs misspelling', () => {
+  it('a value that is no division at all returns NO candidates (→ safe to migrate)', () => {
+    for (const q of ['Misty Creek', 'Aberdeen', 'Collinswood', '1091 Misty Creek Drive']) {
+      const r = resolveRideParam(SPEC, q, STATE);
+      assert.equal(r.unknown, true, q);
+      assert.deepEqual(r.candidates || [], [], `${q} must offer no division candidates`);
+    }
+  });
+  it('a MISSPELLED division still returns candidates (→ must keep the ask-back, never migrate)', () => {
+    const r = resolveRideParam(SPEC, 'Atlanta', STATE);
+    assert.equal(r.unknown, true);
+    assert.ok((r.candidates || []).length > 0, 'a near-miss must stay an ask-back');
+  });
+});

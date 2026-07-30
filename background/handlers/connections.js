@@ -200,7 +200,11 @@ export function createConnectionsHandlers({ invokeSgHandler } = {}) {
               state = after === 'wrong-account' ? 'signed-out' : after;
             } catch { confirmed = 'failed'; }
           } else {
-            confirmed = 'failed';   // no open tab → no probe, ever — proceed, the request arbitrates
+            // v2.74.1859 — no open tab → no probe, ever. This used to report 'failed' (→ always proceed); it
+            // is now its OWN outcome, because "nothing to probe" is not "the probe flaked": with a signed-out
+            // belief it means the ride is certain to fail (no tab to ride). The gate decides; unknown/stale
+            // still proceeds exactly as before.
+            confirmed = 'no-tab';
           }
         }
         const v = presenceGate({ state, checkedAt: (key && reg[key] && reg[key].lastVerifiedAt) || null }, { confirmed });

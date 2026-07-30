@@ -4,7 +4,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderSpan, createRunLedger, renderNoEffect, SPAN_OUTCOMES } from './runLedger.js';
+import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdict, SPAN_OUTCOMES } from './runLedger.js';
 
 describe('renderSpan — the exit that goes missing', () => {
   it('turns the 53-second branch hole into a duration and a cause', () => {
@@ -107,5 +107,60 @@ describe('v2.74.1834 — a read that returned data did its job (the false positi
 
   it('read() ignores junk and non-positive counts', () => {
     assert.equal(createRunLedger().read(-3).read('x').read().snapshot().rowsRead, 0);
+  });
+});
+
+// v2.74.1859 — the run-level terminal + the outcome-derived verdict. Each fixture is a REAL shape from the
+// 07-28 traces (the day the backstop's suppression finally had a producer and the run lost its receipt).
+describe('renderRunReceipt (v2.74.1859) — a span that opened must close, whatever the outcome', () => {
+  it('the no-effect signature keeps the backstop wording byte-identical (no double-reporting)', () => {
+    const l = createRunLedger();
+    assert.equal(renderRunReceipt(l, { ms: 5417 }), renderNoEffect(l, { ms: 5417 }));
+    assert.match(renderRunReceipt(l, { ms: 5417 }), /^RUN ▸ no-effect — /);
+  });
+  it('THE 13:20 CASE: an errored turn that produced nothing now closes as failed (was: silence)', () => {
+    const line = renderRunReceipt(createRunLedger().error().decision('act → vs_warranty_tasks'), { ms: 800, ask: 'get open warranty tasks' });
+    assert.match(line, /^RUN ▸ failed — nothing was created, updated or written/);
+    assert.match(line, /1 step\(s\) failed/);
+    assert.equal(renderNoEffect(createRunLedger().error()), '', 'the backstop still stays quiet — the receipt is what speaks');
+  });
+  it('a plain successful READ closes as ok with its rows (the backstop deliberately says nothing)', () => {
+    const l = createRunLedger().read(3);
+    assert.equal(renderNoEffect(l), '');
+    assert.match(renderRunReceipt(l, { ms: 120 }), /^RUN ▸ ok · 120ms · 3 row\(s\) read/);
+  });
+  it('effects render; an error alongside them reads partial, never ok', () => {
+    assert.match(renderRunReceipt(createRunLedger().effect('case', 3)), /^RUN ▸ ok — case 3/);
+    assert.match(renderRunReceipt(createRunLedger().effect('case', 3).error()), /^RUN ▸ partial — case 3 · 1 step\(s\) failed/);
+  });
+  it('junk in → empty string out (a receipt never throws on a missing ledger)', () => {
+    assert.equal(renderRunReceipt(null), '');
+    assert.equal(renderRunReceipt({}), '');
+  });
+});
+
+describe('runVerdict (v2.74.1859) — outcomes, not step positions', () => {
+  const snap = (l) => l.snapshot();
+  it('THE FALSE SUCCESS: a 1-step workflow whose only step failed is failed, not complete', () => {
+    assert.equal(runVerdict(snap(createRunLedger().error()), { done: 1, total: 1 }), 'failed');
+  });
+  it('THE 13:20 CASE: 2 steps, step 1 dispatched-then-blocked, nothing produced → failed (was: partial)', () => {
+    assert.equal(runVerdict(snap(createRunLedger().error()), { done: 1, total: 2 }), 'failed');
+  });
+  it('an error WITH real work is partial — the honest middle', () => {
+    assert.equal(runVerdict(snap(createRunLedger().error().effect('case', 2)), { done: 2, total: 3 }), 'partial');
+    assert.equal(runVerdict(snap(createRunLedger().error().read(4)), { done: 1, total: 1 }), 'partial', 'rows count as work done');
+  });
+  it('all steps ran, work happened, nothing failed → complete', () => {
+    assert.equal(runVerdict(snap(createRunLedger().effect('case', 3)), { done: 2, total: 2 }), 'complete');
+    assert.equal(runVerdict(snap(createRunLedger().read(3)), { done: 2, total: 2 }), 'complete');
+  });
+  it('silent nothing (no error, no work) is failed — a run that touched nothing did not complete', () => {
+    assert.equal(runVerdict(snap(createRunLedger()), { done: 2, total: 2 }), 'failed');
+  });
+  it('no ledger → the legacy positional read, so an unmeasured host is never made worse', () => {
+    assert.equal(runVerdict(null, { done: 2, total: 2 }), 'complete');
+    assert.equal(runVerdict(null, { done: 1, total: 2 }), 'partial');
+    assert.equal(runVerdict(null, { done: 0, total: 2 }), 'failed');
   });
 });

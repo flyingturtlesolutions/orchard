@@ -62,3 +62,16 @@ const drvSpoke = drvSilent + '\nb DRIVE ▸ section-wait TIMEOUT (12s) — want=
 assert.strictEqual(lintText(drvSpoke).length, 0);
 
 console.log('lint.test.cjs — all assertions passed');
+
+// gl 202123 — a RECEIPT must never also count as an OPENER. Live 202123: the cross-division sweep's own
+// narration retired its span and was immediately pushed as a new one, so the final sweep line always flagged.
+const sweep = [
+  'a RIDE_EACH ▸ vs_warranty_tasks × 121 division(s) (chain, status=new, address=4867009) → 121 ok, 0 failed, 0 row(s)',
+  'b RIDE_EACH ▸ returned 0 row(s) from 121/121 division(s) [chain]',
+  'c RIDE_EACH ▸ cross-division new → 0 row(s), no match',
+].join('\n');
+assert.strictEqual(lintText(sweep).length, 0, 'a sweep that narrated both its return and its verdict is closed, not open');
+// and every receipt form is excluded from the opener, individually
+for (const form of ['rendered 5 row(s)', 'exit — total failure (0 ok, 3 tried)', 'cross-division open → 2 row(s), MATCH', 'returned 7 row(s) from 4/4 division(s) [chain]']) {
+  assert.strictEqual(lintText(`x RIDE_EACH ▸ ${form}`).length, 0, `"${form}" must not open a span`);
+}

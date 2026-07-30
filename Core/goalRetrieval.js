@@ -11,7 +11,7 @@
 // Relevance is deterministic token overlap (cheap, no embedding). The live wiring (feed renderGoalContext into the
 // interpret + answer prompts) is AL-4's later slices; this is the policy, headless-testable.
 
-import { tierRank } from './goalMemory.js';
+import { tierRank, retireStaleShapeDeltas } from './goalMemory.js';   // v2.74.1870 — drop verdicts about routing that has since changed
 import { classifyAskToGrid } from './appDef.js';   // OM #3a — classify the ask + each belief into their operation×object cell
 
 // Tiny stoplist — drop function words + the highest-frequency app verbs so overlap reflects DOMAIN words ("open
@@ -44,8 +44,13 @@ function _overlap(askTokens, text) {
  * @param {{ ask?: string, maxRules?: number, maxRecall?: number, minOverlap?: number }} [opts]
  * @returns {{ rules: Array, recalled: Array }}
  */
-export function assembleGoalContext(items, { ask = '', maxRules = 8, maxRecall = 5, minOverlap = 1, om = null } = {}) {
-  const list = (Array.isArray(items) ? items : []).filter((x) => x && x.id);
+export function assembleGoalContext(items, { ask = '', maxRules = 8, maxRecall = 5, minOverlap = 1, om = null, shapes = null } = {}) {
+  // v2.74.1870 — a verdict about code that no longer exists is dropped at RECALL, before it can steer anything.
+  // `shapes` maps ref → the leg's CURRENT shape key (Core/goalMemory.capabilityShapeKey); an act-fail whose
+  // banked shape has moved retires here. Read-time, so no migration and no writer coordination: the store keeps
+  // the row, the reasoner never sees it. Absent map / absent ref / pre-v1870 lesson without a shape → unchanged.
+  const _pre = (Array.isArray(items) ? items : []).filter((x) => x && x.id);
+  const list = shapes ? retireStaleShapeDeltas(_pre, shapes).items : _pre;
   const askTokens = _tokens(ask);
   const deltas = list.filter((x) => x.kind === 'delta');
   const beliefs = list.filter((x) => x.kind === 'belief');

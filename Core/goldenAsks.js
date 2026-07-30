@@ -14,6 +14,14 @@
  *                                //   pattern makes vs_warranty_tasks a correct answer for a single-task ask —
  *                                //   the primary legId still carries A-0b coverage; accept never does)
  *     mustNotResolve?: [ids],    // NEGATIVE: legs this ask must NEVER resolve to (the case→Zendesk class)
+ *     expectParams?: {k: str|true}, // v1876 — the leg is necessary, NOT sufficient. Which SLOT must carry the
+ *                                //   value: a string is a case-insensitive contains-check, `true` = any non-empty.
+ *     mustNotBindParams?: [keys],// NEGATIVE: slots that must stay EMPTY. Live 174833: "warranty tasks on Misty
+ *                                //   Creek" resolved to the RIGHT leg and died anyway, because the router bound
+ *                                //   the place-name to `divisionId` (required, place-shaped) instead of `address`
+ *                                //   (the drill's declared row filter) — so the resolver honestly answered "I
+ *                                //   don't know division Misty Creek". A leg-only assertion scored it a HIT, and
+ *                                //   the whole text half of the synthetic find leg shipped unreachable.
  *     mustNotIntent?: [intents], // NEGATIVE: intents this ask must never land in (run 2's answer-class — an
  *                                //   act-ask drawing `answer` fabricates about data never fetched)
  *     mustNotWrite?: true,       // NEGATIVE: must never resolve to any write-class leg ("how many…" ≠ a write)
@@ -81,6 +89,41 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'who are the contacts on task 4867009', expect: { legId: 'vs_task_contacts' } },
   { ask: 'warranty task counts by status', expect: { legId: 'vs_warranty_stats' } },
   { ask: 'any vendor announcements?', expect: { legId: 'vs_announcements' } },
+  // ── VendorSuite depth (v2.74.1860) — SHAPE-DERIVED then LIVE-RUN (gl 155750). Each entry below was typed at
+  // the real site; the expectations are what the run PROVED, and the negatives are failures it caught. This is
+  // the first tranche authored from leg shape rather than from a trace, and it found four defect classes.
+  { ask: 'which division am I in right now', expect: { legId: 'vs_state' }, mintedAt: 'v2.74.1860' },              // routed ✓ (the ANSWER gap is a does-overclaim, tracked separately)
+  { ask: 'what divisions do I have access to?', expect: { legId: 'vs_state' }, mintedAt: 'v2.74.1860' },           // live ✓ 121 divisions
+  { ask: 'what are my permissions in vendorsuite?', expect: { legId: 'vs_state' }, mintedAt: 'v2.74.1860' },       // live ✓
+  { ask: 'list the new warranty tasks in Atlanta West', expect: { legId: 'vs_warranty_tasks' }, mintedAt: 'v2.74.1860' },        // live ✓ division-by-NAME + non-default status
+  { ask: "show me every division's open warranty tasks", expect: { legId: 'vs_warranty_tasks' }, mintedAt: 'v2.74.1860' },       // live ✓ each-mode over 121 divisions
+  { ask: "what's the status of the warranty task at 409 Citron Street", expect: { legId: 'vs_warranty_tasks' }, mintedAt: 'v2.74.1860' },   // live ✓ the ADDRESS DRILL end-to-end (list+address → vs_warranty_task)
+  // THE PARAM-KIND NEGATIVES (v1860): a number a person can SEE is a TicketId; this leg takes the internal
+  // TaskId, and the site answers a bare http-500. Three live 500s minted these. The list+address door is the
+  // only correct resolve for a user-named identifier.
+  { ask: 'pull the full details for task id 4886921', expect: { legId: 'vs_warranty_tasks' }, mustNotResolve: ['vs_warranty_task'], mintedAt: 'v2.74.1860' },
+  { ask: 'read warranty task 4867009', expect: { legId: 'vs_warranty_tasks' }, mustNotResolve: ['vs_warranty_task'], mintedAt: 'v2.74.1860' },
+  // v2.74.1876 — the three phrasings that resolved to the right leg and still died (live 174833). `address` is a
+  // DECLARED param whose hint already says "ANY identifier the user names — a STREET address, a TICKET number…",
+  // so this is a binder defect, not a catalog gap; these entries are what make it visible to the scoreboard.
+  { ask: 'warranty tasks on Misty Creek', expect: { legId: 'vs_warranty_tasks' }, expectParams: { address: 'Misty Creek' }, mustNotBindParams: ['divisionId'], mintedAt: 'v2.74.1876' },
+  { ask: 'warranty tasks in Aberdeen', expect: { legId: 'vs_warranty_tasks' }, expectParams: { address: 'Aberdeen' }, mustNotBindParams: ['divisionId'], mintedAt: 'v2.74.1876' },
+  { ask: 'warranty tasks for Collinswood', expect: { legId: 'vs_warranty_tasks' }, expectParams: { address: 'Collinswood' }, mintedAt: 'v2.74.1876' },
+  // the CONTROL: a real division name MUST still bind divisionId — the repair must not swing the other way
+  { ask: 'get open warranty tasks in Charlotte North', expect: { legId: 'vs_warranty_tasks' }, expectParams: { divisionId: 'Charlotte North' }, mintedAt: 'v2.74.1876' },
+  // a by-number ask binds the row filter, never the division
+  { ask: 'read warranty task 4886921', expect: { legId: 'vs_warranty_tasks' }, expectParams: { address: '4886921' }, mustNotBindParams: ['divisionId'], mintedAt: 'v2.74.1876' },
+  { ask: "what's the homeowner's phone number on this task?", expect: { legId: 'vs_task_contacts' }, mintedAt: 'v2.74.1860' },   // the case-context path the does names
+  // THE COUNT NEGATIVES (v1860): both pulled the LIST leg live — the second re-ran a 121-division sweep and
+  // answered "how many" with a wall of rows. The contested pair since scoreboard run 1.
+  { ask: 'how many warranty tasks are new in Raleigh?', expect: { legId: 'vs_warranty_stats' }, mustNotResolve: ['vs_warranty_tasks'], mintedAt: 'v2.74.1860' },
+  { ask: 'how many open and fixed tasks do we have', expect: { legId: 'vs_warranty_stats' }, mustNotResolve: ['vs_warranty_tasks'], mintedAt: 'v2.74.1860' },
+  { ask: 'give me the warranty dashboard numbers', expect: { legId: 'vs_warranty_stats' }, mintedAt: 'v2.74.1860' },             // live ✓ — the phrasing that already beats the list
+  { ask: 'any new notices from the builder?', expect: { legId: 'vs_announcements' }, mintedAt: 'v2.74.1860' },                   // live ✓ — hits without ever saying "announcement"
+  { ask: "read the vendor announcements for Atlanta West", expect: { legId: 'vs_announcements' }, mintedAt: 'v2.74.1860' },      // division-scoped, so vs_state's announcements overlap cannot bite
+  // NOT MINTED YET — the three vs_versions asks all answered "no data" live and their trace lines were evicted
+  // by the ring flood, so whether they even reached the leg is unproven. Minting an expectation on an unproven
+  // resolve would freeze a guess as a fact; they land after the re-run (see findings 2026-07-28 15:57).
   // ── HubSpot ───────────────────────────────────────────────────────────────────────────────────────────────
   { ask: 'show my hubspot portal', expect: { legId: 'hubspot_me' } },
   { ask: 'list the hubspot teams', expect: { legId: 'hubspot_teams' } },

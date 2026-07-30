@@ -44,6 +44,50 @@ export function isRedirect(decision) {
  * @param {{writeIds?: Set<string>}} opts  ids of write-class legs (for mustNotWrite)
  * @returns {{status: 'hit'|'miss'|'redirect'|'violation', got: string, why: string}}
  */
+/**
+ * Do the BOUND PARAMS match what the entry demands? PURE. Returns null when fine, else the `why` string.
+ *
+ * v2.74.1876 — the blind spot that let the text find-path ship broken. The corpus asserted `expect.legId` and
+ * nothing else, so `warranty tasks on Misty Creek` scored a clean HIT: it resolved to `vs_warranty_tasks`, the
+ * correct leg. It then died live, because the router put "Misty Creek" in `divisionId` (required, place-shaped)
+ * instead of `address` (the drill's row filter, declared, hinted, optional) and the resolver honestly answered
+ * "I don't know division Misty Creek". Right leg, wrong slot — invisible to a leg-only assertion, and the whole
+ * text half of the synthetic find leg was unreachable because of it.
+ *   expectParams:      { address: 'Misty Creek' } — that slot must be bound; a string value must appear in it
+ *                      (case-insensitive contains, so router normalisation doesn't false-flag), `true` = any value
+ *   mustNotBindParams: ['divisionId'] — that slot must be empty
+ * Both are only meaningful once the LEG matched, so the caller checks them inside that branch.
+ */
+// v2.74.1878 — THE ENUMERATION SENTINEL IS NOT A NARROWING BINDING. Live 190346 found this the first time the gate
+// met a real decision: `warranty tasks on Misty Creek` resolved to `{divisionId:"each", status:"open",
+// address:"Misty Creek"}` — the router bound the row filter correctly AND asked for every division, which is the
+// BEST available resolve. `mustNotBindParams:['divisionId']` would have scored it a MISS, reporting a regression
+// where the router had improved. The assertion I wanted was "this slot must not swallow the query"; "must be empty"
+// was a proxy, and the proxy is false for the sentinel. `each`/`every`/`all` mean "do not restrict this axis", so
+// semantically they ARE the unrestricted case — treating them as unbound here is the correct reading, not an
+// exception to it. Applied to the NEGATIVE only: an entry that positively demands a slot be bound is asking a
+// different question, and `each` is a legitimate answer to it.
+const _AXIS_SENTINEL = /^(?:each|every|all)$/i;
+
+export function scoreParams(entry, decision) {
+  const e = entry || {};
+  const got = (decision && decision.params && typeof decision.params === 'object') ? decision.params : {};
+  const bound = (k) => got[k] != null && String(got[k]).trim() !== '';
+  const narrows = (k) => bound(k) && !_AXIS_SENTINEL.test(String(got[k]).trim());
+  for (const k of (Array.isArray(e.mustNotBindParams) ? e.mustNotBindParams : [])) {
+    if (narrows(k)) return `leg matched but bound ${k}="${String(got[k]).slice(0, 24)}" — that slot must not narrow the search`;
+  }
+  const want = (e.expectParams && typeof e.expectParams === 'object') ? e.expectParams : null;
+  if (!want) return null;
+  for (const [k, v] of Object.entries(want)) {
+    if (!bound(k)) return `leg matched but ${k} was not bound (got: ${Object.keys(got).filter(bound).join(',') || 'nothing'})`;
+    if (typeof v === 'string' && !String(got[k]).toLowerCase().includes(v.toLowerCase())) {
+      return `leg matched but ${k}="${String(got[k]).slice(0, 24)}" does not carry "${v}"`;
+    }
+  }
+  return null;
+}
+
 export function scoreEntry(entry, decision, { writeIds = new Set() } = {}) {
   const e = entry || {};
   const d = decision || {};
@@ -69,7 +113,12 @@ export function scoreEntry(entry, decision, { writeIds = new Set() } = {}) {
     return { status: 'miss', got: gotLabel, why: `wanted intent ${e.expect.intent}` };
   }
   if (e.expect && e.expect.legId) {
-    if (got === e.expect.legId) return { status: 'hit', got: gotLabel, why: 'leg matched' };
+    if (got === e.expect.legId) {
+      // v1876 — the leg is necessary, not sufficient: a right-leg/wrong-slot resolve cannot work live, so it is a
+      // MISS rather than a hit. Deliberately not a `violation` — nothing was fenced, the binding is simply wrong.
+      const pv = scoreParams(e, d);
+      return pv ? { status: 'miss', got: gotLabel, why: pv } : { status: 'hit', got: gotLabel, why: 'leg matched' };
+    }
     // v2.74.1751 (run 1): `accept` — additional CORRECT legs (the drill-via-list pattern: the catalog itself
     // routes a single-task ask through the list leg's address param, so either resolve is right)
     if (got && Array.isArray(e.accept) && e.accept.includes(got)) return { status: 'hit', got: gotLabel, why: 'accepted alternative leg' };

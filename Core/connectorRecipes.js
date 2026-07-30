@@ -546,6 +546,13 @@ export const CONNECTOR_RECIPES = [
   // address → the task's full details.
   { ...VS, id: 'vs_warranty_tasks', name: 'Warranty tasks by status', listUrl: '/#warranty',
     resolve: { divisionId: VS_DIVISION },
+    // v2.74.1877 — COVERAGE. `(divisionId × status)` is a PARTITION of the warranty corpus: every task sits in
+    // exactly one cell, so a complete scan earns the definite negative ("isn't in any of them"). Contrast
+    // `shopify_orders_queue` ("Open unfulfilled orders") and Zendesk's five views, which are SELECTIONS — a scan
+    // over those can only ever say "not in what I read". Read from the catalog by id (Core/synthEntity.js), never
+    // off the leg, so this is not an invariant-#3 field; anything undeclared falls back to `selection`, which
+    // makes the definite negative unreachable. Forgetting to declare costs a weaker sentence, never a false one.
+    coverage: 'partition',
     // CX-9k (v2.74.1617) — the row's HUMAN display id, preference-ordered (the generic first-…Number scan landed on
     // the per-home claim sequence — every bullet read "#01"). TicketId is the number users quote ("ticket 4867009");
     // TaskNumber the site's own task number.
@@ -597,7 +604,10 @@ export const CONNECTOR_RECIPES = [
     params: [
       { name: 'divisionId', type: 'string', required: true, hint: 'the DIVISION — a name ("Atlanta West"), a market number ("210"), or exactly "each" for every accessible division; never a street' },
       { name: 'status', type: 'string', enum: ['new', 'open', 'fixed', 'closed'], required: true },
-      { name: 'address', type: 'string', required: false, hint: 'a STREET address or task number — set ONLY when the user names one specific property/task to drill into' },   // NOT in the endpoint — the drill join's filter
+      // v2.74.1860 — this param OWNS every number a person can name (ticket #4886921 · task number 01 · claim ·
+      // job · street address). It matches against the row's whole label set and then drills with the row's real
+      // internal id, so it is the ONLY correct door for a user-supplied identifier.
+      { name: 'address', type: 'string', required: false, hint: 'ANY identifier the user names — a STREET address, a TICKET number (#4886921), a task/claim/job number. Set this whenever one specific property or task is named; it finds the row and drills into it. Never send such a number to "Warranty task details" instead' },   // NOT in the endpoint — the drill join's filter
     ] },
   { ...VS, id: 'vs_warranty_task', name: 'Warranty task details', itemUrl: '/#warranty',
     displayId: ['TicketId', 'TaskNumber'],   // CX-9k — the detail head's "#id" shows the human number too
@@ -623,9 +633,22 @@ export const CONNECTOR_RECIPES = [
       { contact: 'other', type: 'phone' },
       { contact: 'other', type: 'name' },
     ],   // PM-7 (v1634) — same ladder on the detail read
-    does: 'read a warranty task\'s full details by its INTERNAL task id (from a task list row — for a human task number or an address, use the task LIST with that as the address filter)',
+    // v2.74.1860 (live 155750: THREE http-500s in a row) — the `does` is now a REFUSAL, not a preference. Every
+    // number a person can SEE is the wrong one: the list renders `#<TicketId>` and this endpoint takes the
+    // internal `TaskId`, and the two are both 7-digit integers — indistinguishable by shape, so no runtime guard
+    // can catch the mix-up and the site answers a bare 500. The router is the only place it can be prevented,
+    // so the text has to say "never" in the router's own vocabulary. The drill path already works end-to-end
+    // (label[] matches TicketId → drills with the row's real TaskId), which is why redirecting is safe.
+    // v2.74.1861 — REWRITTEN FOR THE BUDGET, not for the reader. v1860's version said all the right things and
+    // changed nothing live (gl 162926: "pull the full details for task id 4886286" → this leg → http-500 again,
+    // with the fix loaded). Cause: interpretPrompt splits `does` on ' — ' and accumulates segments only while
+    // the total stays ≤140 (interpretPrompt.js:236-238) — my seg0 was the useless "read a warranty task's full
+    // details" and the entire refusal sat in a seg1 too long to fit, so it was dropped WHOLE. The router never
+    // saw one word of it. Now seg0+seg1 = 131 chars and carry the whole discrimination; the rest is for humans.
+    // (This is the v1753 budget-fill lesson repeating: a discriminating clause that does not FIT does not exist.)
+    does: 'full details from an INTERNAL TaskId you already hold — a number a person typed is a TICKET id: send it to the task LIST as `address` — that finds the row and drills in with the real id (list rows and case records carry the TaskId; a number the user names never does)',
     endpoint: '/api/Vendor/Warranty/Task/{taskId}',
-    params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id from a list row — for a human task number or address, use the task LIST' }] },
+    params: [{ name: 'taskId', type: 'string', required: true, machineOnly: true, hint: 'the INTERNAL TaskId from a list row or case record ONLY — a number the user names is a TICKET number and 500s here; send it to the task LIST as `address` instead' }] },
   // v2.74.1559 — CURATED from the user's harvest (harvest_get_api_vendor_warranty_taskcontacts_id — the task
   // page's contact-dropdown lazy read; live 195557: the harvested {id} carried no semantics, so the binder fed a
   // human TICKET number → the known junk-taskId http-500). Same id discipline as vs_warranty_task; in a CASE the
@@ -633,7 +656,7 @@ export const CONNECTOR_RECIPES = [
   { ...VS, id: 'vs_task_contacts', name: 'Warranty task contacts', itemUrl: '/#warranty',
     does: 'the homeowner CONTACTS for a warranty task (names, phone, email — the task page\'s contact dropdown) by its INTERNAL task id; in a case just ask ("homeowner\'s phone?") — the case record carries the id',
     endpoint: '/api/Vendor/Warranty/TaskContacts/{taskId}',
-    params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id (TaskId from a list row / the case record) — never a ticket or task NUMBER' }] },
+    params: [{ name: 'taskId', type: 'string', required: true, machineOnly: true, hint: 'the INTERNAL task id (TaskId from a list row / the case record) — never a ticket or task NUMBER' }] },
   { ...VS, id: 'vs_warranty_stats', name: 'Warranty task counts', listUrl: '/#dashboard',
     resolve: { divisionId: VS_DIVISION },
     does: 'COUNTS of warranty tasks (new / open / fixed) for a division — answers "how many tasks are open/new/fixed" with the dashboard statistic, NEVER the task list itself; division by name, market number, or blank for your current one',   // v2.74.1751 — count-vocabulary added: scoreboard run 1 showed "how many … are open" pulling the LIST leg @0.95 over this one
@@ -1010,7 +1033,15 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
     // the page-captured auth HEADERS FROM the app tab (sessionHost = the connected host where the login + token live). The
     // dispatch sees tool.replay==='headers' → SESSION_REPLAY instead of cookie-ride INVOKE_SESSION.
     leg.tool.sessionHost = host;
-    leg.tool.replay = 'headers';
+    // v2.74.1868 — but ONLY for records that were actually harvested. A CURATED record reaching this projection
+    // (seedFromCatalog stamps `provenance:'curated'`) is the same binding as its curated-direct twin and must
+    // ride the same executor. Stamping header-replay on it sent every curated leg down SESSION_REPLAY, which has
+    // no `{handle}` tab-fill — so live 184948 killed FOUR Shopify legs at once with `blocked needs-handle`
+    // (customer_by_phone · customer_search · orders_queue · shop_pulse), every one of them working minutes
+    // earlier through the curated-direct path. THE CHANNEL IS THE INVARIANT-#3 DIVERGENCE MY OWN HOP SEAL
+    // EXEMPTS (`SEEDED_ONLY_TOOL_FIELDS`) — the seal keeps every field honest and waves through the one
+    // difference that decides which executor runs. §20 exists for captured cross-origin APIs, not catalog entries.
+    if (r.provenance !== 'curated') leg.tool.replay = 'headers';
     // v2.74.1340 (review A/§18) — carry the recipe's Ground so the SESSION_REPLAY dispatch can hand the arm guard
     // its {groundId, recipeId} pair (the executor re-checks armable at run time, not just at projection time).
     if (groundId) leg.tool.groundId = String(groundId);
@@ -1045,4 +1076,53 @@ export function connectorLegsForConnections(connections, { account = 'me', trust
     }
   }
   return out;
+}
+
+/**
+ * v2.74.1863 — THE DRILL-TARGET REDIRECT (pure, catalog-derived).
+ *
+ * A "drill target" is a leg reachable only with an id that comes OUT of another leg's rows: `vs_warranty_task`
+ * takes an internal `TaskId`, `vs_task_contacts` the same, `shopify_order` an order id from the queue. The
+ * catalog already declares every one of these relationships (`drill: {via, param, matchOn, also[]}`), so this
+ * needs no new field — it just reads the arrow backwards.
+ *
+ * WHY IT EXISTS. Live 175843 settled that TEXT cannot keep a model out of these legs. `INTERPRET_RAW` caught
+ * three distinct overrides in one run: it quoted the "never use a typed number" warning and picked the leg
+ * anyway; it REASONED that "4867009 appears to be a task identifier"; and — the one no wording survives — it
+ * inferred *"RECENT_TURNS shows 'pull the full details for task id 4886921' succeeded, so we have the internal
+ * TaskId"*, when that success came through the LIST door where the number matched a DISPLAY id and the drill
+ * supplied a different internal one. **The redirect's own success became the evidence for the next failure.**
+ * The two id kinds are both 7-digit integers, so no value check can separate them either (v1860).
+ *
+ * What CAN be known is PROVENANCE: an id that came from a drill join or a case record is real; one the model
+ * bound out of the ask is a display id. The caller supplies that bit; this function supplies the door to send
+ * it to instead.
+ *
+ * @returns {{parentId, matchOn, joinParam}|null} — the LIST leg that owns this target, and the param a
+ *   user-named identifier belongs in (its matcher accepts BOTH id kinds and drills with the real one).
+ */
+export function drillTargetRedirect(recipeId, catalog = CONNECTOR_RECIPES) {
+  const id = String(recipeId || '');
+  if (!id) return null;
+  const list = Array.isArray(catalog) ? catalog : [];
+  const target = list.find((r) => r && r.id === id);
+  if (!target) return null;
+  for (const r of list) {
+    const d = r && r.drill;
+    if (!d || !d.matchOn || !d.param) continue;                       // a `via` with no join spec cannot redirect
+    const also = Array.isArray(d.also) ? d.also : [];
+    if (d.via !== id && !also.includes(id)) continue;
+    if (r.id === id) continue;                                        // never redirect a leg to itself
+    // v2.74.1868 — THE JOIN PARAM MUST DECLARE ITSELF MACHINE-ONLY. v1863 keyed the redirect on drill MEMBERSHIP,
+    // which conflates two different properties: "this leg is drilled into" and "a human cannot type this id".
+    // They coincide in VendorSuite (the list renders #TicketId, the details leg needs the internal TaskId) and
+    // NOT in Shopify — `shopify_order` takes the order NUMBER a person reads off the screen. Live 184948 caught
+    // it: the redirect fired on `shopify_order` (correct by the old rule), sent 69872 into the UNFULFILLED
+    // queue — a filtered subset that structurally cannot hold a fulfilled order — and turned a working lookup
+    // into a confident miss. Membership was a correlation in a sample of one; `machineOnly` is the property.
+    const p = (Array.isArray(target.params) ? target.params : []).find((x) => x && x.name === d.param);
+    if (!p || p.machineOnly !== true) continue;
+    return { parentId: String(r.id), matchOn: String(d.matchOn), joinParam: String(d.param) };
+  }
+  return null;
 }

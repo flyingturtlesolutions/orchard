@@ -62,10 +62,18 @@ const _label = (row, spec) => String(row[spec.label] != null ? row[spec.label] :
  *   raw matches nothing → { unknown, candidates } (closest Name contains-hits, capped) for an honest ask-back.
  *   No spec / no usable state → null (caller proceeds unresolved — never blocks on the resolver's own failure).
  */
+// v2.74.1862 — DEICTIC words mean "the one I'm in", which is precisely what BLANK already means everywhere in
+// this catalog ("division optional — blank = your current one"). Live 172159: "show me this division's
+// announcements" bound `divisionId:"this"` and the resolver honestly answered *I don't know division "this"* —
+// honest, and useless, because the answer was sitting in defaultPath. Deliberately NARROW: only these bare
+// words, only when they are the WHOLE value, so a real row named "My Division" or "Current Phase 2" is
+// untouched (a contains-match would shadow it).
+const _DEICTIC_RE = /^(?:this|that|the|current|my|our|mine|present)$/i;
+
 export function resolveRideParam(spec, raw, state) {
   if (!spec || typeof spec !== 'object' || !spec.id || !state || typeof state !== 'object') return null;
   const rows = _rows(state, spec);
-  const has = raw !== undefined && raw !== null && String(raw).trim() !== '';
+  const has = raw !== undefined && raw !== null && String(raw).trim() !== '' && !_DEICTIC_RE.test(String(raw).trim());
   // DK-7 (v2.74.1488) — the "each" mode: same spec, same via-read, different CARDINALITY. When the recipe OPTS IN
   // (spec.each: true) and the model bound the each-sentinel ("for each division…" → divisionId:"each"), return the
   // FULL candidate list instead of matching one — the dispatcher fans the leg out over it (reads only, capped).
