@@ -22,8 +22,9 @@ const path = require('path');
       { key: 'client-error', pattern: '{ $.lvl = "ERROR" }', metricName: 'ClientErrors' },
       ...metricMarkers().map((m) => ({
         key: m.key,
-        // events land as JSON lines (spec §3); markers are matched on the msg field
-        pattern: `{ $.msg = "%${m.pattern}%" }`,
+        // events land as JSON lines (spec §3); markers match on msg via *-wildcards, ||-composed —
+        // CloudWatch JSON filter syntax (regex/%-delimiters are invalid there: the v1906 fix)
+        pattern: '{ ' + m.patterns.map((p) => `$.msg = "*${p}*"`).join(' || ') + ' }',
         metricName: 'Marker_' + m.key.replace(/-([a-z])/g, (_, c) => c.toUpperCase()).replace(/^([a-z])/, (_, c) => c.toUpperCase()),
       })),
     ],

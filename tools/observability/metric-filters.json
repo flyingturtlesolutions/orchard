@@ -10,22 +10,22 @@
     },
     {
       "key": "cadence",
-      "pattern": "{ $.msg = \"%CADENCE ▸ ?(fired|auto-disarmed)%\" }",
+      "pattern": "{ $.msg = \"*CADENCE ▸ fired*\" || $.msg = \"*CADENCE ▸ auto-disarmed*\" }",
       "metricName": "Marker_Cadence"
     },
     {
       "key": "heal",
-      "pattern": "{ $.msg = \"%HEAL ▸ suspect%\" }",
+      "pattern": "{ $.msg = \"*HEAL ▸ suspect*\" }",
       "metricName": "Marker_Heal"
     },
     {
       "key": "vitals",
-      "pattern": "{ $.msg = \"%VITALS ▸ case opened%\" }",
+      "pattern": "{ $.msg = \"*VITALS ▸ case opened*\" }",
       "metricName": "Marker_Vitals"
     },
     {
       "key": "shipper",
-      "pattern": "{ $.msg = \"%SHIPPER ▸ gap%\" }",
+      "pattern": "{ $.msg = \"*SHIPPER ▸ gap*\" }",
       "metricName": "Marker_Shipper"
     }
   ]

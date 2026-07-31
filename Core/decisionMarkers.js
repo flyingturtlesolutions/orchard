@@ -90,7 +90,7 @@ export const DECISION_MARKERS = [
   { key: 'connector-tools', src: "CONNECTOR_TOOLS ▸" },
   { key: 'source', src: "SOURCE ▸" },
   { key: 'workflow', src: "WORKFLOW ▸" },
-  { key: 'cadence', src: "CADENCE ▸", metric: true, metricPattern: 'CADENCE ▸ ?(fired|auto-disarmed)' },
+  { key: 'cadence', src: "CADENCE ▸", metric: true, metricPattern: ['CADENCE ▸ fired', 'CADENCE ▸ auto-disarmed'] },
   { key: 'trigger', src: "TRIGGER ▸" },
   { key: 'ride-write', src: "RIDE_WRITE ▸" },
   { key: 'ride-resolve', src: "RIDE_RESOLVE ▸" },
@@ -153,7 +153,11 @@ export function buildDecisionRegExp() {
   return new RegExp('(' + DECISION_MARKERS.map((m) => m.src).join('|') + ')');
 }
 
-/** The metric-filter subset (gen-filters.cjs consumes this). */
+/** The metric-filter subset (gen-filters.cjs consumes this). patterns = literal substrings (CloudWatch JSON
+ * filter patterns support only *-wildcards and ||-composition — never regex, the v1906 lesson). */
 export function metricMarkers() {
-  return DECISION_MARKERS.filter((m) => m.metric).map((m) => ({ key: m.key, pattern: m.metricPattern || m.src }));
+  return DECISION_MARKERS.filter((m) => m.metric).map((m) => {
+    const raw = m.metricPattern || m.src;
+    return { key: m.key, patterns: Array.isArray(raw) ? raw : [raw] };
+  });
 }

@@ -42,7 +42,7 @@ describe('decisionMarkers — the manifest', () => {
   it('the metric subset is non-empty and every entry carries a pattern (the generator consumes this)', () => {
     const mm = metricMarkers();
     assert.ok(mm.length >= 4, 'heal/cadence/vitals/shipper at minimum');
-    for (const m of mm) assert.ok(m.key && m.pattern, `metric entry missing pattern: ${m.key}`);
+    for (const m of mm) assert.ok(m.key && Array.isArray(m.patterns) && m.patterns.length && m.patterns.every((p) => typeof p === 'string' && !/[%|()\\]/.test(p)), `metric entry needs LITERAL patterns (CloudWatch filter syntax): ${m.key}`);
   });
 
   it('studio.js DERIVES its filter from the manifest (the hand-list stays dead — invariant #1 restructured)', () => {
