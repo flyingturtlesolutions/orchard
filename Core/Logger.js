@@ -328,12 +328,19 @@ export class Logger {
    * @param {LogEntry} entry
    * @returns {Promise<void>}
    */
+  /** CW-3 (DESIGN_cloud_logs.md §3) — the tail-tap: subscribers see every SCRUBBED entry post-persist
+   * (exactly what storage and a gl export see). The CloudLogShipper subscribes here; a subscriber throw
+   * must never break logging. Additive — nothing else changes. */
+  static #entryTaps = [];
+  static onEntry(cb) { if (typeof cb === 'function') Logger.#entryTaps.push(cb); }
+
   static #persistAndBroadcast(entry) {
     // ── Scrub PII before storing ────────────────────────────────────────────
     // DOM snapshots and other log data may contain sensitive values from the
     // authenticated page context (emails, phones, UUIDs, record IDs).
     // Scrub the entry before it touches storage so logs are safe to share.
     const safeEntry = Logger.#scrubEntry(entry);
+    for (const tap of Logger.#entryTaps) { try { tap(safeEntry); } catch { /* a tap must never break logging */ } }
 
     // Chain onto the previous persist. Each entry waits for the prior one
     // to commit before doing its own get-modify-set, so the snapshot it

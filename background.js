@@ -139,6 +139,7 @@ import {
   forceResyncRecord,
   getGroundWorkspaceMap,
 } from './Services/Sync/SyncEngine.js';
+import { initCloudLogShipper } from './Services/Cloud/CloudLogShipper.js';   // CW-3 — cloud log mirror (opt-in)
 import * as GroundAssetStore from './Services/Storage/GroundAssetStore.js';
 import {
   getLastSyncAt,
@@ -328,6 +329,11 @@ getIdentitySummary()
       : `Orchard v${_v} identity ready (preview ${orchardUserIdPreview}; not bound to cloud)`);
   })
   .catch(err => Logger.warn('background', `Orchard identity init: ${err.message}`));
+
+// CW-3 (DESIGN_cloud_logs.md) — the CloudWatch log shipper: opt-in (settings:cloudLogs, default off),
+// tail-taps the SCRUBBED Logger ring, ships through the Orchard API only. Init is fail-safe — a throw here
+// must never touch boot.
+try { initCloudLogShipper().catch(() => {}); } catch { /* */ }
 
 // v2.74.818 — log the Ground inventory at session start. The duplicate/sibling-Ground class of bug (a cap on a
 // host the active-tab-scoped delete can't reach — e.g. app.notion.com vs notion.so) is invisible without a roster

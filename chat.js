@@ -4788,6 +4788,16 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
             const r = resolveFieldKey(Object.keys(_probe), ph);
             if (r.key && !r.ambiguous) { w[slot] = r.key; _fixed++; }
           }
+          // v2.74.1901 — a model-authored BLANK arm gets the absence-native form. Live 20:13 the model wrote its own
+          // deterministic assertion for the arm labeled "blank" and seven absent-key records answered unknown; the
+          // label states the intent (presenceShape's negated shapes), the field is whichever the assertion names, and
+          // `record_field_blank` is the only form whose semantics match. Positive arms are left exactly as authored.
+          const _ps = presenceShape('', a.label);
+          if (_ps && _ps.negate) {
+            const fld = (typeof w.fieldName === 'string' && w.fieldName.trim() && Object.prototype.hasOwnProperty.call(_probe, w.fieldName.trim())) ? w.fieldName.trim()
+              : ((typeof w.binding === 'string' && w.binding.trim() !== 'item' && Object.prototype.hasOwnProperty.call(_probe, w.binding.trim())) ? w.binding.trim() : '');
+            if (fld && w.type !== 'record_field_blank') { a.when = { type: 'record_field_blank', binding: 'item', fieldName: fld }; _fixed++; }
+          }
         }
       }
       if (_fixed) { try { _orchLog(`BRANCH ▸ ${_fixed} deterministic field name(s) resolved against the record`); } catch { /* */ } }
@@ -4869,8 +4879,12 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           if (!key && !p.fieldPhrase) key = _sibKey;
           if (!key) continue;
           _sibKey = key;
+          // v2.74.1901 — the negated shape is `record_field_blank`, a predicate ABOUT absence: the first live run
+          // used orch_predicate{op:none} on the field BINDING, and seven records that OMIT the key entirely came
+          // back "unbound → unknown" — reasons describing blankness while refusing to conclude it. The new form's
+          // absent-or-empty semantics are its declared meaning, so absence finally answers the question it is.
           a.when = p.negate
-            ? { type: 'orch_predicate', binding: key, specJson: '{"op":"none"}' }        // "blank" — the field holds no value
+            ? { type: 'record_field_blank', binding: 'item', fieldName: key }            // "blank" — absent OR empty
             : { type: 'record_field_non_empty', binding: 'item', fieldName: key };       // "has a <field>"
           _rw++;
         }
@@ -5915,6 +5929,36 @@ let _lastSendStamp = { key: '', at: 0 };   // v2.74.1553 — the duplicate-send 
 function _persistFocus() {
   if (!_currentConversationId || _currentConversationKind !== 'agent') return;
   try { ConversationStore.patchMeta(_currentConversationId, { focus: _currentConversationFocus }).catch(() => { /* best-effort */ }); } catch { /* */ }
+}
+/**
+ * v2.74.1900 — THE CLAUSE PRIOR SURVIVES A RELOAD (FC-2, for the dispatches).
+ *
+ * Live 19:57: `sort the open tasks in Raleigh into: …` → interpret said `collection:'prior'` and it was RIGHT by its
+ * own contract — the list WAS read this conversation, nine rows, drilled and composed at 19:44. What lied was the
+ * runtime: the prior lives in `_lastGroundedRead`, a module variable, and the extension reload between the two turns
+ * emptied it. The transcript survives a reload; the variable does not; interpret reads the transcript. Meanwhile the
+ * durable copy — the same nine rows, VendorExplanation already merged, accreted into FOCUS by that very read — sat
+ * one unconsulted lookup away. `_fieldFollowup` got exactly this fallback at v1552 ("the module-var read memory dies
+ * with the panel; the focus head doesn't"); the clause dispatches never did. Seventh twin-door.
+ *
+ * The reconstructed leg is DELIBERATELY MINIMAL: focus provenance keeps host/groundId/recipeId/drill (Core/
+ * conversationFocus._provenance), which is everything `_rideDrillLeg` needs to re-drill, and nothing else is
+ * invented. A focus entry that carries no provenance still supplies its ROWS — enriched rows need no leg.
+ */
+function _priorForClause() {
+  if (_lastGroundedRead && _lastGroundedRead.value != null) {
+    return { value: _lastGroundedRead.value, leg: _lastGroundedRead.leg || null };
+  }
+  const e = (_currentConversationFocus || []).find((x) => x
+    && ((x.kind === 'list' && Array.isArray(x.rows) && x.rows.length) || (x.kind === 'record' && x.fields)));
+  if (!e) return { value: null, leg: null };
+  const p = e.provenance || {};
+  const leg = (p.host || p.groundId)
+    ? { name: e.label || e.noun || 'prior read', domain: 'connector', mode: 'ask', tool: { origin: p.host || '', groundId: p.groundId || null, recipeId: p.recipeId || null, drill: p.drill || null } }
+    : null;
+  const value = e.kind === 'list' ? { results: e.rows } : { results: [e.fields] };
+  try { _orchLog(`FOCUS ▸ prior from focus — ${e.kind} "${e.label}" (${e.kind === 'list' ? `${e.rows.length} row(s)` : 'record'}, ${Math.max(0, Math.round((Date.now() - (e.at || 0)) / 1000))}s old) — the module prior died with the panel`); } catch { /* */ }
+  return { value, leg };
 }
 function _pushFocusEntry(entry, convId = null) {
   if (!entry) return;
@@ -8028,11 +8072,26 @@ async function _fieldFollowup(text) {
     return true;
   }
   // match the ask against the record's OWN keys ("vendor explanation" → VendorExplanation; "status" → TaskStatus)
-  const hits = Object.entries(obj).filter(([k, v]) => {
+  let hits = Object.entries(obj).filter(([k, v]) => {
     if (v == null || v === '') return false;
     const nk = norm(k);
     return nk === q || nk.includes(q) || q.includes(nk);
   }).slice(0, 4);
+  // v2.74.1903 — DEPTH, the Shopify lesson: "what's the tracking number?" answered "no tracking field" three times
+  // over an order whose payload holds `fulfillments[].trackingInfo[].number` — present, nested, invisible to the
+  // top-level scan above. The shared deep resolver (resolveFieldKey in record mode, GQL plumbing dropped from the
+  // match text) finds the dotted path, and extractValue — which has walked dotted paths since v1625 — reads it.
+  // Only on a top-level MISS, so every flat-record answer is byte-identical to before.
+  if (!hits.length) {
+    const _deep = resolveFieldKey(obj, q);
+    if (_deep && _deep.key && _deep.key.includes('.')) {
+      const _dv = extractValue(obj, _deep.key);
+      if (_dv != null && _dv !== '') {
+        try { _orchLog(`FIELD_FOLLOWUP ▸ "${q}" → ${_deep.key} (deep)`); } catch { /* */ }
+        hits = [[_deep.key.split('.').filter((s) => !/^(edges|node|nodes)$/.test(s)).join(' · '), _dv]];
+      }
+    }
+  }
   if (!hits.length) {
     // v2.74.1526 — a NAMED-FIELD probe that matches NO field answers HONESTLY (absence + the real field list),
     // instead of falling through — where interpret mis-bound a record id as a division ("I don't know division
@@ -12489,7 +12548,10 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   // gated-down / underspecified map already became clarify/decompose upstream (interpret.js PM-1).
   if (d.intent === 'map' && d.map) {
     try { _orchLog('DISPATCH ▸ map → _runMapClause @interpret-door'); } catch { /* */ }
-    try { await _runMapClause(msg, d.map, { tabId, goal }); } catch (e) { _clauseError('map', e, msg); }
+    // v2.74.1900 — the prior rides here too: this call passed NO prior at all, so a map with collection 'prior'
+    // arriving at this door could never see one — the v1658 wired-only-one-door class, on the options bag instead
+    // of the dispatch. Same durable source as the siblings below.
+    try { const _p = _priorForClause(); await _runMapClause(msg, d.map, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg }); } catch (e) { _clauseError('map', e, msg); }
     return true;
   }
   // PM-9 (v2.74.1658) — the per-item OWN-RECORD field read, at THIS door too.
@@ -12508,12 +12570,8 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     // last grounded read the panel performed, kept precisely so a follow-up can answer from THAT record.
     try { _orchLog('DISPATCH ▸ fieldread → _runFieldReadClause @interpret-door'); } catch { /* */ }
     try {
-      await _runFieldReadClause(msg, d.fieldRead, {
-        tabId,
-        goal,
-        priorValue: (_lastGroundedRead && _lastGroundedRead.value) || null,
-        priorLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null,
-      });
+      const _p = _priorForClause();
+      await _runFieldReadClause(msg, d.fieldRead, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg });
     } catch (e) { _clauseError('fieldread', e, msg); }
     return true;
   }
@@ -12534,24 +12592,16 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     // release unreachable). `_lastGroundedRead` is this door's prior; with none, `_runCaseClause` stops by name.
     try { _orchLog('DISPATCH ▸ case → _runCaseClause @interpret-door'); } catch { /* */ }
     try {
-      await _runCaseClause(msg, d.case, {
-        tabId,
-        goal,
-        priorValue: (_lastGroundedRead && _lastGroundedRead.value) || null,
-        priorLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null,
-      });
+      const _p = _priorForClause();
+      await _runCaseClause(msg, d.case, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg });
     } catch (e) { _clauseError('case', e, msg); }
     return true;
   }
   if (d.intent === 'branch' && d.branch) {
     try { _orchLog('DISPATCH ▸ branch → _runBranchClause @interpret-door'); } catch { /* */ }
     try {
-      await _runBranchClause(msg, d.branch, {
-        tabId,
-        goal,
-        priorValue: (_lastGroundedRead && _lastGroundedRead.value) || null,
-        priorLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null,
-      });
+      const _p = _priorForClause();
+      await _runBranchClause(msg, d.branch, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg });
     } catch (e) { _clauseError('branch', e, msg); }
     return true;
   }
@@ -13650,6 +13700,31 @@ async function sendChatMessage() {
     try { await _renderAppMemory(); }
     catch (e) { try { console.warn('[chat] memory view failed:', e?.message); } catch { /* */ } }
     return;
+  }
+
+  // CW-4 (DESIGN_cloud_logs.md) — `cloudlogs off|decisions|full`: the opt-in cloud log-shipping level. A
+  // utility command (before routing). `full` names exactly what leaves the machine and confirms once —
+  // consent is explicit, never a silent default (ruling 2; default is OFF).
+  {
+    const _cm = text.match(/^cloudlogs?\s*(off|decisions|full)?\s*$/i);
+    if (_cm) {
+      const m = appendMessage({ role: 'assistant', body: '' });
+      const KEY = 'settings:cloudLogs';
+      const want = (_cm[1] || '').toLowerCase();
+      if (!want) {
+        const got = await chrome.storage.local.get(KEY);
+        _setMessageBody(m, `Cloud log shipping is **${got?.[KEY] || 'off'}**. Set it with \`cloudlogs off|decisions|full\` — \`decisions\` ships only the signal markers; \`full\` ships the whole scrubbed trace (DEBUG included).`, { markdown: true });
+      } else if (want === 'full' && !confirm('Ship the FULL runtime trace to Orchard cloud?\n\nThis sends your Orchard activity log — scrubbed of emails, phones, and ids — NOT page content and NOT conversations. Requires a bound cloud identity.')) {
+        _setMessageBody(m, 'Left unchanged.');
+      } else {
+        await chrome.storage.local.set({ [KEY]: want });
+        _setMessageBody(m, want === 'off'
+          ? 'Cloud log shipping is **off** — the pending queue was dropped, nothing more leaves this machine.'
+          : `Cloud log shipping is **${want}** — the scrubbed trace mirrors to CloudWatch through the Orchard API (a bound cloud identity is required; unbound installs pause until sign-in).`, { markdown: true });
+      }
+      _orchFinalize(m);
+      return;
+    }
   }
 
   // WF-2 — `workflows` lists THIS app's saved IL workflows (name/ask/steps/runs) with ▶ Run / 🗑 Delete per row. A

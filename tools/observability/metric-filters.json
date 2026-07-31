@@ -1,0 +1,32 @@
+{
+  "_generated": "by tools/observability/gen-filters.cjs from Core/decisionMarkers.js — DO NOT EDIT BY HAND",
+  "logGroup": "/orchard/{env}/client",
+  "namespace": "Orchard/Client",
+  "filters": [
+    {
+      "key": "client-error",
+      "pattern": "{ $.lvl = \"ERROR\" }",
+      "metricName": "ClientErrors"
+    },
+    {
+      "key": "cadence",
+      "pattern": "{ $.msg = \"%CADENCE ▸ ?(fired|auto-disarmed)%\" }",
+      "metricName": "Marker_Cadence"
+    },
+    {
+      "key": "heal",
+      "pattern": "{ $.msg = \"%HEAL ▸ suspect%\" }",
+      "metricName": "Marker_Heal"
+    },
+    {
+      "key": "vitals",
+      "pattern": "{ $.msg = \"%VITALS ▸ case opened%\" }",
+      "metricName": "Marker_Vitals"
+    },
+    {
+      "key": "shipper",
+      "pattern": "{ $.msg = \"%SHIPPER ▸ gap%\" }",
+      "metricName": "Marker_Shipper"
+    }
+  ]
+}
