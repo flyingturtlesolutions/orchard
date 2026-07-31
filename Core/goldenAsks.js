@@ -75,7 +75,13 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'search shopify customers named Rivera', expect: { legId: 'shopify_customer_search' } },
   { ask: 'show the shopify orders for this customer', expect: { legId: 'shopify_orders_for_customer' } },
   { ask: 'look up shopify order 1043', expect: { legId: 'shopify_order' } },
-  { ask: 'search shopify products for valve', expect: { legId: 'shopify_search_products' } },
+  { ask: 'search shopify products for valve', expect: { legId: 'shopify_search_products' }, accept: ['shopify_admin_search'] },   // v1905 — the admin-bar leg is an equally-correct answer for free words
+  // v2.74.1905 — the admin search bar itself (HAR-authored): plain product words rank the way the admin ranks them.
+  { ask: 'find the smart switch product', expect: { legId: 'shopify_admin_search' }, expectParams: { query: 'smart switch' }, mintedAt: 'v2.74.1905' },
+  // v2.74.1904 — the by-SKU lookup (admin-UI ground truth: the create-order page searches SKU as a first-class
+  // field; bare "DK-SW-01" against the default search fields missed live). The negative pins the house split:
+  // an exact SKU must not fall to the free-text product search.
+  { ask: 'find the product with sku DK-SW-01', expect: { legId: 'shopify_product_by_sku' }, expectParams: { sku: 'DK-SW-01' }, mustNotResolve: ['shopify_search_products'], mintedAt: 'v2.74.1904' },
   { ask: "how's the store doing today", expect: { legId: 'shopify_shop_pulse' } },
   { ask: 'show the unfulfilled orders', expect: { legId: 'shopify_orders_queue' } },
   { ask: 'create a shopify profile for the homeowner', expect: { legId: 'shopify_create_customer' } },   // trace-adjacent (the find-or-create flow)

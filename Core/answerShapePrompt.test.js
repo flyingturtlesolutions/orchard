@@ -456,3 +456,39 @@ describe('metricAnswerLine — a superlative names the GROUP (v1897)', () => {
     assert.match(s, /^\*\*15\*\* open/);
   });
 });
+
+// v2.74.1903 — depth + the clock + the stock bridge, on the live Shopify shapes.
+const SH_ORDER_T = { id: 'gid://shopify/Order/5551', name: 'DEAKO#69872', createdAt: '2026-07-20T10:00:00Z',
+  displayFulfillmentStatus: 'FULFILLED', customer: { email: 'momkat820@gmail.com' },
+  fulfillments: [{ deliveredAt: '2026-07-23T18:00:00Z', estimatedDeliveryAt: '2026-07-24T00:00:00Z', trackingInfo: [{ number: '1Z27691W0320913590', company: 'UPS' }] }] };
+const SH_PRODUCT_T = { id: 'gid://shopify/Product/9', title: 'Smart Scene Controller Switch', status: 'ACTIVE', totalInventory: 1378,
+  variants: { edges: [{ node: { title: 'White', sku: 'DK-SW-01', price: '49.00', inventoryQuantity: 620 } }] } };
+
+describe('readShapeFacts — the asked block reaches DEPTH (v1903)', () => {
+  it('THE LIVE CASE: "is it in stock?" now carries the inventory (the stock bridge + deep walk)', () => {
+    const f = readShapeFacts({ results: [SH_PRODUCT_T, { ...SH_PRODUCT_T, id: 'x' }] }, { ask: 'is the smart switch in stock?' });
+    assert.ok(f.sample[0].asked, 'asked block present');
+    assert.match(JSON.stringify(f.sample[0].asked), /1378|620/);
+  });
+  it('"has it been delivered?" carries deliveredAt from inside fulfillments', () => {
+    const f = readShapeFacts({ results: [SH_ORDER_T, { ...SH_ORDER_T, id: 'y' }] }, { ask: 'has it been delivered yet?' });
+    assert.match(JSON.stringify(f.sample[0].asked || {}), /deliveredAt/);
+  });
+  it('flat rows are byte-identical to the v1895 behaviour', () => {
+    const f = readShapeFacts({ results: [{ TicketId: 1, Title: 'x', Age: '003' }] }, { ask: 'how old is it?' });
+    assert.equal(f.sample[0].asked.Age, '003');
+  });
+});
+
+describe('buildAnswerShapeMessages — the clock (v1903)', () => {
+  it('TODAY rides the user message when the transport supplies it', () => {
+    const u = buildAnswerShapeMessages({ ask: 'how old are those orders?', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }), today: '2026-07-31' }).user;
+    assert.match(u, /TODAY: 2026-07-31/);
+  });
+  it('the system rule forbids computing an age without TODAY', () => {
+    assert.match(buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }) }).system, /inventing today's date is fabrication/);
+  });
+  it('no today → no TODAY line (byte-identical prompt otherwise)', () => {
+    assert.doesNotMatch(buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }) }).user, /TODAY:/);
+  });
+});

@@ -74,6 +74,9 @@ const _COND_KIND = Object.freeze({
 
   record_has_field: { kind: 'record', absentField: 'false' },
   record_field_non_empty: { kind: 'record', absentField: 'unknown' },
+  // v2.74.1901 — NO absentField column on purpose: absence is this predicate's SUBJECT, so the precheck must not
+  // intercept it — the evaluator answers TRUE for an absent field, which is the whole point of the form.
+  record_field_blank: { kind: 'record' },
 
   scalar_non_empty: { kind: 'scalar' }, scalar_is_number: { kind: 'scalar' },
   scalar_equals: { kind: 'scalar' }, scalar_number_range: { kind: 'scalar' }, scalar_in_set: { kind: 'scalar' },

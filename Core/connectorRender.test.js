@@ -486,3 +486,48 @@ describe('connectorRender — rowsFromValue: a single record IS a collection of 
     assert.equal(rowsFromValue([{ Id: 1 }, { Id: 2 }]).length, 2);
   });
 });
+
+// v2.74.1907 — the admin-search response, shape verbatim from admin.shopify.com.har entry 235 (values trimmed).
+// Live: `data.shop`'s id made it record-shaped, CX-9h swallowed the connection, and every reply rendered the Shop
+// wrapper ("#17439859 (Shop type)… no title") over seven ranked hits.
+describe('primaryList — a GQL ENVELOPE must not swallow its connection (v1907)', () => {
+  const SEARCH = { data: { shop: { id: 'gid://shopify/Shop/17439859', search: {
+    inaccessibleResultTypes: [], indexCounts: [{}], totalCount: 87,
+    edges: [
+      { cursor: 'x', node: { title: 'Smart Switch', url: 'https://admin.shopify.com/store/deako/products/4370755977350', score: 133.5, reference: { id: 'gid://shopify/Product/4370755977350', __typename: 'Product', title: 'Smart Switch', status: 'DRAFT', totalAvailableInventory: -114 }, __typename: 'SearchResult' } },
+      { cursor: 'y', node: { title: 'Smart Switch (Gen 2)', url: 'https://…', score: 120.1, reference: { id: 'gid://shopify/Product/7407296151686', __typename: 'Product', title: 'Smart Switch (Gen 2)', status: 'ACTIVE', totalAvailableInventory: 766 }, __typename: 'SearchResult' } },
+    ], __typename: 'SearchResultConnection' }, __typename: 'Shop' } } };
+  it('THE LIVE CASE: the ranked hits are the rows, never the Shop wrapper', () => {
+    const rows = primaryList(SEARCH);
+    assert.ok(rows && rows.length === 2, 'two hits');
+    assert.equal(rows[0].title, 'Smart Switch');
+    assert.equal(rows[1].title, 'Smart Switch (Gen 2)');
+  });
+  it('CX-9h stays intact — a RECORD with scalar payload keeps owning its child arrays', () => {
+    const task = { TaskId: 963119, TaskNumber: '10803524', Priority: '1', Instructions: 'x',
+      Appointments: [{ AppointmentId: 1, StartDate: '2026-07-10' }] };
+    assert.equal(primaryList(task), null, 'a real record is not a list container');
+  });
+  it('an envelope WITHOUT a connection still resolves nothing (no over-reach)', () => {
+    assert.equal(primaryList({ id: 'gid://x/1', child: { notEdges: [1, 2] } }), null);
+  });
+});
+
+describe('renderConnectorLines — id ≡ title collapses; # is for numbers (v1907)', () => {
+  it('a product row with displayId=title reads once, without a stray #', () => {
+    const lines = renderConnectorLines({ results: [
+      { title: 'Smart Switch', status: 'DRAFT' },
+      { title: 'Smart Switch (Gen 2)', status: 'ACTIVE' },
+    ] }, { name: 'Products', displayId: ['title'] });
+    const body = lines.join('\n');
+    assert.ok(!/Smart Switch Smart Switch/.test(body), 'no doubled title');
+    assert.ok(!/#Smart Switch\b/.test(body), 'no # on a word id');
+  });
+  it('a numeric or DEAKO#-shaped id keeps its #', () => {
+    const lines = renderConnectorLines({ results: [
+      { TicketId: 4894068, AddressLine1: '553 Tim Currin Road' },
+      { name: 'DEAKO#69872', createdAt: '2026-07-20', displayFulfillmentStatus: 'FULFILLED' },
+    ] }, { name: 'Rows', displayId: ['TicketId', 'name'] });
+    assert.match(lines.join('\n'), /#4894068/);
+  });
+});

@@ -79,12 +79,27 @@ function _candidatePaths(row) {
   // fine for the scorer (which substring-matches) and fatal for a word-level test: with only a substring path, a
   // 4-char floor made every SHORT REAL token orphaned ("id number" reported "nothing matches id" on a record full of
   // ids). The floor needs word-splitting to be correct, not just a length rule.
-  const push = (path, val) => { const k = path.split('.').pop(); out.push({ path, keyNorm: _norm(k), keyWords: _camelWords(k), val }); };
-  for (const [k, v] of Object.entries(row)) {
-    push(k, v);
-    const inner = Array.isArray(v) ? (v[0] && typeof v[0] === 'object' ? v[0] : null) : (v && typeof v === 'object' ? v : null);
-    if (inner) for (const [k2, v2] of Object.entries(inner)) { if (v2 == null || typeof v2 === 'object') continue; push(`${k}.${k2}`, v2); }
-  }
+  //
+  // v2.74.1903 — DEPTH, from the Shopify pass (gl 08:06): the one-hop scan made `variants.edges[].node.price` and
+  // `fulfillments[].trackingInfo[].number` invisible — "price" reported absent on five product rows that all carry
+  // it. The walk now descends OBJECTS and ARRAY [0]-elements to depth 4, with GraphQL plumbing segments (edges/node)
+  // EXCLUDED from the key text a phrase matches against (a person says "tracking number", never "edges node") while
+  // the PATH keeps them — `extractValue` needs the real segments and already walks them. VendorSuite's flat rows see
+  // byte-identical candidates: depth only ADDS what the shallow scan could not reach.
+  const GQL_SEG = new Set(['edges', 'node', 'nodes']);
+  const push = (path, val) => {
+    const words = path.split('.').filter((seg) => !GQL_SEG.has(seg));
+    const kText = (words.length ? words : path.split('.')).join(' ');
+    out.push({ path, keyNorm: _norm(kText), keyWords: kText.split(' ').flatMap((w) => _camelWords(w)), val });
+  };
+  const walk = (v, path, depth) => {
+    if (out.length >= 120) return;
+    if (v == null || typeof v !== 'object') { if (path) push(path, v); return; }
+    if (Array.isArray(v)) { if (v[0] && typeof v[0] === 'object' && depth < 4) walk(v[0], path, depth); return; }   // [0] — the element extractValue reads
+    if (depth >= 4) return;
+    for (const [k, vv] of Object.entries(v)) walk(vv, path ? `${path}.${k}` : k, depth + 1);
+  };
+  walk(row, '', 0);
   return out;
 }
 

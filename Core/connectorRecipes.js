@@ -123,7 +123,12 @@ const _GQL_CUSTOMERS = 'query Customers($q: String!, $n: Int!) { customers(first
 // CX-7c (v2.74.1388) — order read now carries RETURNS (return/exchange status + reverse tracking — the "where's my
 // exchange?" question) and the refund AMOUNT (totalRefundedSet), plus the fulfillment event timeline. Spec §3.
 const _GQL_ORDERS = 'query Orders($q: String!, $n: Int!) { orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true) { edges { node { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } customer { email } lineItems(first: 10) { edges { node { title quantity } } } fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } events(first: 10) { edges { node { status happenedAt } } } } returns(first: 10) { edges { node { id status returnLineItems(first: 10) { edges { node { quantity } } } reverseFulfillmentOrders(first: 5) { edges { node { reverseDeliveries(first: 5) { edges { node { deliverable { ... on ReverseDeliveryShippingDeliverable { tracking { carrierName number url } } } } } } } } } } } } refunds { createdAt note totalRefundedSet { shopMoney { amount currencyCode } } } tags note } } } }';
-const _GQL_PRODUCTS = 'query Products($q: String!, $n: Int!) { products(first: $n, query: $q) { edges { node { id title status totalInventory variants(first: 10) { edges { node { id title sku price inventoryQuantity } } } } } } }';
+// v2.74.1904 — `sortKey: RELEVANCE`, from ADMIN-UI ground truth (user-supplied, 2026-07-31): the search bar's top
+// five for "smart switch" were Smart Switch · Gen 2 · Bundle · Scene Controller · Gen 1 Refurbished, while this query
+// returned a DRAFT scene controller, a Dimmer and an ARCHIVED Backplate — because an unsorted products connection
+// orders by ID (oldest first among matches), so `first: n` truncated precisely the newer, relevant items. RELEVANCE
+// is what the admin's own bar ranks by.
+const _GQL_PRODUCTS = 'query Products($q: String!, $n: Int!) { products(first: $n, query: $q, sortKey: RELEVANCE) { edges { node { id title status totalInventory variants(first: 10) { edges { node { id title sku price inventoryQuantity } } } } } } }';
 // CX-7c — the LIVENESS probe document: `{ shop { name } }` (spec §2 probeShopify). `shopProbe:true` makes
 // INVOKE_SESSION run it once (cached) before the call — a clean signed-out verdict instead of a mid-call surprise.
 // LEG-1 (v2.74.1593) — the same read, NAMED, as a standalone recipe document (the RH-0a contract 404s anonymous
@@ -389,12 +394,26 @@ export const CONNECTOR_RECIPES = [
   // FL-1c/CX-7e (v2.74.1393) — `itemUrl`: the record's HUMAN admin page ("show profile" opens it, like "show ticket"
   // on Zendesk). {handle} fills from the read's tab-derived urlParam (the same /store/<handle>/ the read rode);
   // {id} is the RESULT's record id (a customer lookup by email → the customer gid, tail-stripped to numeric).
+  // v2.74.1902 — the VendorSuite ride-leg declarations, ported (user: "work on shopify next, using the same
+  // principles applied to vendorsuite ride legs"). Each is an EXISTING catalog field already threaded through all
+  // three invariant-#3 hops (rideRecipe.js:95-98 · the v1432 spread · connectorLeg.js:193-199), so this is data,
+  // not plumbing:
+  //   displayId — the HUMAN id the row should headline (v1617; v1887 carries it into the shaper's facts). An
+  //               order's is `name` ("DEAKO#69872" — what a user quotes); a customer's is their `email`. The gid
+  //               is deliberately NOT a fallback — "gid://shopify/Customer/…" headlining a reply is the exact
+  //               defect displayId exists to prevent.
+  //   joinKey   — the declared cross-system identity ladder (v1633: a declaration is consumed BEFORE the
+  //               name/shape heuristics). A customer joins other systems by EMAIL then PHONE; an order by its
+  //               customer's email (`customer.email` — extractValue walks dotted paths). This is the reverse of
+  //               vs_warranty_tasks' ladder, and it is what "for each order, find the warranty task" resolves by.
   { ...SH, id: 'shopify_customer_by_email', name: 'Find a Shopify customer by email', itemUrl: '/store/{handle}/customers/{id}',
+    displayId: ['email'], joinKey: ['email', 'phone'],
     does: 'look up Shopify customer(s) by EMAIL, riding your admin login — search returns near-matches: confirm the exact email before trusting a hit',
     endpoint: '/api/shopify/{handle}?operation=Customers&type=query',
     body: { operationName: 'Customers', query: _GQL_CUSTOMERS, variables: { q: 'email:"{email}"', n: 5 } },
     params: [{ name: 'email', type: 'string', required: true }] },
   { ...SH, id: 'shopify_customer_by_phone', name: 'Find a Shopify customer by phone', itemUrl: '/store/{handle}/customers/{id}',
+    displayId: ['email'], joinKey: ['email', 'phone'],
     does: 'look up Shopify customer(s) by PHONE number, riding your admin login — search returns near-matches: confirm the digits match exactly before trusting a hit',
     endpoint: '/api/shopify/{handle}?operation=Customers&type=query',
     body: { operationName: 'Customers', query: _GQL_CUSTOMERS, variables: { q: 'phone:"{phone}"', n: 5 } },
@@ -403,25 +422,60 @@ export const CONNECTOR_RECIPES = [
   // leg; only email/phone existed, so interpret force-fit the email leg). Shopify search matches bare words
   // against names; the near-match warning applies doubly (same/similar names are common).
   { ...SH, id: 'shopify_customer_search', name: 'Search Shopify customers by name', itemUrl: '/store/{handle}/customers/{id}',
+    displayId: ['email'], joinKey: ['email', 'phone'],
     does: 'search Shopify customers by NAME (or any free search words), riding your admin login — returns near-matches: same or similar names are common, confirm the email before trusting a hit',
     endpoint: '/api/shopify/{handle}?operation=Customers&type=query',
     body: { operationName: 'Customers', query: _GQL_CUSTOMERS, variables: { q: '{query}', n: 5 } },
     params: [{ name: 'query', type: 'string', required: true, hint: 'the customer\'s name or free search words — for an exact email use the by-email lookup' }] },
   { ...SH, id: 'shopify_orders_for_customer', name: 'Shopify orders for a customer',
-    does: 'list a customer’s recent Shopify orders by their EMAIL (status, totals, line items, fulfillment/tracking, refunds), riding your admin login',
+    displayId: ['name'], joinKey: ['customer.email'],
+    // v2.74.1902 — the LIST leg carries its drill (the vs_warranty_tasks pattern): "her orders — and open 69872"
+    // filters this list by the order param and drills via the by-number lookup, instead of needing a second ask.
+    drill: { via: 'shopify_order', param: 'order', from: 'name', matchOn: 'order', label: ['name', 'id', 'displayFulfillmentStatus', 'displayFinancialStatus'] },
+    does: 'list a customer’s recent Shopify orders by their EMAIL (status, totals, line items, fulfillment/tracking, refunds), riding your admin login; give an order number to drill straight into that one',
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
     body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'email:"{email}"', n: 5 } },
-    params: [{ name: 'email', type: 'string', required: true }] },
+    params: [
+      { name: 'email', type: 'string', required: true },
+      { name: 'order', type: 'string', required: false, hint: 'an ORDER NUMBER — set ONLY when the user names one specific order to drill into' },   // NOT in the body — the drill join's filter
+    ] },
   { ...SH, id: 'shopify_order', name: 'Look up a Shopify order', itemUrl: '/store/{handle}/orders/{id}',
+    displayId: ['name'], joinKey: ['customer.email'],
     does: 'fetch one Shopify order by its ORDER NUMBER (digits, e.g. 69872 — not the DEAKO# prefix): status, totals, line items, fulfillment/tracking, refunds — riding your admin login',
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
     body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'name:{order}', n: 3 } },
     params: [{ name: 'order', type: 'string', required: true }] },
-  { ...SH, id: 'shopify_search_products', name: 'Search Shopify products',
-    does: 'search Shopify products by title / sku / tag query (with variants, price, inventory), riding your admin login',
+  { ...SH, id: 'shopify_search_products', name: 'Search Shopify products', itemUrl: '/store/{handle}/products/{id}',
+    displayId: ['title'],
+    does: 'search Shopify products by title or free words (with variants, price, inventory; drafts and archived included — say so when a hit is not ACTIVE), riding your admin login. For an exact SKU use the by-SKU lookup',
     endpoint: '/api/shopify/{handle}?operation=Products&type=query',
-    body: { operationName: 'Products', query: _GQL_PRODUCTS, variables: { q: '{query}', n: 5 } },
+    body: { operationName: 'Products', query: _GQL_PRODUCTS, variables: { q: '{query}', n: 10 } },   // v1904 — 10, not 5: the ID-ordered truncation cost the top admin hits
     params: [{ name: 'query', type: 'string', required: true }] },
+  // v2.74.1905 — THE ADMIN SEARCH BAR ITSELF, HAR-authored (admin.shopify.com.har, 2026-07-31; entry 235 is the
+  // literal "smart switch" keystroke). The RELEVANCE experiment measured its ceiling in one probe — the bar is a
+  // DIFFERENT SEARCH SERVICE (per-hit `score`, prefix matching), not products(query:), and no sortKey reaches it.
+  // So this leg IS the bar: the persisted `Search` operation, GET with the variables JSON in the query string
+  // (percent-encoded verbatim scaffold; {query} is the one fill slot — fillEndpoint's encodeURIComponent lands the
+  // value inside the JSON string correctly). {op_sha} rides the SAME per-origin op bank as the writes — the tee's
+  // OP_RE matches any /api/operations/<sha>/<Op>/ URL regardless of method, so ONE hand search with the tab ridden
+  // banks it, and a deploy-rotated sha re-captures through the existing HASH_STALE path. Response:
+  // data.shop.search.edges[].node {title, url, score, reference{status,…}} — ranked, drafts/archived included,
+  // exactly what the user's paste showed the bar showing.
+  { ...SH, id: 'shopify_admin_search', name: 'Search the Shopify admin (products)', method: 'GET', gql: false, persistedOp: 'Search',
+    displayId: ['title'],
+    does: 'search Shopify PRODUCTS by words exactly like the admin search bar — relevance-ranked, drafts and archived included (say so when a hit is not ACTIVE). First use may need one search done by hand in the admin to bank the operation',
+    endpoint: '/api/operations/{op_sha}/Search/shopify/{handle}?operationName=Search&variables=%7B%22getRating%22%3Afalse%2C%22includeRollouts%22%3Atrue%2C%22query%22%3A%22{query}%22%2C%22annotatedSearchTerm%22%3Anull%2C%22types%22%3A%5B%22PRODUCT%22%5D%2C%22first%22%3A7%2C%22cursor%22%3Anull%2C%22sortField%22%3Anull%2C%22sortAscending%22%3Afalse%7D',
+    params: [{ name: 'query', type: 'string', required: true, hint: 'plain product words ("smart switch") — quotes are not supported' }] },
+  // v2.74.1904 — the by-SKU lookup, from the same admin ground truth: the create-order page searches SKU/variant as
+  // first-class fields, and a bare "DK-SW-01" against the default search fields missed live. Field-targeted `sku:`
+  // is Shopify's own query syntax — the by_email/by_phone house pattern (a separate simple leg over a param-switched
+  // one), applied to products.
+  { ...SH, id: 'shopify_product_by_sku', name: 'Find a Shopify product by SKU', itemUrl: '/store/{handle}/products/{id}',
+    displayId: ['title'],
+    does: 'look up the Shopify product carrying an exact variant SKU (title, status, variants, price, inventory), riding your admin login',
+    endpoint: '/api/shopify/{handle}?operation=Products&type=query',
+    body: { operationName: 'Products', query: _GQL_PRODUCTS, variables: { q: 'sku:{sku}', n: 5 } },
+    params: [{ name: 'sku', type: 'string', required: true, hint: 'the exact variant SKU (e.g. DK-SW-01) — for words from a title use the product search instead' }] },
   // LEG-1 (v2.74.1593) — the STORE PULSE: the CX-7c liveness document promoted to a standalone, PARAMS-FREE
   // curated read. This is Shopify's CANARY (DESIGN_vitals.md §6 — the recorded no-canary blind spot): every other
   // SH read takes a required param, so the daily visit had nothing safe to run and the ground sat drift-blind
@@ -440,6 +494,7 @@ export const CONNECTOR_RECIPES = [
   // Query FIXED (status:open + not fully fulfilled): the queue IS the fulfillment backlog — separate simple legs
   // over one param-switched one, the by_email/by_phone house pattern. No each-mode (one store per handle).
   { ...SH, id: 'shopify_orders_queue', name: 'Open unfulfilled Shopify orders', listUrl: '/store/{handle}/orders',
+    displayId: ['name'], joinKey: ['customer.email'],
     drill: { via: 'shopify_order', param: 'order', from: 'name', matchOn: 'order', label: ['name', 'id', 'displayFulfillmentStatus', 'displayFinancialStatus'] },
     does: 'THE fulfillment queue: open orders not yet (fully) fulfilled, newest first — number, date, payment/fulfillment status, total, customer email, line items, tracking. Give an order number to drill straight into that one; say "on the site" to open it on the admin orders page. Fans out: "open each in a case"',
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
@@ -859,6 +914,8 @@ const _OP_CAPTURE_HINTS = {
   CustomerCreate: 'create any customer by hand (Customers → Add customer — test values are fine; you can delete it right after)',
   EditCustomer: 'edit any customer by hand (open one, change a field — e.g. add a tag — and Save; you can undo it right after)',
   DraftOrderCreate: 'create a draft order by hand (Orders → Drafts → Create order, any product; you can delete the draft right after)',
+  // v2.74.1905 — the first READ persisted op: the admin search bar's own operation.
+  Search: 'type anything into the admin search bar once (the magnifying glass, top bar) — that banks the search operation',
 };
 /** The by-hand capture instruction for an op. PURE (a safe default for unmapped ops). */
 export function opCaptureHint(op) {

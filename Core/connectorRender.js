@@ -51,7 +51,22 @@ export function primaryList(value, _depth = 0) {
   if (!value || typeof value !== 'object') return null;
   for (const k of LIST_KEYS) if (Array.isArray(value[k])) return _unwrapNodes(value[k]);
   if (Array.isArray(value.edges)) return _unwrapNodes(value.edges);                    // a GraphQL connection at this level
-  if (_recordShaped(value)) return null;                                              // CX-9h — a record root is NOT a list container (its arrays are children)
+  if (_recordShaped(value)) {
+    // v2.74.1907 — A GQL ENVELOPE MUST NOT SWALLOW ITS CONNECTION. Live (gl 09:34, the admin-search leg's first
+    // pass): `data.shop` is {id, search{edges[…]}, __typename} — the `id` made it record-shaped, CX-9h declared it
+    // a record root, and every reply rendered "#17439859 (Shop type)… no title" — the WRAPPER, with seven ranked
+    // hits invisible beneath it. The discriminator is exact and keeps CX-9h intact: an ENVELOPE has NO scalar
+    // payload of its own (nothing but id/__typename), while the record CX-9h protects (a warranty task with an
+    // Appointments child) carries dozens. Zero own-scalars + a direct child CONNECTION (.edges — definitionally a
+    // list, unlike CX-9h's plain child arrays) → the connection is the data.
+    const _ownScalars = Object.entries(value).filter(([k, v]) => k !== 'id' && k !== '__typename' && (v == null || typeof v !== 'object')).length;
+    if (_ownScalars === 0) {
+      for (const v of Object.values(value)) {
+        if (v && typeof v === 'object' && !Array.isArray(v) && Array.isArray(v.edges)) return _unwrapNodes(v.edges);
+      }
+    }
+    return null;                                                                      // CX-9h — a record root is NOT a list container (its arrays are children)
+  }
   for (const v of Object.values(value)) if (Array.isArray(v) && v.length && v[0] && typeof v[0] === 'object') return _unwrapNodes(v);
   if (_depth < 5) for (const v of Object.values(value)) {                              // recurse: data → customers → edges
     if (v && typeof v === 'object' && !Array.isArray(v)) { const found = primaryList(v, _depth + 1); if (found) return found; }
@@ -377,7 +392,10 @@ export function renderConnectorLines(value, { name = 'Results', displayId = null
       // VendorSuite warranty row) falls back to its generic fields ("3955 Gallery Chase · Cumming, GA 30028 · …")
       // instead of a dead "(no title)" bullet — the list twin of the single-record enrichment.
       const label = it.title || itemFields(o, { max: 4 }).map(([, v]) => v).join(' · ') || '(no title)';
-      return `• ${it.id != null ? `#${it.id} ` : ''}${label}${it.status ? ` — ${it.status}` : ''}`;
+      // v2.74.1907 — id ≡ label collapses (displayId ['title'] made every product row read "#Smart Switch Smart
+      // Switch"), and the # sigil is reserved for number-shaped ids — "#Smart Switch" is not a number.
+      const _idPart = (it.id != null && String(it.id) !== String(label)) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) ? '#' : ''}${it.id} ` : '';
+      return `• ${_idPart}${label}${it.status ? ` — ${it.status}` : ''}`;
     });
     if (list.length > MAX_ROWS) lines.push(`… +${list.length - MAX_ROWS} more`);
     return [`${head}:`, ...lines];
@@ -386,7 +404,8 @@ export function renderConnectorLines(value, { name = 'Results', displayId = null
   const obj = (list && list.length === 1) ? list[0] : primaryObject(value);   // a single result renders as the FULL record
   if (obj) {
     const it = summarizeItem(obj, { full: true, displayId });
-    const out = [`${it.id != null ? `#${it.id} ` : ''}${it.title || ''}${it.status ? ` — ${it.status}` : ''}`.trim() || '(no details)'];
+    const _hidPart = (it.id != null && String(it.id) !== String(it.title || '')) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) ? '#' : ''}${it.id} ` : '';   // v1907 — same collapse as the bullet rows
+    const out = [`${_hidPart}${it.title || ''}${it.status ? ` — ${it.status}` : ''}`.trim() || '(no details)'];
     if (it.body) out.push(it.body);
     const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));   // don't repeat the title/status/id as an extra
     for (const [k, v] of _extraFields(obj, used, { max: 12 })) out.push(`${_label(k)}: ${v}`);   // CX-9g — the single-record budget
@@ -407,7 +426,8 @@ export function itemLabels(value, cap = 20) {
   const labels = list.slice(0, cap).map((o) => {
     const it = summarizeItem(o);
     const label = it.title || itemFields(o, { max: 2 }).map(([, v]) => v).join(' · ') || 'item';   // CX-9c — generic-fields fallback (fan-out labels for vocabulary-less rows)
-    return `${it.id != null ? `#${it.id} ` : ''}${label}`.trim();
+    const _lidPart = (it.id != null && String(it.id) !== String(label)) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) ? '#' : ''}${it.id} ` : '';   // v1907
+    return `${_lidPart}${label}`.trim();
   }).filter(Boolean);
   return { labels, total: list.length, capped: list.length > cap };
 }

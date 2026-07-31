@@ -128,6 +128,41 @@ export function fieldPhraseCandidates(phrase) {
 }
 
 /**
+ * v2.74.1903 — DEEP FIELD PATHS: every scalar leaf a record holds, as an extractable dotted path. PURE.
+ *
+ * THE SHOPIFY LESSON. Five months of field machinery grew up on VendorSuite's FLAT rows, so every door scanned one
+ * hop and no deeper. The first nested ground broke four asks in one pass (gl 2026-07-31 08:06): tracking lives at
+ * `fulfillments[].trackingInfo[].number`, price at `variants.edges[].node.price`, delivery at
+ * `fulfillments[].deliveredAt` — all present in the payload, all invisible to `Object.keys`. Meanwhile
+ * `extractValue` (Core/peritemMap.js) ALREADY walks dotted paths and descends arrays to [0] — extraction was never
+ * the gap, DISCOVERY was. This enumerator is the one place discovery learns depth, so every door that resolves
+ * through it inherits the fix at once instead of one door per pass.
+ *
+ * `matchText` is the path with GraphQL plumbing segments (edges/node) DROPPED — "variants price", not
+ * "variants edges node price" — because a person's phrase never contains the envelope. The PATH keeps them,
+ * because extraction needs the real segments.
+ */
+const _GQL_SEG = new Set(['edges', 'node', 'nodes']);
+export function deepFieldPaths(record, { maxDepth = 5, max = 80 } = {}) {
+  const out = [];
+  const walk = (v, segs, depth) => {
+    if (out.length >= max) return;
+    if (v == null) return;
+    if (typeof v !== 'object') {
+      if (!segs.length) return;
+      const shown = segs.filter((x) => !_GQL_SEG.has(x));
+      out.push({ path: segs.join('.'), matchText: (shown.length ? shown : segs).join(' ') });
+      return;
+    }
+    if (depth >= maxDepth) return;
+    if (Array.isArray(v)) { if (v.length) walk(v[0], segs, depth); return; }   // [0] — the same element extractValue reads
+    for (const [k, vv] of Object.entries(v)) walk(vv, [...segs, k], depth + 1);
+  };
+  walk(record, [], 0);
+  return out;
+}
+
+/**
  * Resolve a human field PHRASE to the record's actual KEY. PURE. v2.74.1690.
  *
  * ── WHY THIS EXISTS ─────────────────────────────────────────────────────────────────────────────────────────
@@ -157,9 +192,10 @@ export function fieldPhraseCandidates(phrase) {
  */
 export function resolveFieldKey(keysOrRecord, phrase) {
   const miss = { key: '', ambiguous: false, candidates: [] };
+  const isRecord = !!(keysOrRecord && typeof keysOrRecord === 'object' && !Array.isArray(keysOrRecord));
   const keys = Array.isArray(keysOrRecord)
     ? keysOrRecord.filter((k) => typeof k === 'string' && k)
-    : (keysOrRecord && typeof keysOrRecord === 'object' ? Object.keys(keysOrRecord) : []);
+    : (isRecord ? Object.keys(keysOrRecord) : []);
   if (!keys.length) return miss;
 
   const norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -171,18 +207,57 @@ export function resolveFieldKey(keysOrRecord, phrase) {
   const verbatim = keys.find((k) => k === phrase);
   if (verbatim) return { key: verbatim, ambiguous: false, candidates: [] };
 
+  // v2.74.1903 — a RECORD argument resolves DEEP: the candidate space becomes every scalar leaf's dotted path, with
+  // the GQL plumbing dropped from the MATCH text (a person says "tracking number", never "fulfillments edges node
+  // number"; `deepFieldPaths` keeps the real segments in `path` because extraction needs them). ARRAY callers keep
+  // the shallow behaviour byte-for-byte — they told us which keys exist, and we believe them. Top-level keys stay
+  // first in the space, so every pre-1903 resolve is unchanged and depth only ADDS candidates the shallow scan
+  // could not see (the Shopify lesson, gl 08:06: tracking/price/deliveredAt all present, all invisible).
+  const space = isRecord
+    ? [...keys.map((k) => ({ path: k, m: norm(k) })),
+       ...deepFieldPaths(keysOrRecord).filter((e) => e.path.includes('.')).map((e) => ({ path: e.path, m: norm(e.matchText) }))]
+    : keys.map((k) => ({ path: k, m: norm(k) }));
+
+  // v2.74.1903 — ALL-TOKENS FIRST, for multi-word phrases over a DEEP space. The drop-leading ladder below exists
+  // for phrases whose leading words are noise ("tasks instructions" → "instructions"); over nested paths the leading
+  // word is often the DISCRIMINATOR — its own test caught "refund amount" resolving to the ORDER total
+  // (`totalPriceSet.shopMoney.amount`) because the ladder tried bare "amount" before "refund" ever ran. A path
+  // carrying EVERY content token beats any single-token rung, so it is tried first; ties fall through to the same
+  // shallow-first / ambiguous discipline.
+  if (isRecord) {
+    const toks = String(phrase).toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w.length >= 4);
+    if (toks.length >= 2) {
+      const all = space.filter((e) => toks.every((t) => e.m.includes(t)));
+      if (all.length === 1) return { key: all[0].path, ambiguous: false, candidates: [] };
+      if (all.length > 1) {
+        const minDepth = Math.min(...all.map((e) => e.path.split('.').length));
+        const top = all.filter((e) => e.path.split('.').length === minDepth);
+        if (top.length === 1) return { key: top[0].path, ambiguous: false, candidates: [] };
+        return { key: '', ambiguous: true, candidates: all.map((e) => e.path) };
+      }
+    }
+  }
+
   for (const cand of fieldPhraseCandidates(phrase)) {
     const c = norm(cand);
     if (!c) continue;
     // Normalized EQUALITY first — "Vendor Explanation" ≡ `VendorExplanation` ≡ `vendor_explanation`. This is the
     // live case, and it is exact enough that a tie here means genuinely duplicate keys.
-    const exact = keys.filter((k) => norm(k) === c);
-    if (exact.length === 1) return { key: exact[0], ambiguous: false, candidates: [] };
-    if (exact.length > 1) return { key: '', ambiguous: true, candidates: exact };
+    const exact = space.filter((e) => e.m === c);
+    if (exact.length === 1) return { key: exact[0].path, ambiguous: false, candidates: [] };
+    if (exact.length > 1) return { key: '', ambiguous: true, candidates: exact.map((e) => e.path) };
     // Then CONTAINMENT, which is where ties actually happen and where refusing to guess earns its keep.
-    const subs = keys.filter((k) => norm(k).includes(c));
-    if (subs.length === 1) return { key: subs[0], ambiguous: false, candidates: [] };
-    if (subs.length > 1) return { key: '', ambiguous: true, candidates: subs };
+    const subs = space.filter((e) => e.m.includes(c));
+    if (subs.length === 1) return { key: subs[0].path, ambiguous: false, candidates: [] };
+    if (subs.length > 1) {
+      // v1903 — depth tie-break BEFORE declaring ambiguity: a shallow key and its own nested echo are not a tie
+      // ("email" over customer rows must not tie with customer.email three hops down another branch). Distinct
+      // paths at the SAME depth stay ambiguous — trackingInfo.number vs trackingInfo.url is a real question.
+      const minDepth = Math.min(...subs.map((e) => e.path.split('.').length));
+      const top = subs.filter((e) => e.path.split('.').length === minDepth);
+      if (top.length === 1) return { key: top[0].path, ambiguous: false, candidates: [] };
+      return { key: '', ambiguous: true, candidates: subs.map((e) => e.path) };
+    }
   }
   return miss;
 }

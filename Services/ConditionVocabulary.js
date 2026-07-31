@@ -67,6 +67,7 @@ export const CONDITION_TYPES = Object.freeze([
   'binding_is_record',
   'record_has_field',
   'record_field_non_empty',
+  'record_field_blank',
 
   // ── Scope family — scalar assertions ────────────────────────────────────
   'binding_is_scalar',
@@ -172,6 +173,7 @@ export const CONDITION_FIELDS = Object.freeze({
   binding_is_record:                { family: 'scope', subfamily: 'record', fields: ['binding'],                          required: ['binding'] },
   record_has_field:                 { family: 'scope', subfamily: 'record', fields: ['binding', 'fieldName'],             required: ['binding', 'fieldName'] },
   record_field_non_empty:           { family: 'scope', subfamily: 'record', fields: ['binding', 'fieldName'],             required: ['binding', 'fieldName'] },
+  record_field_blank:               { family: 'scope', subfamily: 'record', fields: ['binding', 'fieldName'],             required: ['binding', 'fieldName'] },   // v1901 — absence is the SUBJECT: absent-or-empty is TRUE, never unknown
 
   // ── Scope family — scalars ──────────────────────────────────────────────
   binding_is_scalar:                { family: 'scope', subfamily: 'scalar', fields: ['binding'],                          required: ['binding'] },

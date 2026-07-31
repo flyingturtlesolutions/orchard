@@ -79,7 +79,7 @@ function personaRole(persona) {
  *          coverage?:{authoredCount:number,total:number,coveragePct:number}|null, url?:string }} args
  * @returns {{ system:string, user:string }}
  */
-export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '', seed = '', connections = [], ride = [], learned = '', objects = '', subTasks = [], history = [], verifiedAsks = [] } = {}) {
+export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '', seed = '', connections = [], ride = [], learned = '', objects = '', subTasks = [], history = [], verifiedAsks = [], today = '' } = {}) {
   const capLines = (Array.isArray(capabilities) ? capabilities : [])
     .map((c) => { const n = c && (c.name || c.alias); return n ? `- ${n}${c.alias ? '  (you\'ve used this)' : ''}` : null; })
     .filter(Boolean)
@@ -147,6 +147,11 @@ export function buildAnswerMessages({ ask, capabilities = [], affordances = [], 
   const subTasksBlock = renderSubTasksBlock(subTasks);   // CV-4-reduce — THIS app's own children + their latest results (untrusted data)
   if (subTasksBlock) parts.push('', subTasksBlock);
   if (cov) parts.push('', `COVERAGE: ${cov}.`);
+  // v2.74.1903 — THE CLOCK. This is the door that answered "how old are those orders?" with *"roughly 92 days from
+  // today, January 9, 2025"* on July 31, 2026 — precise arithmetic against an invented today, stated twice,
+  // identically. The transport stamps the date; the rule makes its absence a refusal rather than a guess.
+  const _today = String(today ?? '').trim();
+  if (_today) parts.push('', `TODAY: ${_today}. Relative-time statements ("how old", "days ago") compute against THIS date. If a computation needs today's date and TODAY is missing, state the recorded date and say you cannot compute the age — never invent today.`);
   // CV-2 — an app (seeded) answers FROM its role (personaRole DOMINATES); the Overview (no seed) uses the generic
   // assistant identity. BASE (operating rules) is shared. SAFE: free-text generation, not structured output.
   const persona = String(seed ?? '').trim();

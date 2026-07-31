@@ -971,7 +971,9 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           let extra = isGqlRead ? { gqlRead: true } : null;
           const _rideHdrs = (payload && payload.requestHeaders && typeof payload.requestHeaders === 'object') ? payload.requestHeaders : null;
           if (_rideHdrs) extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ..._rideHdrs } };
-          if ((isWrite || isGqlRead) && payload && payload.csrf === 'sniff') {
+          // v2.74.1905 — a persisted-op GET carries the token too: the HAR shows x-csrf-token on the admin bar's
+          // own Search GET, and the leg that mirrors it must send what the surface sends (RH-0a: headers are route).
+          if ((isWrite || isGqlRead || (payload && payload.persistedOp)) && payload && payload.csrf === 'sniff') {
             extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { 'x-csrf-token': csrfTok } : {}) } };
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt

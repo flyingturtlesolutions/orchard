@@ -392,6 +392,25 @@ export function evaluateDataCondition(cond, scope) {
       return { ok: true, reason: '' };
     }
 
+    // v2.74.1901 — a predicate ABOUT absence. Live (gl 20:14): "sort into: has a vendor explanation, or blank" put
+    // 2 items in the has-arm and the 7 whose detail records OMIT the key entirely into "couldn't tell" — with per-row
+    // reasons that literally described blankness (`record has no field "VendorExplanation"`) while refusing to
+    // conclude it. §2.0.1's absent-is-unknown rule is right where absence is an ACCIDENT (a transport blip must not
+    // decide a branch) and wrong where absence is the SUBJECT: the user's "blank" MEANS "no vendor explanation",
+    // absent key included. The escape is not an exception but a richer vocabulary — this form's NAME declares that
+    // absence matches, so nothing is collapsed silently. True: field absent, null, or whitespace-only. False: the
+    // field has content. The only unknowns are the structural ones every record form shares (unbound / not a record).
+    case 'record_field_blank': {
+      const v = scope?.get?.(cond.binding);
+      if (v == null) return { ok: false, reason: `binding "${cond.binding}" is unbound` };
+      if (v.kind !== 'record') return { ok: false, reason: `binding "${cond.binding}" is kind=${v.kind}, expected record` };
+      const fname = String(cond.fieldName);
+      const fields = v.fields ?? {};
+      const fv = fields[fname];
+      if (fv == null || String(fv).trim() === '') return { ok: true, reason: '' };
+      return { ok: false, reason: `binding "${cond.binding}" field "${fname}" has content` };
+    }
+
     // ── Scalar assertions (v2.69.0 additions) ──────────────────────────────
 
     case 'scalar_non_empty': {
@@ -766,6 +785,7 @@ export function describeDataCondition(cond) {
     case 'binding_is_record':              return `${cond.binding || '?'} is a record`;
     case 'record_has_field':               return `${cond.binding || '?'} has field "${cond.fieldName || '?'}"`;
     case 'record_field_non_empty':         return `${cond.binding || '?'}.${cond.fieldName || '?'} is non-empty`;
+    case 'record_field_blank':             return `${cond.binding || '?'}.${cond.fieldName || '?'} is blank (absent or empty)`;
 
     // Scalar
     case 'binding_is_scalar':              return `${cond.binding || '?'} is a scalar`;

@@ -5480,7 +5480,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    */
   static async shapeAnswer({ ask, facts, scope } = {}) {
     if (!String(ask || '').trim() || !facts || typeof facts !== 'object' || !(await AnthropicService.hasLlm())) return { answer: null, showList: false };
-    const { system, user } = buildAnswerShapeMessages({ ask, facts, scope });
+    const { system, user } = buildAnswerShapeMessages({ ask, facts, scope, today: new Date().toISOString().slice(0, 10) });   // v1903 — the clock (the builder stays pure; caught missing in the v1909 bcp — the failed patch run took it down and only the builder half was re-applied)
     const res = await AnthropicService.#call(system, user, 300, [], { role: 'routing', operation: 'answer-shape' });
     if (!res || res.success === false) return { answer: null, showList: false };
     return parseAnswerShapeOutput(res.text);
@@ -5674,7 +5674,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    */
   static async answerAsk({ ask, capabilities, affordances, coverage, url, seed, connections, ride, learned, objects, subTasks, history, verifiedAsks } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], ride: Array.isArray(ride) ? ride : [], learned: learned || '', objects: objects || '', subTasks: Array.isArray(subTasks) ? subTasks : [], history: Array.isArray(history) ? history : [], verifiedAsks: Array.isArray(verifiedAsks) ? verifiedAsks : [] });   // CV-2b — seed → persona; AS-4 — connected sites; §18 — RIDE class; AL-4 — learned; OM — object model; CV-4-reduce — own sub-tasks; Q1 — recent-turn window; v1577 — verified example asks (quote-only)
+    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], ride: Array.isArray(ride) ? ride : [], learned: learned || '', objects: objects || '', subTasks: Array.isArray(subTasks) ? subTasks : [], history: Array.isArray(history) ? history : [], verifiedAsks: Array.isArray(verifiedAsks) ? verifiedAsks : [], today: new Date().toISOString().slice(0, 10) });   // v1903 — the clock (the builder stays pure)   // CV-2b — seed → persona; AS-4 — connected sites; §18 — RIDE class; AL-4 — learned; OM — object model; CV-4-reduce — own sub-tasks; Q1 — recent-turn window; v1577 — verified example asks (quote-only)
     const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'il-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }

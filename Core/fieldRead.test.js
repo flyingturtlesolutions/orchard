@@ -3,7 +3,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey } from './fieldRead.js';
+import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, deepFieldPaths } from './fieldRead.js';
+import { extractValue } from './peritemMap.js';   // v1903 — discovery and extraction must agree
 
 // Shaped after the real VendorSuite `Instructions` (HAR-verified): a date header, a numbered item with a
 // label ending in a colon, a lettered sub-item. Tabs are real in the source.
@@ -225,5 +226,64 @@ describe('fieldRead — v1882: termFieldKey, for when the DOOR invented the {fie
     assert.equal(termFieldKey(REC, '', 'Instructions'), '');
     assert.equal(termFieldKey(REC, null, 'Instructions'), '');
     assert.equal(termFieldKey(null, 'paid', 'X'), '');
+  });
+});
+
+// v2.74.1903 — DEPTH. The live Shopify order shape (gl 2026-07-31 08:06): tracking, price and delivery all present,
+// all invisible to the one-hop/top-level scans. Structure verbatim from _GQL_ORDERS/_GQL_PRODUCTS; values fabricated.
+const SH_ORDER = {
+  id: 'gid://shopify/Order/5551', name: 'DEAKO#69872', createdAt: '2026-07-20T10:00:00Z',
+  displayFinancialStatus: 'PAID', displayFulfillmentStatus: 'FULFILLED',
+  totalPriceSet: { shopMoney: { amount: '50.34', currencyCode: 'USD' } },
+  customer: { email: 'momkat820@gmail.com' },
+  lineItems: { edges: [{ node: { title: 'Universal Connector', quantity: 1 } }] },
+  fulfillments: [{ status: 'SUCCESS', displayStatus: 'DELIVERED', estimatedDeliveryAt: '2026-07-24T00:00:00Z', deliveredAt: '2026-07-23T18:00:00Z', trackingInfo: [{ number: '1Z27691W0320913590', company: 'UPS', url: 'https://ups.example/track' }] }],
+  refunds: [{ createdAt: '2026-07-25T00:00:00Z', totalRefundedSet: { shopMoney: { amount: '10.00', currencyCode: 'USD' } } }],
+};
+const SH_PRODUCT = { id: 'gid://shopify/Product/9', title: 'Smart Scene Controller Switch', status: 'ACTIVE', totalInventory: 1378,
+  variants: { edges: [{ node: { id: 'gid://v/1', title: 'White', sku: 'DK-SW-01', price: '49.00', inventoryQuantity: 620 } }] } };
+
+describe('deepFieldPaths — discovery learns depth (v1903)', () => {
+  it('enumerates the nested leaves with GQL plumbing dropped from matchText and kept in path', () => {
+    const ps = deepFieldPaths(SH_ORDER);
+    const track = ps.find((p) => p.path === 'fulfillments.trackingInfo.number');
+    assert.ok(track, 'tracking number path found');
+    assert.equal(track.matchText, 'fulfillments trackingInfo number');
+    const price = deepFieldPaths(SH_PRODUCT).find((p) => p.path === 'variants.edges.node.price');
+    assert.ok(price, 'variant price path found');
+    assert.equal(price.matchText, 'variants price');
+  });
+  it('a flat record yields exactly its keys', () => {
+    assert.deepEqual(deepFieldPaths({ TicketId: 1, Age: '003' }).map((p) => p.path).sort(), ['Age', 'TicketId']);
+  });
+});
+
+describe('resolveFieldKey — record mode resolves DEEP (v1903)', () => {
+  it('THE LIVE FOUR: tracking · price · delivered · refund', () => {
+    assert.equal(resolveFieldKey(SH_ORDER, 'tracking number').key, 'fulfillments.trackingInfo.number');
+    assert.equal(resolveFieldKey(SH_PRODUCT, 'price').key, 'variants.edges.node.price');
+    assert.equal(resolveFieldKey(SH_ORDER, 'delivered').key, 'fulfillments.deliveredAt');
+    assert.match(resolveFieldKey(SH_ORDER, 'refund amount').key, /refunds\.totalRefundedSet\.shopMoney\.amount/);
+  });
+  it('extractValue reads every resolved path — discovery and extraction agree', () => {
+    assert.equal(extractValue(SH_ORDER, resolveFieldKey(SH_ORDER, 'tracking number').key), '1Z27691W0320913590');
+    assert.equal(extractValue(SH_PRODUCT, resolveFieldKey(SH_PRODUCT, 'price').key), '49.00');
+  });
+  it('a SHALLOW key beats its own nested echo — depth tie-break, not ambiguity', () => {
+    const r = resolveFieldKey(SH_ORDER, 'created');
+    assert.equal(r.key, 'createdAt');   // NOT refunds.createdAt
+    assert.equal(r.ambiguous, false);
+  });
+  it('same-depth distinct meanings STAY ambiguous — carrier vs number is a real question', () => {
+    const r = resolveFieldKey(SH_ORDER, 'tracking');
+    assert.equal(r.ambiguous, true);
+    assert.ok(r.candidates.length >= 2);
+  });
+  it('ARRAY callers keep the shallow contract byte-for-byte', () => {
+    const r = resolveFieldKey(Object.keys(SH_ORDER), 'tracking number');
+    assert.equal(r.key, '', 'keys-array input must not resolve deep');
+  });
+  it('flat records resolve exactly as before (the VendorSuite regression guard)', () => {
+    assert.equal(resolveFieldKey({ VendorExplanation: 'x', TicketId: 1 }, 'vendor explanation').key, 'VendorExplanation');
   });
 });

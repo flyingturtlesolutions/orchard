@@ -10,6 +10,7 @@ import {
   planBindings, precheckCondition, makeBranchEvaluator, resolveConditionNames,
   RECORD_BINDING, DOC_MIN_LENGTH, ORCH_PREDICATE_OPS,
 } from './branchScope.js';
+import { evaluateDataCondition } from '../Services/DataAssertion.js';   // v1901 — the real evaluator, so record_field_blank is pinned end to end
 import { normalizeBranchVerdict, evalBranch } from './branchClause.js';
 
 // A scope stand-in with the same accessor shape as Services/Scope.js (get(name) → tagged value | undefined).
@@ -325,5 +326,50 @@ describe('branchScope — a field name from a person meets the record’s real k
   it('degenerate input does not throw', () => {
     for (const bad of [null, undefined, {}, 'x']) assert.doesNotThrow(() => resolveConditionNames(bad, lookupFor(REC)));
     assert.doesNotThrow(() => resolveConditionNames({ type: 'record_has_field' }, null));
+  });
+});
+
+// v2.74.1901 — `record_field_blank`: a predicate ABOUT absence. Live (gl 20:14): "sort into: has a vendor
+// explanation, or blank" put 7 absent-key records in "couldn't tell" with reasons that literally described
+// blankness (`record has no field "VendorExplanation"`) while refusing to conclude it — §2.0.1's absent-is-unknown
+// is right where absence is an accident and unreachable-truth where absence is the SUBJECT.
+describe('record_field_blank — absence is the subject (v1901)', () => {
+  // The adapter's contract is true | false | undefined (§2.0.1's three outcomes), not verdict objects.
+  const mk = (fields) => makeBranchEvaluator({
+    evaluate: evaluateDataCondition,
+    scope: { get: (n) => (n === 'item' ? { kind: 'record', fields } : undefined) },
+    lookup: (n) => (n === 'item' ? { kind: 'record', fields } : undefined),
+    onUnknown: () => {},
+  });
+  const BLANK = { type: 'record_field_blank', binding: 'item', fieldName: 'VendorExplanation' };
+  const NONEMPTY = { type: 'record_field_non_empty', binding: 'item', fieldName: 'VendorExplanation' };
+  it('THE LIVE CASE: an ABSENT key answers TRUE — not unknown', () => {
+    assert.equal(mk({ TicketId: 4888465 })(BLANK), true);
+  });
+  it('present-but-empty and whitespace answer TRUE', () => {
+    assert.equal(mk({ VendorExplanation: '' })(BLANK), true);
+    assert.equal(mk({ VendorExplanation: '   ' })(BLANK), true);
+  });
+  it('content answers FALSE — never unknown', () => {
+    assert.equal(mk({ VendorExplanation: '7/22/26 - Switches sent.' })(BLANK), false);
+  });
+  it('the PAIR partitions the live nine: 2 non-empty · 7 blank · 0 unknown', () => {
+    const rows = [
+      { VendorExplanation: '7/22/26 - Switches sent. 71432' }, { VendorExplanation: '71477' },
+      {}, {}, {}, {}, {}, { VendorExplanation: '' }, {},
+    ];
+    let has = 0, blank = 0, unknown = 0;
+    for (const fields of rows) {
+      const ev = mk(fields);
+      if (ev(NONEMPTY) === true) has++;
+      else if (ev(BLANK) === true) blank++;
+      else unknown++;
+    }
+    assert.deepEqual([has, blank, unknown], [2, 7, 0]);
+  });
+  it('the structural unknowns stay: not-a-record is unknown, and non_empty on absent stays unknown (§2.0.1 intact)', () => {
+    const evScalar = makeBranchEvaluator({ evaluate: evaluateDataCondition, scope: { get: () => undefined }, lookup: (n) => (n === 'item' ? { kind: 'scalar', value: 'x' } : undefined), onUnknown: () => {} });
+    assert.equal(evScalar(BLANK), undefined);
+    assert.equal(mk({ TicketId: 1 })(NONEMPTY), undefined);
   });
 });

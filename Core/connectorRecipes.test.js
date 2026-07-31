@@ -431,6 +431,14 @@ describe('CX-7 — Shopify recipes project with the transport markers', () => {
     assert.ok(cust.tool.body && typeof cust.tool.body.query === 'string'); // gql READ body threads (write-only gating lifted)
     assert.equal(isReadOnlyGql(cust.tool.body.query), true);               // every curated READ document passes the belt
     for (const l of legs) {
+      // v2.74.1905 — a persisted-op GET read (shopify_admin_search: the admin bar's own Search operation) carries
+      // no gql body BY DESIGN — its document lives server-side behind the sha. The gql contract applies to the
+      // free-form reads; the persisted read's contract is the op bank's (sha in path, variables in the QS).
+      if (l.tool.persistedOp && (l.tool.method || 'GET').toUpperCase() === 'GET') {
+        assert.match(String(l.tool.endpoint), /\/api\/operations\/\{op_sha\}\//, `${l.tool.recipeId} rides the op-sha path`);
+        assert.equal(l.tool.gql, false, `${l.tool.recipeId} is not a gql leg`);
+        continue;
+      }
       assert.equal(isReadOnlyGql(l.tool.body.query), true);
       // every free-form read carries the full contract; the ?operation= name matches its body operationName
       const m = String(l.tool.endpoint).match(/\?operation=(\w+)&type=query$/);
@@ -729,7 +737,9 @@ describe('connectorRecipes — LEG-2a (v2.74.1594): the SH-T4 checklist surface 
   it('persistedOpsForHost lists the catalog’s op-hash writes for the Shopify admin; other hosts get none', () => {
     const wanted = persistedOpsForHost('admin.shopify.com');
     const ops = wanted.map((w) => w.op).sort();
-    assert.deepEqual(ops, ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer'], 'the three SH-T5 writes');
+    // v2.74.1905 — Search joins: the first READ persisted op (the admin bar itself, HAR-authored). The checklist
+    // is precisely where its one-time by-hand capture is coached, so listing it is the point, not an accident.
+    assert.deepEqual(ops, ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer', 'Search'], 'the three SH-T5 writes + the Search read');
     for (const w of wanted) { assert.ok(w.recipeId && w.recipeName, 'each carries its recipe identity for the checklist line'); }
     assert.deepEqual(persistedOpsForHost('deako.zendesk.com'), [], 'Zendesk writes are REST — no op-hash demands');
     assert.deepEqual(persistedOpsForHost(''), []);

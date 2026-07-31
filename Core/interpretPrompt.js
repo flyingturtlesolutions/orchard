@@ -72,6 +72,7 @@ const SYSTEM = [
   '  Each "when" is a structured ASSERTION, never prose. The ONLY forms available:',
   '    {"type":"record_field_non_empty","binding":"item","fieldName":"<field>"}    — the field has content',
   '    {"type":"record_has_field","binding":"item","fieldName":"<field>"}          — the record carries the field',
+  '    {"type":"record_field_blank","binding":"item","fieldName":"<field>"}        — the field is ABSENT or empty ("blank", "missing", "no <field>")',
   '    {"type":"document_contains","binding":"<fieldName>","value":"<literal>"}    — long text contains (CASE-SENSITIVE)',
   '    {"type":"scalar_equals","binding":"<fieldName>","value":"<literal>"}        — exact value',
   '    {"type":"scalar_in_set","binding":"<fieldName>","values":["a","b"]}         — one of a set',
