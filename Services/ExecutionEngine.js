@@ -157,7 +157,23 @@ export class ExecutionEngine {
       const summary = ev.error || ev.message || '';
       const line    = `[${invId}] ${ev.type ?? 'progress'}${summary ? ': ' + summary : ''}`;
       if (isFailure) {
-        Logger.error('ExecutionEngine', line, ev);
+        // v2.74.1898 — a FAILURE logs as ONE LINE, because there is one log store and every reader of it is
+        // line-oriented. Passing `ev` whole meant the export pretty-printed scopeSnapshot/lastActions as ~25 lines
+        // of JSON, and one failed walk EVICTED two turns from the decisions ring (gl 18:36: a clarify and a
+        // wrong-scope count both became undiagnosable — the eviction cost MORE diagnosis than the dump ever gave).
+        // The one-line digest carries what a trace reader actually uses: the scope VALUES, the last action, the
+        // fragment. What is deliberately dropped is scopeSnapshot's type/subtype scaffolding and the full
+        // lastActions array — structure about structure, and the price of keeping it was other turns' existence.
+        let flat = '';
+        try {
+          const scope = ev.scopeSnapshot && typeof ev.scopeSnapshot === 'object'
+            ? Object.entries(ev.scopeSnapshot).map(([k, v]) => `${k}=${JSON.stringify(String((v && v.value) ?? '')).slice(0, 24)}`).join(' ')
+            : '';
+          const last = Array.isArray(ev.lastActions) && ev.lastActions.length
+            ? String(ev.lastActions[ev.lastActions.length - 1].action || '') : '';
+          flat = [scope && `scope{${scope}}`, last && `lastAction=${last}`, ev.fragmentName && `fragment="${String(ev.fragmentName).slice(0, 40)}"`].filter(Boolean).join(' · ');
+        } catch (_) { flat = ''; }
+        Logger.error('ExecutionEngine', flat ? `${line} · ${flat}` : line);
       } else {
         Logger.info('ExecutionEngine', line, ev);
       }

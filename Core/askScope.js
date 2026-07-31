@@ -50,11 +50,56 @@ export function isExistentialAsk(ask) {
 }
 
 /**
+ * v2.74.1891 — AN UNSCOPED AGGREGATE ASK MEANS EVERYTHING I CAN SEE. PURE. (User ruling, 2026-07-30.)
+ *
+ * Live 16:08, thirty-one seconds apart, both sentences internally honest and the PAIR incoherent:
+ *     total open warranty tasks?        → "0 open warranty tasks in Atlanta West"
+ *     is there anything open right now? → "Yes — 22 open across all 121 divisions"
+ * The existential twin widened past a scope nobody named; the collective one was vetoed by `_COLLECTIVE` and answered
+ * from the account's default division. That veto was written when widening cost 121 list reads to return one row; the
+ * metric sweep measured 2.2 seconds, and the alternative was answering 0 when the answer was 22.
+ *
+ * So the two shapes now agree on SCOPE and differ only in what they DO with it: an existential ask wants one from
+ * anywhere (stop at the first), an aggregate ask wants the whole number (read them all). Keeping them as separate
+ * predicates rather than widening `isExistentialAsk` is deliberate — that function gates the EARLY STOP too, and a
+ * collective ask answered by stopping at the first hit would reply to "how many are open" with "here's one".
+ *
+ * No length cap here, unlike the existential test: length is a proxy for "about one thing", which a total never is.
+ * An aggregate ask that NAMES its scope ("how many open in Raleigh") is not this function's problem — the caller only
+ * widens an axis the ask left to a default or to the conversation.
+ */
+export function isCollectiveAsk(ask) {
+  const q = _norm(ask);
+  return !!q && _COLLECTIVE.test(q);
+}
+
+/**
  * Which quantifier earned it? PURE. For the trace line — "widened on 'any'" is checkable, "widened" is not.
  */
 export function existentialToken(ask) {
   const m = _norm(ask).match(_EXISTENTIAL);
   return m ? m[0] : '';
+}
+
+/**
+ * v2.74.1897 — IS THIS A SUPERLATIVE OVER GROUPS? PURE. Returns 'max' | 'min' | null.
+ *
+ * Live (gl 18:36), asked twice four minutes apart: `which division has the most open tasks?` →
+ * *"**23** open (openwarrantytasks) across all 121 divisions, in 12 of 121."* That is a total, not a division. The
+ * fan had summed 121 per-division numbers and thrown away which was which — an argmax over data already in hand.
+ *
+ * DISTINCT FROM `askedMetric`, which answers "which measure"; this answers "ranked how". Both are needed: "the most
+ * OPEN tasks" names a measure AND a ranking, and either alone gives the wrong sentence. Kept out of the ordinal
+ * family (`newest`/`oldest`) on purpose — those rank RECORDS by a field, this ranks GROUPS by a count.
+ */
+const _SUPERLATIVE_MAX = /\b(?:most|highest|largest|biggest|greatest|worst|top)\b/;
+const _SUPERLATIVE_MIN = /\b(?:fewest|least|lowest|smallest|best)\b/;
+export function superlativeAsk(ask) {
+  const q = _norm(ask);
+  if (!q) return null;
+  if (_SUPERLATIVE_MAX.test(q)) return 'max';
+  if (_SUPERLATIVE_MIN.test(q)) return 'min';
+  return null;
 }
 
 /**
@@ -101,5 +146,8 @@ export function askedMetric(ask, metrics) {
   if (!disc.length) return null;
   const matched = sq.filter((x) => disc.some((t) => _match(x, t)));
   if (!matched.length) return null;
-  return { label: matched.map((x) => x.label).join(' + '), value: matched.reduce((n, x) => n + m[x.label], 0) };
+  // v2.74.1890 — the TOKENS that earned the match ride along: they are the user's own words for the measure
+  // ("open"), and a sentence built from them beats one built from the payload's key ("openwarrantytasks").
+  const tokens = disc.filter((t) => matched.some((x) => _match(x, t)));
+  return { label: matched.map((x) => x.label).join(' + '), value: matched.reduce((n, x) => n + m[x.label], 0), tokens };
 }

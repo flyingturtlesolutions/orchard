@@ -739,6 +739,16 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     'INVOKE_SESSION': (payload, _sender, sendResponse) => {
       (async () => {
         let ephemeralOrigin = null;          // set when this ride opened/reused a managed tab (→ idle-close on exit)
+        // v2.74.1892 — THE COLD RIDE'S RECEIPT. Six measurements across four passes (10.2 · 10.6 · 11.9 · 9.3 · 6.8 ·
+        // 7.7s, mean ~9.4s) sit between `Message: INVOKE_SESSION` and `INVOKE ▸ … → ok` on the FIRST ride after a
+        // reload, with NOTHING in the trace for any of it; the second ride of the same session takes 117ms. It is the
+        // largest single latency in the product and the only one with no instrument, which is the shape this log keeps
+        // learning to distrust — the stage nobody can see absorbs every theory. Candidates are tab discovery, the
+        // discarded/frozen revive (a reload + full load wait), the content-script handshake, the CSRF sniff and the
+        // identity probe, and the trace distinguishes NONE of them. So: per-stage deltas, one line, and only when the
+        // ride was actually slow — a warm read stays silent, and a quiet fan-out cannot flood the ring.
+        const _rideT0 = Date.now(); let _rideTPrev = _rideT0; const _rideSpans = [];
+        const _mark = (name) => { const now = Date.now(); const d = now - _rideTPrev; _rideTPrev = now; if (d >= 25) _rideSpans.push(`${name}=${d}`); };
         try {
           // §18 arm guard (the observability layer's teeth) — a per-Ground recipe that's disabled / pending / rejected
           // must NOT run. If we know the Ground + recipe and a stored record exists, refuse unless armable. No record
@@ -750,6 +760,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               if (_rec && !armable(_rec)) { try { Logger.info('ride', `INVOKE ▸ blocked recipe-not-armable [${payload.recipeId}] (${_rec.reviewState})`); } catch { /* */ } sendResponse({ success: false, error: 'recipe-not-armable', hint: _rec.reviewState === 'pending' ? 'accept this recipe in Studio first' : 'this recipe is disabled in Studio' }); return; }
             } catch { /* never block on the guard's own failure */ }
           }
+          _mark('arm');
           const args = (payload && typeof payload.args === 'object' && payload.args) || {};
           const method = String((payload && payload.method) || 'GET').toUpperCase();
           // CX-6 — a non-GET is fail-closed behind explicit post-HITL `confirmed:true` (Belt #1). CSRF is page-side (Belt #2).
@@ -776,6 +787,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           let tabs = [];
           try { tabs = await chrome.tabs.query({ url: urlPatterns }); } catch { tabs = []; }
           let tab = pickRideTab(tabs, { urlParam: (payload && payload.urlParam) || null });
+          _mark('tabs');
           let ephemeral = false;
 
           // 2) Cold start (§16): no open tab → open an ephemeral managed tab — IF we know a concrete origin to open.
@@ -791,6 +803,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           } else if (!origin) {
             try { origin = new URL(tab.url).host; } catch { origin = appHost; }
           }
+          _mark(ephemeral ? 'open-tab' : 'pick');
           if (origin && appHost) _lastOriginByAppHost.set(appHost, origin);   // remember the instance for next cold start
 
           // v1380 (live: "sweep only runs if the zendesk tab is visible") — a BACKGROUND ride tab gets DISCARDED
@@ -805,11 +818,13 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               await _waitTabComplete(tab.id);
             }
           } catch { /* revive is best-effort; ensureContentScript below still gates */ }
+          _mark('revive');
 
           if (typeof ensureContentScript === 'function') {
             const ok = await ensureContentScript(tab.id);
             if (!ok) { try { Logger.info('ride', `INVOKE ▸ blocked no-content-script @${origin} [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'no-content-script', origin }); return; }
           }
+          _mark('content-script');
 
           // CX-7 — tab-URL params: fill e.g. {handle} from the RIDE TAB's own URL (admin.shopify.com/store/<handle>/…).
           // TRUSTED source (the user's real workspace tab), never the model — a model-supplied value is DELETED first.
@@ -856,7 +871,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // double-sniff. Cached per-origin inside _acquireSniffedCsrf; null is fine (a gql read may go cookie-only).
           // v2.74.1759 — wake:true soft-wakes an idle admin when nothing is banked yet (pre-warm after reload).
           let csrfTok = null;
-          if (payload && payload.csrf === 'sniff') { csrfTok = await _acquireSniffedCsrf(tab.id, origin, { wake: true }); }
+          if (payload && payload.csrf === 'sniff') { csrfTok = await _acquireSniffedCsrf(tab.id, origin, { wake: true }); _mark('csrf'); }
 
           // CX-7c (ADVISORY since v2.74.1389) — the liveness probe NEVER blocks the call. The first cut hard-gated
           // on it and BLOCKED a signed-in user: the probe needs the sniffed CSRF, and a cold/idle admin tab hasn't
@@ -866,6 +881,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // So we probe only when a token exists, purely to warm the shop cache; the main call is the source of truth.
           if (payload && payload.shopProbe && csrfTok) {
             try { await _probeShopLiveness(tab.id, origin, args[(payload.urlParam && payload.urlParam.name) || 'handle'], csrfTok); } catch { /* advisory — never blocks */ }
+            _mark('shop-probe');
           }
 
           // CX-7b — persisted-op hash: {op_sha} fills from the SNIFFED per-origin bank ONLY (model values deleted).
@@ -932,6 +948,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             }
           }
 
+          _mark('identity');
           // 4) Build + run the call (write body filled from args incl. {me}; SESSION_FETCH JSON-encodes + adds CSRF).
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!path) { try { Logger.info('ride', `INVOKE ▸ blocked session-no-recipe [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'session-no-recipe' }); return; }
@@ -958,6 +975,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { 'x-csrf-token': csrfTok } : {}) } };
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
+          _mark('fetch');
           // v1401 / v1759 — cold `no-csrf` or http-40x with sniff: drop stale bank, soft-wake, force re-mint, retry once.
           // v2.74.1853 — but only when there WAS a token to invalidate: an initial acquire that already woke the
           // tab and sniffed NOTHING makes a second identical wake pointless (same idle SPA, same dry well, ~12s
@@ -1057,6 +1075,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               //     recipeId — live, the `vs_state` access blob printed as `[vs_warranty_tasks]` and then alternated
               //     with the real rows, which alone guaranteed a "changed" every turn. The endpoint's tail is enough
               //     to tell them apart and is a path template, never data.
+              // v2.74.1892 — the COLD-RIDE receipt. `SPAN ▸` is the existing shape for "this took a while and here is
+              // where it went" (Core/runLedger.js, chat.js's ORCHREQ spans), so no new marker and no `_DECISION_RE`
+              // edit. Threshold, not always-on: a warm ride is ~120ms and would say nothing worth a line.
+              if (Date.now() - _rideT0 >= 1200) {
+                try { Logger.info('ride', `SPAN ▸ RIDE · ${Date.now() - _rideT0}ms · [${(payload && payload.recipeId) || '?'}] ${_rideSpans.join(' · ') || 'no stage over 25ms'}`); } catch { /* */ }
+              }
               const _rid = (payload && payload.recipeId) || null;
               if (_ok && _rid) {
                 const _ep = String((payload && payload.endpoint) || '');

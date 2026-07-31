@@ -10,7 +10,7 @@ import {
   makeClassifyEvaluator, bankedVerdict, unbankedItems, textHash, classifyTally,
   CLASSIFY_TYPE, IDENTITY_FIELD_HINTS,
 } from './branchClassify.js';
-import { normalizeBranchVerdict, evalBranch } from './branchClause.js';
+import { normalizeBranchVerdict, evalBranch, presenceShape } from './branchClause.js';
 import { redact, restore, newRedactionMap } from './redact.js';
 
 const ARMS = [
@@ -325,5 +325,75 @@ describe('branchClassify — identity comes from the ground\'s own joinKey decla
     const row = { Email: 'a@b.co' };
     assert.deepEqual(identityValues(row, { joinKey: ['Email'] }), ['a@b.co']);
     for (const bad of [null, 'nope', [null], [{}], [42]]) assert.doesNotThrow(() => identityValues(row, { joinKey: bad }));
+  });
+});
+
+// v2.74.1896 — THE FLATTENED ARM. Live (gl 18:06) every arm arrived with its assertion inline instead of under
+// `when`, all three were dropped, the verdict normalized to null, and the turn asked the user to name groups they
+// had just named. The meaning was right twice running; only the envelope was missing.
+describe('normalizeBranchVerdict — lifts a flattened assertion (v1896)', () => {
+  const FLAT = { collection: 'prior', mode: 'first', arms: [
+    { label: 'needs a replacement', type: 'classify', is: 'asks for a replacement part', field: 'Instructions' },
+    { label: 'needs the homeowner', type: 'classify', is: 'asks to contact the homeowner', field: 'Instructions' },
+  ] };
+  it('THE LIVE SHAPE: an inline assertion becomes a `when`, and the verdict survives', () => {
+    const v = normalizeBranchVerdict(FLAT);
+    assert.ok(v, 'the verdict is no longer dropped');
+    assert.equal(v.arms.length, 2);
+    assert.equal(v.arms[0].when.type, 'classify');
+    assert.equal(v.arms[0].when.is, 'asks for a replacement part');
+    assert.equal(v.arms[0].when.field, 'Instructions');
+  });
+  it('the lift is REPORTED, never silent', () => {
+    assert.equal(normalizeBranchVerdict(FLAT).lifted, 2);
+    assert.ok(!('lifted' in normalizeBranchVerdict({ arms: [{ label: 'a', when: { type: 'classify', is: 'x', field: 'F' } }] })));
+  });
+  it('classifyArms sees a lifted arm exactly as it sees a nested one', () => {
+    assert.equal(classifyArms(normalizeBranchVerdict(FLAT)).length, 2);
+    assert.equal(classifyArms(normalizeBranchVerdict(FLAT))[0].when.label, 'needs a replacement');   // v1663 — forced
+  });
+  it('the deterministic assertion forms lift too, with their own slots', () => {
+    const v = normalizeBranchVerdict({ arms: [
+      { label: 'has a note', type: 'record_field_non_empty', binding: 'item', fieldName: 'VendorExplanation' },
+      { label: 'urgent', type: 'scalar_equals', binding: 'Priority', value: '1' },
+    ] });
+    assert.equal(v.arms[0].when.fieldName, 'VendorExplanation');
+    assert.equal(v.arms[1].when.value, '1');
+  });
+  it('a nested `when` always wins — an arm carrying both is not re-wrapped', () => {
+    const v = normalizeBranchVerdict({ arms: [{ label: 'a', type: 'classify', is: 'inline', when: { type: 'classify', is: 'nested', field: 'F' } }] });
+    assert.equal(v.arms[0].when.is, 'nested');
+  });
+  it('a genuinely empty verdict still returns null, and now says why', () => {
+    assert.equal(normalizeBranchVerdict({ arms: [{ label: 'a' }, { label: 'b' }] }), null);
+    assert.match(String(normalizeBranchVerdict.reason), /no usable "when"/);
+    assert.equal(normalizeBranchVerdict({ arms: [] }), null);
+    assert.equal(normalizeBranchVerdict.reason, 'no arms');
+  });
+});
+
+// v2.74.1898 — a PRESENCE question is an assertion. Live (gl 18:36): "sort into: has a vendor explanation, or blank"
+// → both arms classify → 8 × indeterminate about a question extractValue settles for free.
+describe('presenceShape — the anchored presence forms (v1898)', () => {
+  it('THE LIVE PAIR: "has a vendor explanation" and the bare "blank"', () => {
+    assert.deepEqual(presenceShape('has a vendor explanation'), { fieldPhrase: 'vendor explanation', negate: false });
+    assert.deepEqual(presenceShape('blank'), { fieldPhrase: '', negate: true });
+  });
+  it('the negated forms', () => {
+    assert.deepEqual(presenceShape('no vendor explanation'), { fieldPhrase: 'vendor explanation', negate: true });
+    assert.deepEqual(presenceShape('vendor explanation is blank'), { fieldPhrase: 'vendor explanation', negate: true });
+    assert.deepEqual(presenceShape('missing instructions'), { fieldPhrase: 'instructions', negate: true });
+    assert.deepEqual(presenceShape('empty'), { fieldPhrase: '', negate: true });
+  });
+  it('falls back to the LABEL when `is` says nothing', () => {
+    assert.deepEqual(presenceShape('', 'has an appointment'), { fieldPhrase: 'appointment', negate: false });
+  });
+  it('a JUDGEMENT is never mistaken for a presence test — anchoring is the whole guard', () => {
+    for (const t of ['is the note hasty?', 'asks for a replacement part', 'describes reaching out to the homeowner', 'the vendor has not responded', 'sounds unhappy'])
+      assert.equal(presenceShape(t), null, t);
+  });
+  it('empty input is null', () => {
+    assert.equal(presenceShape(''), null);
+    assert.equal(presenceShape(null), null);
   });
 });

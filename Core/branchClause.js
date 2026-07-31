@@ -18,6 +18,37 @@
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
 const _arr = (v) => (Array.isArray(v) ? v : []);
 
+/**
+ * v2.74.1898 — A PRESENCE QUESTION IS AN ASSERTION, NOT A JUDGEMENT. PURE.
+ *
+ * Live (gl 18:36): `sort the open tasks in Raleigh into: has a vendor explanation, or blank` → the model wrote BOTH
+ * arms as `classify`, and the classifier — which judges prose — answered "indeterminate" eight times about a question
+ * `extractValue` settles for free. The prompt's own ⚠ ("PICK BY THE FIELD'S NATURE") did not carry, and the v1690
+ * warning has a mirror: a literal form on free text is confidently WRONG; a classify form on a structured question is
+ * confidently USELESS.
+ *
+ * So the recognizable presence shapes are rewritten to `record_field_non_empty` (± negate) at normalization — the
+ * same repair-over-instruction precedent as the v1896 arm lift, one block up. ANCHORED on purpose: "has a/an <field>",
+ * "<field> is blank/empty/missing", "no <field>", "blank"/"empty" alone (which inherit the field from a sibling arm —
+ * the live ask's second arm was the bare word "blank"). "is the note hasty?" matches nothing here.
+ * Returns { fieldPhrase, negate } | null. The CALLER decides whether fieldPhrase resolves against real rows — this
+ * module has no rows, and an unresolvable phrase must stay a classify arm rather than become a wrong assertion.
+ */
+export function presenceShape(is, label = '') {
+  const t = _str(is).toLowerCase() || _str(label).toLowerCase();
+  if (!t) return null;
+  // The article is consumed WITH its trailing space or not at all — `(?:a|an|the)?\s*` bit "an appointment" into
+  // "n appointment" (alternation took "a", `\s*` matched nothing). Caught by this function's own test.
+  let m = t.match(/^has\s+(?:(?:a|an|the)\s+)?(.+)$/);       // "has a vendor explanation"
+  if (m) return { fieldPhrase: m[1].trim(), negate: false };
+  m = t.match(/^(?:no|missing|without)\s+(.+)$/);           // "no vendor explanation"
+  if (m) return { fieldPhrase: m[1].trim(), negate: true };
+  m = t.match(/^(.+?)\s+is\s+(?:blank|empty|missing|absent|not\s+set)$/);   // "<field> is blank"
+  if (m) return { fieldPhrase: m[1].trim(), negate: true };
+  if (/^(?:blank|empty|missing|absent|none|not\s+set)$/.test(t)) return { fieldPhrase: '', negate: true };   // bare — field from a sibling
+  return null;
+}
+
 /** Valid multi-arm modes. §3.1 — 'first' is the DEFAULT because doing less than asked is visible in the tally, */
 /** while an unrequested extra write is not. */
 export const BRANCH_MODES = Object.freeze(['first', 'all']);
@@ -33,9 +64,24 @@ export const BRANCH_MODES = Object.freeze(['first', 'all']);
 export function normalizeBranchVerdict(v) {
   const o = (v && typeof v === 'object') ? v : {};
   const arms = [];
-  for (const a of _arr(o.arms)) {
-    if (!a || typeof a !== 'object') continue;
-    if (!a.when || typeof a.when !== 'object') continue;   // `when` is an ASSERTION, never prose (§1.2)
+  let _lifted = 0; let _dropped = 0;
+  for (const a0 of _arr(o.arms)) {
+    if (!a0 || typeof a0 !== 'object') { _dropped++; continue; }
+    // v2.74.1896 — LIFT A FLATTENED ASSERTION. Live (gl 18:06) every arm arrived as
+    //     {"label":"needs a replacement","type":"classify","is":"needs a replacement","field":"Instructions"}
+    // — the assertion inline on the arm instead of nested under `when` — so all three were dropped, the verdict
+    // normalized to null, and the turn asked the user for the groups they had just named. The MEANING was right
+    // twice in a row; only the envelope was missing.
+    //
+    // The lift is unambiguous: an arm is {label, when, then}, so a top-level `type` can only be an assertion that
+    // lost its wrapper. Repairing it here rather than in the prompt is the difference between a guarantee and a
+    // request — and for a CLASSIFY arm the wrapper carries nothing anyway (`when.label` is forced to the arm's
+    // label eleven lines down), which is why this is the shape a model reaches for.
+    const a = (!a0.when && a0.type)
+      ? { label: a0.label, then: a0.then, when: { type: a0.type, label: a0.label, ...(a0.is !== undefined ? { is: a0.is } : {}), ...(a0.field !== undefined ? { field: a0.field } : {}), ...(a0.fieldName !== undefined ? { fieldName: a0.fieldName } : {}), ...(a0.binding !== undefined ? { binding: a0.binding } : {}), ...(a0.value !== undefined ? { value: a0.value } : {}), ...(a0.values !== undefined ? { values: a0.values } : {}), ...(a0.specJson !== undefined ? { specJson: a0.specJson } : {}), ...(a0.negate !== undefined ? { negate: a0.negate } : {}) } }
+      : a0;
+    if (!a.when || typeof a.when !== 'object') { _dropped++; continue; }   // `when` is an ASSERTION, never prose (§1.2)
+    if (a !== a0) _lifted++;
     const label = _str(a.label) || `arm ${arms.length + 1}`;
     // v2.74.1663 (bug pass) — THE ARM'S LABEL IS AUTHORITATIVE, and a model-classified `when` is forced to it.
     //
@@ -48,12 +94,21 @@ export function normalizeBranchVerdict(v) {
     const when = (a.when.type === 'classify') ? { ...a.when, label } : a.when;
     arms.push({ when, label, then: _arr(a.then) });
   }
-  if (!arms.length) return null;
+  // v2.74.1896 — a DROP SAYS SO. The regression above was invisible for an hour because a null verdict downgrades to
+  // a clarify whose `why` still describes a correct plan: the decisions view showed a model that had understood and a
+  // system asking what it had just been told. `reason` travels with the null so the caller can log what was wrong,
+  // the same rule as v1857's "every early exit names itself".
+  if (!arms.length) {
+    normalizeBranchVerdict.reason = _dropped ? `${_dropped} arm(s) carried no usable "when" assertion` : 'no arms';
+    return null;
+  }
+  normalizeBranchVerdict.reason = '';
   const mode = BRANCH_MODES.includes(o.mode) ? o.mode : 'first';
   return {
     kind: 'branch',
     collection: (o.collection && typeof o.collection === 'object') ? o.collection : 'prior',
     arms,
+    ...(_lifted ? { lifted: _lifted } : {}),   // the caller reports a repaired shape rather than hiding it
     otherwise: _arr(o.otherwise).length ? _arr(o.otherwise) : null,
     mode,
   };

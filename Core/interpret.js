@@ -114,7 +114,17 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     // v1636, the bulk-write shape v1638, target.system v1643-48). No arms → clarify, never a half-branch.
     const br = normalizeBranchVerdict(d.branch || d);
     if (br) return { ...base, branch: br };
-    return { ...base, intent: 'clarify', question: 'What should I sort each item by, and into which groups?', why: why || 'branch-underspecified' };
+    // v2.74.1896 — the clarify NAMES what was wrong. "What should I sort each item by?" asked to a user who had just
+    // said is a worse turn than no answer: live 18:05 the model produced three correctly-worded groups and the shape
+    // was rejected, so the question was addressed to the wrong party. `why` now carries the defect (it is logged),
+    // and the question distinguishes "you didn't say" from "I couldn't build it".
+    const _bwhy = String(normalizeBranchVerdict.reason || 'no arms');
+    const _stated = !!(d.branch && Array.isArray(d.branch.arms) && d.branch.arms.length);
+    return { ...base, intent: 'clarify',
+      question: _stated
+        ? 'I have the groups but couldn’t build the rule for them — say it as “sort each one by <field> into <A>, <B>, <C>”.'
+        : 'What should I sort each item by, and into which groups?',
+      why: `${why || 'branch-underspecified'} · dropped: ${_bwhy}` };
   }
   if (intent === 'write') {
     // PP-2 (v2.74.1681) — a per-item WRITE over the rows a prior step left unmatched. Nothing is required: the

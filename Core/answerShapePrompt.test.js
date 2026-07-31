@@ -3,7 +3,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readShapeFacts, buildAnswerShapeMessages, parseAnswerShapeOutput, ensureScopeNamed, payloadMetrics, sumMetrics, unsupportedCountClaim } from './answerShapePrompt.js';
+import { askedMetric, superlativeAsk } from './askScope.js';
+import { readShapeFacts, buildAnswerShapeMessages, parseAnswerShapeOutput, ensureScopeNamed, payloadMetrics, sumMetrics, unsupportedCountClaim, metricAnswerLine, countAnswerLine } from './answerShapePrompt.js';
 
 const TICKETS = { results: [
   { id: 64863, subject: 'Conversation with Carolina', status: 'open', description: 'a long private ticket body that must NOT leave' },
@@ -290,5 +291,168 @@ describe('unsupportedCountClaim — no metric, no number (v1888)', () => {
   });
   it('does NOT fire on an answer that states no figure', () => {
     assert.equal(unsupportedCountClaim({ ask: 'how many are open?', facts: husk, answer: 'I could not find that number in what came back.' }), false);
+  });
+});
+
+// v2.74.1890 — the live pair that prompted this: `total open warranty tasks?` and `is there anything open right now?`
+// returned BYTE-IDENTICAL three-number tables (gl 11:18), because the aggregate printed every measure and never read
+// the ask. Same sums here; the two asks must now differ.
+const SUMS = { newwarrantytasks: 2, openwarrantytasks: 19, fixedwarrantytasks: 9 };
+const SCOPE = { scopePhrase: 'all 121 divisions', groups: 121, noun: 'division' };
+
+describe('metricAnswerLine — shaped by the ask, not dumped (v1890)', () => {
+  it('a COUNT ask leads with the number of the measure it named', () => {
+    const s = metricAnswerLine({ ask: 'total open warranty tasks?', sums: SUMS, asked: askedMetric('total open warranty tasks?', SUMS), ...SCOPE });
+    assert.match(s, /^\*\*19\*\* open \(openwarrantytasks\) across all 121 divisions/);
+  });
+  it('a YES/NO ask leads with yes and the number', () => {
+    const s = metricAnswerLine({ ask: 'is there anything open right now?', sums: SUMS, asked: askedMetric('is there anything open right now?', SUMS), ...SCOPE });
+    assert.match(s, /^\*\*Yes — 19\*\*/);
+  });
+  it('THE LIVE DEFECT: the two asks are no longer the same string', () => {
+    const a = metricAnswerLine({ ask: 'total open warranty tasks?', sums: SUMS, asked: askedMetric('total open warranty tasks?', SUMS), ...SCOPE });
+    const b = metricAnswerLine({ ask: 'is there anything open right now?', sums: SUMS, asked: askedMetric('is there anything open right now?', SUMS), ...SCOPE });
+    assert.notEqual(a, b);
+  });
+  it('a zero measure answers NO rather than reporting a table', () => {
+    const zero = { ...SUMS, openwarrantytasks: 0 };
+    const s = metricAnswerLine({ ask: 'is there anything open right now?', sums: zero, asked: askedMetric('is there anything open right now?', zero), ...SCOPE });
+    assert.match(s, /^\*\*No\*\* — 0 open/);
+  });
+  it('the measures NOT asked about are demoted, never dropped', () => {
+    const s = metricAnswerLine({ ask: 'total open warranty tasks?', sums: SUMS, asked: askedMetric('total open warranty tasks?', SUMS), ...SCOPE });
+    assert.match(s, /Also: newwarrantytasks 2 · fixedwarrantytasks 9\./);
+    assert.ok(!/Also:[^\n]*openwarrantytasks/.test(s), 'the answered measure is not repeated in the secondary line');
+  });
+  it('the dashboard caveat survives, with the failure count when there was one', () => {
+    assert.match(metricAnswerLine({ ask: 'x', sums: SUMS, ...SCOPE }), /own dashboard counts, summed over the 121 I read — not a row-by-row scan/);
+    assert.match(metricAnswerLine({ ask: 'x', sums: SUMS, ...SCOPE, failed: 3 }), /summed over the 121 I read, 3 failed/);
+  });
+  it('no measure named by the ask → the TABLE is the honest answer', () => {
+    const s = metricAnswerLine({ ask: 'what is going on?', sums: SUMS, asked: null, ...SCOPE });
+    assert.match(s, /^Counts across all 121 divisions:/);
+    assert.match(s, /\*\*openwarrantytasks\*\*: 19/);
+  });
+  it('the spread rides when it is known — 19 across 121, in 12 of them', () => {
+    const s = metricAnswerLine({ ask: 'total open warranty tasks?', sums: SUMS, asked: askedMetric('total open warranty tasks?', SUMS), ...SCOPE, hits: 12 });
+    assert.match(s, /in 12 of 121/);
+  });
+  it('empty sums produce nothing rather than an empty claim', () => {
+    assert.equal(metricAnswerLine({ ask: 'x', sums: {} }), '');
+    assert.equal(metricAnswerLine({ ask: 'x', sums: null }), '');
+  });
+});
+
+describe('countAnswerLine — an aggregate over ROWS answers with the number, not the rows (v1891)', () => {
+  const GROUPS = [{ label: 'Raleigh', n: 6 }, { label: 'Dallas South', n: 1 }, { label: 'Greensboro', n: 2 }];
+  it('leads with the total and lists the biggest groups first', () => {
+    const s = countAnswerLine({ ask: 'total open warranty tasks?', noun: 'tasks', total: 9, groups: GROUPS, cells: 121, cellNoun: 'division' });
+    assert.match(s, /^\*\*9\*\* tasks across all 121 divisions, in 3 of 121: Raleigh 6 · Greensboro 2 · Dallas South 1\./);
+  });
+  it('a yes/no ask still leads with yes', () => {
+    assert.match(countAnswerLine({ ask: 'is there anything open?', noun: 'tasks', total: 9, groups: GROUPS, cells: 121 }), /^\*\*Yes — 9\*\*/);
+  });
+  it('caps the named groups and counts the rest', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ label: `d${i}`, n: 12 - i }));
+    assert.match(countAnswerLine({ ask: 'how many?', noun: 'tasks', total: 78, groups: many, cells: 121 }), /· \+6 more\./);
+  });
+  it('zero is an honest negative, and a failed read is never hidden', () => {
+    assert.equal(countAnswerLine({ ask: 'how many?', noun: 'tasks', total: 0, cells: 121, cellNoun: 'division' }), 'No tasks across all 121 divisions.');
+    assert.match(countAnswerLine({ ask: 'how many?', noun: 'tasks', total: 0, cells: 121, failed: 2 }), /2 reads failed/);
+    assert.match(countAnswerLine({ ask: 'how many?', noun: 'tasks', total: 9, groups: GROUPS, cells: 121, failed: 2 }), /the total may be low/);
+  });
+});
+
+describe('metricAnswerLine — a SERVED count states its age (v1893)', () => {
+  const SUMS2 = { newwarrantytasks: 5, openwarrantytasks: 22 };
+  it('the age clause appears only when cells came from cache', () => {
+    const fresh = metricAnswerLine({ ask: 'total open?', sums: SUMS2, asked: askedMetric('total open?', SUMS2), groups: 121, noun: 'division' });
+    assert.ok(!/from reads up to/.test(fresh));
+    const served = metricAnswerLine({ ask: 'total open?', sums: SUMS2, asked: askedMetric('total open?', SUMS2), groups: 121, noun: 'division', fromCache: 121, oldestMs: 118000 });
+    assert.match(served, /121 of them from reads up to 118s old/);
+  });
+  it('the age rides WITH the failure count, not instead of it', () => {
+    const s = metricAnswerLine({ ask: 'total open?', sums: SUMS2, groups: 121, noun: 'division', failed: 2, fromCache: 40, oldestMs: 60000 });
+    assert.match(s, /summed over the 121 I read, 2 failed, 40 of them from reads up to 60s old/);
+  });
+  it('the number itself is unchanged by having been served', () => {
+    const a = metricAnswerLine({ ask: 'total open?', sums: SUMS2, asked: askedMetric('total open?', SUMS2), groups: 121, noun: 'division' });
+    const b = metricAnswerLine({ ask: 'total open?', sums: SUMS2, asked: askedMetric('total open?', SUMS2), groups: 121, noun: 'division', fromCache: 121, oldestMs: 5000 });
+    assert.equal(a.split('\n')[0], b.split('\n')[0]);
+  });
+});
+
+// v2.74.1895 — the live false absence: "how old are the open warranty tasks in Raleigh?" answered "the data does not
+// include age or date information" over rows that carry Age, because the lean projection keeps `fields` only when
+// title AND status are both empty. The ask now selects which scalars survive.
+const AGED_ROW = { TicketId: 4888465, TaskNumber: '01', AddressLine1: '1097 Misty Creek Drive', CityStateZip: 'ABERDEEN, NC 28315', Age: '003', AllowedAmount: 0, ProjectName: 'Collinswood' };
+
+describe('readShapeFacts — the field the QUESTION asks about survives (v1895)', () => {
+  it('THE LIVE CASE: an age ask keeps Age on a row that also has a title', () => {
+    const f = readShapeFacts({ results: [AGED_ROW, { ...AGED_ROW, TicketId: 4892224, Age: '012' }] }, { ask: 'how old are the open warranty tasks in Raleigh?' });
+    assert.ok(f.sample[0].asked, 'the asked-for scalars ride the sample');
+    assert.equal(f.sample[0].asked.Age, '003');
+    assert.equal(f.sample[1].asked.Age, '012');
+  });
+  it('a DIFFERENT question keeps a different field, and never everything', () => {
+    const f = readShapeFacts({ results: [AGED_ROW] }, { ask: 'what project is that task in?' });
+    assert.equal(f.sample[0].asked.ProjectName, 'Collinswood');
+    assert.ok(!('Age' in (f.sample[0].asked || {})), 'only what the ask names');
+  });
+  it('no ask, or an ask naming nothing on the record → unchanged payload', () => {
+    assert.ok(!('asked' in readShapeFacts({ results: [AGED_ROW] }).sample[0]));
+    assert.ok(!('asked' in readShapeFacts({ results: [AGED_ROW] }, { ask: 'is it urgent?' }).sample[0]));
+  });
+  it('a STATUS word never selects a field by itself — it names a filter the app already applied', () => {
+    // "open" must not pull `OpenedDate`/`IsOpen`; carrying the entity's own status field alongside is harmless context
+    const f = readShapeFacts({ results: [{ ...AGED_ROW, OpenedDate: '2026-07-01', IsOpen: true }] }, { ask: 'show me the open ones' });
+    const a = f.sample[0].asked || {};
+    assert.ok(!('OpenedDate' in a) && !('IsOpen' in a));
+  });
+  it('the English bridge crosses "how old" → Age, which no token rule can', () => {
+    assert.equal(readShapeFacts({ results: [AGED_ROW] }, { ask: 'how old is it?' }).sample[0].asked.Age, '003');
+    assert.equal(readShapeFacts({ results: [{ Id: 1, Title: 'x', CreatedDate: '2026-01-01' }] }, { ask: 'when was that opened?' }).sample[0].asked.CreatedDate, '2026-01-01');
+  });
+  it('bounded like the contact class — short scalars, capped, never an object', () => {
+    const wide = { Age: '003', AgeBucket: 'week', AgeDays: 3, AgeLabel: 'three days', AgeNote: 'x', Nested: { a: 1 }, Instructions: 'y'.repeat(500) };
+    const f = readShapeFacts({ results: [wide] }, { ask: 'how old with what instructions?' });
+    const a = f.sample[0].asked || {};
+    assert.ok(Object.keys(a).length <= 4);
+    assert.ok(!('Nested' in a));
+    for (const v of Object.values(a)) assert.ok(String(v).length <= 60);
+  });
+});
+
+// v2.74.1897 — "which division has the most open tasks?" was answered twice with the TOTAL (gl 18:36) while the fan
+// held all 121 per-division numbers. The argmax is over data already in hand.
+const PERGROUP = [
+  { label: 'Raleigh', m: { openwarrantytasks: 8, newwarrantytasks: 3 } },
+  { label: 'Chicago', m: { openwarrantytasks: 2, newwarrantytasks: 0 } },
+  { label: 'Greensboro', m: { openwarrantytasks: 5, newwarrantytasks: 1 } },
+  { label: 'Las Vegas', m: { openwarrantytasks: 0, newwarrantytasks: 0 } },
+];
+describe('metricAnswerLine — a superlative names the GROUP (v1897)', () => {
+  const ask = 'which division has the most open tasks?';
+  const sums = { openwarrantytasks: 15, newwarrantytasks: 4 };
+  it('THE LIVE ASK: the winner, its share of the total, and the runners-up', () => {
+    const s = metricAnswerLine({ ask, sums, asked: askedMetric(ask, sums), perGroup: PERGROUP, superlative: 'max', scopePhrase: 'all 121 divisions', groups: 121, noun: 'division' });
+    assert.match(s, /^\*\*Raleigh\*\* has the most open \(openwarrantytasks\) — \*\*8\*\* of 15 across all 121 divisions\./);
+    assert.match(s, /Next: Greensboro 5 · Chicago 2\./);
+  });
+  it('min picks the other end, and may name a zero group', () => {
+    const s = metricAnswerLine({ ask: 'which division has the fewest open tasks?', sums, asked: askedMetric('which division has the fewest open tasks?', sums), perGroup: PERGROUP, superlative: 'min', groups: 121, noun: 'division' });
+    assert.match(s, /^\*\*Las Vegas\*\* has the fewest/);
+  });
+  it('a max NEVER names a zero group — "the most" of nothing is not an answer', () => {
+    const s = metricAnswerLine({ ask, sums: { openwarrantytasks: 0 }, asked: askedMetric(ask, { openwarrantytasks: 0 }), perGroup: [{ label: 'A', m: { openwarrantytasks: 0 } }], superlative: 'max', groups: 121, noun: 'division' });
+    assert.ok(!/has the most/.test(s), 'falls back to the total sentence');
+  });
+  it('no per-group data → the total sentence, unchanged', () => {
+    const s = metricAnswerLine({ ask, sums, asked: askedMetric(ask, sums), superlative: 'max', scopePhrase: 'all 121 divisions', groups: 121, noun: 'division' });
+    assert.match(s, /^\*\*15\*\* open/);
+  });
+  it('NOT a superlative → the total sentence, unchanged', () => {
+    const s = metricAnswerLine({ ask: 'how many open tasks?', sums, asked: askedMetric('how many open tasks?', sums), perGroup: PERGROUP, superlative: null, groups: 121, noun: 'division' });
+    assert.match(s, /^\*\*15\*\* open/);
   });
 });

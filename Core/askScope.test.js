@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isExistentialAsk, existentialToken, askedMetric } from './askScope.js';
+import { isExistentialAsk, isCollectiveAsk, existentialToken, askedMetric, superlativeAsk } from './askScope.js';
 
 describe('askScope — the three live phrasings that were narrowed', () => {
   // trace 071412: all three bound divisionId:"" and were answered from one of 121 divisions
@@ -66,14 +66,14 @@ const STATS_M = { newwarrantytasks: 0, openwarrantytasks: 0, fixedwarrantytasks:
 describe('askedMetric — a zero COUNT is as empty as zero rows', () => {
   it('THE LIVE CASE: "open" selects the open bucket, which is 0 → the widen may proceed', () => {
     const m = askedMetric('is there anything open right now?', STATS_M);
-    assert.deepEqual(m, { label: 'openwarrantytasks', value: 0 });
+    assert.deepEqual(m, { label: 'openwarrantytasks', value: 0, tokens: ['open'] });
   });
   it('a token EVERY label carries discriminates nothing — "warranty" must not sum all three', () => {
     // matching on "warranty" would return 402 and conclude "there is something open" from the FIXED ones
     assert.equal(askedMetric('get any warranty request', STATS_M), null);
   });
   it('a non-zero measure is a real hit — the scan stops there', () => {
-    assert.deepEqual(askedMetric('anything fixed?', STATS_M), { label: 'fixedwarrantytasks', value: 402 });
+    assert.deepEqual(askedMetric('anything fixed?', STATS_M), { label: 'fixedwarrantytasks', value: 402, tokens: ['fixed'] });
   });
   it('two named measures are summed — "is there any" is satisfied by either', () => {
     const m = askedMetric('any open or fixed ones?', STATS_M);
@@ -87,7 +87,7 @@ describe('askedMetric — a zero COUNT is as empty as zero rows', () => {
     assert.equal(askedMetric('anything open?', { Total: 'x' }), null, 'non-numeric values are not measures');
   });
   it('a SINGLE-measure payload still matches (the all-labels-carry-it rule cannot apply to one)', () => {
-    assert.deepEqual(askedMetric('anything open?', { openTasks: 0 }), { label: 'openTasks', value: 0 });
+    assert.deepEqual(askedMetric('anything open?', { openTasks: 0 }), { label: 'openTasks', value: 0, tokens: ['open'] });
   });
   it('short tokens are ignored — "any" must not match "companyTotals"', () => {
     assert.equal(askedMetric('any?', { companyTotals: 5, other: 1 }), null);
@@ -96,12 +96,77 @@ describe('askedMetric — a zero COUNT is as empty as zero rows', () => {
 
 describe('askedMetric — a short token must not match mid-word (v1889, its own test caught this)', () => {
   it('"new" still selects a new-bucket — a flat 4-char floor would have dropped a real status word', () => {
-    assert.deepEqual(askedMetric('is there anything new anywhere?', STATS_M), { label: 'newwarrantytasks', value: 0 });
+    assert.deepEqual(askedMetric('is there anything new anywhere?', STATS_M), { label: 'newwarrantytasks', value: 0, tokens: ['new'] });
   });
   it('a camelCase segment matches exactly', () => {
-    assert.deepEqual(askedMetric('anything open?', { TotalOpen: 2, TotalClosed: 9 }), { label: 'TotalOpen', value: 2 });
+    assert.deepEqual(askedMetric('anything open?', { TotalOpen: 2, TotalClosed: 9 }), { label: 'TotalOpen', value: 2, tokens: ['open'] });
   });
   it('an underscore segment matches exactly', () => {
-    assert.deepEqual(askedMetric('any new ones?', { new_tasks: 0, done_tasks: 4 }), { label: 'new_tasks', value: 0 });
+    assert.deepEqual(askedMetric('any new ones?', { new_tasks: 0, done_tasks: 4 }), { label: 'new_tasks', value: 0, tokens: ['new'] });
   });
+});
+
+describe('askedMetric — the matched TOKENS ride along (v1890)', () => {
+  it('the word the user used for the measure, not the payload key', () => {
+    assert.deepEqual(askedMetric('total open warranty tasks?', STATS_M).tokens, ['open']);
+  });
+  it('only tokens that actually earned a match', () => {
+    const m = askedMetric('any open or fixed ones?', STATS_M);
+    assert.deepEqual(m.tokens.sort(), ['fixed', 'open']);
+  });
+});
+
+describe('isCollectiveAsk — an unscoped aggregate means everything I can see (v1891 ruling)', () => {
+  it('catches the aggregate shapes', () => {
+    for (const q of ['total open warranty tasks?', 'how many are open?', 'count the open ones', 'list all warranty tasks', 'every open task', 'what is the total number of open tasks across the queue right now'])
+      assert.equal(isCollectiveAsk(q), true, q);
+  });
+  it('does NOT catch an existential or an ordinary act', () => {
+    for (const q of ['is there anything open right now?', 'get any open warranty request', 'open a case for this one', 'what is the address?', 'show me the instructions'])
+      assert.equal(isCollectiveAsk(q), false, q);
+  });
+  it('the two predicates are disjoint on the live pair — one mode each, never both', () => {
+    const a = 'total open warranty tasks?'; const b = 'is there anything open right now?';
+    assert.equal(isExistentialAsk(a), false); assert.equal(isCollectiveAsk(a), true);
+    assert.equal(isExistentialAsk(b), true);  assert.equal(isCollectiveAsk(b), false);
+  });
+  it('empty is neither', () => {
+    assert.equal(isCollectiveAsk(''), false);
+    assert.equal(isCollectiveAsk(null), false);
+  });
+});
+
+// v2.74.1894 — the gate that killed the ruling. `how many warranty tasks are fixed?` is COLLECTIVE, and the widen's
+// entry test (borrowed from the existential path) stood it down because the default division held 1 — answering "1
+// fixed in Atlanta West" while the corpus held 9. These pin the classification the caller branches on.
+describe('askScope — the mode a widen must run in (v1894)', () => {
+  const cases = [
+    ['how many warranty tasks are fixed?', 'all'],
+    ['total open warranty tasks?', 'all'],
+    ['count the open ones', 'all'],
+    ['is there anything open right now?', 'first'],
+    ['get any open warranty request', 'first'],
+    ['what is the address?', null],
+  ];
+  for (const [q, want] of cases) {
+    it(`"${q}" → ${want}`, () => {
+      const mode = isExistentialAsk(q) ? 'first' : (isCollectiveAsk(q) ? 'all' : null);
+      assert.equal(mode, want);
+    });
+  }
+});
+
+describe('superlativeAsk — ranking GROUPS, not records (v1897)', () => {
+  it('catches the max family', () => {
+    for (const q of ['which division has the most open tasks?', 'who has the highest count', 'the biggest queue', 'top division by open tasks'])
+      assert.equal(superlativeAsk(q), 'max', q);
+  });
+  it('catches the min family', () => {
+    for (const q of ['which division has the fewest open?', 'the lowest count', 'least open tasks']) assert.equal(superlativeAsk(q), 'min', q);
+  });
+  it('a plain count or an ordinal is NOT a group superlative', () => {
+    for (const q of ['how many open tasks?', 'total open warranty tasks?', "what's the newest task in Raleigh?", 'get the oldest open task'])
+      assert.equal(superlativeAsk(q), null, q);
+  });
+  it('empty is null', () => { assert.equal(superlativeAsk(''), null); assert.equal(superlativeAsk(null), null); });
 });

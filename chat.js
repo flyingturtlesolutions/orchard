@@ -54,7 +54,7 @@ import { contextSpecsFor, contextAskFor, contextAnswerLine, viaTargets } from '.
    // v1872 — "which division am I in right now" answered from the RESOLVER's defaultPath, not the shaper
 import { classifyQuery, partitionFields, findInRows, filterRows, scanCells, estimateScan, findVerdict, isReferentialQuery, noMatchLine, scanNegativeLine, MEASURED_MS_PER_READ } from './Core/corpusFind.js';   // v1887 — noMatchLine: the negative names the surface it searched; v1888 — scanNegativeLine: the same rule at the scan's two doors
 import { entityFor, coverageOf } from './Core/synthEntity.js';
-import { isExistentialAsk, existentialToken, askedMetric } from './Core/askScope.js';   // v1884 — "any/one/first" means anywhere, not the narrowest default; v1889 — askedMetric: a zero COUNT is as empty as zero rows
+import { isExistentialAsk, isCollectiveAsk, existentialToken, askedMetric, superlativeAsk } from './Core/askScope.js';   // v1884 — "any/one/first" means anywhere, not the narrowest default; v1889 — askedMetric: a zero COUNT is as empty as zero rows
 import { rideCacheKey, makeRideCache } from './Core/rideCache.js';   // v1881 — the age-aware row cache: populate from every read, serve only where age cannot change the answer   // v1877 — the ENTITY the find generates from (drill block = entity graph) + partition-vs-selection   // v1875 — vs_task_find's pure half: query kind, field partition, scan cells, cost, verdict
 import { armable as rideArmable, hostRideInventory, formatHostRideInventory } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard; v1761 — TR-1 meta host inventory
 import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 — TR-1 meta vs act split
@@ -66,7 +66,7 @@ import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js
 import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
-import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
+import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { parseDashboardAsk, friendlyVitalsLine, clockWord } from './Core/vitalsDashboard.js';   // VT-2d (v2.74.1583) — the context dashboard door; v1590 — the human-words layer for incident cases
 import { friendlyError as _errWord, actionPhrase as _actionPhrase, recordNounWord as _recordNounWord } from './Core/chatVoice.js';   // v2.74.1591 — ONE chat voice: slugs/codes → phrases, catalog verbs → sentences, leg names → nouns
@@ -88,7 +88,7 @@ import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
-import { evalBranch, branchTally } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure)
+import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
 import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
 import { redact, restore, newRedactionMap } from './Core/redact.js';   // R-1 (v2.74.1662) — pseudonymize identity before the instruction text ever leaves (DESIGN_llm_privacy.md §5)
@@ -4733,6 +4733,66 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   // each record's OWN fields, which is the only way an ADDRESS gets redacted at all — no regex finds a street
   // address, but the record knows which field holds one. The map stays in the panel; the service never sees it.
   let classifyBy = null;
+  let _classifyGap = '';   // v1895 — WHY nothing could be classified, when that is the answer (a field the records lack)
+  // v2.74.1899 — the DRILL, hoisted so BOTH arm kinds reach it. The v1895 drill was gated inside the classify block,
+  // so the first live deterministic branch ("has a vendor explanation, or blank" — the model chose assertion arms
+  // itself, which is the v1896 prompt working) died against LIST rows with `record has no field "Vendor Explanation"`
+  // on all nine. Same twin-door as v1895, one nesting level down: two arm kinds, one enriching and one not.
+  let _bDrilled = false;
+  const _bdjTool = (srcLeg && srcLeg.tool && srcLeg.tool.drill && srcLeg.tool.drill.via && srcLeg.tool.drill.from) ? srcLeg.tool.drill : null;
+  const _branchDrill = async (forLabel) => {
+    if (_bDrilled || !_bdjTool) return false;
+    _bDrilled = true;   // one drill per branch run, whoever asks first
+    const viaLeg = await _rideDrillLeg(srcLeg, _bdjTool.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
+    if (!viaLeg) return false;
+    let got = 0;
+    for (let k = 0; k < use.length; k++) {
+      if (_walkAbortFlag.requested) break;
+      const joinId = use[k] && use[k][_bdjTool.from];
+      if (joinId == null || joinId === '') continue;
+      _setMessageBody(msg, `Opening each record for “${escHtml(String(forLabel))}”… ${k + 1}/${use.length}`);
+      let dr = null;
+      try { dr = await _rideExecOnce(viaLeg, { [_bdjTool.param || 'id']: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null }); } catch { dr = null; }
+      if (!dr || !dr.ok) continue;
+      const detail = primaryObject(dr.value) || dr.value;
+      if (detail && typeof detail === 'object' && !Array.isArray(detail)) { use[k] = { ...use[k], ...detail }; got++; }
+    }
+    try { _orchLog(`BRANCH ▸ enriched ${got}/${use.length} row(s) via ${_bdjTool.via} for "${forLabel}"`); } catch { /* */ }
+    return got > 0;
+  };
+  // v2.74.1899 — DETERMINISTIC arms get the v1690 resolve too. The live unknowns were `record has no field "Vendor
+  // Explanation"` and `binding "Vendor Explanation" is unbound` — the model's HUMAN phrase against the record's own
+  // key, the exact disagreement resolveFieldKey was written for, applied until now only to classify's cField. The
+  // phrase is resolved against the (drilled) rows and rewritten IN the assertion; an unresolvable phrase is left
+  // alone so the miss stays reported under the name asked for.
+  {
+    const _detPhrases = [];
+    for (const a of br.arms) {
+      const w = a && a.when;
+      if (!w || typeof w !== 'object' || w.type === 'classify') continue;
+      if (typeof w.fieldName === 'string' && w.fieldName.trim()) _detPhrases.push(w.fieldName.trim());
+      if (typeof w.binding === 'string' && w.binding.trim() && w.binding !== 'item') _detPhrases.push(w.binding.trim());
+    }
+    if (_detPhrases.length) {
+      const _hasKey = (phrase) => use.some((it) => it && typeof it === 'object' && (Object.prototype.hasOwnProperty.call(it, phrase) || resolveFieldKey(Object.keys(it), phrase).key));
+      if (!_detPhrases.some(_hasKey)) await _branchDrill(_detPhrases[0]);
+      let _fixed = 0;
+      const _probe = use.find((it) => it && typeof it === 'object') || null;
+      if (_probe) {
+        for (const a of br.arms) {
+          const w = a && a.when;
+          if (!w || typeof w !== 'object' || w.type === 'classify') continue;
+          for (const slot of ['fieldName', 'binding']) {
+            const ph = (typeof w[slot] === 'string') ? w[slot].trim() : '';
+            if (!ph || ph === 'item' || Object.prototype.hasOwnProperty.call(_probe, ph)) continue;
+            const r = resolveFieldKey(Object.keys(_probe), ph);
+            if (r.key && !r.ambiguous) { w[slot] = r.key; _fixed++; }
+          }
+        }
+      }
+      if (_fixed) { try { _orchLog(`BRANCH ▸ ${_fixed} deterministic field name(s) resolved against the record`); } catch { /* */ } }
+    }
+  }
   const _cArms = classifyArms(br);
   if (_cArms.length) {
     // v2.74.1662 — String(...).trim(), NOT a `_str` helper: chat.js has no such binding, and an undefined
@@ -4754,18 +4814,73 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     // arms now do. `cField` is the model echoing the user ("Vendor Explanation"); the record uses its own key
     // (`VendorExplanation`). Unresolved, every row extracts '' and is dropped from the payload — which surfaces
     // as "couldn't tell" on every item, indistinguishable from a model that genuinely could not judge the text.
-    const _cKey = (() => {
+    const _resolveCKey = () => {
       if (!cField) return '';
       const probe = use.find((it) => it && typeof it === 'object');
       if (!probe) return cField;
       if (Object.prototype.hasOwnProperty.call(probe, cField)) return cField;
       const r = resolveFieldKey(Object.keys(probe), cField);
       return r.key || cField;   // unresolved → keep the original, so the miss is reported under the name asked for
-    })();
+    };
+    let _cKey = _resolveCKey();
     if (_cKey && _cKey !== cField) { try { _orchLog(`BRANCH ▸ field "${cField}" → "${_cKey}" (resolved against the record)`); } catch { /* */ } }
 
+    // v2.74.1895 — DRILL FOR THE FIELD BEFORE CLASSIFYING ON IT, exactly as `_runFieldReadClause` has since v1649.
+    //
+    // Live (gl 17:44), the workflow's central step: `BRANCH ▸ classify 0 item(s) × 3 arm(s) on "Instructions"` → every
+    // one of seven items came back "couldn't tell" and the pipeline reported 7 blocked. The extraction below is
+    // correct and the rows were wrong: a `vs_warranty_tasks` LIST row carries 17 identifier/address fields and has
+    // never carried `Instructions`, which lives on the DETAIL leg one drill away. The classifier was handed nothing
+    // and honestly said so.
+    // The v1690 comment above anticipated the SYMPTOM ("every row extracts '' … surfaces as couldn't tell on every
+    // item") and guarded the wrong cause: the field NAME resolves fine, the RECORD is absent. Two clauses, one
+    // enriching and one not, is the fifth twin-door of this session — so this is the fieldRead drill, same shape,
+    // same receipt, run only when the field is missing from the rows we have.
+    // v2.74.1899 — the drill itself is hoisted above (`_branchDrill`) so deterministic arms reach it too; this call
+    // keeps the v1895 behaviour for classify arms (gated on the field missing from every row we have), PLUS a
+    // post-drill RE-RESOLVE: the first resolve ran against LIST rows that lacked the key entirely, so v1895 worked
+    // live only because "Instructions" IS the record's exact key — "vendor explanation" would have stayed a phrase
+    // forever and extracted '' from perfectly enriched rows.
+    const _bMissing = _cKey && use.every((it) => !String(extractValue(it, _cKey) ?? '').trim());
+    const _bdj = _bMissing ? _bdjTool : null;
+    if (_bdj && await _branchDrill(_cKey)) {
+      const _k2 = _resolveCKey();
+      if (_k2 && _k2 !== _cKey) { try { _orchLog(`BRANCH ▸ field "${_cKey}" → "${_k2}" (re-resolved after the drill)`); } catch { /* */ } _cKey = _k2; }
+    }
+
+    // v2.74.1898 — A PRESENCE QUESTION BECOMES AN ASSERTION, not a judgement. Live (gl 18:36): "sort into: has a
+    // vendor explanation, or blank" → both arms classify → 8 × "indeterminate" about a question `extractValue`
+    // settles for free (the v1690 mirror: a literal form on free text is confidently WRONG; a classify form on a
+    // structured question is confidently USELESS). `presenceShape` (Core/branchClause.js) recognizes the anchored
+    // shapes; HERE — where the enriched rows are in hand — the phrase is resolved to a real key, and only a clean
+    // resolve rewrites (an unresolvable phrase stays classify, never becomes a wrong assertion). Two passes so a
+    // bare "blank" arm inherits its field from a named sibling regardless of declaration order.
+    {
+      let _rw = 0; let _sibKey = '';
+      const _probe = use.find((it) => it && typeof it === 'object') || null;
+      const _passes = [(p) => p.fieldPhrase, (p) => !p.fieldPhrase];   // named arms first, then bare blank/empty
+      for (const pass of _passes) {
+        for (const a of br.arms) {
+          if (!a || !a.when || a.when.type !== 'classify') continue;
+          const p = presenceShape(a.when.is, a.label);
+          if (!p || !pass(p)) continue;
+          let key = '';
+          if (p.fieldPhrase && _probe) { const r = resolveFieldKey(Object.keys(_probe), p.fieldPhrase); if (r.key && !r.ambiguous) key = r.key; }
+          if (!key && !p.fieldPhrase) key = _sibKey;
+          if (!key) continue;
+          _sibKey = key;
+          a.when = p.negate
+            ? { type: 'orch_predicate', binding: key, specJson: '{"op":"none"}' }        // "blank" — the field holds no value
+            : { type: 'record_field_non_empty', binding: 'item', fieldName: key };       // "has a <field>"
+          _rw++;
+        }
+      }
+      if (_rw) { try { _orchLog(`BRANCH ▸ ${_rw} presence arm(s) → field assertions on "${_sibKey}" — a structure test, not a judgement`); } catch { /* */ } }
+    }
+    const _cLeft = classifyArms(br);   // the arms STILL classify-typed after the rewrite; only these go to the model
+
     const payloadItems = [];
-    use.forEach((it, i) => {
+    if (_cLeft.length) use.forEach((it, i) => {
       const raw = _cKey ? String(extractValue(it, _cKey) ?? '') : '';
       if (!raw.trim()) return;   // no text to judge → no verdict → UNKNOWN downstream, which is the honest outcome
       const { text } = redact(raw, { names: identityValues(it, { joinKey: (srcLeg && srcLeg.tool && srcLeg.tool.joinKey) || null }), map: redMap });
@@ -4774,14 +4889,26 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
 
     try { _orchLog(`BRANCH ▸ classify ${payloadItems.length} item(s) × ${_cArms.length} arm(s) on "${_cKey || '(record)'}" — redacted before egress`); } catch { /* */ }
     let resp = null;
+    // v2.74.1895 — NO ITEMS IS A DIAGNOSIS, NOT A FAILED CALL. Live, an empty payload went to the service, came back
+    // `classifier unavailable (items and arms required)`, and the user read "couldn't tell" on every row — a sentence
+    // that blames the classifier for a field the records never had. The two cases must not share a receipt.
+    if (!_cLeft.length) {
+      // v2.74.1898 — every classify arm was rewritten to a field assertion: nothing to send, and NOT a gap. The
+      // deterministic evaluator below owns the whole branch now; classifyBy stays null so no classify lookup runs.
+      try { _orchLog('BRANCH ▸ all arms deterministic after the presence rewrite — no classifier call'); } catch { /* */ }
+    } else if (!payloadItems.length) {
+      _classifyGap = _cKey ? `none of the ${use.length} record${use.length === 1 ? '' : 's'} carry a “${_cKey}” field to sort on` : 'there was no field to sort on';
+      try { _orchLog(`BRANCH ▸ nothing to classify — "${_cKey || '(record)'}" empty on ${use.length}/${use.length} row(s)${_bdj ? ' even after the drill' : ' and the leg declares no drill'}`); } catch { /* */ }
+    } else {
     try {
       resp = await _orchReq('CLASSIFY_BRANCH_ITEMS', {
         items: payloadItems, field: cField,
-        arms: _cArms.map((a) => ({ label: a.label, is: String((a.when && a.when.is) ?? '').trim() })),
+        arms: _cLeft.map((a) => ({ label: a.label, is: String((a.when && a.when.is) ?? '').trim() })),
       });
     } catch { resp = null; }
+    }
 
-    if (resp && resp.success && Array.isArray(resp.verdicts)) {
+    if (!_cLeft.length) { classifyBy = null; } else if (resp && resp.success && Array.isArray(resp.verdicts)) {
       // Restore the model's REASONS locally — they may quote the redacted text, and the user should read the
       // real words even though the model never saw them.
       classifyBy = new Map(resp.verdicts.map((v) => [String(v.id), { group: String(v.group), why: restore(String(v.why || ''), redMap).text }]));
@@ -4858,7 +4985,11 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   }
 
   const tally = branchTally(results, { arms: br.arms });
-  const head = `Sorted each record into **${br.arms.length}** group${br.arms.length === 1 ? '' : 's'}.${capped ? `  (first ${cap} of ${rows.length})` : ''}`;
+  // v2.74.1895 — when NOTHING could be judged, the headline is the reason, not the sorting. "Sorted each record into 3
+  // groups · couldn't tell 7" reads as a classifier that hedged; the truth was that the records had no such field.
+  const head = _classifyGap
+    ? `I couldn’t sort these — ${_classifyGap}.${capped ? `  (first ${cap} of ${rows.length})` : ''}`
+    : `Sorted each record into **${br.arms.length}** group${br.arms.length === 1 ? '' : 's'}.${capped ? `  (first ${cap} of ${rows.length})` : ''}`;
   _setMessageBody(msg, [head, tally, ...lines].join('\n'), { markdown: true });
   _orchFinalize(msg);
   try { _orchLog(`BRANCH ▸ ${results.length} × ${br.mode} → ${tally}${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
@@ -5484,9 +5615,39 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // Zendesk queue). Only making `target.system` optional with an explicit per-item-field-read branch fixes
   // that, because the invention happens before there is any phrasing or target to test.
   if (_sameGroundAsSource(tgt0, srcLeg) || _declaresSourceSystem(system, srcLeg)) {
-    _setMessageBody(msg, `Those live on the record itself — that’s a per-item field read, not a lookup somewhere else, and I can’t do that one yet. Ask for the field on a single record and I’ll read it off that one.`, { markdown: true });
+    // v2.74.1898 — HAND OFF, don't refuse. The old sentence here diagnosed itself: *"that's a per-item field read"*
+    // — and the clause that does exactly that sits one function over with the SAME options bag. Live it refused
+    // "for each open task in Raleigh, get the homeowner's phone and email" AFTER doing 14 successful reads (17:42),
+    // and told the user to "connect vendorsuite" while connected (18:33, the appointments ask). The self-map test
+    // stays the detector (structure, not phrasing — the v1646 charter); what changes is what detection MEANS: the
+    // target being the source is precisely the evidence this was never a lookup. The field phrase comes from the
+    // map's own slots (itemField, else the target readAsk's words), so nothing is invented on the way through.
+    // String(...).trim() inline, NOT a helper — chat.js has no `_str` binding, and an undefined identifier here
+    // throws at RUNTIME while passing `node --check` (the v1662 class; caught in this change's own bug pass).
+    //
+    // v2.74.1899 — the readAsk fallback must be CLEANED to a field phrase, not handed over whole. Live 19:44 the
+    // first handoff shipped `field="get the homeowner's phone for task {value}"` — a SENTENCE with a placeholder —
+    // and fieldRead's orphan sentence faithfully asked which field "get homeowner phone value" meant. The readAsk
+    // is a per-item READ ASK by contract, so strip what makes it one: `{…}` placeholders, a leading verb, and the
+    // per-item tail ("for task …" / "for each …"). What remains ("the homeowner's phone") is a field phrase the
+    // fieldRead resolver's own ladder is built for. Nothing left after cleaning → the honest refusal below.
+    const _frClean = (s) => String(s ?? '')
+      .replace(/\{[^}]*\}/g, ' ')                                              // placeholders are never field words
+      .replace(/^\s*(?:get|read|pull|fetch|look\s*up|find|show|list)\b\s*/i, '')   // the verb made it an ask
+      .replace(/\s+(?:for|of|on)\s+(?:each|every|this|that|the)?\s*(?:task|record|item|row|one|ticket|order)\b.*$/i, '')   // the per-item tail
+      .replace(/\s+/g, ' ').trim();
+    const _frField = String(map.itemField ?? '').trim() || _frClean(map.target && map.target.readAsk);
+    if (_frField) {
+      try { _orchLog(`MAP ▸ self-map ("${system}") → fieldRead handoff — field "${_frField}"`); } catch { /* */ }
+      // v2.74.1899 — hand over the ENRICHED rows, not the original prior: at this point `rows` already carry the
+      // v1628 drill merge INCLUDING the `also` sidecar (contacts — live 19:44: `MAP ▸ enriched 9/9 … +1 sidecar`),
+      // which is exactly where a "homeowner's phone" lives. fieldRead's own drill does NOT consult `also` (the
+      // standing v1881 gap), so re-reading fresh would LOSE fields the map already fetched.
+      return _runFieldReadClause(msg, { kind: 'fieldRead', field: _frField, term: '', collection: 'prior' }, { tabId, priorValue: { results: rows }, priorLeg: srcLeg || priorLeg, goal });
+    }
+    _setMessageBody(msg, `Those live on the record itself — tell me which field to read (“for each one, read the <field>”) and I’ll read it off each record.`, { markdown: true });
     _orchFinalize(msg);
-    try { _orchLog(`MAP ▸ declined - target resolves to the SOURCE ground (self-map; "${system}")`); } catch { /* */ }
+    try { _orchLog(`MAP ▸ declined - self-map ("${system}") with no field phrase to hand off`); } catch { /* */ }
     return { ok: false, gap: true };
   }
   // 4) per-row: walk the ladder, stop at the first MATCH. Deterministic (no LLM per row), capped, abort-aware.
@@ -5917,9 +6078,11 @@ async function _resolveTarget(ask) {
   if (!a) return null;
   if (_lastTargetResolve.ask === a && (Date.now() - _lastTargetResolve.at) < 5000) return _lastTargetResolve.decision;
   let decision = null;
+  let _warmTabId = null;
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tabId = (tabs && tabs[0] && tabs[0].id) ?? null;
+    _warmTabId = tabId;
     const deskOrigins = _boundConnections().map((c) => c.origin);
     // FC-4 (v2.74.1552) — the conversation's FOCUS provenance rides as TR-2 evidence: the grounds the working
     // set points at (+ their nouns) join the conversation-tier candidate pool. Hints only — ids and hosts from
@@ -5932,6 +6095,9 @@ async function _resolveTarget(ask) {
     decision = (r && r.success && r.decision) ? { ...r.decision, tabGroundId: r.tabGroundId ?? null } : null;
   } catch { decision = null; }
   _lastTargetResolve = { ask: a, at: Date.now(), decision };
+  // v2.74.1894 — the host is known ~4-5s before INTERPRET returns; spend that window on the slow via read instead of
+  // making the user spend it after. Fire-and-forget by construction — the turn does not await it and never sees it.
+  if (decision && decision.host) void _warmResolveVia(decision.host, _warmTabId);
   return decision;
 }
 // TRT-5 §5.3 — the ADOPT counter: the Nth (≥2) off-desk run of the SAME origin from the SAME desk is role signal →
@@ -7682,6 +7848,16 @@ async function _showSection(word) {
   // wrong site with the literal phrase (live 144407: "show this ticket" in a case → zendesk's "its this ticket
   // page"). Fall through — the case bridge or interpret owns references.
   if (/^(?:this|that|these|those)\b/.test(w)) return false;
+  // v2.74.1897 — STRIP THE INDIRECT OBJECT. The caller removes the verb and not "me/us", so "show me my current
+  // division" arrived as `me my current division` and navigated to a page it then named in the sentence —
+  // *"Focused the tab on its me my current division page"*, which is the tell that nobody had ever read `w` aloud.
+  w = w.replace(/^(?:me|us)\s+/, '').trim();
+  if (!w) return false;
+  // v2.74.1897 — A FIRST-PERSON ASK IS ABOUT THE USER, NOT A PAGE. Same class as the demonstrative guard above, and
+  // it protects a built answer: "show me my current division" is `contextAnswer`'s shape 2 — its twins ("what's my
+  // current division", "current division?") answered correctly in the same minute while this one was swallowed here.
+  // A possessive can never name a section: no site has a "my …" page in its section vocabulary.
+  if (/^(?:my|our)\b/.test(w)) return false;
   // v2.74.1521 — a digit-run means a RECORD ask ("show ticket 4867009 on vendorsuite"), never a section name.
   // Fall through to interpret, where the ride drill owns it (v1520 on-site open). Live miss: the token fallback
   // matched "ticket" against a Zendesk leg's does-line and navigated the WRONG SITE with the ask's value ignored.
@@ -7722,7 +7898,12 @@ async function _showSection(word) {
         for (let qi = 0; qi < queries.length; qi++) {
           const q = queries[qi];
           const inPath = path.toLowerCase().includes(q);
-          const inMeta = `${r.name || ''} ${r.does || ''}`.toLowerCase().includes(q);
+          // v2.74.1897 — A SINGLE TOKEN MAY ONLY MATCH THE PATH. The token fallback's charter (v1451, three lines
+          // up) is "view the warranty section" → "warranty" hits '/#warranty' — a PATH hit. Letting one loose token
+          // match a recipe's NAME or DOES is how "…my current division" navigated: `division` appears in
+          // vs_warranty_tasks' does-line ("list a division's warranty tasks by status"), which describes a PARAMETER,
+          // not a page. A does-line is prose about what a leg accepts; a path is the page itself.
+          const inMeta = qi === 0 && `${r.name || ''} ${r.does || ''}`.toLowerCase().includes(q);
           if (!inPath && !inMeta) continue;
           // phrase matches (qi 0) outrank token matches; within a rank, path beats meta
           const score = (queries.length - qi) * 10 + (inPath ? 2 : 0) + (inMeta ? 1 : 0);
@@ -10412,9 +10593,19 @@ async function _ilRunPanelAction(msg, { leg, panel, ask, params = {} }) {
 // CX-9b (v2.74.1434) — the `resolve` marker's via-read cache (e.g. VendorSuite/State): one fetch per origin+endpoint
 // per 10 min, so resolving divisionId on every ask doesn't re-pull State each time. Panel-lifetime map, TTL-checked.
 const _rideResolveCache = new Map();
+// v2.74.1898 — SINGLE-FLIGHT. The v1894 warm fired 87ms into the turn and LOST: the endpoint took 6.7s, interpret
+// returned at 5.6s, and the ask found an empty cache and issued a second identical 6-second read (gl 17:31 — two
+// SPAN ▸ RIDE lines for one payload). A value cache dedupes only requests that are already fast enough not to need
+// deduping; the slower the read, the more certain the race. So the IN-FLIGHT PROMISE is cached too: a second caller
+// awaits the first request instead of racing it, which converts the warm from "sometimes a duplicate request" into
+// "always a head start". The 19:06 pass sharpened the stakes — the ~6-12s cost is per-ENDPOINT cold, so overlap is
+// the only lever that generalizes.
+const _rideResolveInFlight = new Map();   // key → Promise<value|null>; deleted on settle, so a failure never sticks
 async function _rideResolveVia(leg, via, { tabId, groundId } = {}) {
   const host = String((leg.tool && (leg.tool.origin || leg.tool.appHost)) || '');
   const key = `${host}|${via}`;
+  const inflight = _rideResolveInFlight.get(key);
+  if (inflight) return inflight;
   const hit = _rideResolveCache.get(key);
   // v2.74.1880 — 10 minutes was arbitrary and too long for what this payload CARRIES. The division list and the
   // permissions in it never change, but `access.DefaultDivision.Id` is site state the user can switch in the app —
@@ -10424,19 +10615,58 @@ async function _rideResolveVia(leg, via, { tabId, groundId } = {}) {
   // bounded window rather than an invalidation hook. 2 minutes costs one extra one-request fetch per two minutes of
   // activity. A real hook (invalidate on navigation to the app host) is the complete fix and is NOT built.
   if (hit && (Date.now() - hit.at) < 120000) return hit.value;
-  let r = null;
+  const run = (async () => {
+    let r = null;
+    try {
+      if (leg.tool && leg.tool.replay === 'headers') {   // the harvested/seeded transport (mirror the dispatch's payload shape)
+        r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost || host, origin: host, endpoint: via, method: 'GET', params: {}, groundId: leg.tool.groundId || groundId || null, recipeId: null, requestHeaders: leg.tool.requestHeaders || null });   // v1464 — the static routing headers ride the resolve read too
+      } else {                                            // cookie-ride / connected-app — route via the same planner the leg itself uses
+        const viaLeg = { ...leg, mode: 'ask', params: [], paramSchema: { type: 'object', properties: {}, required: [] }, tool: { ...leg.tool, endpoint: via, method: 'GET', body: null } };
+        const plan = planExec(viaLeg, {}, { tabId, groundId });
+        if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, plan.payload);
+      }
+    } catch { r = null; }
+    const value = (r && r.success !== false && r.value != null) ? r.value : null;
+    if (value) _rideResolveCache.set(key, { at: Date.now(), value });
+    return value;
+  })();
+  _rideResolveInFlight.set(key, run);
+  try { return await run; } finally { _rideResolveInFlight.delete(key); }   // deleted on settle either way — a failed read must not pin followers to null
+}
+
+/**
+ * v2.74.1894 — WARM THE VIA READ WHILE THE MODEL THINKS.
+ *
+ * The v1892 instrument answered the four-pass cold-ride mystery in one line: `SPAN ▸ RIDE · 12148ms · fetch=12132` —
+ * every stage I had suspected (tab revive, content-script, identity probe) came in under 25ms, and the whole cost is
+ * the FIRST request of the session, which is this via read of a 136-path access blob. The next request on the same tab
+ * took ~100ms. So it is not our plumbing and not a mystery: the endpoint is slow cold, and we call it LAZILY, at the
+ * one moment a human is waiting on it — every division-scoped read must resolve `{divisionId}` before it can run.
+ *
+ * The cheapest honest fix is not to make it faster but to stop paying for it in series. The target resolves ~4-5s
+ * before INTERPRET returns (a full LLM round trip), so firing the via read there overlaps most of it. Deliberately
+ * narrow: fire-and-forget, ONE per host (every via-bearing leg on a host shares the same read), silent when the cache
+ * is already warm, and it never opens or wakes a tab — it is exactly the request the next ask would make, made
+ * earlier. A turn that never reaches that host has spent one read it would otherwise have spent on the ask after it.
+ */
+async function _warmResolveVia(host, tabId) {
   try {
-    if (leg.tool && leg.tool.replay === 'headers') {   // the harvested/seeded transport (mirror the dispatch's payload shape)
-      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost || host, origin: host, endpoint: via, method: 'GET', params: {}, groundId: leg.tool.groundId || groundId || null, recipeId: null, requestHeaders: leg.tool.requestHeaders || null });   // v1464 — the static routing headers ride the resolve read too
-    } else {                                            // cookie-ride / connected-app — route via the same planner the leg itself uses
-      const viaLeg = { ...leg, mode: 'ask', params: [], paramSchema: { type: 'object', properties: {}, required: [] }, tool: { ...leg.tool, endpoint: via, method: 'GET', body: null } };
-      const plan = planExec(viaLeg, {}, { tabId, groundId });
-      if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, plan.payload);
+    const h = String(host || '').toLowerCase();
+    if (!h) return;
+    const { groundId, recipes } = await _cachedHostRecipes(h);
+    if (!groundId || !recipes || !recipes.length) return;
+    for (const leg of harvestedRecipeLegs(recipes, { host: h, mode: 'ask', groundId })) {
+      const specs = (leg && leg.tool && leg.tool.resolve) || null;
+      const spec = specs ? Object.values(specs).find((s) => s && s.via) : null;
+      if (!spec) continue;
+      const via = String(spec.via);
+      const hit = _rideResolveCache.get(`${h}|${via}`);
+      if (hit && (Date.now() - hit.at) < 120000) return;                  // already warm — say nothing, do nothing
+      try { _orchLog(`RIDE_RESOLVE ▸ warming ${via} on ${h} ahead of the ask (the cold read is ~7-12s)`); } catch { /* */ }
+      void _rideResolveVia(leg, via, { tabId, groundId });                 // fire-and-forget: it caches on arrival
+      return;                                                              // one host, one via read
     }
-  } catch { r = null; }
-  const value = (r && r.success !== false && r.value != null) ? r.value : null;
-  if (value) _rideResolveCache.set(key, { at: Date.now(), value });
-  return value;
+  } catch { /* a warm must never affect the turn it rode in on */ }
 }
 
 // CX-9b — resolve every `leg.tool.resolve` param BEFORE dispatch (both transports; the HITL write preview then shows
@@ -10619,6 +10849,24 @@ async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = fa
   return { ok: true, value: r.value };
 }
 
+/**
+ * v2.74.1893 — IS THIS LEG'S PAYLOAD A MEASURE? Judged from a cell we have ALREADY read, so it costs nothing and needs
+ * no catalog field.
+ *
+ * The decision to serve must precede the read, and whether serving is honest depends on what the payload turns out to
+ * be — rows must read as current, a measure only has to state its age. That looks circular and isn't: the cache holds
+ * the PREVIOUS sweep's cells, so one peek at any of them answers "what kind of thing does this leg return" without a
+ * request. A leg never seen before simply reads fresh, which is also the correct first-run behaviour.
+ * Deliberately NOT a declared `metricsLeg` on the recipe — the v1888 lesson (fix the projection, not the payload) says
+ * derive what the data already shows. The peek ignores age on purpose: what a leg RETURNS is not a perishable fact.
+ */
+function _metricLegFromCache(leg, paramsForCell) {
+  try {
+    const hit = _rideRowCache.get(rideCacheKey(leg, paramsForCell), 86400000);
+    return !!(hit && Object.keys(payloadMetrics(hit.value)).length);
+  } catch { return false; }
+}
+
 // Rows from one each-item's reply, list-or-single normalized. Shared by both each consumers.
 function _rideEachRows(value) {
   const rows = primaryList(value);
@@ -10652,6 +10900,13 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   const slots = new Array(all.length).fill(null);
   const doneAt = new Array(all.length).fill(false);
   let completed = 0; let nextIdx = started;
+  // v2.74.1893 — A MEASURE FAN MAY SERVE FROM THE ROW CACHE. The v1881 rule stands for rows ("rendered rows read as
+  // current, so the fan populates and takes maxAgeMs: 0") and does not carry to a MEASURE: the answer is a number that
+  // already ships with a provenance caveat, so stating its age costs one clause — the same move the FIND receipt makes.
+  // The user's scope ruling made this matter: every unscoped aggregate now sweeps the axis, and the live pass ran two
+  // 121-cell fans thirteen seconds apart for one answer (242 reads).
+  const _serveMs = _metricLegFromCache(leg, { ...params, [each.name]: (all[started] && all[started].value) }) ? _RIDE_CACHE_MS : 0;
+  let fanCached = 0; let fanOldestMs = 0;
   try {
     const fanWorker = async () => {
       while (nextIdx < all.length && !_rideEachAbort) {
@@ -10662,8 +10917,9 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
         // parameter both existed; the CHAIN each-path passed it and this panel each-path never did. The roll-up
         // already carries the successes; a per-item FAILURE still logs individually, which the roll-up cannot express.
         let r = null;
-        try { r = await _rideExecOnce(leg, { ...params, [each.name]: v.value }, { tabId, groundId, quiet: true }); } catch { r = null; }   // DK-8b — the shared per-item executor
+        try { r = await _rideExecOnce(leg, { ...params, [each.name]: v.value }, { tabId, groundId, quiet: true, maxAgeMs: _serveMs }); } catch { r = null; }   // DK-8b — the shared per-item executor
         doneAt[i] = true; completed++;
+        if (r && r.cached) { fanCached++; fanOldestMs = Math.max(fanOldestMs, r.ageMs || 0); }
         if (r && r.ok) slots[i] = { label: v.label, value: r.value, rows: _rideEachRows(r.value) };
         else failed++;
         // Progress is a COMPLETION count now — under concurrency there is no single "current" item, and `i` no
@@ -10677,7 +10933,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   const stopped = _rideEachAbort; _rideEachAbort = false;
   // exclusive — the first cell NOT completed, so a resume never skips one that was in flight when the stop landed
   let ranTo = started; while (ranTo < all.length && doneAt[ranTo]) ranTo++;
-  try { _orchLog(`RIDE_EACH ▸ ${leg.tool.recipeId || leg.key} × ${ranTo - started} (${started + 1}–${ranTo} of ${total})${stopped ? ' STOPPED' : ''} → ${items.length} ok, ${failed} failed, ${items.reduce((n, it) => n + it.rows.length, 0)} row(s)`); } catch { /* */ }
+  try { _orchLog(`RIDE_EACH ▸ ${leg.tool.recipeId || leg.key} × ${ranTo - started} (${started + 1}–${ranTo} of ${total})${stopped ? ' STOPPED' : ''} → ${items.length} ok, ${failed} failed, ${items.reduce((n, it) => n + it.rows.length, 0)} row(s)${fanCached ? `, ${fanCached} cached ≤${Math.round(fanOldestMs / 1000)}s` : ''}`); } catch { /* */ }
   if (!items.length && !stopped) {
     // v2.74.1856 — Experiment B: every fan-out EXIT speaks (the 07-27 14:38 silence — a 121-division tally with
     // no terminal line — is the trace-lint's founding fixture; render calls are trace-invisible, receipts aren't).
@@ -10741,20 +10997,38 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   // key, `Age` is a string), while every statistics reply yields one per bucket — so this cannot swallow a record fan.
   {
     const _mrows = [];
-    for (const it of view) for (const row of it.rows) _mrows.push(payloadMetrics(row));
+    const _mgroups = [];   // v1897 — per-GROUP measures, kept so "which one has the most?" can name a winner
+    for (const it of view) {
+      let first = null;
+      for (const row of it.rows) { const m = payloadMetrics(row); _mrows.push(m); if (!first && Object.keys(m).length) first = m; }
+      if (first) _mgroups.push({ label: String(it.label), m: first });
+    }
     if (!headNote && _mrows.length && _mrows.every((m) => Object.keys(m).length)) {
       const _sums = sumMetrics(_mrows);
-      const _line = Object.entries(_sums).map(([k, v]) => `**${escHtml(k)}**: ${v}`).join(' · ');
       const _groups = view.filter((it) => it.rows.length).length;
-      _setMessageBody(msg, `${legName} — totals across ${span}${failed ? ` (${failed} ${noun}${failed === 1 ? '' : 's'} failed)` : ''}:\n\n${_line}\n\n_These are each ${noun}'s own dashboard counts, summed over the ${_groups} I read — not a row-by-row scan._`, { markdown: true });
-      try { _orchLog(`RIDE_EACH ▸ metric aggregate — ${Object.keys(_sums).length} measure(s) summed over ${_groups}/${view.length} ${noun} group(s), rows NOT rendered`); } catch { /* */ }
-      _lastGroundedRead = { leg, params, at: Date.now(), value: { results: [_sums] } };
-      _accreteFocusFromRead({ leg, params, value: _lastGroundedRead.value, convId: _askConvId });
+      // v2.74.1890 — SHAPED BY THE ASK, not dumped. Live 11:16/11:17 a count question and a yes/no question got the
+      // same three-number table because this printed every measure and never read the ask (the user asked why they
+      // were identical, which is the right question). `askedMetric` picks the one they named; the rest demote.
+      const _asked = askedMetric(ask, _sums);
+      const _named = _asked ? String(_asked.label).split(' + ') : [];
+      const _hits = _asked ? _mrows.filter((m) => _named.some((k) => (Number(m[k]) || 0) > 0)).length : null;
+      _setMessageBody(msg, metricAnswerLine({ ask, sums: _sums, asked: _asked, scopePhrase: span, groups: _groups, failed, noun, hits: _hits, fromCache: fanCached, oldestMs: fanOldestMs, perGroup: _mgroups, superlative: superlativeAsk(ask) }), { markdown: true });
+      try { _orchLog(`RIDE_EACH ▸ metric aggregate — ${Object.keys(_sums).length} measure(s) summed over ${_groups}/${view.length} ${noun} group(s)${_asked ? ` · asked=${_asked.label}=${_asked.value}` : ' · no measure named by the ask'}, rows NOT rendered`); } catch { /* */ }
+      // v2.74.1897 — AN AGGREGATE IS AN ANSWER, NOT A COLLECTION, so it does NOT become the prior. Live (gl 18:36):
+      // `which division has the most open tasks?` stored `{results:[sums]}` and the next two asks — "for each of
+      // those, read the vendor explanation" and "which of those ask for a replacement?" — ran against a ONE-ROW
+      // TOTALS RECORD. They answered honestly about it ("no vendor explanation field", "none of the 1 record"), and
+      // the row rendered with the label `6`, a metric VALUE used as an item id. Leaving the prior alone means "those"
+      // keeps meaning the last list the user actually saw, which is what it meant before the count.
       return true;
     }
   }
   // grouped render: coverage leads, non-empty groups first, empties collapse to one line.
-  const head = `${legName} — ${totalRows}${headNote} across ${span}${each.capped ? ` (enumeration capped at ${all.length})` : ''}${failed ? ` — ${failed} ${noun}${failed === 1 ? '' : 's'} failed` : ''}:`;
+  // v2.74.1893 — the BELT on the serve decision: if the peek said "measure" and the render turned out to be ROWS after
+  // all, those rows may be up to two minutes old and the v1881 rule says they must not read as current. So the header
+  // carries the age rather than the serve being silently wrong. Expected to be unreachable; cheap enough to keep.
+  const _staleRows = fanCached ? ` (${fanCached} ${noun}${fanCached === 1 ? '' : 's'} from reads up to ${Math.round(fanOldestMs / 1000)}s old)` : '';
+  const head = `${legName} — ${totalRows}${headNote} across ${span}${each.capped ? ` (enumeration capped at ${all.length})` : ''}${_staleRows}${failed ? ` — ${failed} ${noun}${failed === 1 ? '' : 's'} failed` : ''}:`;
   const secs = [];
   const nonEmpty = view.filter((it) => it.rows.length); const empty = view.filter((it) => !it.rows.length);
   // a drill-filtered view renders ONLY its matching rows (label lines, like the drill's many-hit list) — the
@@ -11186,16 +11460,30 @@ function _refreshResolveCacheFrom(leg, value) {
  * a fact about the scope, not about the world, so it escalates rather than asking permission. Cost is one 121-cell fan
  * (~2s since v1880 made it concurrent), and only ever after an empty read.
  */
-async function _maybeWidenExistential(msg, { leg, ask, tabId, groundId, params, value }) {
+async function _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, value }) {
   const _widenConvId = _currentConversationId;   // FC-6 — the hit belongs to the conversation that asked, not the one on screen when the scan ends
   try {
-    if (!isExistentialAsk(ask)) return false;
+    // v2.74.1891 — TWO SHAPES, ONE SCOPE (user ruling 2026-07-30, findings 16:08). An unscoped EXISTENTIAL ask wants
+    // one from anywhere; an unscoped AGGREGATE ask wants the whole number — and both mean "anywhere I can see", which
+    // is what the live pair proved by answering 0 and 22 about the same thing thirty-one seconds apart. The mode is
+    // what differs: 'first' stops at a hit, 'all' reads the axis out. A measure is summed in either (v1890).
+    const _mode = isExistentialAsk(ask) ? 'first' : (isCollectiveAsk(ask) ? 'all' : null);
+    if (!_mode) return false;
     // v2.74.1889 — "FOUND SOMETHING" MUST MEAN THE THING THAT WAS ASKED FOR. `rowsFromValue().length` alone was true
     // for a STATS payload's envelope while the measure asked about was zero, so `is there anything open right now?`
     // answered a scoped "no" from Atlanta West with eighteen open tasks in ten other divisions (gl 09:48). When the ask
     // names one of the payload's own measures, THAT number decides; otherwise the row test stands exactly as before.
-    const _askedHere = askedMetric(ask, payloadMetrics(value));
-    if (_askedHere ? _askedHere.value > 0 : rowsFromValue(value).length) return false;   // it found something — that IS the answer
+    // v2.74.1894 — THE GATE BELONGS TO 'first' ALONE, and reusing it for 'all' was a two-version-old bug of mine.
+    // "Did the scoped read already answer this?" has a mode-dependent answer: for one-from-anywhere, a hit IS the
+    // answer; for an aggregate, **one cell is not the aggregate**. Live 17:09:46: `how many warranty tasks are fixed?`
+    // saw fixed=1 in the default division, stood down, and answered "1 fixed warranty task in Atlanta West" while the
+    // corpus held 9 — so the ruling was honoured only when the default division happened to be EMPTY (the 17:09:18
+    // twin widened purely because open=0 there). 'all' has no such exit: the axis check above already guarantees the
+    // ask named no scope, and that is the entire precondition for sweeping it.
+    if (_mode === 'first') {
+      const _askedHere = askedMetric(ask, payloadMetrics(value));
+      if (_askedHere ? _askedHere.value > 0 : rowsFromValue(value).length) return false;   // it found something — that IS the answer
+    }
     const specs = (leg && leg.tool && leg.tool.resolve) || null;
     if (!specs) return false;
     // v2.74.1886 — "NOT NAMED BY THE ASK" is the test, not "defaulted". User ruling: *"get any open warranty request
@@ -11209,21 +11497,29 @@ async function _maybeWidenExistential(msg, { leg, ask, tabId, groundId, params, 
     const cells = (rp && rp.each && Array.isArray(rp.each.values)) ? rp.each.values : [];
     if (cells.length < 2) return false;
     const noun = axis.replace(/Id$/i, '');
-    try { _orchLog(`SCOPE ▸ widened on "${existentialToken(ask)}" — ${axis} not named by the ask; scanning ${cells.length} ${noun}(s) for the FIRST hit`); } catch { /* */ }
-    _setMessageBody(msg, `Nothing in your current ${noun} — you asked for any, so I'm checking the others…`);
+    try { _orchLog(`SCOPE ▸ widened on "${existentialToken(ask) || 'an aggregate ask'}" — ${axis} not named by the ask; scanning ${cells.length} ${noun}(s) ${_mode === 'first' ? 'for the FIRST hit' : 'and counting ALL of them'}`); } catch { /* */ }
+    _setMessageBody(msg, `Nothing in your current ${noun} — you asked for ${_mode === 'first' ? 'any' : 'the total'}, so I'm checking the others…`);
 
-    // ONE result, EARLY STOP. The previous shape fanned all 121 and rendered every row (17 across 10 divisions), which
-    // answers "show me all open requests" — a different ask. Stopping at the first hit also makes the common case
-    // cheap: expected cost is the first non-empty cell, not the whole axis.
+    // 'first': ONE result, EARLY STOP. Fanning all 121 and rendering every row answers "show me all open requests" —
+    // a different ask — and stopping makes the common case cheap. 'all' (v1891): an aggregate ask needs the whole
+    // axis, so nothing sets `hit` and the loop runs to completion.
     const t0 = Date.now();
     let hit = null; let scanned = 0; let failed = 0; let next = 0;
     let metricLabel = '';   // v1889 — the measure this scan is counting, for the negative's wording
+    let metricSums = null; let metricHits = 0; const metricGroups = [];   // v1890 — a MEASURE is summed, not stopped at; v1897 — per-cell, for a superlative
+    let recCount = 0; const recGroups = [];      // v1891 — 'all' over ROWS: how many, and where
+    // v2.74.1893 — the TWIN of the fan's serve decision. Fixing one of two doors is the mistake this arc has made
+    // three times (the absence texts, the scan negatives, the metric sentence), so the widen gets it in the same
+    // change rather than the next trace.
+    const _serveMs = _metricLegFromCache(leg, { ...rp.params, [axis]: (cells[0] && cells[0].value) }) ? _RIDE_CACHE_MS : 0;
+    let scanCached = 0; let scanOldestMs = 0;
     const worker = async () => {
       while (next < cells.length && !hit && !_rideEachAbort) {
         const c = cells[next++];
         let r = null;
-        try { r = await _rideExecOnce(leg, { ...rp.params, [axis]: c.value }, { tabId, groundId, quiet: true }); } catch { r = null; }
+        try { r = await _rideExecOnce(leg, { ...rp.params, [axis]: c.value }, { tabId, groundId, quiet: true, maxAgeMs: _serveMs }); } catch { r = null; }
         scanned++;
+        if (r && r.cached) { scanCached++; scanOldestMs = Math.max(scanOldestMs, r.ageMs || 0); }
         if (!r || !r.ok) { failed++; continue; }
         const rows = _rideEachRows(r.value);
         // v2.74.1889 — the SAME predicate as the entry gate, or the widen would "hit" on the first cell: every stats
@@ -11231,14 +11527,43 @@ async function _maybeWidenExistential(msg, { leg, ask, tabId, groundId, params, 
         const _m = payloadMetrics(r.value);
         const _am = askedMetric(ask, _m);
         if (_am) {
+          // v2.74.1890 — NO EARLY STOP FOR A MEASURE. The early stop exists because a RECORD hit is the answer and
+          // reading on is waste; a measure is already an aggregate, so stopping turns a complete total into "1 of
+          // unknown" to save 2.9× the reads on a 2.4s sweep (live 11:18: the widen said "Dallas South has 1 … there
+          // may be more in the remaining 79" while the fan, reading all 121, said 19). `hit` is deliberately left
+          // null here so the loop's own condition runs the axis out.
           if (!metricLabel) metricLabel = _am.label;
-          if (_am.value > 0 && !hit) hit = { label: c.label ?? c.value, value: c.value, row: rows[0] || null, more: 0, metric: _am, metrics: _m };
-        } else if (rows.length && !hit) hit = { label: c.label ?? c.value, value: c.value, row: rows[0], more: rows.length - 1, metric: null };
+          metricSums = sumMetrics([metricSums || {}, _m]);
+          metricGroups.push({ label: String(c.label ?? c.value), m: _m });   // v1897 — keep the per-cell numbers for an argmax
+          if (_am.value > 0) metricHits++;
+        } else if (rows.length) {
+          // v2.74.1891 — ROWS, and the MODE decides. 'first' stops here; 'all' counts and keeps going, because
+          // answering "how many are open" with "here's one from Dallas South" is the failure this mode exists to
+          // avoid. Worker order is nondeterministic under concurrency, so the groups are sorted at render.
+          if (_mode === 'first') { if (!hit) hit = { label: c.label ?? c.value, value: c.value, row: rows[0], more: rows.length - 1 }; }
+          else { recCount += rows.length; recGroups.push({ label: String(c.label ?? c.value), n: rows.length }); }
+        }
       }
     };
     await Promise.all(Array.from({ length: Math.min(_RIDE_CONC, cells.length) }, worker));
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    try { _orchLog(`SCOPE ▸ existential ${hit ? `hit in ${hit.label}` : 'none'} — ${scanned}/${cells.length} ${noun}(s) read in ${secs}s, ${failed} failed`); } catch { /* */ }
+    try { _orchLog(`SCOPE ▸ ${_mode} ${metricSums ? `metric sum — ${metricLabel} over ${metricHits} of` : (hit ? `hit in ${hit.label} —` : (recCount ? `row count — ${recCount} over ${recGroups.length} of` : 'none —'))} ${scanned}/${cells.length} ${noun}(s) read in ${secs}s, ${failed} failed${scanCached ? `, ${scanCached} cached ≤${Math.round(scanOldestMs / 1000)}s` : ''}`); } catch { /* */ }
+
+    // v2.74.1890 — a MEASURE scan answers with the TOTAL, through the same builder the fan uses, so the two paths
+    // cannot drift into two different sentences for one question (they already had: "Dallas South has 1" vs "19").
+    if (metricSums) {
+      const _asked = askedMetric(ask, metricSums);
+      _setMessageBody(msg, metricAnswerLine({ ask, sums: metricSums, asked: _asked, scopePhrase: `all ${cells.length} ${noun}s`, groups: scanned, failed, noun, hits: metricHits, fromCache: scanCached, oldestMs: scanOldestMs, perGroup: metricGroups, superlative: superlativeAsk(ask) }), { markdown: true });
+      return true;   // v1897 — the twin: an aggregate does not overwrite the prior collection either
+    }
+
+    // v2.74.1891 — 'all' over ROWS answers with the COUNT and where they are, never the rows: the ask was "how many".
+    if (_mode === 'all' && recCount) {
+      _setMessageBody(msg, countAnswerLine({ ask, noun: _recordNounWord(leg.name || '') || 'records', total: recCount, groups: recGroups, cells: cells.length, cellNoun: noun, failed }), { markdown: true });
+      _lastGroundedRead = { leg, params: rp.params, at: Date.now(), value: { results: recGroups.map((g) => ({ [noun]: g.label, count: g.n })) } };
+      _accreteFocusFromRead({ leg, params: rp.params, value: _lastGroundedRead.value, convId: _widenConvId });
+      return true;
+    }
 
     if (!hit) {
       // The negative may not exceed the read — the same rule as the find's verdict (v1874/v1877).
@@ -11247,17 +11572,8 @@ async function _maybeWidenExistential(msg, { leg, ask, tabId, groundId, params, 
         // v2.74.1887 — the RECORD NOUN, not the leg's display name: `leg.name` is a catalog title ("Warranty tasks by
         // status"), so the negative read *"No **Warranty tasks by status** with status new in any of the 121
         // divisions"* (gl 08:24). `_recordNounWord` is the existing chat-voice reducer for exactly this.
-        // v2.74.1889 — a METRIC scan counted a measure, not records; naming it is what makes the negative checkable.
-        : `No ${metricLabel || _recordNounWord(leg.name || '') || 'records'}${params.status ? ` with status ${params.status}` : ''} in any of the ${cells.length} ${noun}s.`, { markdown: true });
-      return true;
-    }
-    // v2.74.1889 — a METRIC hit has no record to render (the row is the stats envelope: `#warranty / Type: 8`), so it
-    // reports the COUNT and where it is. The early-stop caveat is the same and matters more here: the first non-zero
-    // division is not the largest one.
-    if (hit.metric) {
-      _setMessageBody(msg, `**${escHtml(String(hit.label))}** has ${hit.metric.value} (${escHtml(String(hit.metric.label))}) — I stopped at the first ${noun} with any, so there may be more in the remaining ${cells.length - scanned} ${noun}s.`, { markdown: true });
-      _lastGroundedRead = { leg, params: { ...rp.params, [axis]: hit.value }, labels: { [axis]: String(hit.label) }, at: Date.now(), value: { results: [{ [noun]: hit.label, ...hit.metrics }] } };
-      _accreteFocusFromRead({ leg, params: { ...rp.params, [axis]: hit.value }, labels: { [axis]: String(hit.label) }, value: _lastGroundedRead.value, convId: _widenConvId });
+        // v2.74.1890 — record-only now: a measure scan returns above, so `metricLabel` here would always be empty.
+        : `No ${_recordNounWord(leg.name || '') || 'records'}${params.status ? ` with status ${params.status}` : ''} in any of the ${cells.length} ${noun}s.`, { markdown: true });
       return true;
     }
     // STOPPED EARLY, so we cannot say how many exist — only that here is one and where it came from.
@@ -11767,7 +12083,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     }
     _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), value: rr.value };   // FL-1d — this read grounds the coming answer; CX-9j — the VALUE stays (panel memory) so a follow-up ("what are the instructions?") answers from THIS record; v1534 — labels carry the human division NAME for a follow-up on-site open
     _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: rr.value, convId: _askConvId });   // FC-3/6
-    const facts = readShapeFacts(rr.value, { displayId: _legDisplayId(leg) });   // v1887 — the DECLARED human id rides into the facts (the shaper headlined #01 while the renderer said #4889637)
+    const facts = readShapeFacts(rr.value, { displayId: _legDisplayId(leg), ask });   // v1887 — the DECLARED human id rides into the facts (the shaper headlined #01 while the renderer said #4889637)
     // CX-9j (v2.74.1445) — an explicit DETAILS-intent in the ask ("… and show details", "warranty details for …") on a
     // SINGLE record → the FULL FORMATTED RECORD, deterministically (live: the clause rode along as words and the shaper
     // digested anyway — but "details" means the fields, not a summary). Lists still digest (N records can't full-render).
@@ -11777,7 +12093,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     }
     _refreshResolveCacheFrom(leg, rr.value);   // v1880 — a live read of a via-target teaches the resolver's cache
     if (_maybeContextAnswer(msg, { leg, ask, value: rr.value })) return true;   // v1872 — the twin call (see the helper: a seeded leg rides THIS door)
-    if (await _maybeWidenExistential(msg, { leg, ask, tabId, groundId, params, value: rr.value })) return true;   // v1884 — the twin call: a seeded leg rides THIS door
+    if (await _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, value: rr.value })) return true;   // v1884 — the twin call: a seeded leg rides THIS door
     let shaped = null;
     try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts, scope: _shapeScope(params, _resolvedLabels) }); } catch { /* best-effort */ }   // CX-9d — the applied filters ride along
     // v2.74.1888 — a quantity ask over a single record with NO metric cannot be answered with a number: `count` is 1
@@ -11880,7 +12196,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: res.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled, _drillTo, _redirected });
       if (dj !== null) return dj;
     }
-    if (await _maybeWidenExistential(msg, { leg, ask, tabId, groundId, params, value: res.value })) return true;
+    if (await _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, value: res.value })) return true;
     // ANSWER-SHAPE (v2.74.1267) — the interrogator's final stage: match the answer to the QUESTION ("how many" → a
     // number), not the recipe's default list. The model SHAPES + phrases; `readShapeFacts` hands it the EXACT count + a
     // MINIMIZED sample (ids/titles/status, NO bodies — the privacy-minimization lever). A shaped answer → show it;
@@ -11889,7 +12205,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // tab-derived urlArgs (handle), so "show profile" can open that record's admin page even for a by-email lookup.
     _lastGroundedRead = { leg, params, labels: _resolvedLabels, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null, value: res.value };   // CX-9j — the value stays for field follow-ups; v1534 — labels carry the division NAME
     _accreteFocusFromRead({ leg, params, labels: _resolvedLabels, value: res.value, convId: _askConvId });   // FC-3/6
-    const facts = readShapeFacts(res.value, { displayId: _legDisplayId(leg) });   // v1887 — the twin call: the declared human id rides into the facts
+    const facts = readShapeFacts(res.value, { displayId: _legDisplayId(leg), ask });   // v1887 — the twin call: the declared human id rides into the facts
     // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
       const flines = renderConnectorLines(res.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
