@@ -143,6 +143,9 @@ export const DECISION_MARKERS = [
   { key: 'write', src: "WRITE ▸" },
   { key: 'upsert', src: "UPSERT ▸" },
   { key: 'case', src: "CASE   ▸" },
+  // CW-4 (gl 2026-07-31 observation) — a consent flip that changes what leaves the machine is a DECISION:
+  // the decisions view and the fleet must both record it.
+  { key: 'cloudlogs', src: 'CLOUDLOGS ▸' },
   // CW (DESIGN_cloud_logs.md ruling 9) — the shipper's own honesty marker: a fleet trace must record its
   // own incompleteness, and the dashboard must see the pipeline's loss rate.
   { key: 'shipper', src: 'SHIPPER ▸', metric: true, metricPattern: 'SHIPPER ▸ gap' },

@@ -70,3 +70,22 @@ describe('logShipping — backoff + urgency', () => {
     assert.ok(!urgentEvent(ev(1, 'INFO', 'x')) && !urgentEvent(ev(1, 'DEBUG', 'x')));
   });
 });
+
+describe('logShipping — normalizeRingEntry (v1910: the ring→wire contract, tested where it lives)', () => {
+  it('maps the Logger fields (level/source/message/timestamp) to the wire shape', async () => {
+    const { normalizeRingEntry } = await import('./logShipping.js');
+    const e = normalizeRingEntry({ level: 'WARN', source: 'route', message: 'HEAL ▸ suspect x', timestamp: '2026-07-31T12:00:00.000Z' }, '2.74.1910');
+    assert.equal(e.lvl, 'WARN');
+    assert.equal(e.tag, 'route');
+    assert.equal(e.msg, 'HEAL ▸ suspect x');
+    assert.equal(e.t, Date.parse('2026-07-31T12:00:00.000Z'));
+    assert.equal(e.v, '2.74.1910');
+  });
+  it('defaults safely on a malformed entry (never throws, never undefined msg)', async () => {
+    const { normalizeRingEntry } = await import('./logShipping.js');
+    const e = normalizeRingEntry({}, '');
+    assert.equal(e.lvl, 'INFO');
+    assert.equal(e.msg, '');
+    assert.ok(e.t > 0);
+  });
+});

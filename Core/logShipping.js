@@ -65,6 +65,25 @@ export function backoffDelay(attempt) {
   return Math.min(15 * 60 * 1000, 30 * 1000 * Math.pow(2, Math.max(0, attempt | 0)));
 }
 
+/**
+ * v1910 (live: empty log group) — normalize a RING entry to the wire shape. The Logger's real fields are
+ * { level, source, message, timestamp:ISO }; the shipper's first cut read { lvl, tag, msg, t } and therefore
+ * shipped vacuum — every msg normalized to '' and the decisions filter matched nothing. The contract now
+ * lives HERE, tested, instead of implicitly in the Services wiring.
+ * @param {{level?:string, source?:string, message?:string, timestamp?:string}} entry
+ * @param {string} version
+ */
+export function normalizeRingEntry(entry, version) {
+  const t = entry && entry.timestamp ? (Date.parse(entry.timestamp) || Date.now()) : Date.now();
+  return {
+    t,
+    lvl: (entry && entry.level) || 'INFO',
+    tag: (entry && entry.source) || '',
+    msg: String((entry && entry.message) || ''),
+    v: String(version || ''),
+  };
+}
+
 /** True when this event should trigger an immediate flush (§3: errors are what the fleet view is FOR). */
 export function urgentEvent(e) {
   return !!e && (LEVEL_RANK[e.lvl] ?? 0) >= LEVEL_RANK.WARN;

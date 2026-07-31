@@ -13718,6 +13718,7 @@ async function sendChatMessage() {
         _setMessageBody(m, 'Left unchanged.');
       } else {
         await chrome.storage.local.set({ [KEY]: want });
+        setTimeout(() => { try { _orchLog('CLOUDLOGS ▸ level=' + want); } catch { /* */ } }, 500);   // v1910 — the consent flip IS a decision (and, when enabling, the pipe's own first test vector)
         _setMessageBody(m, want === 'off'
           ? 'Cloud log shipping is **off** — the pending queue was dropped, nothing more leaves this machine.'
           : `Cloud log shipping is **${want}** — the scrubbed trace mirrors to CloudWatch through the Orchard API (a bound cloud identity is required; unbound installs pause until sign-in).`, { markdown: true });

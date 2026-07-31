@@ -12,7 +12,7 @@
 import { Logger } from '../../Core/Logger.js';
 import { cloudRequest, CloudClientError } from './CloudClient.js';
 import { buildDecisionRegExp } from '../../Core/decisionMarkers.js';
-import { filterForLevel, evictMiddleOut, gapEvent, buildBatches, backoffDelay, urgentEvent } from '../../Core/logShipping.js';
+import { filterForLevel, evictMiddleOut, gapEvent, buildBatches, backoffDelay, urgentEvent, normalizeRingEntry } from '../../Core/logShipping.js';
 
 const SETTING_KEY = 'settings:cloudLogs';          // 'off' | 'decisions' | 'full' (spec ruling 2; default off)
 const OUTBOX_KEY = 'cloudlogs:outbox';             // persisted so an MV3 SW death doesn't drop the queue
@@ -49,9 +49,10 @@ function _persistSoon() {
 
 function _enqueue(entry) {
   if (_level === 'off') return;
-  const kept = filterForLevel([entry], _level, _re);
-  if (!kept.length) return;
-  const e = { t: entry.t || Date.now(), lvl: entry.lvl || 'INFO', tag: entry.tag || '', msg: String(entry.msg || ''), v: _version() };
+  // v1910 — normalize FIRST (the ring's fields are level/source/message/timestamp), then filter on the
+  // normalized event: the first cut filtered the raw entry, whose .msg does not exist — vacuum shipped.
+  const e = normalizeRingEntry(entry, _version());
+  if (!filterForLevel([e], _level, _re).length) return;
   _outbox.push(e);
   const { events, dropped } = evictMiddleOut(_outbox, OUTBOX_CAP, KEEP_HEAD);
   if (dropped) { _outbox = events; _outbox.push(gapEvent(dropped)); }   // ruling 9 — the trace records its own gaps
