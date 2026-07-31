@@ -15716,7 +15716,14 @@ async function _maybeRenderAdminDesk() {
         return `• ${escHtml(String(inc.subject || '').slice(0, 48))} — ${escHtml(how)} · cleared ${clockWord(inc.closedAt, now)}`;
       }).join('\n')}`
     : '';
-  const body = `**Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}${incLine}${resolvedBlock}`;   // v2.74.1581 — emoji-free chrome (user directive)
+  // CW-4 (DESIGN_cloud_logs.md §5) — shipping is never invisible: while cloud log shipping is enabled the
+  // card carries a standing line naming the level. Silence when off (the default posture needs no badge).
+  let _cwLine = '';
+  try {
+    const _cw = (await chrome.storage.local.get('settings:cloudLogs'))?.['settings:cloudLogs'];
+    if (_cw === 'decisions' || _cw === 'full') _cwLine = `\n\ncloud logs: **on (${_cw})** — the scrubbed trace mirrors to CloudWatch · \`cloudlogs off\` stops it`;
+  } catch { /* the card never blocks on the setting read */ }
+  const body = `**Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}${incLine}${resolvedBlock}${_cwLine}`;   // v2.74.1581 — emoji-free chrome (user directive)
   let msg = document.querySelector('#messages .message[data-message-id="vitals_card"]');
   if (msg) _setMessageBody(msg, body, { markdown: true });
   else msg = appendMessage({ role: 'assistant', body, id: 'msg-vitals_card' });
