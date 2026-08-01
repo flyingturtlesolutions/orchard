@@ -1889,7 +1889,12 @@ textarea {
 /* v2.74.1785 (user directive) — each STEP is highlighted: its own pill row (accented number + soft chip
    background) sliding in with the theme's stagger as the card opens. */
 .wf-row-steps {
-  margin: var(--sp-1) 0 0 0;
+  /* WFH-1/2 (padding/hierarchy review) — the step LIST is the detail's body; separate it from the summary
+     (title+meta) above with a clear section break (8px) that is LARGER than the gap between its own members
+     (3px unpinned / 6px pinned). Proximity was inverted: the old 4px top ≈ the inter-chip gap, so the chips
+     read farther apart than the block was from the meta. 8px > both, so the steps now group as one set under
+     a visible break. */
+  margin: 8px 0 0 0;
   padding: 0;
   list-style: none;
   /* WFT-3 — px, not 0.85em: the em resolved against the body's 14px (nothing between sets a size), so the
@@ -1943,7 +1948,9 @@ textarea {
   transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease, margin 300ms cubic-bezier(0.22, 1, 0.36, 1), background var(--t-fast);
   transition-delay: 0ms;
 }
-.wf-row-sched { margin-top: 2px; font-size: 11px; color: var(--c-text-subtle); }   /* WFT-3 — px, matches the steps (was 0.85em → 11.9px) */
+/* WFH-3 — the schedule (the CADENCE) is a distinct fact from the step list: separate it with 6px (a group
+   gap, > the 3px inter-chip spacing) so it doesn't blur into the last step. WFT-3 — px, matches the steps. */
+.wf-row-sched { margin-top: 6px; font-size: 11px; color: var(--c-text-subtle); }
 /* v1822 — the card-hosted RUN REPORT: a message-shaped host inside the detail; neutralize bubble chrome
    so it reads as part of the card. */
 .wf-card-run { display: block; margin: 6px 0 0; padding: 0; background: none; font-size: 0.85em; }
