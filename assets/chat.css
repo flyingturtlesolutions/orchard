@@ -1736,6 +1736,10 @@ textarea {
    VIEW = blue (kept) · CASE = green · WORKFLOW = violet (matching its step chips). */
 .rail-item-badge.case { background: rgba(76, 175, 125, 0.18); color: var(--c-x-ok-soft); }
 .rail-item-badge.wf { background: rgba(160, 122, 201, 0.18); color: var(--c-x-violet-soft); }
+/* WFT-1 (UI type review) — a workflow card's NAME is a headline, not a child label: undo the is-subtask
+   de-emphasis (which correctly dims a CASE row's title, but here made the name the dimmest text on the card,
+   identical to its own metadata). Keep is-subtask for structure; override only the colour + weight. */
+.rail-item.is-workflow .rail-item-title { color: var(--c-text); font-weight: 500; }
 .rail-item-badge.design { background: rgba(160, 122, 201, 0.18); color: var(--c-x-violet-soft); }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
 .rail-item-badge {
   display: inline-block;
@@ -1888,7 +1892,11 @@ textarea {
   margin: var(--sp-1) 0 0 0;
   padding: 0;
   list-style: none;
-  font-size: 0.85em;
+  /* WFT-3 — px, not 0.85em: the em resolved against the body's 14px (nothing between sets a size), so the
+     drill-down steps computed to 11.9px — LARGER than the 11px meta line above them, inverting the tier and
+     rescaling on any ancestor font change. 11px sits the steps at the meta's size, one clear step below the
+     13px name. */
+  font-size: 11px;
 }
 /* v2.74.1786/1787 (user directives) — each step is a badge-style chip block: v1787 — its OWN color (the
    violet family, distinct from the blue "workflow" badge), NO numbering, and the background WRAPS the text
@@ -1901,7 +1909,9 @@ textarea {
   padding: 3px 8px;
   background: rgba(167, 139, 250, 0.10);   /* v1795 — a LIGHTER violet than the workflow badge (steps sit under it) */
   border-radius: var(--r-sm);
-  color: var(--c-x-violet);
+  /* WFT-2 — the steps use the SOFT violet (matching the badge), not the bright --c-x-violet: the drill-down
+     content must sit BELOW the name and its type label, not outshine both. One violet, subordinate. */
+  color: var(--c-x-violet-soft);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1933,7 +1943,7 @@ textarea {
   transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease, margin 300ms cubic-bezier(0.22, 1, 0.36, 1), background var(--t-fast);
   transition-delay: 0ms;
 }
-.wf-row-sched { margin-top: 2px; font-size: 0.85em; color: var(--c-text-subtle); }
+.wf-row-sched { margin-top: 2px; font-size: 11px; color: var(--c-text-subtle); }   /* WFT-3 — px, matches the steps (was 0.85em → 11.9px) */
 /* v1822 — the card-hosted RUN REPORT: a message-shaped host inside the detail; neutralize bubble chrome
    so it reads as part of the card. */
 .wf-card-run { display: block; margin: 6px 0 0; padding: 0; background: none; font-size: 0.85em; }
