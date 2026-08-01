@@ -1691,6 +1691,34 @@ textarea {
   letter-spacing: 0.2px;
   margin-right: auto;   /* v2.74.1040 — push the title left so the trash + ✕ group together at the right */
 }
+/* v2.74.1933 — the rail TABS (Conversations · Automations) replace the single title. Underline-style tabs:
+   the active one is bright + accent-underlined, the inactive muted; they group left, the icon buttons right. */
+.rail-tabs {
+  display: flex;
+  gap: var(--sp-3);
+  margin-right: auto;
+}
+.rail-tab {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0 0 3px 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--c-text-subtle);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.rail-tab:hover { color: var(--c-text-muted); }
+.rail-tab.active { color: var(--c-text); border-bottom-color: var(--c-accent, #378ADD); }
+.rail-tab:focus-visible { outline: 2px solid var(--c-accent, #378ADD); outline-offset: 2px; border-radius: 2px; }
+/* the automations panel shares the list layout; a hidden tabpanel takes no space */
+.rail-automations[hidden] { display: none; }
+.rail-automations-empty { padding: var(--sp-4) var(--sp-3); font-size: 12px; color: var(--c-text-subtle); line-height: 1.5; }
+.rail-auto-group { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-text-subtle); padding: var(--sp-2) var(--sp-2) 2px; }
 
 /* v2.74.1040 — small gap between the trash and the ✕ close button (they now sit side-by-side) */
 .rail-header .icon-btn + .icon-btn {

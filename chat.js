@@ -653,8 +653,33 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
   await _renderRailList();
 });
 
+// v2.74.1933 — the rail has two TABS: Conversations (the accordion) and Automations (scheduled workflows +
+// parked runs, cross-desk). _railTab tracks which is showing; the open/refresh paths render the active one.
+let _railTab = 'conversations';
+async function _renderActiveRailTab(opts = {}) {
+  if (_railTab === 'automations') return _renderRailAutomations();
+  return _renderRailList(opts);
+}
+function _switchRailTab(tab) {
+  if (tab !== 'conversations' && tab !== 'automations') return;
+  _railTab = tab;
+  const isConv = tab === 'conversations';
+  try {
+    document.querySelectorAll('.rail-tab').forEach((t) => {
+      const on = t.dataset.tab === tab;
+      t.classList.toggle('active', on);
+      t.setAttribute('aria-selected', String(on));
+    });
+    $('rail-list').hidden = !isConv;
+    $('rail-automations').hidden = isConv;
+    $('btn-delete-all-conversations').style.display = isConv ? '' : 'none';   // delete-all is conversations-only
+  } catch { /* */ }
+  void _renderActiveRailTab({ force: true });
+}
+try { document.querySelectorAll('.rail-tab').forEach((t) => t.addEventListener('click', () => _switchRailTab(t.dataset.tab))); } catch { /* */ }
+
 async function _openRail() {
-  await _renderRailList({ force: true });   // v1816 — opening the rail is a user action; render immediately
+  await _renderActiveRailTab({ force: true });   // v1816/1933 — opening the rail is a user action; render the active tab now
   $('rail').classList.add('open');   // width 0 → drawer-w (chat column shrinks alongside)
 }
 
@@ -669,7 +694,7 @@ function _closeRail() {
 // bug. Guarded by .open so a closed drawer pays nothing on the hot send path.
 async function _refreshRailIfOpen() {
   _updateRailActionDot();   // v2.74.1094 — the "needs you" dot rides the toggle button, visible even when the drawer is closed
-  if ($('rail')?.classList.contains('open')) await _renderRailList();
+  if ($('rail')?.classList.contains('open')) await _renderActiveRailTab();
 }
 
 // v2.74.1249 — REVEAL the conversations drawer: open it if closed, then render. Called wherever an ASK adds/removes
@@ -9487,6 +9512,61 @@ function _railParkedRow(p) {
   }));
   item.appendChild(acts);
   return item;
+}
+
+// v2.74.1933 — the AUTOMATIONS tab renderer: a cross-desk view of what runs on its own. Two groups —
+// parked runs waiting on a human (needs-action, first), then every SCHEDULED workflow (an armed trigger),
+// each as the same _railWorkflowRow the Conversations tab uses (run-in-card / schedule / history / delete all
+// work standalone; the pin/section logic no-ops without a section parent). Cross-desk, so a workflow shows
+// its owning desk name via the parentConv passed to the row.
+async function _renderRailAutomations() {
+  const live = $('rail-automations'); if (!live) return;
+  const container = document.createElement('div');
+  let all = [];
+  try { all = await ConversationStore.list(); } catch { /* */ }
+  const desks = all.filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev');
+  // resolve every bank to its owning desk (the class-key sweep, mirrored from _renderRailListNow)
+  const wfRows = [];   // { wf, parentConv }
+  try {
+    const banks = await listAllWorkflows();
+    for (const b of banks) {
+      if (!b || !Array.isArray(b.items) || !b.items.length) continue;
+      const key = String(b.appId);
+      const owner = desks.find((c) => String(c.instanceId) === key || String(c.appId) === key);
+      if (!owner) continue;   // ownerless banks show nowhere (v1814)
+      for (const w of b.items) {
+        if (!w || !(w.trigger && w.trigger.enabled)) continue;   // scheduled only
+        const wf = w.appId ? w : { ...w, appId: key };
+        if (!wfRows.some((r) => r.wf.id === wf.id)) wfRows.push({ wf, parentConv: owner });
+      }
+    }
+  } catch { /* */ }
+  // parked runs (cross-desk)
+  let parked = [];
+  try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : []; } catch { /* */ }
+
+  if (!parked.length && !wfRows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'rail-automations-empty';
+    empty.textContent = 'No automations yet. Give a workflow a schedule (its ⏱ chip) and it appears here — it runs on the clock and reports its runs.';
+    container.appendChild(empty);
+    live.replaceChildren(...container.childNodes);
+    return;
+  }
+  if (parked.length) {
+    const h = document.createElement('div'); h.className = 'rail-auto-group'; h.textContent = 'Needs approval';
+    container.appendChild(h);
+    for (const p of parked) container.appendChild(_railParkedRow(p));
+  }
+  if (wfRows.length) {
+    const h = document.createElement('div'); h.className = 'rail-auto-group'; h.textContent = `Scheduled (${wfRows.length})`;
+    container.appendChild(h);
+    // soonest-due first
+    wfRows.sort((a, b) => ((a.wf.trigger && a.wf.trigger.nextDue) || Infinity) - ((b.wf.trigger && b.wf.trigger.nextDue) || Infinity));
+    for (const { wf, parentConv } of wfRows) container.appendChild(_railWorkflowRow({ wf, wfKey: wf.appId }, parentConv));
+  }
+  if (!live.isConnected) return;
+  live.replaceChildren(...container.childNodes);
 }
 
 // CD-6 (DESIGN_cadence.md §6) — the RUN HISTORY view. History is its OWN store (wfruns:<workflowId>), never the
