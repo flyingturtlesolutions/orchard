@@ -17,6 +17,9 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.match(user, /startTime\*:string\(date-time\)/);
     assert.match(system, /ISO 8601/);
     assert.doesNotMatch(buildInterpretMessages('x', {}).user, /NOW:/);   // no now → no stray line
+    // v2.74.1920 — the ZONE RULE rides with the clock (glf 00:44: local NOW minus UTC createdAt read "3h" for a
+    // true 8h gap): the line itself forbids cross-zone subtraction, and it only exists when NOW does.
+    assert.match(user, /never subtract a UTC timestamp from local time/);
   });
 
   it('system states the intents + the clarify-when-unsure trust rule; user carries the ask', () => {

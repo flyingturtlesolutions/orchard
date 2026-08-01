@@ -445,6 +445,27 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
     body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'name:{order}', n: 3 } },
     params: [{ name: 'order', type: 'string', required: true }] },
+  // v2.74.1921 — THE ORDER TIMELINE, HAR-authored (admin.shopify.com.har #2, 2026-08-01; entry 116 is the order
+  // page's own Timeline fetch). The timeline section LAZY-LOADS on scroll — which is why the first HAR carried
+  // zero of it, and why "who created this order?" was unanswerable from any read: the ACTOR exists only here
+  // (the Orders query has no creator; OrderDetailsSidebar's attribution names the CHANNEL, "Draft Orders", not
+  // the person). The second READ persisted op, same transport class as the admin search: GET, sha from the op
+  // bank, variables pre-encoded in the query string with {orderGid} the one fill slot (fillEndpoint's
+  // encodeURIComponent lands `gid://…` inside the JSON string correctly — verbatim match with the capture).
+  // Response: data.node.events.edges[].node {message, createdAt, eventLabel, …} newest-first — the actor rides
+  // IN the message ("<staff> created this order for <customer> from draft order …", label order_placed);
+  // data.staffMember is the VIEWING admin, never the actor. primaryList unwraps the shape as-is (probed against
+  // the raw capture: 7 rows, no staffMember hijack — the v1907 envelope rule generalized). Messages carry
+  // page-authored HTML (<a href>) — they stay on the escape-first render path (injection boundary).
+  { ...SH, id: 'shopify_order_events', name: 'Shopify order timeline', method: 'GET', gql: false, persistedOp: 'Timeline',
+    displayId: ['message'],
+    does: 'the order TIMELINE by the order\'s INTERNAL gid — every event with its actor and time: who created it (and from what draft), returns, refunds, fulfillments, emails sent. Answers "who created/refunded/fulfilled this order" and "what happened on it". First use may need one order page scrolled to its timeline by hand to bank the operation',
+    endpoint: '/api/operations/{op_sha}/Timeline/shopify/{handle}?operationName=Timeline&variables=%7B%22id%22%3A%22{orderGid}%22%2C%22first%22%3A15%2C%22last%22%3Anull%2C%22before%22%3Anull%2C%22after%22%3Anull%7D',
+    // v2.74.1922 — fromField: a machineOnly param binds from the RECORD, never from generation (live 123241: the
+    // model CONSTRUCTED "gid://shopify/Order/59987" from the DEAKO number while the true gid sat in focus; the
+    // act door's fill reads the newest focus record/list's `id` and overrides a generated value). The field rides
+    // hop 1 verbatim (recipeFromCatalogEntry copies `params` whole), so the seeded path carries it too.
+    params: [{ name: 'orderGid', type: 'string', required: true, machineOnly: true, fromField: 'id', hint: 'the order\'s INTERNAL gid (`id` on an order row, gid://shopify/Order/…) — never the DEAKO# number; fetch the order first, then ask from it' }] },
   { ...SH, id: 'shopify_search_products', name: 'Search Shopify products', itemUrl: '/store/{handle}/products/{id}',
     displayId: ['title'],
     does: 'search Shopify products by title or free words (with variants, price, inventory; drafts and archived included — say so when a hit is not ACTIVE), riding your admin login. For an exact SKU use the by-SKU lookup',
@@ -916,6 +937,8 @@ const _OP_CAPTURE_HINTS = {
   DraftOrderCreate: 'create a draft order by hand (Orders → Drafts → Create order, any product; you can delete the draft right after)',
   // v2.74.1905 — the first READ persisted op: the admin search bar's own operation.
   Search: 'type anything into the admin search bar once (the magnifying glass, top bar) — that banks the search operation',
+  // v2.74.1921 — the second READ persisted op: the order page's timeline fetch (it lazy-loads on scroll).
+  Timeline: 'open any order page and scroll down to its timeline once — that banks the timeline operation',
 };
 /** The by-hand capture instruction for an op. PURE (a safe default for unmapped ops). */
 export function opCaptureHint(op) {

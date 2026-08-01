@@ -480,15 +480,24 @@ describe('readShapeFacts — the asked block reaches DEPTH (v1903)', () => {
   });
 });
 
-describe('buildAnswerShapeMessages — the clock (v1903)', () => {
-  it('TODAY rides the user message when the transport supplies it', () => {
+describe('buildAnswerShapeMessages — the clock (v1903) + its grain (v1913)', () => {
+  it('a full-ISO stamp rides the user message as NOW (UTC)', () => {
+    const u = buildAnswerShapeMessages({ ask: 'how old are those orders?', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }), today: '2026-07-31T19:53:00.000Z' }).user;
+    assert.match(u, /NOW: 2026-07-31T19:53:00\.000Z \(UTC\)/);
+  });
+  it('a date-only stamp says so — the grain travels with the line (v1913)', () => {
     const u = buildAnswerShapeMessages({ ask: 'how old are those orders?', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }), today: '2026-07-31' }).user;
-    assert.match(u, /TODAY: 2026-07-31/);
+    assert.match(u, /NOW: 2026-07-31 \(date only — no time-of-day is known\)/);
   });
-  it('the system rule forbids computing an age without TODAY', () => {
-    assert.match(buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }) }).system, /inventing today's date is fabrication/);
+  it('the system rule forbids computing an age without NOW, and sub-day claims beyond its grain', () => {
+    const s = buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }) }).system;
+    assert.match(s, /inventing today's date is fabrication/);
+    assert.match(s, /a date-only NOW supports day math/);
   });
-  it('no today → no TODAY line (byte-identical prompt otherwise)', () => {
-    assert.doesNotMatch(buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }) }).user, /TODAY:/);
+  it('the system rule forbids invented id sigils (v1915)', () => {
+    assert.match(buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts({ results: [SH_ORDER_T] }) }).system, /never add "#" or any sigil/);
+  });
+  it('no today → no NOW line (byte-identical prompt otherwise)', () => {
+    assert.doesNotMatch(buildAnswerShapeMessages({ ask: 'x', facts: readShapeFacts({ results: [SH_ORDER_T, SH_ORDER_T] }) }).user, /NOW:/);
   });
 });

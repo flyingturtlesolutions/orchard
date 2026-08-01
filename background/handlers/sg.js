@@ -662,6 +662,15 @@ export function assertCtx(ctx) {
 const _HARVEST_TEE_FILE = 'ContentScripts/harvestTee.js';
 const _harvestSessions = new Map();   // groundId → { tabId, host, regId, appHost, origin }
 const _harvestRegId = (groundId) => `ahub-harvest-${String(groundId || '').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60)}`;
+// v2.74.1924 — SCRUB-BEFORE-SLICE (the chat.js twin): the ring scrub is TLD-anchored, so an ask head-sliced mid-
+// email ships the fragment verbatim (live 123241: `…for dmonk@deako.` on the cloud wire). User-authored text
+// scrubs FIRST — the Core/Logger.js pattern — then cuts; a post-scrub cut at worst truncates "[email]" itself.
+// v1924-b (review) — phone + long-digit rules too (same truncation hazard); boundaries verbatim from Logger.
+const _scrubHead = (s, n = 60) => String(s ?? '')
+  .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]')
+  .replace(/(?<![\w.@-])(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?![\w])/g, '[phone]')
+  .replace(/\b\d{8,}\b/g, '[id]')
+  .slice(0, n);
 const _hostMatchPattern = (host) => `*://${String(host || '').replace(/[^a-zA-Z0-9.\-]+/g, '')}/*`;
 
 // The MAIN-world reader DRAIN_HARVEST_TEE + stopHarvestSession run to pull + clear a tab's captures (sessionStorage
@@ -1047,7 +1056,7 @@ export function createSgMessageHandlers(ctx) {
         const cacheKey = _routeCacheKey(ask, groundId, tabUrl ? ctx.normalizeUrl(tabUrl) : '');
         const hit = seed ? null : _routeCache.get(cacheKey);   // CV-2b — a seeded ask is conversation-specific; never serve/pollute the cross-conversation cache
         if (hit && (Date.now() - hit.at) < ROUTE_CACHE_TTL_MS) {
-          Logger.info('route', `ROUTE_ASK "${ask.slice(0, 60)}" -> ${hit.decision.action} (CACHE HIT, age ${Math.round((Date.now() - hit.at) / 1000)}s)`);
+          Logger.info('route', `ROUTE_ASK "${_scrubHead(ask, 60)}" -> ${hit.decision.action} (CACHE HIT, age ${Math.round((Date.now() - hit.at) / 1000)}s)`);
           sendResponse({ success: true, decision: hit.decision, groundId: groundId || null, candidateCount: hit.candidateCount, cached: true });
           return;
         }
@@ -1064,7 +1073,7 @@ export function createSgMessageHandlers(ctx) {
           if (_routeCache.size > ROUTE_CACHE_MAX) { _routeCache.delete(_routeCache.keys().next().value); }
         }
         const t = decision.tool;
-        Logger.info('route', `ROUTE_ASK "${ask.slice(0, 60)}" → ${decision.action}${t ? ` ${t.op || t.capabilityId || ''}` : ''} (conf ${decision.confidence}, ${candidates.length} cand, ground ${groundId || '—'})`);
+        Logger.info('route', `ROUTE_ASK "${_scrubHead(ask, 60)}" → ${decision.action}${t ? ` ${t.op || t.capabilityId || ''}` : ''} (conf ${decision.confidence}, ${candidates.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, candidateCount: candidates.length });
       } catch (err) {
         Logger.error('background', `ROUTE_ASK failed: ${err.message}`);
@@ -1081,7 +1090,7 @@ export function createSgMessageHandlers(ctx) {
         const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
         if (!goal || !candidates.length) { sendResponse({ success: true, match: { id: null, confidence: 0 } }); return; }
         const match = await AnthropicService.matchWorkflowSemantic({ goal, candidates });
-        Logger.info('workflow', `MATCH_WORKFLOW "${goal.slice(0, 50)}" (${candidates.length} cand) → ${match.id || 'none'}${match.id ? ` (conf ${match.confidence})` : ''}`);
+        Logger.info('workflow', `MATCH_WORKFLOW "${_scrubHead(goal, 50)}" (${candidates.length} cand) → ${match.id || 'none'}${match.id ? ` (conf ${match.confidence})` : ''}`);
         sendResponse({ success: true, match });
       } catch (err) {
         Logger.error('background', `MATCH_WORKFLOW failed: ${err.message}`);
@@ -1113,7 +1122,7 @@ export function createSgMessageHandlers(ctx) {
         const clause = String(payload?.clause ?? '').trim();
         if (!clause) { sendResponse({ success: true, spec: { task: '', persona: null } }); return; }
         const spec = await AnthropicService.extractFanoutSpec({ clause });
-        Logger.info('fanout', `FANOUT_SPEC "${clause.slice(0, 50)}" → ${describeFanoutSpec(spec) || 'no slots declared'}`);   // FS-6 — all eight slots, not just task/persona
+        Logger.info('fanout', `FANOUT_SPEC "${_scrubHead(clause, 50)}" → ${describeFanoutSpec(spec) || 'no slots declared'}`);   // FS-6 — all eight slots, not just task/persona
         sendResponse({ success: true, spec });
       } catch (err) {
         Logger.error('background', `FANOUT_SPEC failed: ${err.message}`);
@@ -1868,7 +1877,7 @@ export function createSgMessageHandlers(ctx) {
         // v1476 — the chosen leg's SCOPE TIER (alias/target/vocab/tab/global): the alias marker (ask #5) that says
         // whether this pick came from a warm recall vs a fresh vocab match — visible without cross-referencing the palette.
         let _pScope = ''; try { const _pl = retrieved.find((l) => l && legRef(l) === _pick); if (_pl && _pl.scope) _pScope = ` scope:${_pl.scope}`; } catch { /* */ }
-        Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} leg=${_pick.slice(0, 60)}${_pNames ? ` params:{${_pNames}}` : ''}${_pScope} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
+        Logger.info('route', `INTERPRET_ASK "${_scrubHead(ask, 60)}" → ${decision.intent} leg=${_pick.slice(0, 60)}${_pNames ? ` params:{${_pNames}}` : ''}${_pScope} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
         Logger.error('background', `INTERPRET_ASK failed: ${err.message}`);
@@ -2133,7 +2142,7 @@ export function createSgMessageHandlers(ctx) {
             const guarded = neutralizeFalseCompletion(answer, ask);
             if (guarded.neutralized) {
               answer = guarded.answer;
-              Logger.info('background', `ANSWER_GUARD ▸ neutralized a false-completion claim — "${ask.slice(0, 48)}" routed to answer (no dispatch) but the reply claimed the act was done`);
+              Logger.info('background', `ANSWER_GUARD ▸ neutralized a false-completion claim — "${_scrubHead(ask, 48)}" routed to answer (no dispatch) but the reply claimed the act was done`);
             }
           }
         } catch { /* never block the answer on the guard */ }
@@ -2247,7 +2256,7 @@ export function createSgMessageHandlers(ctx) {
           Logger.info('background', `RUN_SG_TRIAL — reusing cached propose spec (shape=${spec.shape}, ${(spec.subGoals || []).length} subGoal(s)) — no re-comprehend`);
         } else {
           spec = await AnthropicService.comprehendIntent({ userIntent: intent });
-          if (!spec) { Logger.info('background', `RUN_SG_TRIAL ▸ EXIT — comprehend returned nothing for "${intent.slice(0, 60)}"`); sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }   // v2.74.914
+          if (!spec) { Logger.info('background', `RUN_SG_TRIAL ▸ EXIT — comprehend returned nothing for "${_scrubHead(intent, 60)}"`); sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }   // v2.74.914
           // GA-5 — bias Select's tie-break toward this Ground's historically-durable selector tiers (only with signal).
           let _conv = null;
           try { const r = await ctx.outcomeRollups(groundId); if (r && r.conventions && r.conventions.total >= 5) _conv = r.conventions; } catch { /* */ }
@@ -2259,7 +2268,7 @@ export function createSgMessageHandlers(ctx) {
         // multi-fragment EXECUTION + accept/replay wiring lands in a follow-up (verified live).
         if (payload && payload.tier2 === true) {
           const op = lowerToTier2(spec, selection, localeModel);
-          Logger.info('background', `RUN_SG_TRIAL[tier2] — intent="${intent.slice(0, 60)}" shape=${spec.shape} nodes=${op.nodes.length} [${op.nodes.map((n) => n.type).join(' → ')}]`);
+          Logger.info('background', `RUN_SG_TRIAL[tier2] — intent="${_scrubHead(intent, 60)}" shape=${spec.shape} nodes=${op.nodes.length} [${op.nodes.map((n) => n.type).join(' → ')}]`);
           // v2.74.634 — per-fragment role diagnostic (why a filter node is over-bound): featureId:kind:effect,
           // plus whether the fragment's goal(s) carry a submit (which makes SG-RES-7d treat it as a form).
           const _feats = (localeModel && localeModel.features) || {};
@@ -2284,7 +2293,7 @@ export function createSgMessageHandlers(ctx) {
           const _actionable = phases.filter((n) => n && n.type === 'fragment' && Array.isArray(n.roles) && n.roles.length);
           if (!_actionable.length) {
             const cover0 = coverComplete(spec, selection);
-            Logger.info('background', `RUN_SG_TRIAL[tier2] ▸ EXIT — no actionable phases for "${intent.slice(0, 60)}" (cover=${cover0.complete}; ${cover0.reason})`);
+            Logger.info('background', `RUN_SG_TRIAL[tier2] ▸ EXIT — no actionable phases for "${_scrubHead(intent, 60)}" (cover=${cover0.complete}; ${cover0.reason})`);
             sendResponse({ success: true, ran: false, reason: 'no actionable phases from the selection', cover: cover0, intentShape: spec.shape, tier2: true });
             return;
           }
@@ -2375,8 +2384,8 @@ export function createSgMessageHandlers(ctx) {
         }
         const cover = coverComplete(spec, selection);
         const roles = selectionToTrialRoles(spec, selection, localeModel);
-        Logger.info('background', `RUN_SG_TRIAL — intent="${intent.slice(0, 60)}" shape=${spec.shape} cover=${cover.complete} roles=${roles.length}`);
-        if (!roles.length) { Logger.info('background', `RUN_SG_TRIAL ▸ EXIT — no bindable roles from the selection for "${intent.slice(0, 60)}"`); sendResponse({ success: true, ran: false, reason: 'no bindable roles from the selection', cover, intentShape: spec.shape }); return; }   // v2.74.925 (CR-T2) — the .914 every-exit-logs invariant missed this one
+        Logger.info('background', `RUN_SG_TRIAL — intent="${_scrubHead(intent, 60)}" shape=${spec.shape} cover=${cover.complete} roles=${roles.length}`);
+        if (!roles.length) { Logger.info('background', `RUN_SG_TRIAL ▸ EXIT — no bindable roles from the selection for "${_scrubHead(intent, 60)}"`); sendResponse({ success: true, ran: false, reason: 'no bindable roles from the selection', cover, intentShape: spec.shape }); return; }   // v2.74.925 (CR-T2) — the .914 every-exit-logs invariant missed this one
         // Precondition: Comprehend+Select take several seconds of LLM calls, during which the page can
         // navigate away (e.g. an auth redirect to /login). Re-read the live URL and bail with a CLEAR
         // "wrong page" rather than typing the form's selectors into whatever loaded.
@@ -3324,7 +3333,7 @@ export function createSgMessageHandlers(ctx) {
         const via = scorer ? 'llm' : (aliasHit ? 'alias' : 'lexical');   // alias-hit may bind via LLM but is alias-DECIDED
         // ── ORCH_MATCH diagnostics — full visibility into a match decision ──
         const _capLine = (c) => { const u = (c.params || []).filter((p) => p && p.used); return `${String(c.id).slice(0, 8)}:"${c.intent}"${u.length ? `[${u.map((p) => `${p.name}/${p.kind}${Array.isArray(p.vocabulary) ? `(${p.vocabulary.length}:${p.vocabulary.slice(0, 6).join('|')})` : ''}`).join(', ')}]` : ''}`; };
-        Logger.info('background', `ORCH_MATCH ▸ ask="${String(ask).slice(0, 90)}" @ ${localeUrl || '(no url)'} ground=${gid}`);
+        Logger.info('background', `ORCH_MATCH ▸ ask="${_scrubHead(ask, 90)}" @ ${localeUrl || '(no url)'} ground=${gid}`);
         Logger.info('background', `  affordances(${affordances.length}): ${JSON.stringify(affordances.slice(0, 40))}`);
         Logger.info('background', `  candidates(${candidates.length}): ${candidates.map(_capLine).join('  |  ') || '(none)'}`);
         if (llm) Logger.info('background', `  llm: top=${llm.topId} bindings=${JSON.stringify(llm.bindings)} rationale="${llm.rationale}" scores=${JSON.stringify(llm.scores)}`);
@@ -3385,7 +3394,7 @@ export function createSgMessageHandlers(ctx) {
           for (const c of pool) tagged.push({ cand: c, gid, g });
         }
         Logger.info('background', `GROUNDS ▸ ${roster.length} ground(s): ${roster.join(' · ') || '(none)'}`);   // v2.74.818 — the inventory blind-spot: host(id,Ncap) for every Ground
-        if (!tagged.length) { Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${String(ask).slice(0, 60)}" → no candidates across Grounds`); sendResponse({ success: true, hits: [] }); return; }
+        if (!tagged.length) { Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${_scrubHead(ask, 60)}" → no candidates across Grounds`); sendResponse({ success: true, hits: [] }); return; }
         // ONE LLM matchCapability pass over the COMBINED pool — the lexical floor is too weak for cross-Ground intent
         // (live trace: "search jazz singer jobs" missed lexically but the LLM scored "Search jobs by title and
         // location" 0.95). Scores are per-candidate, so we keep every Ground whose best candidate clears the floor →
@@ -3418,7 +3427,7 @@ export function createSgMessageHandlers(ctx) {
           } });
         }
         const hits = [...bestByGround.values()].sort((a, b) => b.relevance - a.relevance).map((x) => x.hit);
-        Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${String(ask).slice(0, 60)}" → ${hits.length} Ground(s) [${scores ? 'LLM' : 'lexical'} over ${tagged.length} cand]: ${hits.map((h) => `${h.groundName}(${h.relevance.toFixed(2)})`).join(', ') || '(none)'}`);
+        Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${_scrubHead(ask, 60)}" → ${hits.length} Ground(s) [${scores ? 'LLM' : 'lexical'} over ${tagged.length} cand]: ${hits.map((h) => `${h.groundName}(${h.relevance.toFixed(2)})`).join(', ') || '(none)'}`);
         sendResponse({ success: true, hits });
       } catch (err) {
         Logger.error('background', `ORCH_MATCH_GLOBAL failed: ${err.message}`);
@@ -3748,7 +3757,7 @@ export function createSgMessageHandlers(ctx) {
         const wfId = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const built = buildWorkflowRecord({ id: wfId, intent: ask, name: String(ask).slice(0, 60), resolved });
         if (!built || !built.workflow || !Array.isArray(built.workflow.steps) || !built.workflow.steps.length) { sendResponse({ success: false, error: 'could not build a runnable step for that capability' }); return; }
-        Logger.info('background', `BUILD_SG_ON_GROUND_WORKFLOW — "${String(ask).slice(0, 50)}" → ${capabilityKind} ${capabilityId} on ${_groundLabel(g)} (params: ${Object.keys(stated).join(',') || 'none'})`);
+        Logger.info('background', `BUILD_SG_ON_GROUND_WORKFLOW — "${_scrubHead(ask, 50)}" → ${capabilityKind} ${capabilityId} on ${_groundLabel(g)} (params: ${Object.keys(stated).join(',') || 'none'})`);
         sendResponse({ success: true, workflow: built.workflow, runnable: built.runnable });
       } catch (err) {
         Logger.error('background', `BUILD_SG_ON_GROUND_WORKFLOW failed: ${err.message}`);
@@ -3783,11 +3792,11 @@ export function createSgMessageHandlers(ctx) {
           const pruned = removeAlias(other.aliases, phrase);
           if (pruned.length !== other.aliases.length) { other.aliases = pruned; try { await ctx.writeSgCapability(groundId, other); depoisoned++; } catch { /* */ } }
         }
-        if (depoisoned) Logger.info('background', `ORCH_RECORD_ALIAS — de-poisoned "${String(phrase).slice(0, 40)}" from ${depoisoned} other capability(ies)`);
+        if (depoisoned) Logger.info('background', `ORCH_RECORD_ALIAS — de-poisoned "${_scrubHead(phrase, 40)}" from ${depoisoned} other capability(ies)`);
         // ORCH-G — record the confirmation so the capability's health accrues (gate promotion). `confirmed:true`
         // distinguishes a match-confirmation from the DERIVE-time 'accept' so creation doesn't inflate health.
         try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', outcome: 'success', detail: { capabilityId: cap.id, confirmed: true, phrase: String(phrase).slice(0, 120) } })]); } catch { /* */ }
-        Logger.info('background', `ORCH_RECORD_ALIAS — "${String(phrase).slice(0, 40)}" → ${cap.id} (${before}→${cap.aliases.length} alias, +1 confirmation)`);
+        Logger.info('background', `ORCH_RECORD_ALIAS — "${_scrubHead(phrase, 40)}" → ${cap.id} (${before}→${cap.aliases.length} alias, +1 confirmation)`);
         sendResponse({ success: true, aliases: cap.aliases, added: cap.aliases.length > before });
       } catch (err) {
         Logger.error('background', `ORCH_RECORD_ALIAS failed: ${err.message}`);
@@ -3842,7 +3851,7 @@ export function createSgMessageHandlers(ctx) {
             }
           } catch (e) { Logger.warn('background', `ORCH_FEEDBACK op ${op && op.op} failed: ${e.message}`); }
         }
-        Logger.info('background', `ORCH_FEEDBACK ▸ ${kind} cap=${String(capabilityId).slice(0, 8)} applied=[${applied.join(',')}] ask="${String(ask).slice(0, 50)}"`);
+        Logger.info('background', `ORCH_FEEDBACK ▸ ${kind} cap=${String(capabilityId).slice(0, 8)} applied=[${applied.join(',')}] ask="${_scrubHead(ask, 50)}"`);
         sendResponse({ success: true, kind, correction, say: plan.say, followup: plan.followup, applied });
       } catch (err) {
         Logger.error('background', `ORCH_FEEDBACK failed: ${err.message}`);
@@ -4187,7 +4196,7 @@ export function createSgMessageHandlers(ctx) {
         if (save && built.workflow && built.runnable) {
           try { await StorageManager.saveWorkflow(built.workflow); saved = true; } catch (e) { Logger.warn('background', `COMPREHEND_CROSS_GROUND save failed: ${e.message}`); }
         }
-        Logger.info('background', `COMPREHEND_CROSS_GROUND ▸ "${String(ask).slice(0, 60)}" → ${resolved.length} sub-intent(s), ${((built.workflow && built.workflow.steps) || []).length} step(s) across ${((built.workflow && built.workflow.groundIds) || []).length} Ground(s), runnable=${built.runnable}, ${repairs.length} repair(s)${saved ? ', saved' : ''}`);
+        Logger.info('background', `COMPREHEND_CROSS_GROUND ▸ "${_scrubHead(ask, 60)}" → ${resolved.length} sub-intent(s), ${((built.workflow && built.workflow.steps) || []).length} step(s) across ${((built.workflow && built.workflow.groundIds) || []).length} Ground(s), runnable=${built.runnable}, ${repairs.length} repair(s)${saved ? ', saved' : ''}`);
         sendResponse({ success: true, workflow: built.workflow, runnable: built.runnable, gaps: built.gaps, repairs, resolved, ambiguities, saved });
       } catch (err) {
         Logger.error('background', `COMPREHEND_CROSS_GROUND failed: ${err.message}`);
@@ -4274,7 +4283,7 @@ export function createSgMessageHandlers(ctx) {
         cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
         await ctx.writeSgCapability(gid, cap);
         try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'observation', outputType: cap.outputType, selector: chosenSelector } })]); } catch { /* */ }
-        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} stored via ${via}: ${chosenArch ? `archetype "${chosenArch.selector}"[${chosenArch.index}]` : `selector "${String(chosenSelector).slice(0, 80)}"`} on ${gid}${antecedentCapabilityId ? ` · antecedent=${antecedentCapabilityId}${antecedentParamBindings ? ` (${Object.keys(antecedentParamBindings).join(',')})` : ''}` : ' · no antecedent inferred'}`);
+        Logger.info('background', `OBSERVE_CAPTURE — "${_scrubHead(ask, 50)}" ${cap.id} → ${cap.outputType} stored via ${via}: ${chosenArch ? `archetype "${chosenArch.selector}"[${chosenArch.index}]` : `selector "${String(chosenSelector).slice(0, 80)}"`} on ${gid}${antecedentCapabilityId ? ` · antecedent=${antecedentCapabilityId}${antecedentParamBindings ? ` (${Object.keys(antecedentParamBindings).join(',')})` : ''}` : ' · no antecedent inferred'}`);
         sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation', antecedent: antecedentCapabilityId ? { capabilityId: antecedentCapabilityId, label: antecedentLabel } : null }, sawText: String(label || ''), verifiedValue, via });
       } catch (err) {
         Logger.error('background', `OBSERVE_CAPTURE failed: ${err.message}`);
@@ -4440,7 +4449,7 @@ export function createSgMessageHandlers(ctx) {
         cap.localeUrl = localeUrl; cap.createdAt = Date.now();
         cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
         await ctx.writeSgCapability(gid, cap);
-        Logger.info('background', `CAPTURE_VISUAL_OBSERVATION — "${String(ask).slice(0, 50)}" ${cap.id} → ${cap.outputType} (verify count=${inp ? inp.count : '?'}) on ${gid}`);
+        Logger.info('background', `CAPTURE_VISUAL_OBSERVATION — "${_scrubHead(ask, 50)}" ${cap.id} → ${cap.outputType} (verify count=${inp ? inp.count : '?'}) on ${gid}`);
         sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, kind: 'observation', via: 'visual', outputType: cap.outputType }, verify: inp ? { count: inp.count, value: inp.value } : null });
       } catch (err) {
         Logger.error('background', `CAPTURE_VISUAL_OBSERVATION failed: ${err.message}`);
@@ -4598,7 +4607,7 @@ export function createSgMessageHandlers(ctx) {
           sendResponse({ success: true, matched: true, ok: false, name: best.name, observationId: best.id, output: ex.output });
           return;
         }
-        Logger.info('background', `RUN_BEST_OBSERVATION — "${ask.slice(0, 50)}" → manual obs "${best.name}" ${best.id} via ${msg.type} (score ${typeof bestScore === 'number' ? bestScore.toFixed(2) : '1.00'}) → "${value.slice(0, 60)}"`);
+        Logger.info('background', `RUN_BEST_OBSERVATION — "${_scrubHead(ask, 50)}" → manual obs "${best.name}" ${best.id} via ${msg.type} (score ${typeof bestScore === 'number' ? bestScore.toFixed(2) : '1.00'}) → "${value.slice(0, 60)}"`);
         sendResponse({ success: true, matched: true, ok: true, value, name: best.name, observationId: best.id, output: ex.output });
       } catch (err) {
         Logger.error('background', `RUN_BEST_OBSERVATION failed: ${err.message}`);
@@ -4664,7 +4673,7 @@ export function createSgMessageHandlers(ctx) {
             }
           } catch (e) { Logger.warn('background', `ORCH_PLAN conditional lift failed (kept flat): ${e.message}`); }
         }
-        Logger.info('background', `ORCH_PLAN ▸ ask="${String(ask).slice(0, 70)}" → ${steps.length} step(s): ${steps.map((s) => `"${s.intent}"${Object.keys(s.bindings).length ? `[${JSON.stringify(s.bindings)}]` : ''}`).join(' → ') || '(none)'}${gaps.length ? ` | uncovered: ${JSON.stringify(gaps)}` : ''}`);
+        Logger.info('background', `ORCH_PLAN ▸ ask="${_scrubHead(ask, 70)}" → ${steps.length} step(s): ${steps.map((s) => `"${s.intent}"${Object.keys(s.bindings).length ? `[${JSON.stringify(s.bindings)}]` : ''}`).join(' → ') || '(none)'}${gaps.length ? ` | uncovered: ${JSON.stringify(gaps)}` : ''}`);
         // ORCH-CB SHADOW — comprehend→bind alongside the LLM plan; LOG the divergence (observational, NO response
         // change, no LLM). Measures how much of the WARM case the deterministic floor already covers → informs the
         // warm-path swap. Best-effort: never affects the result.
@@ -4744,7 +4753,7 @@ export function createSgMessageHandlers(ctx) {
         } catch { /* template is best-effort; the exact-alias hit still works */ }
         await ctx.writeSgCapability(gid, cap);
         try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: isCF ? 'composite-cf' : 'composite', steps: cap.steps.length } })]); } catch { /* */ }
-        Logger.info('background', `ACCEPT_COMPOUND — "${ask.slice(0, 50)}" ${cap.id} → T2 ${isCF ? 'control-flow ' : ''}composite of ${cap.steps.length} step(s) [${cap.steps.map((s) => s.kind || 'action').join(' → ')}]${isCF ? ` intent="${cap.intent}" params=[${(cap.params || []).join(', ')}] → ${cap.output ? `${cap.output.name}:${cap.output.type}` : '?'}` : ''} on ${gid}`);
+        Logger.info('background', `ACCEPT_COMPOUND — "${_scrubHead(ask, 50)}" ${cap.id} → T2 ${isCF ? 'control-flow ' : ''}composite of ${cap.steps.length} step(s) [${cap.steps.map((s) => s.kind || 'action').join(' → ')}]${isCF ? ` intent="${cap.intent}" params=[${(cap.params || []).join(', ')}] → ${cap.output ? `${cap.output.name}:${cap.output.type}` : '?'}` : ''} on ${gid}`);
         sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, kind: 'composite', controlFlow: cap.controlFlow, steps: cap.steps.length, params: cap.params, output: cap.output || null } });
       } catch (err) {
         Logger.error('background', `ACCEPT_COMPOUND failed: ${err.message}`);
@@ -4780,7 +4789,7 @@ export function createSgMessageHandlers(ctx) {
           }
         }
         if (!hit) { sendResponse({ success: true, matched: false }); return; }
-        Logger.info('background', `MATCH_COMPOSITE — T2 cache HIT "${ask.slice(0, 50)}" → ${hit.controlFlow ? 'control-flow ' : ''}composite ${hit.id} (${steps.length} step(s))${rebind ? ` REBOUND ${JSON.stringify(rebind)}` : ''}`);
+        Logger.info('background', `MATCH_COMPOSITE — T2 cache HIT "${_scrubHead(ask, 50)}" → ${hit.controlFlow ? 'control-flow ' : ''}composite ${hit.id} (${steps.length} step(s))${rebind ? ` REBOUND ${JSON.stringify(rebind)}` : ''}`);
         sendResponse({ success: true, matched: true, groundId: gid, capabilityId: hit.id, intent: hit.intent, steps, controlFlow: !!hit.controlFlow, rebound: rebind || null });
       } catch (err) {
         Logger.error('background', `MATCH_COMPOSITE failed: ${err.message}`);
@@ -4889,7 +4898,7 @@ export function createSgMessageHandlers(ctx) {
           if (usedParams.length) {
             try {
               const bp = await AnthropicService.bindClauseParams({ clause: ask, params: usedParams });
-              if (bp && bp.values && typeof bp.values === 'object') { effectiveParamValues = bp.values; Logger.info('background', `REPLAY delegation bound ${Object.keys(bp.values).length} param(s) from ask "${ask.slice(0, 50)}"`); }
+              if (bp && bp.values && typeof bp.values === 'object') { effectiveParamValues = bp.values; Logger.info('background', `REPLAY delegation bound ${Object.keys(bp.values).length} param(s) from ask "${_scrubHead(ask, 50)}"`); }
             } catch (e) { Logger.warn('background', `REPLAY delegation bind failed: ${e.message}`); }
           }
         }

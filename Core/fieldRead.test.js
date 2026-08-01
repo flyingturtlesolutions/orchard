@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, deepFieldPaths } from './fieldRead.js';
+import { readFieldSection, splitSentences, normalizeFieldReadVerdict, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, deepFieldPaths, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './fieldRead.js';
 import { extractValue } from './peritemMap.js';   // v1903 — discovery and extraction must agree
 
 // Shaped after the real VendorSuite `Instructions` (HAR-verified): a date header, a numbered item with a
@@ -285,5 +285,92 @@ describe('resolveFieldKey — record mode resolves DEEP (v1903)', () => {
   });
   it('flat records resolve exactly as before (the VendorSuite regression guard)', () => {
     assert.equal(resolveFieldKey({ VendorExplanation: 'x', TicketId: 1 }, 'vendor explanation').key, 'VendorExplanation');
+  });
+});
+
+describe('v2.74.1912 — the interrogative type guard (live: "who created the order?" answered with createdAt)', () => {
+  it('askInterrogative finds who/when and nothing else', () => {
+    assert.equal(askInterrogative('who created the order?'), 'who');
+    assert.equal(askInterrogative('by whom was this filed'), 'who');
+    assert.equal(askInterrogative('whose task is this'), 'who');
+    assert.equal(askInterrogative('when did it arrive?'), 'when');
+    assert.equal(askInterrogative('what is the sku?'), null);
+    assert.equal(askInterrogative('how old is the order'), null);
+    assert.equal(askInterrogative('the show went on'), null, 'no substring hits inside words');
+  });
+  it('the LIVE case: who ⇸ createdAt (blocked), who → customer.email (an answer)', () => {
+    assert.equal(fieldAnswersInterrogative('who', 'createdAt', '2026-07-31T16:35:49Z'), false);
+    assert.equal(fieldAnswersInterrogative('who', 'customer.email', 'cherry@example.com'), true);
+  });
+  it('date-shape evidence: camel suffix, snake suffix, and ISO value all read as dates', () => {
+    assert.equal(fieldAnswersInterrogative('when', 'CreatedDate', undefined), true);
+    assert.equal(fieldAnswersInterrogative('when', 'updated_at', undefined), true);
+    assert.equal(fieldAnswersInterrogative('when', 'stamp', '2026-07-31 09:00'), true);
+    assert.equal(fieldAnswersInterrogative('when', 'reason', 'because'), null, "'reason' ends in lowercase 'on' — never a date");
+  });
+  it('when ⇸ a person field; unknown fields stay null (the guard steps aside)', () => {
+    assert.equal(fieldAnswersInterrogative('when', 'customer.email', 'a@b.co'), false);
+    assert.equal(fieldAnswersInterrogative('who', 'Instructions', 'call the office'), null);
+    assert.equal(fieldAnswersInterrogative(null, 'createdAt', ''), null);
+  });
+  it('an email-shaped VALUE answers who whatever its key is called', () => {
+    assert.equal(fieldAnswersInterrogative('who', 'ContactInfo', 'jane@x.org'), true);
+  });
+  it('v1912-b: bare `name` is NOT a person — a Shopify order name is the order number', () => {
+    assert.equal(fieldAnswersInterrogative('who', 'name', 'DEAKO#69872'), null);
+    assert.equal(fieldAnswersInterrogative('who', 'ProjectName', 'Eclipse Trail'), null);
+    assert.equal(fieldAnswersInterrogative('who', 'FirstName', 'Jane'), true, 'person compounds still count');
+  });
+  it('v1912-b: flat-lowercase wire names classify as dates (the HubSpot createdate class)', () => {
+    assert.equal(fieldAnswersInterrogative('who', 'createdate', '1719511234567'), false);
+    assert.equal(fieldAnswersInterrogative('when', 'lastmodifieddate', '1719511234567'), true);
+  });
+  it('v1912-b: the leading interrogative owns the ask', () => {
+    assert.equal(askInterrogative('what did she say when it shipped?'), null);
+    assert.equal(askInterrogative('who was notified when it shipped?'), 'who');
+  });
+  it('v1917-b: leading:true — a mid-sentence who/when is a relative clause, not the ask', () => {
+    assert.equal(askInterrogative('who created the order?', { leading: true }), 'who');
+    assert.equal(askInterrogative('whose task is this', { leading: true }), 'who');
+    assert.equal(askInterrogative('so who filed it?', { leading: true }), 'who', 'lead-in words are stripped');
+    assert.equal(askInterrogative('when did it arrive?', { leading: true }), 'when');
+    assert.equal(askInterrogative('read the assignee field from when this was created', { leading: true }), null);
+    assert.equal(askInterrogative('read the createdAt field for the customer who complained', { leading: true }), null);
+    assert.equal(askInterrogative('read the assignee field from when this was created'), 'when', 'the loose default is unchanged (the v1912 total-miss gate keeps it)');
+  });
+});
+
+describe('v2.74.1917 — interrogativeFieldCandidates: which fields COULD answer the ask (the resolve-door swap)', () => {
+  const ORDER = { id: 'gid://shopify/Order/9', name: 'DEAKO#71644', createdAt: '2026-07-31T16:35:49Z', displayFulfillmentStatus: 'UNFULFILLED', customer: { email: 'cherry@example.com' }, note: null };
+  it('the LIVE case: a who-ask on the order record finds exactly customer.email', () => {
+    assert.deepEqual(interrogativeFieldCandidates(ORDER, 'who'), ['customer.email']);
+  });
+  it('a when-ask finds the date field, never the person', () => {
+    const c = interrogativeFieldCandidates(ORDER, 'when');
+    assert.ok(c.includes('createdAt'), `createdAt in ${c}`);
+    assert.ok(!c.includes('customer.email'));
+  });
+  it('no interrogative / junk record → []', () => {
+    assert.deepEqual(interrogativeFieldCandidates(ORDER, null), []);
+    assert.deepEqual(interrogativeFieldCandidates(null, 'who'), []);
+    assert.deepEqual(interrogativeFieldCandidates([1, 2], 'who'), []);
+  });
+});
+
+describe('v2.74.1923 — WHO has roles (type-compatible is not role-compatible)', () => {
+  it('the LIVE case: a created-ask on a customer field is a role MISMATCH', () => {
+    assert.equal(askWhoRole('who created the order?'), 'creator');
+    assert.equal(fieldWhoRole('customer.email'), 'customer');
+  });
+  it('role matches render as THE answer (creator field for a created-ask)', () => {
+    assert.equal(fieldWhoRole('createdBy'), 'creator');
+    assert.equal(fieldWhoRole('AuthorName'), 'creator');
+    assert.equal(askWhoRole('who was this assigned to?'), 'assignee');
+    assert.equal(fieldWhoRole('AssigneeEmail'), 'assignee');
+  });
+  it('unclear roles stay null — the guard steps aside', () => {
+    assert.equal(askWhoRole('who is on this order?'), null);
+    assert.equal(fieldWhoRole('email'), null);
+    assert.equal(fieldWhoRole('DisplayName'), null);
   });
 });

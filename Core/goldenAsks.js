@@ -82,6 +82,9 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   // field; bare "DK-SW-01" against the default search fields missed live). The negative pins the house split:
   // an exact SKU must not fall to the free-text product search.
   { ask: 'find the product with sku DK-SW-01', expect: { legId: 'shopify_product_by_sku' }, expectParams: { sku: 'DK-SW-01' }, mustNotResolve: ['shopify_search_products'], mintedAt: 'v2.74.1904' },
+  // v2.74.1921 — the order timeline (HAR-authored): actor-bearing events are ONLY here — a who/what-happened ask
+  // on an order must reach the events leg, never settle for the order record's customer.
+  { ask: 'show the order timeline — who created it and what has happened since', expect: { legId: 'shopify_order_events' }, mintedAt: 'v2.74.1921' },
   { ask: "how's the store doing today", expect: { legId: 'shopify_shop_pulse' } },
   { ask: 'show the unfulfilled orders', expect: { legId: 'shopify_orders_queue' } },
   { ask: 'create a shopify profile for the homeowner', expect: { legId: 'shopify_create_customer' } },   // trace-adjacent (the find-or-create flow)

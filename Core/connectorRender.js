@@ -394,7 +394,7 @@ export function renderConnectorLines(value, { name = 'Results', displayId = null
       const label = it.title || itemFields(o, { max: 4 }).map(([, v]) => v).join(' · ') || '(no title)';
       // v2.74.1907 — id ≡ label collapses (displayId ['title'] made every product row read "#Smart Switch Smart
       // Switch"), and the # sigil is reserved for number-shaped ids — "#Smart Switch" is not a number.
-      const _idPart = (it.id != null && String(it.id) !== String(label)) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) ? '#' : ''}${it.id} ` : '';
+      const _idPart = (it.id != null && String(it.id) !== String(label)) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) && !String(it.id).includes('#') ? '#' : ''}${it.id} ` : '';
       return `• ${_idPart}${label}${it.status ? ` — ${it.status}` : ''}`;
     });
     if (list.length > MAX_ROWS) lines.push(`… +${list.length - MAX_ROWS} more`);
@@ -404,7 +404,7 @@ export function renderConnectorLines(value, { name = 'Results', displayId = null
   const obj = (list && list.length === 1) ? list[0] : primaryObject(value);   // a single result renders as the FULL record
   if (obj) {
     const it = summarizeItem(obj, { full: true, displayId });
-    const _hidPart = (it.id != null && String(it.id) !== String(it.title || '')) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) ? '#' : ''}${it.id} ` : '';   // v1907 — same collapse as the bullet rows
+    const _hidPart = (it.id != null && String(it.id) !== String(it.title || '')) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) && !String(it.id).includes('#') ? '#' : ''}${it.id} ` : '';   // v1907 — same collapse as the bullet rows
     const out = [`${_hidPart}${it.title || ''}${it.status ? ` — ${it.status}` : ''}`.trim() || '(no details)'];
     if (it.body) out.push(it.body);
     const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));   // don't repeat the title/status/id as an extra
@@ -426,7 +426,7 @@ export function itemLabels(value, cap = 20) {
   const labels = list.slice(0, cap).map((o) => {
     const it = summarizeItem(o);
     const label = it.title || itemFields(o, { max: 2 }).map(([, v]) => v).join(' · ') || 'item';   // CX-9c — generic-fields fallback (fan-out labels for vocabulary-less rows)
-    const _lidPart = (it.id != null && String(it.id) !== String(label)) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) ? '#' : ''}${it.id} ` : '';   // v1907
+    const _lidPart = (it.id != null && String(it.id) !== String(label)) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) && !String(it.id).includes('#') ? '#' : ''}${it.id} ` : '';   // v1907
     return `${_lidPart}${label}`.trim();
   }).filter(Boolean);
   return { labels, total: list.length, capped: list.length > cap };

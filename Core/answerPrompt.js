@@ -150,8 +150,10 @@ export function buildAnswerMessages({ ask, capabilities = [], affordances = [], 
   // v2.74.1903 — THE CLOCK. This is the door that answered "how old are those orders?" with *"roughly 92 days from
   // today, January 9, 2025"* on July 31, 2026 — precise arithmetic against an invented today, stated twice,
   // identically. The transport stamps the date; the rule makes its absence a refusal rather than a guess.
+  // v2.74.1913 — THE GRAIN (see answerShapePrompt.js): the stamp is now the full timestamp, and the rule ties
+  // every relative-time claim to the grain the stamp carries — a date-only NOW never supports "hours ago".
   const _today = String(today ?? '').trim();
-  if (_today) parts.push('', `TODAY: ${_today}. Relative-time statements ("how old", "days ago") compute against THIS date. If a computation needs today's date and TODAY is missing, state the recorded date and say you cannot compute the age — never invent today.`);
+  if (_today) parts.push('', `NOW: ${_today}${/T/.test(_today) ? ' (UTC)' : ' (date only — no time-of-day is known)'}. Relative-time statements ("how old", "days ago") compute against THIS moment, at its grain only — a date-only NOW supports day math, never "hours/minutes ago". If a computation needs the current date or time and NOW is missing, state the recorded date and say you cannot compute the age — never invent the clock.`);
   // CV-2 — an app (seeded) answers FROM its role (personaRole DOMINATES); the Overview (no seed) uses the generic
   // assistant identity. BASE (operating rules) is shared. SAFE: free-text generation, not structured output.
   const persona = String(seed ?? '').trim();

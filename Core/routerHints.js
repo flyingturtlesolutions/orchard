@@ -40,6 +40,7 @@ export const ROUTER_HINTS = Object.freeze({
   // v2.74.1904 — the product pair splits like by_email/by_phone: free words vs an exact SKU.
   shopify_search_products: 'a products-API query for field syntax (status:, tag:, vendor:) — plain words prefer the admin search; exact SKU the by-SKU leg',
   shopify_admin_search: 'search products by WORDS the way the admin bar does — relevance-ranked; the first choice for "find/search <product words>"',
+  shopify_order_events: 'the order TIMELINE by internal gid — WHO created/refunded/fulfilled it and when; fetch the order first, then ask',
   shopify_product_by_sku: 'the product carrying an EXACT variant SKU (like DK-SW-01) — never for words from a title',
   shopify_shop_pulse: 'a params-free health check that the Shopify admin session works — not a data read',
   shopify_orders_queue: 'THE fulfillment queue: open unfulfilled orders, newest first; give an order number to drill straight into one',

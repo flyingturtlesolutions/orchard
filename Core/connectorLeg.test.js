@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey, missingRequiredParams } from './connectorLeg.js';
+import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey, missingRequiredParams, identifierClassParam, inventedIdentifierParams } from './connectorLeg.js';   // v1911 — the identifier-provenance gate
 import { recipeLegs } from './connectorRecipes.js';   // v2.74.1864 — real projected legs for the leg-shape assertions
 import { toOfferedLeg } from './palette.js';
 import { CONNECTOR_RECIPES } from './connectorRecipes.js';   // v2.74.1854 — the pre-flight gate proves itself against the REAL catalog
@@ -258,5 +258,82 @@ describe('missingRequiredParams — reads a LEG as well as a recipe (v2.74.1864)
     for (const x of [null, undefined, 0, 'x', {}]) assert.deepEqual(missingRequiredParams(x, {}), []);
     assert.deepEqual(missingRequiredParams({ paramSchema: { required: ['a'] } }, { a: 'v' }), []);
     assert.deepEqual(missingRequiredParams({ paramSchema: { required: ['a'] } }, {}), ['a']);
+  });
+});
+
+describe('v2.74.1925 — the machine-bind declaration survives HOP 3 (invariant #3\'s field-reader)', () => {
+  // The v1922 first draft declared machineOnly/fromField on the catalog entry and read them off `leg.tool.params`
+  // — which exists on NO projected leg, so the fill was inert end-to-end (the v1854/v1864 class). The declaration
+  // now rides paramSchema, and this pins it against the REAL catalog entry, not a fixture.
+  it('recipeToLeg carries machineOnly + fromField into paramSchema.properties', () => {
+    const entry = CONNECTOR_RECIPES.find((e) => e && e.id === 'shopify_order_events');
+    assert.ok(entry, 'the timeline entry is in the catalog');
+    const leg = recipeToLeg(entry, { host: 'admin.shopify.com', groundId: 'g1' });
+    const slot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.orderGid;
+    assert.ok(slot, 'orderGid has a schema slot');
+    assert.equal(slot.machineOnly, true, 'machineOnly survives projection');
+    assert.equal(slot.fromField, 'id', 'fromField survives projection — this is what the fill reads');
+  });
+  it('a plain param gains neither key (additive, no empty slots)', () => {
+    const entry = CONNECTOR_RECIPES.find((e) => e && e.id === 'shopify_order');
+    const leg = recipeToLeg(entry, { host: 'admin.shopify.com', groundId: 'g1' });
+    const slot = leg.paramSchema.properties.order;
+    assert.ok(slot && !('machineOnly' in slot) && !('fromField' in slot));
+  });
+});
+
+describe('v2.74.1911 — inventedIdentifierParams: an identifier the conversation never contained is a fabrication', () => {
+  const LEG = { domain: 'connector', tool: { recipeId: 'x', params: [{ name: 'sku', required: true }] } };
+  it('the LIVE case: sku "DK-SW-02" absent from ask+turns → flagged', () => {
+    const inv = inventedIdentifierParams(LEG, { sku: 'DK-SW-02' }, 'what is the sku of the smart switch gen 2?');
+    assert.deepEqual(inv, [{ name: 'sku', value: 'DK-SW-02' }]);
+  });
+  it('a sku the ask names passes — case-insensitive', () => {
+    assert.deepEqual(inventedIdentifierParams(LEG, { sku: 'DK-SW-02' }, 'find the product with sku dk-sw-02'), []);
+  });
+  it('alphanumeric-collapse: "DK SW 02" in the turns legitimizes "DK-SW-02"', () => {
+    assert.deepEqual(inventedIdentifierParams(LEG, { sku: 'DK-SW-02' }, 'earlier reply: the code is DK SW 02'), []);
+  });
+  it('an order number quoted in a prior turn passes (the "get that order" case)', () => {
+    const leg = { tool: { params: [{ name: 'order', required: false }] } };
+    assert.deepEqual(inventedIdentifierParams(leg, { order: '71644' }, 'The most recent order (DEAKO#71644) is less than 1 hour old'), []);
+    assert.deepEqual(inventedIdentifierParams(leg, { order: '99999' }, 'The most recent order (DEAKO#71644)'), [{ name: 'order', value: '99999' }]);
+  });
+  it('free-word params are NEVER gated — query is a legitimate paraphrase target', () => {
+    const leg = { tool: { params: [{ name: 'query', required: true }] } };
+    assert.deepEqual(inventedIdentifierParams(leg, { query: 'dimmer' }, 'do we sell any dimmers?'), []);
+  });
+  it('resolve-marked params are skipped (their fill layers are provenance-clean)', () => {
+    const leg = { tool: { params: [{ name: 'divisionId', required: true }], resolve: { divisionId: { via: '/api/x' } } } };
+    assert.deepEqual(inventedIdentifierParams(leg, { divisionId: '83' }, 'get open warranty tasks'), []);
+  });
+  it('the urlParam slot is skipped (executor-filled)', () => {
+    const leg = { tool: { urlParam: { name: 'handle' }, params: [{ name: 'handle' }] } };
+    assert.deepEqual(inventedIdentifierParams(leg, { handle: 'deako' }, 'search products'), []);
+  });
+  it('identifierClassParam draws the line by name shape', () => {
+    for (const yes of ['sku', 'orderId', 'order_number', 'email', 'trackingNo', 'ticket']) assert.equal(identifierClassParam(yes), true, yes);
+    for (const no of ['query', 'status', 'jobType', 'searchTerm', 'divisionName', 'section', 'notes']) assert.equal(identifierClassParam(no), false, no);
+  });
+  it('junk in → [] out', () => {
+    for (const x of [null, undefined, 0, 'x']) assert.deepEqual(inventedIdentifierParams(x, { sku: 'A1' }, ''), []);
+    assert.deepEqual(inventedIdentifierParams(LEG, null, 'x'), []);
+    assert.deepEqual(inventedIdentifierParams(LEG, { sku: '' }, 'x'), [], 'blank is the required-gate’s case, not this one');
+  });
+  it('v1911-b: array-valued identifier params are judged per ELEMENT (the merge source_ids case)', () => {
+    const leg = { tool: { params: [{ name: 'source_ids', required: true }] } };
+    assert.deepEqual(inventedIdentifierParams(leg, { source_ids: [64776, 64777] }, 'merge tickets 64776 and 64777 into 64775'), []);
+    assert.deepEqual(inventedIdentifierParams(leg, { source_ids: [64776, 99999] }, 'merge tickets 64776 and 64777'), [{ name: 'source_ids', value: '99999' }]);
+  });
+  it('v1911-b: E.164 normalization passes when the 10-digit national tail is in the hay', () => {
+    const leg = { tool: { params: [{ name: 'phone', required: true }] } };
+    assert.deepEqual(inventedIdentifierParams(leg, { phone: '+15551234567' }, 'find the customer at (555) 123-4567'), []);
+    assert.deepEqual(inventedIdentifierParams(leg, { phone: '+15559999999' }, 'find the customer at (555) 123-4567'), [{ name: 'phone', value: '+15559999999' }]);
+  });
+  it('v1911-b: gid-suffixed params are identifier-class (customer_gid was ungated)', () => {
+    assert.equal(identifierClassParam('customer_gid'), true);
+    const leg = { tool: { params: [{ name: 'customer_gid', required: true }] } };
+    assert.deepEqual(inventedIdentifierParams(leg, { customer_gid: 'gid://shopify/Customer/999' }, 'add a vip note to the customer'), [{ name: 'customer_gid', value: 'gid://shopify/Customer/999' }]);
+    assert.deepEqual(inventedIdentifierParams(leg, { customer_gid: 'gid://shopify/Customer/999' }, 'update gid://shopify/Customer/999'), []);
   });
 });

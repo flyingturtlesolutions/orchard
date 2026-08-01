@@ -113,6 +113,8 @@ export const DECISION_MARKERS = [
   { key: 'leg-verify', src: "LEG_VERIFY ▸" },
   { key: 'learned', src: "LEARNED ▸" },
   { key: 'field-followup', src: "FIELD_FOLLOWUP ▸" },
+  // v2.74.1911 — the identifier-provenance gate: a blocked invented param IS a routing decision.
+  { key: 'param', src: "PARAM ▸" },
   { key: 'obs-param', src: "OBS_PARAM ▸" },
   { key: 'target', src: "TARGET ▸" },
   { key: 'invoke', src: "INVOKE ▸" },

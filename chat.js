@@ -45,7 +45,7 @@ import { loadProposals, addProposals, decideProposal, pendingCounts } from './Se
 import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick; v1381 — pendings survive sweeps
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
-import { recipeToLeg, missingRequiredParams } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate
+import { recipeToLeg, missingRequiredParams, inventedIdentifierParams } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate; v1911 — the identifier-provenance gate
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
 import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, drillTargetRedirect, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
@@ -87,7 +87,7 @@ import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — t
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField } from './Core/peritemMap.js';
-import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey } from './Core/fieldRead.js';   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
+import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
 import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
@@ -3916,7 +3916,7 @@ async function _runResolvedStep({ tabId, groundId, ask, capabilityId, bindings =
   // v2.74.1338 (review B) — gate on the ORIGINATING run's config when supplied: the global moves with the UI on a
   // mid-run conversation switch, which both bypassed a read-only origin AND false-blocked a permissive one.
   if (!actAllowed(policyConfig ?? _currentConversationConfig)) {
-    try { _orchLog(`WRITE_GATE ▸ blocked chain step "${String(ask || capabilityId || 'act').slice(0, 40)}" — track writePolicy:never`); } catch { /* */ }
+    try { _orchLog(`WRITE_GATE ▸ blocked chain step "${_scrubHead(ask || capabilityId || 'act', 40)}" — track writePolicy:never`); } catch { /* */ }
     return { ok: false, blocked: true, why: ' — this desk is read-only' };
   }
   const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues: (bindings && typeof bindings === 'object') ? bindings : {} });
@@ -4343,6 +4343,10 @@ async function _mapResolveTarget(readAsk, tabId) {
     || Object.keys(params).find((k) => typeof params[k] === 'string');   // fallback: the first string param
   if (!valueParam) return { leg: null, why: 'no-value-param' };
   const baseParams = { ...params }; delete baseParams[valueParam];
+  // v2.74.1918-b (review) — the map's per-item TARGET reads are a fill door too: every per-item lookup ran a
+  // blank division-class param at the site default while the conversation held a fresher one (the same
+  // default-vs-context gap as the collection read, one hop later). Same narrow rules — blank-only, division-only.
+  _fillContextDivision(leg, baseParams);
   return { leg, valueParam, baseParams, groundId };
 }
 
@@ -4410,7 +4414,7 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
       else {
         _setMessageBody(msg, `Couldn’t read the list${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}. Name it explicitly (e.g. “for each open warranty task…”).`);
         _orchFinalize(msg);
-        try { _orchLog(`FIELD_READ ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve`); } catch { /* */ }
+        try { _orchLog(`FIELD_READ ▸ no collection — "${_scrubHead(readAsk, 40)}" didn't resolve`); } catch { /* */ }
         return { ok: false };
       }
     } else { rows = rowsFromValue(cr.value); srcLeg = cr.leg || null; }
@@ -4502,6 +4506,54 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
     return { ok: false, gap: true };
   }
 
+  let _roleNote = String(fr._interrogNote || '');   // v1923 — role-honesty note (set by the hold below, or carried in by a v1917 swap)
+  // v2.74.1917 — THE RESOLVE-DOOR interrogative guard (door #3 of the who→createdAt class; glf 00:43:09: interpret
+  // bound {field:"created by", term:""} — no term, so the v1912 guard inside the total-miss gate below never ran,
+  // and "created by" resolved straight to createdAt: the WHO got a WHEN through field RESOLUTION itself). Same
+  // type check, applied where the field is CHOSEN: an interrogative-incompatible resolution is never THE answer.
+  // Exactly ONE compatible field on the record → swap and say so (the live record held customer.email unread);
+  // none or many → honest, with the candidates named. `_interrogSwap` bounds the recursion (the swapped field is
+  // compatible by construction, so the guard cannot re-fire — the flag makes that structural).
+  // v1917-b (review) — TWO narrowings: `leading: true` (a mid-sentence who/when is a relative clause — "read the
+  // assignee field from when this was created" must read assignee, not swap it away), and `!fr.term` (a term-ful
+  // clause belongs to the v1912 prong-A/B guards downstream — firing here would preempt the term-as-field rewrite
+  // and silently drop the term qualifier).
+  if (!fr._interrogSwap && !fr.term && use.length) {
+    const _qr = askInterrogative(goal, { leading: true });
+    // v1923-b (review) — the DIRECT-RESOLVE door needs the role note too, and it is the door the LIVE ask took:
+    // {field:'customer', term:''} resolves to customer.email, which ANSWERS a who-ask on the type axis (=== true,
+    // so the block below never fires) and has no term (so the hold's note never fires either) — the wrong person
+    // rendered with nothing said. Type-compatible is not role-compatible; say whose value this is.
+    if (_qr === 'who' && !_roleNote && fieldAnswersInterrogative(_qr, fp.path, extractValue(use[0], fp.path)) === true) {
+      const _ar0 = askWhoRole(goal); const _fr0 = fieldWhoRole(fp.path);
+      if (_ar0 && _fr0 && _ar0 !== _fr0) {
+        _roleNote = `  _(**${escHtml(fp.path)}** is the ${_fr0} on the record — it doesn’t name a ${_ar0})_`;
+        try { _orchLog(`FIELD_READ ▸ role note (resolve door) — the ask wants the ${_ar0}; ${fp.path} is the ${_fr0}`); } catch { /* */ }
+      }
+    }
+    if (_qr && fieldAnswersInterrogative(_qr, fp.path, extractValue(use[0], fp.path)) === false) {
+      const _cands = interrogativeFieldCandidates(use[0], _qr);
+      if (_cands.length === 1) {
+        // v2.74.1923 — ROLE HONESTY rides the swap (user ruling: type-compatible ≠ role-compatible — the live
+        // order was created by STAFF for the customer, and rendering customer.email as the who-answer named the
+        // wrong person). When the ask's role (creator) and the swapped field's role (customer) both parse and
+        // differ, the note says which role the value IS and that the asked one is absent from the record.
+        let _swapNote = '';
+        if (_qr === 'who') {
+          const _ar = askWhoRole(goal); const _fr3 = fieldWhoRole(_cands[0]);
+          if (_ar && _fr3 && _ar !== _fr3) { _swapNote = `  _(**${escHtml(_cands[0])}** is the ${_fr3} on the record — it doesn’t name a ${_ar})_`; try { _orchLog(`FIELD_READ ▸ role note — the ask wants the ${_ar}; ${_cands[0]} is the ${_fr3}`); } catch { /* */ } }
+        }
+        try { _orchLog(`FIELD_READ ▸ interrogative-swap — a "${_qr}" ask is not answered by ${fp.path}; reading ${_cands[0]} instead`); } catch { /* */ }
+        return _runFieldReadClause(msg, { ...fr, field: _cands[0].replace(/\./g, ' '), term: '', _interrogSwap: true, _interrogNote: _swapNote }, { tabId, priorValue, priorLeg, goal });
+      }
+      const _list = _cands.slice(0, 3).map((n) => `**${escHtml(n)}**`).join(' or ');
+      _setMessageBody(msg, `That reads like a “${_qr}” question, but “${escHtml(fr.field)}” matches **${escHtml(fp.path)}**, which can’t answer it.${_cands.length ? ` Did you mean ${_list}?` : ' I don’t see a field on this record that can — name it the way the record spells it.'}`, { markdown: true });
+      _orchFinalize(msg);
+      try { _orchLog(`FIELD_READ ▸ interrogative-block — "${_qr}" vs ${fp.path}; ${_cands.length} compatible candidate(s)`); } catch { /* */ }
+      return { ok: false, gap: true };
+    }
+  }
+
   // 3) per row: extract. Deterministic, local, no network and NO per-item LLM — the value never leaves the panel.
   let found = 0; let whole = 0; let missing = 0;
   const lines = [];
@@ -4520,8 +4572,30 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
   // term:"paid"} while `IsPaid:true` sat unread on the record). Gated on found===0 && whole===everything, so the
   // legitimate "the DEAKO part of Instructions" case never enters here.
   if (fr.term && found === 0 && whole === use.length && use.length) {
+    // v2.74.1912 — THE INTERROGATIVE TYPE GUARD. Live 125712: "who created the order?" arrived as
+    // {field:'customer', term:'created by'} → customer.email → total term miss → the v1882 rewrite decided
+    // "created by" IS `createdAt` and answered a WHO ask with a timestamp. The rewrite matched lexically; nothing
+    // asked whether the candidate's TYPE can answer the ask's interrogative. Two prongs (Core/fieldRead.js):
+    //   A. the RESOLVED field already answers the interrogative (who → customer.email) → the whole field IS the
+    //      answer: skip the gate entirely and let the normal render show it (its "(no 'created by' part — showing
+    //      the whole field)" note says exactly what happened);
+    //   B. the term-as-field CANDIDATE cannot answer it (who ⇸ createdAt) → block the rewrite and fall to the
+    //      honest term-miss instead.
+    const _q = askInterrogative(goal);
+    if (_q && fieldAnswersInterrogative(_q, fp.path, use[0] ? extractValue(use[0], fp.path) : undefined) === true) {
+      try { _orchLog(`FIELD_READ ▸ interrogative-hold — a "${_q}" ask is answered by ${fp.path}; showing the whole field`); } catch { /* */ }
+      // v2.74.1923 — ROLE HONESTY at the hold too (this is the door the live "who created the order?" took):
+      // customer.email CAN answer a who-ask, but when the ask names a different role the render must say whose
+      // value this is and that the asked role is absent — never present the customer as the creator.
+      if (_q === 'who') {
+        const _ar = askWhoRole(goal); const _fr2 = fieldWhoRole(fp.path);
+        if (_ar && _fr2 && _ar !== _fr2) { _roleNote = `  _(**${escHtml(fp.path)}** is the ${_fr2} on the record — it doesn’t name a ${_ar})_`; try { _orchLog(`FIELD_READ ▸ role note — the ask wants the ${_ar}; ${fp.path} is the ${_fr2}`); } catch { /* */ } }
+      }
+    } else {
     const _tk = termFieldKey(use[0], fr.term, fp.path);
-    if (_tk && !fr._termRetry) {
+    if (_tk && !fr._termRetry && _q && fieldAnswersInterrogative(_q, _tk, use[0] ? extractValue(use[0], _tk) : undefined) === false) {
+      try { _orchLog(`FIELD_READ ▸ term-as-field BLOCKED — ${_tk} cannot answer a "${_q}" ask; honest miss instead`); } catch { /* */ }
+    } else if (_tk && !fr._termRetry) {
       // v2.74.1882-b — CORRECTED SIGNATURE. My first draft was `(msg, {...fr}, state, { priorValue, priorLeg, tabId,
       // groundId })` — copied from `_runWriteClause`, which takes a `state` in its options bag. This function takes
       // THREE parameters and neither `state` nor `groundId` is bound anywhere in its scope, so under module strict
@@ -4540,9 +4614,10 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
     _orchFinalize(msg);
     try { _orchLog(`FIELD_READ ▸ term miss — "${fr.term}" not in ${fp.path} and not a field on ${use.length} row(s)`); } catch { /* */ }
     return { ok: false, gap: true };
+    }   // v1912 — close the prong-A else (an interrogative-hold falls through to the tally render below)
   }
   const tally = fieldReadTally({ rows: use.length, found, whole, missing, field: fr.field, term: fr.term });
-  const head = `Read **${escHtml(fr.field)}**${fr.term ? ` — the “${escHtml(fr.term)}” part` : ''} on each record.${capped ? `  (first ${cap} of ${rows.length})` : ''}`;
+  const head = `Read **${escHtml(fr.field)}**${fr.term ? ` — the “${escHtml(fr.term)}” part` : ''} on each record.${capped ? `  (first ${cap} of ${rows.length})` : ''}${_roleNote}`;
   _setMessageBody(msg, [head, tally, ...lines].join('\n'), { markdown: true });
   _orchFinalize(msg);
   try { _orchLog(`FIELD_READ ▸ ${use.length} × "${fp.path}"${fr.term ? ` term "${fr.term}"` : ''} → ${found} found, ${whole} whole-field, ${missing} empty`); } catch { /* */ }
@@ -4617,8 +4692,11 @@ function _rowLabel(row, leg = null) {
     const extra = title && title !== id
       ? title
       : itemFields(row, { max: 2 }).map(([, v]) => String(v ?? '').trim()).filter((v) => v && v !== id)[0] || '';
-    if (id && extra) return `#${id} · ${extra}`;
-    if (id) return `#${id}`;
+    // v2.74.1915 — the SAME sigil rule as the v1907 row builders (this label was their fourth twin door, live
+    // 125712: "#DEAKO#71644"): # only on a number-shaped id, and never onto an id that already carries one.
+    const _sig = (id && /^[A-Za-z]*#?[\d-]+$/.test(id) && !id.includes('#')) ? '#' : '';
+    if (id && extra) return `${_sig}${id} · ${extra}`;
+    if (id) return `${_sig}${id}`;
     if (extra) return extra;
     return '(row)';
   } catch { return '(row)'; }
@@ -4711,7 +4789,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       else {
         _setMessageBody(msg, `Couldn’t read the list to sort${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}. Name it explicitly (e.g. “for each open warranty task…”).`);
         _orchFinalize(msg);
-        try { _orchLog(`BRANCH ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve`); } catch { /* */ }
+        try { _orchLog(`BRANCH ▸ no collection — "${_scrubHead(readAsk, 40)}" didn't resolve`); } catch { /* */ }
         return { ok: false };
       }
     }
@@ -5120,7 +5198,7 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
       : `That’s not a write these rows declare. From here they can fill: **${escHtml(_known)}**. Say which one, or add the mapping for the one you want.`,
       { markdown: true });
     _orchFinalize(msg);
-    try { _orchLog(`WRITE ▸ ${_pf.reason} — wanted "${String(goal).slice(0, 40)}", declared [${(_pf.targets || []).join(', ')}]`); } catch { /* */ }
+    try { _orchLog(`WRITE ▸ ${_pf.reason} — wanted "${_scrubHead(goal, 40)}", declared [${(_pf.targets || []).join(', ')}]`); } catch { /* */ }
     return { ok: false, gap: true };
   }
   const createLeg = await _rideDrillLeg(srcLeg, targetId, (srcLeg.tool && srcLeg.tool.groundId) || null);
@@ -5493,11 +5571,11 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
           if (uw.mode === 'match') srcLeg = null;
           try { _orchLog(`MAP ▸ unwrapped prior join → ${uw.mode} (${rows.length} row(s)${uw.priorSystem ? `, was ${uw.priorSystem}` : ''})`); } catch { /* */ }
         }
-        try { _orchLog(`MAP ▸ collection "${String(readAsk).slice(0, 40)}" unresolved → fell back to the prior read (${rows.length} row(s))`); } catch { /* */ } }
+        try { _orchLog(`MAP ▸ collection "${_scrubHead(readAsk, 40)}" unresolved → fell back to the prior read (${rows.length} row(s))`); } catch { /* */ } }
       else {
         _setMessageBody(msg, `Couldn’t read the list to map over${cr && cr.error ? ` — ${_errWord(cr.error)}` : ''}.${cr && cr.hint ? `  ${cr.hint}.` : ''}  Name the list explicitly (e.g. “for each open warranty task…”).`);
         _orchFinalize(msg);
-        try { _orchLog(`MAP ▸ no collection — "${String(readAsk).slice(0, 40)}" didn't resolve to a read and no prior list was piped`); } catch { /* */ }
+        try { _orchLog(`MAP ▸ no collection — "${_scrubHead(readAsk, 40)}" didn't resolve to a read and no prior list was piped`); } catch { /* */ }
         return { ok: false };
       }
     } else { rows = rowsFromValue(cr.value); srcLeg = cr.leg || null; }
@@ -5764,7 +5842,8 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
     text = [_header, tally, ...joined.map((j) => {
       // v2.74.1678 — the label ALREADY carries `#id` (it comes from `_rowLabel` now), so prepending the id here
       // would print it twice.
-      const src = String(j.source.label || '').trim() || (j.source.id != null ? `#${j.source.id}` : 'row');
+      const _sid = j.source.id != null ? String(j.source.id) : '';   // v1915-b — the fifth sigil sibling: same rule as _rowLabel
+      const src = String(j.source.label || '').trim() || (_sid ? `${(/^[A-Za-z]*#?[\d-]+$/.test(_sid) && !_sid.includes('#')) ? '#' : ''}${_sid}` : 'row');
       const val = j.value != null ? String(j.value) : null;
       const _via = (results[joined.indexOf(j)] || {}).via || '';
       // THE ANSWER FIRST, the evidence after. The old order read
@@ -6053,7 +6132,7 @@ async function _openFocusEntry(entry, originalText) {
   const host = (entry.provenance && entry.provenance.host) || '';
   const siteWord = host ? String(host).toLowerCase().replace(/^www\./, '').split('.')[0] : 'site';
   const synth = `show ticket ${find}${div ? ` in ${div}` : ''} on ${host ? siteWord : 'the site'}`;
-  try { _orchLog(`FOCUS ▸ "${String(originalText).slice(0, 40)}" → ${String(entry.label || 'record').slice(0, 40)} (${find}${div ? `, ${div}` : ''}) on ${host || 'site'}`); } catch { /* */ }
+  try { _orchLog(`FOCUS ▸ "${_scrubHead(originalText, 40)}" → ${String(entry.label || 'record').slice(0, 40)} (${find}${div ? `, ${div}` : ''}) on ${host || 'site'}`); } catch { /* */ }
   try { _orchLog(`TARGET ▸ tier=TR-2/focus target=${host || '(drill-scoped)'} why=focus(${entry.noun || 'record'}) auto`); } catch { /* */ }
   // v2.74.1557 — the claim shows WORK immediately: a transient thinking bubble names the record + venue while
   // the match + start-establish + walk run (live report: echo → tab focus → 2-3s of NOTHING → the walk — no
@@ -6141,7 +6220,31 @@ async function _resolveTarget(ask) {
   _lastTargetResolve = { ask: a, at: Date.now(), decision };
   // v2.74.1894 — the host is known ~4-5s before INTERPRET returns; spend that window on the slow via read instead of
   // making the user spend it after. Fire-and-forget by construction — the turn does not await it and never sees it.
-  if (decision && decision.host) void _warmResolveVia(decision.host, _warmTabId);
+  // v2.74.1914 — CORROBORATION GATE. The warm followed TARGET's weakest guesses (live 125712: six vendorsuite
+  // sprays of 6.3-13.6s, mid-Shopify conversation, on desk-affinity matches like "(how)"). A warm is a cost
+  // optimization, so it fires only on evidence: an explicit/alias tier (the ask NAMED the place), a conversation
+  // with no grounded reads yet (cold start — desk affinity is the best available signal, the case v1894 was
+  // built for), or a host this conversation has actually read from. A mid-conversation guess at a host every
+  // read so far disagrees with is exactly the spray — skip it and say so once in the trace.
+  if (decision && decision.host) {
+    // v1914-b (review) — ONE normalizer for every host compared here (scheme + www. + path stripped — origins
+    // arrive in mixed formats, the v1547 lesson), and suffix-tolerant matching: `leg.tool.appHost` is the catalog
+    // SUFFIX ('zendesk.com'), the decision host is the full host ('deako.zendesk.com') — exact-match Set lookup
+    // could never corroborate the very host the conversation just read from.
+    const _whNorm = (s) => String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/[/?#].*$/, '').trim();
+    const _dh = _whNorm(decision.host);
+    const _strongTier = decision.tier === 'explicit' || decision.tier === 'alias';
+    let _warmOk = _strongTier;
+    if (!_warmOk) {
+      const _readHosts = new Set();
+      for (const e of (_currentConversationFocus || [])) { const h = _whNorm(e && e.provenance && e.provenance.host); if (h) _readHosts.add(h); }
+      const _lgTool = _lastGroundedRead && _lastGroundedRead.leg && _lastGroundedRead.leg.tool;
+      if (_lgTool) for (const c of [_lgTool.origin, _lgTool.appHost]) { const h = _whNorm(c); if (h) _readHosts.add(h); }
+      _warmOk = !_readHosts.size || [..._readHosts].some((h) => h === _dh || _dh.endsWith(`.${h}`) || h.endsWith(`.${_dh}`));
+      if (!_warmOk) { try { _orchLog(`RIDE_RESOLVE ▸ warm skipped — ${_dh} is uncorroborated (this conversation reads ${[..._readHosts].slice(0, 3).join(', ')})`); } catch { /* */ } }
+    }
+    if (_warmOk) void _warmResolveVia(decision.host, _warmTabId);
+  }
   return decision;
 }
 // TRT-5 §5.3 — the ADOPT counter: the Nth (≥2) off-desk run of the SAME origin from the SAME desk is role signal →
@@ -6589,7 +6692,7 @@ function _wfAbandon() {
         const draft = { ...payload, status: 'draft', qualifiedAt: 0 };
         if (w.draftId) updateWorkflow(w.appId, w.draftId, draft).catch(() => {});
         else saveWorkflow(w.appId, draft).catch(() => {});
-        try { _orchLog(`WORKFLOW ▸ wizard-draft kept "${String(draft.ask).slice(0, 40)}" (${draft.subAsks.length} steps)`); } catch { /* */ }
+        try { _orchLog(`WORKFLOW ▸ wizard-draft kept "${_scrubHead(draft.ask, 40)}" (${draft.subAsks.length} steps)`); } catch { /* */ }
       }
     }
   } catch { /* the draft keep is best-effort */ }
@@ -7016,7 +7119,7 @@ async function _startWorkflowFromIntent(intent) {
   // Belt: nothing unreadable may reach a queue the user is asked to APPROVE (the v1666 "[object Object]" bug).
   steps = steps.map(_str0).filter((t) => t && t !== '[object Object]');
 
-  try { _orchLog(`WORKFLOW ▸ intent "${goal.slice(0, 50)}" → ${steps.length} suggested step(s)`); } catch { /* */ }
+  try { _orchLog(`WORKFLOW ▸ intent "${_scrubHead(goal, 50)}" → ${steps.length} suggested step(s)`); } catch { /* */ }
 
   if (steps.length < 2) {
     _setMessageBody(m, `I couldn’t break that into separate steps — it reads like one action. Say it as a sequence (“get X, then do Y”), or start an empty workflow with \`new workflow\` and type the steps yourself.`, { markdown: true });
@@ -7155,7 +7258,7 @@ async function _wfDoSave() {
   // migration's final step: off clears both the record and its alarm). Fire-and-forget; the save never blocks.
   if (ok && w.retireRoutineKey) {
     _orchReq('FLEET_ROUTINE', { instanceId: w.retireRoutineKey, off: true }).catch(() => {});
-    try { _orchLog(`ROUTINE ▸ migrated → workflow "${String(payload.name || payload.ask).slice(0, 40)}" (legacy routine retired)`); } catch { /* */ }
+    try { _orchLog(`ROUTINE ▸ migrated → workflow "${_scrubHead(payload.name || payload.ask, 40)}" (legacy routine retired)`); } catch { /* */ }
   }
   const done = appendMessage({ role: 'assistant', body: '' });
   const _sched = payload.trigger ? ` It’s set to run every ${_cadenceLabel(payload.trigger.minutes)} — change or remove that from its edit icon.` : '';
@@ -7164,7 +7267,7 @@ async function _wfDoSave() {
   _orchFinalize(done);
   // v2.74.1619 — the wizard's save is TRACE-VISIBLE (gl 194814: the whole wizard arc left zero log evidence — steps
   // never echo, runs are transient; the durable record deserves one line. WORKFLOW ▸ is already in _DECISION_RE.)
-  try { _orchLog(`WORKFLOW ▸ wizard-saved "${String(payload.name || payload.ask).slice(0, 40)}" (${payload.subAsks.length} steps, ${payload.status})`); } catch { /* */ }
+  try { _orchLog(`WORKFLOW ▸ wizard-saved "${_scrubHead(payload.name || payload.ask, 40)}" (${payload.subAsks.length} steps, ${payload.status})`); } catch { /* */ }
   _wfExitPage();
 }
 
@@ -7800,7 +7903,7 @@ async function _renderRoutinesBody(body, inst) {
 async function _fireRoutine(rec, { manual = false } = {}) {
   const inst = _memoryId(); if (!inst || !rec || !rec.ask) return;
   try { await _orchReq('FLEET_ROUTINE', { instanceId: inst, fired: true }); } catch { /* */ }
-  try { _orchLog(`ROUTINE ▸ fire${manual ? ' (manual)' : ' (due)'} — "${String(rec.ask).slice(0, 60)}"`); } catch { /* */ }
+  try { _orchLog(`ROUTINE ▸ fire${manual ? ' (manual)' : ' (due)'} — "${_scrubHead(rec.ask, 60)}"`); } catch { /* */ }
   if (!manual) _orchFinalize(appendMessage({ role: 'assistant', body: `Routine due — running: “${rec.ask}”` }));
   const inp = $('chat-input'); if (inp) { inp.value = rec.ask; sendChatMessage(); }
 }
@@ -7872,7 +7975,19 @@ async function _cachedHostRecipes(host, { groundId = null } = {}) {
   if (!gid) { try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${h}/` }); gid = (g && g.groundId) || ''; } catch { gid = ''; } }
   let recipes = [];
   if (gid) { try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: gid, origin: h }); recipes = (rr && rr.recipes) || []; } catch { recipes = []; } }
-  const entry = { at: now, groundId: gid || '', recipes };
+  // v2.74.1919-b (review) — OWN-ORIGIN records only, filtered at THIS door for every caller (the warm-only filter
+  // left _showSection navigating a foreign listUrl and _openRecordOnSite drilling a foreign leg over the same
+  // polluted store — glf 00:42: vendorsuite records stored under the shopify ground; merges never delete). The
+  // record's own `origin` is the truth (harvestedRecipeLegs stamps the PASSED host onto every projection, so a
+  // post-projection check is too late). Foreign rows are named once per cache fill so the pollution stays
+  // diagnosable rather than silently steering whoever reads the store next.
+  const _bare = (s) => String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+  const _own = recipes.filter((r) => r && _bare(r.origin) === h);
+  if (_own.length < recipes.length) {
+    const _foreign = [...new Set(recipes.filter((r) => r && _bare(r.origin) !== h).map((r) => _bare(r.origin) || '(no origin)'))].slice(0, 3);
+    try { _orchLog(`RIDE_RESOLVE ▸ ${recipes.length - _own.length} foreign recipe(s) stored under ${h} (${_foreign.join(', ')}) — filtered from every reader`); } catch { /* */ }
+  }
+  const entry = { at: now, groundId: gid || '', recipes: _own };
   _rideScanCache.recs.set(h, entry);
   return entry;
 }
@@ -8215,6 +8330,7 @@ async function _rejectProposal(id, reason) {
 // null when the app has no connections OR the clause isn't a connector read → the chain falls through to ORCH_MATCH
 // unchanged. Gated by the caller on `_boundConnections().length`, so non-connector apps pay nothing.
 async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey = null, pinnedGroundId = null, pinnedBindings = null }) {   // DK-8c (v1494) — onEach threads chain-step progress into the each fan-out; v1728 — pinnedKey enforces a PP-0c connector pin; v1730 — pinnedBindings make the replay LLM-free
+  const _chainConvId = _currentConversationId;   // v1922-b (review) — FC-6 discipline: snapshot at ENTRY. Banking under the LIVE id after the multi-second INTERPRET_ASK await filed refusals against whatever desk the user switched to mid-flight, where the act door's recheck (keyed by its own entry snapshot) would never find them.
   // v2.74.1730 — BANKED BINDINGS make the pinned replay LLM-FREE. The interpret call on a pinned step existed
   // only to re-derive the params the human already approved at qualify time; once the pin carries them, the leg
   // resolves straight from its ground's recipe store (GET_RIDE_RECIPES merges curated — the §18 read) and runs.
@@ -8270,7 +8386,40 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey 
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
   const bound = coerceParams(d.params || {}, leg.paramSchema);   // v1730 — returned as boundParams: the QUALIFY run is cold, and this is what the pin banks
-  const run = await _runConnectorLeg(leg, bound, { tabId, groundId, onEach });
+  // v2.74.1918 — the context-division fill, at the chain door too (glf 00:45: the map's collection sub-read
+  // defaulted to Atlanta West array[0] while the standalone same ask read Raleigh array[6] — this door never had
+  // the v1867 fill). The PINNED paths above stay unfilled: a pin replays human-approved bindings verbatim.
+  // v1918-b (review) — fill a DISPATCH COPY, never `bound` itself: boundParams is what a QUALIFY run BANKS into a
+  // workflow pin (the v1730 comment above), and a transient 10-minute conversation division must not freeze into
+  // a durable unattended replay. The pin banks what the ASK bound (blank still means fire-time current division,
+  // the sanitizeBindings contract); only THIS run rides the conversation's context.
+  const _dispatch = { ...bound };
+  _fillContextDivision(leg, _dispatch);
+  // v2.74.1911-b (review) — the CHAIN twin of the identifier-provenance gate: this cold path binds params from
+  // the SAME generative interpret that invented sku "DK-SW-02" live, and is the door a PLAIN decomposed ask
+  // actually takes. Its interpret call (above) passes no history, so the honest haystack is the clause text +
+  // focus — exactly what the binder saw. The PINNED paths above stay ungated deliberately: a pin replays
+  // human-approved bindings (often unattended), and a false block there breaks a routine with nobody to answer.
+  {
+    let _inv = inventedIdentifierParams(leg, _dispatch, _provenanceHay(clauseText));
+    // v1922-b (review) — the chain door RECHECKS too. It banked refusals but never consulted them, and its
+    // "clause text is user-authored" premise breaks on the decompose path: `subAsks` are MODEL-authored, so a
+    // fabricated id can ride in through the clause itself. A previously-refused value must re-earn its place.
+    if (!_inv.length) {
+      for (const [n, raw] of Object.entries(_dispatch || {})) {
+        if (raw == null || !_wasRefused(_chainConvId, raw)) continue;
+        const _re = inventedIdentifierParams(leg, { [n]: raw }, _provenanceHay(''));   // focus only — the clause is not trusted authorship here
+        if (_re.length) { _inv = _re; break; }
+      }
+    }
+    if (_inv.length) {
+      const _p0 = _inv[0];
+      for (const p of _inv) _bankRefusedParam(_chainConvId, p.name, p.value);   // v1922 — a chain refusal arms the act door's recheck too
+      try { _orchLog(`PARAM ▸ invented ${_inv.map((p) => `${p.name}="${_scrubHead(p.value, 30)}"`).join(', ')} — value absent from clause+focus → no call spent [chain ${(leg.tool && leg.tool.recipeId) || leg.key || ''}]`); } catch { /* */ }
+      return { leg, boundParams: bound, ok: false, error: 'invented-param', hint: `needs a real ${_p0.name} — my router guessed "${_scrubHead(_p0.value, 40)}", which appears nowhere in this conversation` };
+    }
+  }
+  const run = await _runConnectorLeg(leg, _dispatch, { tabId, groundId, onEach });
   return { leg, boundParams: bound, ...run };
 }
 
@@ -8390,7 +8539,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
     {
       const _stop = emptyPriorStop({ text: clause.text, priorValue: st.lastValue, narrowedFrom: st.lastNarrowedFrom || 0 });
       if (_stop.stop) {
-        try { _orchLog(`PIPELINE ▸ stop ${_stop.why} — "${String(clause.text).slice(0, 50)}" refers to a set the last step left empty; nothing dispatched`); } catch { /* */ }
+        try { _orchLog(`PIPELINE ▸ stop ${_stop.why} — "${_scrubHead(clause.text, 50)}" refers to a set the last step left empty; nothing dispatched`); } catch { /* */ }
         // v2.74.1688 — MARK IT AS AN OUTCOME. A stop pushes no `ranStep`, and the wizard reads "no ranStep" as
         // "never engaged" → the teach/retry/change bar under "That step couldn't run". But this step DID run: it
         // ran, determined there was nothing to act on, and stopped — which is the correct answer, not a failure.
@@ -8498,7 +8647,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
         });
         _orchLog(renderStepReceipt(_rcpt));
         try { if (typeof window.__wfStepHook === 'function') window.__wfStepHook(_rcpt); } catch { /* the hook must never break the run */ }
-        _ledgerDecision(`fan-out step ${i + 1}/${total}: ${String(clause.text).slice(0, 90)}`);
+        _ledgerDecision(`fan-out step ${i + 1}/${total}: ${_scrubHead(clause.text, 90)}`);
       } catch { /* a receipt must never break the run it is reporting on */ }
       if (!fo.ok) { _orchFinalize(msg); return; }   // v1505 — settle + persist the failure line (was an unfinalized exit)
       // DK-8i (v2.74.1501) — the desk transcript is the operator's LEDGER: a read CONSUMED by a case spawn drops its
@@ -8730,7 +8879,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           `_A demo won’t teach this one, so “show me” won’t help. ${_perItemWrite.missCount ? `The ${_perItemWrite.missCount} unmatched row${_perItemWrite.missCount === 1 ? '' : 's'} from the last step ${_perItemWrite.missCount === 1 ? 'is' : 'are'} what it would act on.` : ''}_`,
         ].join('\n'), { markdown: true });
         _orchFinalize(msg);
-        try { _orchLog(`WRITE_GATE ▸ per-item write not built — "${String(clause.text).slice(0, 50)}"${_perItemWrite.legName ? ` (leg exists: ${_perItemWrite.legName})` : ''}${_perItemWrite.missCount ? `, ${_perItemWrite.missCount} candidate row(s)` : ''}`); } catch { /* */ }
+        try { _orchLog(`WRITE_GATE ▸ per-item write not built — "${_scrubHead(clause.text, 50)}"${_perItemWrite.legName ? ` (leg exists: ${_perItemWrite.legName})` : ''}${_perItemWrite.missCount ? `, ${_perItemWrite.missCount} candidate row(s)` : ''}`); } catch { /* */ }
         return;
       }
       if (!gid) { _setMessageBody(msg, `${_ranPfx(i)}I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); _orchFinalize(msg); return; }
@@ -8848,10 +8997,10 @@ async function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
     try {
       const list = await saveWorkflow(appId, { ask, subAsks, name: nm });
       saved = list.some((w) => w && w.ask === ask);
-      if (saved) { try { _orchLog(`WORKFLOW ▸ banked "${String(ask).slice(0, 40)}" key=${appId} (${list.length} saved)`); } catch { /* */ } }   // DK-8k — the save is now diagnosable against a later recall miss
+      if (saved) { try { _orchLog(`WORKFLOW ▸ banked "${_scrubHead(ask, 40)}" key=${appId} (${list.length} saved)`); } catch { /* */ } }   // DK-8k — the save is now diagnosable against a later recall miss
     } catch { /* */ }
     const note = appendMessage({ role: 'assistant', body: saved
-      ? (nm ? `Saved as “${nm}”. Say “${nm}” any time to run it.` : `Saved. Next time you ask something like “${String(ask).slice(0, 60)}…”, I’ll offer to run the whole workflow.`)
+      ? (nm ? `Saved as “${nm}”. Say “${nm}” any time to run it.` : `Saved. Next time you ask something like “${_scrubHead(ask, 60)}…”, I’ll offer to run the whole workflow.`)
       : 'Couldn’t save that workflow.' });
     _orchFinalize(note);
   }));
@@ -8940,7 +9089,7 @@ async function _matchWorkflow(goal) {
   const lex = workflowMatch(goal, workflows);
   if (lex) return lex;
   // a miss with a non-empty bank is the diagnosable event (an empty bank is just a normal ask — no noise)
-  if (workflows.length) { try { _orchLog(`WORKFLOW ▸ recall miss "${String(goal).slice(0, 40)}" keys=${_workflowKeys().join('+')} (${workflows.length} saved)`); } catch { /* */ } }
+  if (workflows.length) { try { _orchLog(`WORKFLOW ▸ recall miss "${_scrubHead(goal, 40)}" keys=${_workflowKeys().join('+')} (${workflows.length} saved)`); } catch { /* */ } }
   const candidates = workflowCandidates(workflows);
   if (!candidates.length || !workflowSharesVocab(goal, candidates)) return null;   // near-miss gate — no LLM otherwise
   // v2.74.1796 — THE REACHABILITY GUARD. This semantic fallback is CLASS-BLIND: it sees only workflows, so it
@@ -8950,7 +9099,7 @@ async function _matchWorkflow(goal) {
   // real leg; the lexical matcher above is precise by construction and is deliberately NOT guarded.
   const _named = namesDeclaredLeg(goal, _declaredLegNames());
   if (_named) {
-    try { _orchLog(`WORKFLOW ▸ semantic match DECLINED — "${String(goal).slice(0, 40)}" names the declared leg "${_named}" (reachability guard → interpret)`); } catch { /* */ }
+    try { _orchLog(`WORKFLOW ▸ semantic match DECLINED — "${_scrubHead(goal, 40)}" names the declared leg "${_named}" (reachability guard → interpret)`); } catch { /* */ }
     return null;
   }
   try {
@@ -10071,7 +10220,7 @@ async function _tryGroundedTurn(text) {
   // A bulk delete counts + confirms first. "delete that" (singular) is NOT admin → it falls to the feedback path.
   const admin = parseAdminCommand(text);
   if (admin.isAdmin) {
-    _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → admin/${admin.command}`);   // v2.74.818
+    _orchLog(`ROUTE ▸ "${_scrubHead(text, 50)}" → admin/${admin.command}`);   // v2.74.818
     if (admin.command === 'clear_chat') _orchClearChat();
     else if (admin.command === 'list') await _orchListFlow(admin);     // v2.74.819 — read complement to delete
     else if (admin.command === 'rename') await _orchRenameFlow(admin); // v2.74.819 — name a Ground
@@ -10082,13 +10231,13 @@ async function _tryGroundedTurn(text) {
   }
 
   // DEDUP — "dedupe grounds" / "merge duplicate sites": detect Grounds that are the same site (read-only).
-  if (parseDedupCommand(text).isDedup) { _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → dedup`); await _orchDedupFlow(); return true; }   // v2.74.818
+  if (parseDedupCommand(text).isDedup) { _orchLog(`ROUTE ▸ "${_scrubHead(text, 50)}" → dedup`); await _orchDedupFlow(); return true; }   // v2.74.818
 
   const tab = await _orchActiveTab();
   if (!tab || typeof tab.id !== 'number') return false;
   // v2.74.818 — the grounded route + active-tab Ground host; the downstream COMPREHEND_CROSS_GROUND / ORCH_MATCH(_GLOBAL)
   // line then shows which grounded sub-path ran, so a turn's full route reads in two lines.
-  _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → grounded [tab=${(() => { try { const u = new URL(tab.url); return u.protocol === 'chrome-extension:' ? 'extension-page' : u.hostname; } catch { return '?'; } })()}]`);   // v2.74.962 — the side panel as active tab rendered the extension id as a hostname
+  _orchLog(`ROUTE ▸ "${_scrubHead(text, 50)}" → grounded [tab=${(() => { try { const u = new URL(tab.url); return u.protocol === 'chrome-extension:' ? 'extension-page' : u.hostname; } catch { return '?'; } })()}]`);   // v2.74.962 — the side panel as active tab rendered the extension id as a hostname
 
   // ORCH-X T2 CACHE — a COMPOUND ask the user already saved as a composite (a T2 artifact) runs ATOMICALLY: no
   // re-decompose, no per-clause re-match. Cheap lexical lookup (NO LLM), gated to compound-ish asks so a simple
@@ -10131,7 +10280,7 @@ async function _tryGroundedTurn(text) {
   if (!_xgCue && (/\b(?:and|then|plus)\b/i.test(text) || text.includes('&'))) {
     try {
       const cn = await _orchReq('COUNT_NAMED_GROUNDS', { ask: text });
-      if (cn && cn.success && cn.count >= 2) { _xgCue = true; _xgForce = true; _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → cross-site (ground-aware: ${cn.count} grounds named)`); }
+      if (cn && cn.success && cn.count >= 2) { _xgCue = true; _xgForce = true; _orchLog(`ROUTE ▸ "${_scrubHead(text, 50)}" → cross-site (ground-aware: ${cn.count} grounds named)`); }
     } catch { /* additive — a failure leaves the lexical decision unchanged */ }
   }
   if ((isCompoundAsk(text) || _xgForce) && _xgCue) {
@@ -10145,7 +10294,7 @@ async function _tryGroundedTurn(text) {
       const rd = rr && rr.success && rr.decision;
       if (rd && (rd.action === 'primitive' || rd.action === 'replay')
           && await _dispatchRouteDecision(rd, { tabId: tab.id, groundId: rr.groundId, text })) {
-        _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → router pre-empted T3X (${rd.action}, conf ${rd.confidence})`);
+        _orchLog(`ROUTE ▸ "${_scrubHead(text, 50)}" → router pre-empted T3X (${rd.action}, conf ${rd.confidence})`);
         return true;
       }
     } catch { /* the gate is additive — any failure falls through to the comprehend unchanged */ }
@@ -10424,7 +10573,7 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null, r
       _bankCapabilityOutcome(ask, res.capability.id, true);
       try {
         const mid = _memoryId();
-        if (mid) retireActFail(mid, ask).then((n) => { if (n) _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${String(ask).slice(0, 40)}" after re-teach`); }).catch(() => { /* */ });
+        if (mid) retireActFail(mid, ask).then((n) => { if (n) _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${_scrubHead(ask, 40)}" after re-teach`); }).catch(() => { /* */ });
       } catch { /* best-effort — never block the teach reply */ }
       // v2.74.1540 — RETIRE-ON-REPLACE: the offer said "show me the right way and I'll REPLACE it" — honor the
       // replace half. The re-teach knows exactly which capability it supersedes (threaded from the offer, no
@@ -10525,7 +10674,7 @@ function _orchClarifyFromRoute(d, { tabId = null, groundId = null, text }) {
   const pv = (d.params && typeof d.params === 'object') ? d.params : {};
   const msg = appendMessage({ role: 'assistant', body: '' });
   _setMessageBody(msg, `I'm not sure which you meant — pick one, or just say it a different way.`);
-  _orchLog(`CLARIFY ▸ "${String(text).slice(0, 50)}" → ${cands.length} options: ${cands.map(label).join(' | ')} (conf ${d.confidence})`);
+  _orchLog(`CLARIFY ▸ "${_scrubHead(text, 50)}" → ${cands.length} options: ${cands.map(label).join(' | ')} (conf ${d.confidence})`);
   const bar = _orchActionBar(msg);
   for (const c of cands) {
     bar.appendChild(_mkBtn(label(c), () => {
@@ -10560,7 +10709,7 @@ async function _tryRouterFallback(text) {
   const res = await _orchReq('ROUTE_ASK', { ask: text, tabId: tab && tab.id, seed: _currentConversationSeed });
   if (!res || res.success === false || !res.decision) return false;
   const d = res.decision;
-  _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → router-fallback ${d.action}${d.tool ? ` ${d.tool.op || d.tool.capabilityId || ''}` : ''} (conf ${d.confidence})`);
+  _orchLog(`ROUTE ▸ "${_scrubHead(text, 50)}" → router-fallback ${d.action}${d.tool ? ` ${d.tool.op || d.tool.capabilityId || ''}` : ''} (conf ${d.confidence})`);
   if (await _dispatchRouteDecision(d, { tabId: tab && tab.id, groundId: res.groundId, text })) return true;
   // CLARIFY (v2.74.1016) — the dead-end declined a confident dispatch (low-confidence / explicit clarify).
   // Rather than fall straight to the legacy fuzzy matcher (the mis-escalation source), surface the dropped
@@ -10641,7 +10790,7 @@ function _ilAllCapabilities(tabId) {
 // Dispatch an ACT×Self PANEL leg JUDGE picked → its local handler. No il-confirm (see IL_PANEL_LEGS): the legs run
 // directly — the explicit `il:` command is the authorization, and window.confirm is dead in the async panel flow.
 async function _ilRunPanelAction(msg, { leg, panel, ask, params = {} }) {
-  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → self:${leg.key}`); } catch { /* */ }
+  try { _orchLog(`IL ▸ "${_scrubHead(ask, 50)}" → self:${leg.key}`); } catch { /* */ }
   let r = null;
   try { r = await panel.run(msg, { ask, params }); }   // FL v1348 — interpret-bound params reach the panel leg (extra args are ignored by the param-free legs)
   catch (e) { _setMessageBody(msg, `Couldn’t ${_legFailName(leg)}${e && e.message ? ` — ${e.message}` : ''}.`); return; }
@@ -10714,6 +10863,10 @@ async function _warmResolveVia(host, tabId) {
     if (!h) return;
     const { groundId, recipes } = await _cachedHostRecipes(h);
     if (!groundId || !recipes || !recipes.length) return;
+    // v2.74.1919 — the warm was the first door to trip over foreign stored records (`warming /api/VendorSuite/
+    // State on admin.shopify.com` ×6, glf 00:42-00:45); v1919-b moved the own-origin filter INTO
+    // _cachedHostRecipes, so every reader of the store — this warm, _showSection, _openRecordOnSite, the show
+    // scan — sees own-origin records only.
     for (const leg of harvestedRecipeLegs(recipes, { host: h, mode: 'ask', groundId })) {
       const specs = (leg && leg.tool && leg.tool.resolve) || null;
       const spec = specs ? Object.values(specs).find((s) => s && s.via) : null;
@@ -11691,6 +11844,25 @@ function _divisionCtxFresh() {
   if ((Date.now() - (_divisionCtx.at || 0)) > _FOLLOWUP_TTL) return null;
   return String(_divisionCtx.value);
 }
+// v2.74.1918 — ONE context-division fill for EVERY door that binds interpret params (the v1867 block, extracted).
+// glf 00:45 (the twelfth twin door): the MAP's collection sub-read ("get open warranty tasks") ran through the
+// chain door, which never had this fill — divisionId "" defaulted to Atlanta West → array[0] → "no collection",
+// while the STANDALONE same ask 28 seconds earlier got `divisionId ← "Raleigh"` → array[6]. Same narrow rules as
+// v1867: only a division-class param the model left BLANK (an explicit "in Raleigh" always wins; blank-means-
+// current still holds when there is no context), only from a read inside the 10-minute follow-up window
+// (_contextDivision owns the window), and the fill is RECORDED (v1886) so existential widening stays honest.
+function _fillContextDivision(leg, params) {
+  if (!(leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve && params && typeof params === 'object')) return;
+  for (const _p of Object.keys(leg.tool.resolve)) {
+    if (params[_p] != null && String(params[_p]).trim() !== '') continue;   // explicit or already bound → untouched
+    if (!/division/i.test(_p)) continue;                                     // the only context we can carry today
+    const _ctx = _contextDivision();
+    if (!_ctx) continue;
+    params[_p] = _ctx;
+    _ctxFilledParams[_p] = true;   // v2.74.1886 — the context supplied this, not the ask
+    try { _orchLog(`FOCUS ▸ param fill ${_p} ← "${_ctx}" (conversation context, not the site default)`); } catch { /* */ }
+  }
+}
 async function _openRecordOnSite(ask, recordValue, siteWord, opts = {}) {   // v2.74.1554 — no user echo here: the turn claims at sendChatMessage ENTRY (invariant #4); `ask` (the canonical phrase) still drives matching + alias recording. v1557 — opts.statusMsg: a thinking bubble the caller already showed; consumed (→ assistant) by whichever path acts
   const generic = ['site', 'page', 'tab', 'browser', 'web'].includes(siteWord);
   // v2.74.1533 — an EXPLICIT division in the ask ("show ticket X IN Raleigh on vendorsuite") WINS over the context
@@ -11850,7 +12022,107 @@ function _shapeScope(params, labels) {
 
 // Dispatch a builtin leg JUDGE picked. A PANEL (ACT×Self) leg runs locally (above); a Browser/Self READ leg goes
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
-async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false, _redirected = false, _drillTo = null }) {   // v1869 — _drillTo survives a redirect so the drill lands on the leg the ASK chose
+// v2.74.1924 — SCRUB-BEFORE-SLICE. Logger's ring scrub runs on the FULL line, but a head-slice can cut an email
+// mid-pattern so the TLD-anchored scrubber no longer matches (live 123241: `LEARNED ▸ banked act-ok — "…for
+// dmonk@deako."` shipped VERBATIM to the cloud wire while every full-length line read [email]). Any log fragment
+// built by slicing USER-AUTHORED text (asks, goals, param values) scrubs FIRST — the same pattern as
+// Core/Logger.js:415 — then cuts. A post-scrub cut can at worst truncate the literal "[email]" marker.
+// v1924-b (review) — mirror the ring's PHONE and long-digit rules too: the truncation hazard is identical
+// (a head-slice cutting "555-123-4567" to "555-123-4" dodges the phone rule the same way it dodged the email
+// one). Boundaries copied verbatim from Core/Logger.js:415-425 so artifact ids (`gnd_…`) stay readable.
+const _scrubHead = (s, n = 40) => String(s ?? '')
+  .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]')
+  .replace(/(?<![\w.@-])(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?![\w])/g, '[phone]')
+  .replace(/\b\d{8,}\b/g, '[id]')
+  .slice(0, n);
+// v2.74.1922 — REFUSED-PAIR MEMORY (live 123241, the LAUNDERING LOOP): the gate's refusal NAMES the guessed
+// value — an honesty feature — but the refusal is an assistant turn, so the NEXT ask's recent-turns window
+// contained the fabricated gid and the gate passed it straight to a data.node:null invoke. "Appears in the
+// conversation" and "entered the conversation legitimately" are different predicates: a refused (param,value)
+// pair must appear in USER-authored turns or focus (things the model did not write) to pass again.
+// v1922-b (review) — THREE key-shape corrections, all found by re-deriving the laundering loop against the fix:
+//  · keyed by (conv, VALUE) — NOT the param name: the same fabricated id re-bound under a sibling leg's
+//    differently-named identifier param (`order` vs `orderGid`) slipped a name-keyed memory entirely;
+//  · VARIANT-tolerant: refusing `gid://shopify/Order/59987` must also cover a next-turn rebind of bare `59987`
+//    (the refusal echo contains it, so the base gate's substring containment would pass it) — the match is
+//    two-way containment on the alnum collapse, with a 4-char floor so short ids can't over-match;
+//  · recency eviction: Map.set on an existing key keeps its ORIGINAL position, so a just-re-refused pair could
+//    be the next one evicted. Delete-then-set moves it to the tail.
+const _refusedIdParams = new Map();   // `${convId}|${alnum(value)}` → at (bounded, recency-ordered)
+const _refusedAlnum = (value) => String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const _refusedKey = (convId, value) => `${convId || ''}|${_refusedAlnum(value)}`;
+function _bankRefusedParam(convId, _name, value) {
+  const k = _refusedKey(convId, value);
+  if (_refusedIdParams.has(k)) _refusedIdParams.delete(k);   // re-refusal moves to the tail (recency, not first-insertion)
+  _refusedIdParams.set(k, Date.now());
+  if (_refusedIdParams.size > 100) _refusedIdParams.delete(_refusedIdParams.keys().next().value);
+}
+/** Was this value (or a literal variant of it) refused in this conversation? PURE-ish (reads the module map). */
+function _wasRefused(convId, value) {
+  const a = _refusedAlnum(value);
+  if (a.length < 2) return false;
+  if (_refusedIdParams.has(`${convId || ''}|${a}`)) return true;
+  const pre = `${convId || ''}|`;
+  for (const k of _refusedIdParams.keys()) {
+    if (!k.startsWith(pre)) continue;
+    const b = k.slice(pre.length);
+    if (b.length < 4 || a.length < 4) continue;             // a 2-3 char id is too weak to match by containment
+    if (b.includes(a) || a.includes(b)) return true;        // gid://…/59987 ⇄ 59987
+  }
+  return false;
+}
+// v2.74.1922 — machineOnly params BIND FROM THE RECORD, never from generation. The catalog can declare
+// `fromField` on a machineOnly param (shopify_order_events.orderGid ← `id`): the fill reads the newest focus
+// record/list carrying that field and OVERRIDES a generated value — the drill discipline (`taskId` handoffs)
+// extended to the act door, where the model otherwise CONSTRUCTS plausible ids (live 123241: the DEAKO number
+// dressed up as a gid). A model value identical to the record's is a no-op; a differing one is replaced and the
+// trace says so. The provenance gate then judges the FILLED value, which the focus hay legitimizes naturally.
+function _fillMachineParamsFromFocus(leg, params) {
+  // v1922-b (review) — read the declaration from the surface that SURVIVES projection: recipeToLeg emits param
+  // NAMES on `leg.params` plus this schema; `leg.tool.params` exists on no projected leg (the first draft read
+  // it and was inert end-to-end — the v1854/v1864 class). recipeParamSchema now carries machineOnly/fromField.
+  const props = (leg && leg.paramSchema && leg.paramSchema.properties && typeof leg.paramSchema.properties === 'object') ? leg.paramSchema.properties : null;
+  if (!props || !params) return;
+  // v1922-b (review) — HOST SCOPING. `fromField:'id'` matches a Zendesk ticket's numeric id as readily as a
+  // Shopify order gid, and the fill deliberately OVERRIDES — an unscoped newest-first scan can replace a correct
+  // gid with a wrong-system id, then self-legitimize (the fill's own source IS the provenance hay). Only focus
+  // entries whose provenance host matches the leg's host may bind it; a hostless entry is not evidence.
+  const _nh2 = (s) => String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/[/?#].*$/, '').trim();
+  const legHost = _nh2((leg.tool && (leg.tool.origin || leg.tool.appHost)) || '');
+  for (const [name, slot] of Object.entries(props)) {
+    if (!slot || slot.machineOnly !== true || !slot.fromField) continue;
+    let v = null; let src = '';
+    for (const e of (_currentConversationFocus || [])) {
+      if (!e) continue;
+      const eh = _nh2(e.provenance && e.provenance.host);
+      if (!legHost || !eh || !(eh === legHost || eh.endsWith(`.${legHost}`) || legHost.endsWith(`.${eh}`))) continue;   // cross-system guard
+      if (e.fields && e.fields[slot.fromField] != null && typeof e.fields[slot.fromField] !== 'object') { v = String(e.fields[slot.fromField]); src = 'focus record'; break; }
+      if (Array.isArray(e.rows)) { const r = e.rows.find((row) => row && row[slot.fromField] != null && typeof row[slot.fromField] !== 'object'); if (r) { v = String(r[slot.fromField]); src = 'focus list'; break; } }
+    }
+    if (v == null) continue;
+    const cur = params[name] != null ? String(params[name]) : '';
+    if (cur === v) continue;
+    params[name] = v;
+    try { _orchLog(`PARAM ▸ fill ${name} ← ${src} ${slot.fromField} ("${_scrubHead(v, 44)}") — machineOnly binds from the record, never from generation${cur ? ` (replaced "${_scrubHead(cur, 30)}")` : ''}`); } catch { /* */ }
+  }
+}
+// v2.74.1911 — the provenance HAYSTACK, shared by every door that runs the identifier gate: the ask + the
+// recent-turn window the binder saw + the conversation's focus (labels, field values, AND list rows — v1911-b:
+// list entries hold their join keys in `rows`, not `fields`; the sibling focus param-fill 60 lines down reads
+// them for exactly that reason, and assistant turns clip at 300 chars so a long list's ids often survive ONLY
+// here). Scalars only, rows capped — this is a containment corpus, not a payload.
+function _provenanceHay(askText, history = null) {
+  const parts = [String(askText || '')];
+  if (Array.isArray(history)) for (const t of history) parts.push(typeof t === 'string' ? t : String((t && (t.text ?? t.body)) ?? ''));
+  for (const e of (_currentConversationFocus || [])) {
+    if (!e) continue;
+    if (e.label) parts.push(String(e.label));
+    for (const v of Object.values(e.fields || {})) if (v != null && typeof v !== 'object') parts.push(String(v));
+    if (Array.isArray(e.rows)) for (const row of e.rows.slice(0, 40)) { if (row && typeof row === 'object') for (const v of Object.values(row)) if (v != null && typeof v !== 'object') parts.push(String(v)); }
+  }
+  return parts.join('\n');
+}
+async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false, _redirected = false, _drillTo = null, history = null }) {   // v1869 — _drillTo survives a redirect so the drill lands on the leg the ASK chose; v1911 — history rides in for the identifier-provenance gate (the same window interpret saw)
   const _askConvId = _currentConversationId;   // FC-6 — focus accretes to the conversation the ask was typed in
   // v2.74.1863 — PROVENANCE SNAPSHOT, taken before any fill layer runs. Whatever is non-empty HERE was bound by
   // the MODEL out of the ask; the focus/case fill and the ride resolvers only ever add below. That one bit is
@@ -11876,6 +12148,43 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     if (_gapSys) {
       try { _orchLog(`TARGET ▸ named-system fence (${_trMiss ? 'tr-explicit' : 'catalog'}): ask names "${_gapSys}", selected leg is ${_legHost} (${(leg.tool && leg.tool.recipeId) || leg.key}) — declined`); } catch { /* */ }
       _setMessageBody(msg, `I can’t do that on **${_gapSys}** yet — my closest match runs on **${_legHost}**, which isn’t what you asked for. Teach me the ${_gapSys} way (say “show me”), or ask me to use ${_legHost} instead.`, { markdown: true });
+      _orchFinalize(msg);
+      return false;
+    }
+  }
+  // v2.74.1911 — the IDENTIFIER-PROVENANCE gate (live 125712: interpret bound {"sku":"DK-SW-02"} for "what is the
+  // sku of the smart switch gen 2?" — its own why: "Gen 2 typically corresponds to DK-SW-02 based on Deako's
+  // naming pattern". A generated param can be "extracted" from world-knowledge; the call was spent on a key that
+  // exists nowhere and the miss rendered as "no such product" WITHOUT naming the key it tried). The pure check
+  // lives in Core/connectorLeg.js beside missingRequiredParams; this door judges only MODEL-BOUND params
+  // (_modelBound — code fills are provenance-clean by construction) against the ask + the same recent-turn window
+  // interpret saw + the conversation's focus labels/values/rows. A hit clarifies instead of dispatching, and
+  // NAMES the guessed value so the fabrication is visible.
+  // v1911-b (review) — `!_drilled && !_redirected` is LOAD-BEARING, same as the drill-target guard below: the
+  // drill/widen handoffs re-enter this function with a MACHINE-supplied internal id (taskId from the row just
+  // read — by design absent from all conversation text), and `_modelBound` is recomputed at entry so it cannot
+  // tell them apart. Without the exemption every human-number drill dead-ends in a false "I won't guess" AFTER
+  // the join already found the record — the v1866 class, re-introduced verbatim.
+  if (leg && leg.domain === 'connector' && !_drilled && !_redirected) _fillMachineParamsFromFocus(leg, params);   // v1922 — machineOnly + fromField: the record's value wins BEFORE any judging, and also fills a param the model left blank (else the required-param clarify fires with the answer sitting in focus)
+  if (leg && leg.domain === 'connector' && _modelBound.size && !_drilled && !_redirected) {
+    let _inv = inventedIdentifierParams(leg, params, _provenanceHay(ask, history)).filter((p) => _modelBound.has(p.name));
+    let _reWhy = 'value absent from ask+turns';
+    // v1922 — the refused-pair recheck: a value the gate refused BEFORE only passes on USER-authored or
+    // focus-sourced evidence — its own refusal echo (an assistant turn in the window) does not count.
+    if (!_inv.length) {
+      for (const [n, raw] of Object.entries(params)) {
+        if (raw == null || !_modelBound.has(n)) continue;
+        if (!_wasRefused(_askConvId, raw)) continue;   // v1922-b — value-keyed + variant-tolerant
+        const _trusted = _provenanceHay(ask, Array.isArray(history) ? history.filter((t) => t && t.role === 'user') : null);
+        const _re = inventedIdentifierParams(leg, { [n]: raw }, _trusted);
+        if (_re.length) { _inv = _re; _reWhy = 'refused before; only its own refusal echo backs it'; break; }
+      }
+    }
+    if (_inv.length) {
+      const _p0 = _inv[0];
+      for (const p of _inv) _bankRefusedParam(_askConvId, p.name, p.value);
+      try { _orchLog(`PARAM ▸ invented ${_inv.map((p) => `${p.name}="${_scrubHead(p.value, 30)}"`).join(', ')} — ${_reWhy} → clarify (no call spent) [${(leg.tool && leg.tool.recipeId) || leg.key || ''}]`); } catch { /* */ }
+      _setMessageBody(msg, `**${leg.name || leg.key}** needs a real **${_p0.name}** — the ask doesn’t name one, and I won’t guess (my router proposed \`${escHtml(String(_p0.value))}\`, which ${_reWhy === 'value absent from ask+turns' ? 'appears nowhere in this conversation' : 'I already refused once — it still hasn’t come from you or a read'}). Tell me the ${_p0.name} and I’ll run it.`, { markdown: true });
       _orchFinalize(msg);
       return false;
     }
@@ -11973,20 +12282,9 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   // always wins, and blank-means-current still holds when there is no context), only from a read inside the
   // 10-minute follow-up window, and never over an `each` sweep. `_contextDivision` already prefers the human
   // LABEL, which the resolver maps to an id exactly like a typed name.
-  if (leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve) {
-    for (const _p of Object.keys(leg.tool.resolve)) {
-      if (params[_p] != null && String(params[_p]).trim() !== '') continue;   // explicit or already bound → untouched
-      if (!/division/i.test(_p)) continue;                                     // the only context we can carry today
-      const _ctx = _contextDivision();
-      if (!_ctx) continue;
-      params[_p] = _ctx;
-      // v2.74.1886 — record that the CONTEXT supplied this, not the ask. User ruling: "get any open warranty request"
-      // means one request from ANY division, so an existential ask must widen past the conversation's subject too —
-      // and the honest test is "did the ASK name this axis", of which both a default and a context-fill are a no.
-      _ctxFilledParams[_p] = true;
-      try { _orchLog(`FOCUS ▸ param fill ${_p} ← "${_ctx}" (conversation context, not the site default)`); } catch { /* */ }
-    }
-  }
+  // v2.74.1918 — the block itself now lives in _fillContextDivision, shared with the chain door (the map's
+  // collection sub-read was the twin this fill never reached).
+  _fillContextDivision(leg, params);
   // CX-9b (v2.74.1434) — the ID layer: resolve marked params (divisionId et al.) BEFORE any branch, so every
   // transport (replay read/write, cookie-ride write, the planExec tail) dispatches canonical ids — and a write's
   // HITL preview shows the real request. On ambiguity/unknown the honest ask-back is already rendered.
@@ -12083,7 +12381,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // now banks with its cause classified. Best case the wedge from a signed-out run clears itself.
     if (d && d.precondition) {
       const _mid = _memoryId();
-      if (_mid) retireActFail(_mid, ask).then((n) => { if (n) { try { _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${String(ask).slice(0, 40)}" after a PRECONDITION failure (not a capability verdict)`); } catch { /* */ } } }).catch(() => { /* */ });
+      if (_mid) retireActFail(_mid, ask).then((n) => { if (n) { try { _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${_scrubHead(ask, 40)}" after a PRECONDITION failure (not a capability verdict)`); } catch { /* */ } } }).catch(() => { /* */ });
     }
     return (d && d.precondition) ? 'precondition' : false;
   }
@@ -12210,7 +12508,8 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     const _madeId = createdRecordId(sw && sw.value);
     if (_madeId != null && leg.tool.itemUrl) {
       _lastGroundedRead = { leg, params, at: Date.now(), itemId: _madeId, urlArgs: (sw && sw.urlArgs) || null };
-      _setMessageBody(msg, `Done — created it (#${_madeId}). Say “show it” to open the record.`);
+      const _mSig = (/^[A-Za-z]*#?[\d-]+$/.test(String(_madeId)) && !String(_madeId).includes('#')) ? '#' : '';   // v1915-b — sixth sigil sibling (a created id can be a gid or carry its own #)
+      _setMessageBody(msg, `Done — created it (${_mSig}${_madeId}). Say “show it” to open the record.`);
     } else {
       _setMessageBody(msg, 'Done.');
     }
@@ -12225,7 +12524,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     const oka = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated' });
     if (!oka) { _setMessageBody(msg, 'Cancelled.'); return 'cancelled'; }
   }
-  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
+  try { _orchLog(`IL ▸ "${_scrubHead(ask, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
   // v2.74.1759 — CSRF-cold: keep the turn, show a warming line, one silent retry (don't ask the user to retype).
@@ -12428,7 +12727,7 @@ function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null, _bankLe
   // wedge (v1790-96) took three passes precisely because what got banked was invisible at write time — the
   // lesson only surfaced when interpret quoted it back. Value-scrubbed: provenance/conf + the goal head, never
   // the body.
-  try { _orchLog(`LEARNED ▸ banked ${item.provenance || item.kind || 'outcome'}${item.confidence != null ? ` conf=${item.confidence}` : ''} — "${String(goal).slice(0, 40)}"`); } catch { /* */ }
+  try { _orchLog(`LEARNED ▸ banked ${item.provenance || item.kind || 'outcome'}${item.confidence != null ? ` conf=${item.confidence}` : ''} — "${_scrubHead(goal, 40)}"`); } catch { /* */ }
   try { recordGoalItem(appId, item).catch(() => { /* best-effort */ }); } catch { /* */ }
 }
 async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = null, connectionsOverride = null } = {}) {
@@ -12439,7 +12738,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   if (suggestWorkflows && WF_RECALL_PREDOOR) {
     const wf = await _matchWorkflow(goal);
     if (wf) {
-      try { _orchLog(`WORKFLOW ▸ "${goal.slice(0, 50)}" → ${wf.name || wf.id || 'saved'} (${wf.subAsks.length} steps)`); } catch { /* */ }
+      try { _orchLog(`WORKFLOW ▸ "${_scrubHead(goal, 50)}" → ${wf.name || wf.id || 'saved'} (${wf.subAsks.length} steps)`); } catch { /* */ }
       _offerWorkflowReplay(goal, wf);
       return true;
     }
@@ -12490,7 +12789,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   try {
     const _clauseKey = ['map', 'fieldRead', 'branch', 'write'].find((k) => d && d[k]) || null;   // PP-1 (v1661) — this array is a THIRD whitelist (after INTENTS and parseInterpretOutput's); a clause missing here logs payload:none while working fine, which is worse than useless in a diagnosis.
     const _known = INTENTS.includes(d.intent);
-    _orchLog(`INTERPRET ▸ "${goal.slice(0, 50)}" → ${d.intent} (conf ${d.confidence}${d.why ? `; ${d.why}` : ''}) payload:${_clauseKey || 'none'} registry:${_known ? 'ok' : 'UNKNOWN'}`);
+    _orchLog(`INTERPRET ▸ "${_scrubHead(goal, 50)}" → ${d.intent} (conf ${d.confidence}${d.why ? `; ${d.why}` : ''}) payload:${_clauseKey || 'none'} registry:${_known ? 'ok' : 'UNKNOWN'}`);
   } catch { /* */ }
 
   // clarify / teach / answer — rendered here (no engine dispatch).
@@ -12611,7 +12910,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   if (d.intent === 'act' && d.capabilityId) {
     const cleg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
     if (cleg) {
-      const ok = await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema) });
+      const ok = await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema), history });   // v1911 — the provenance gate judges by the SAME window interpret saw
       _orchFinalize(msg);
       // AL-3e — bank the OUTCOME. A user CANCEL is neither success nor failure (v1338, review C); v2.74.1796 — nor
       // is a PRECONDITION failure (the page never became ready, e.g. signed out) — the walk ran no step, so it is
@@ -12788,7 +13087,7 @@ async function _tryIlCommand(text) {
       _orchFinalize(msg); return true;
     }
     const why = out.decision.reason ? ` — ${out.decision.reason}` : '';
-    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → run "${leg.name || leg.key}"${why}`); } catch { /* */ }
+    try { _orchLog(`IL ▸ "${_scrubHead(ask, 50)}" → run "${leg.name || leg.key}"${why}`); } catch { /* */ }
     await _orchRun(msg, {
       groundId: out.groundId, tabId, ask, capabilityId: leg.key,
       intent: leg.name || (m && m.candidate && m.candidate.intent),
@@ -12802,7 +13101,7 @@ async function _tryIlCommand(text) {
     const why = out.decision.needs.reason ? ` — ${out.decision.needs.reason}` : '';
     _setMessageBody(msg, `The closest match didn’t fit “${ask}”${why}. Try rephrasing.`);
     _orchFinalize(msg);   // v1338 (review D)
-    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → rejected${why}`); } catch { /* */ }
+    try { _orchLog(`IL ▸ "${_scrubHead(ask, 50)}" → rejected${why}`); } catch { /* */ }
     return true;
   }
 
@@ -12812,7 +13111,7 @@ async function _tryIlCommand(text) {
     try {
       const syn = await _orchReq('SYNTHESIZE_FROM_GAP', { ask, tabId, groundId: m && m.groundId });
       if (syn && syn.synthesized && syn.capabilityId) {
-        try { _orchLog(`SYNTH ▸ "${String(ask).slice(0, 50)}" → staged "${syn.intent || syn.capabilityId}"`); } catch { /* */ }
+        try { _orchLog(`SYNTH ▸ "${_scrubHead(ask, 50)}" → staged "${syn.intent || syn.capabilityId}"`); } catch { /* */ }
         await _orchRun(msg, { groundId: syn.groundId || (m && m.groundId), tabId, ask, capabilityId: syn.capabilityId, intent: syn.intent, paramValues: {} });
         return true;
       }
@@ -12835,7 +13134,7 @@ async function _tryIlCommand(text) {
   try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, connections: _boundConnections(), history, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(msg, answer ? `${answer}` : `I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
   _orchFinalize(msg);   // v2.74.1338 (review D) — the IL answer survives a reload (CR-U1 class)
-  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
+  try { _orchLog(`IL ▸ "${_scrubHead(ask, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;
 }
 

@@ -279,7 +279,10 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
   const nowText = String(now ?? '').trim();   // v2.74.1317 — the caller's clock + timezone; without it "tomorrow 3pm" is unresolvable
   const user = [
     `USER ASK: ${String(ask ?? '').trim()}`,
-    ...(nowText ? [`NOW: ${nowText}`] : []),
+    // v2.74.1920 — THE ZONE RULE rides with the clock. glf 00:44: NOW was local ("19:43 America/Chicago"), the
+    // record's createdAt was UTC ("16:35:49Z"), and interpret subtracted across zones — "~3h8m ago" for a true
+    // 8h08m gap. The transport now supplies both forms; this line makes the arithmetic contract explicit.
+    ...(nowText ? [`NOW: ${nowText}. Timestamps ending in Z are UTC — compute any age/delta in ONE zone (convert first); never subtract a UTC timestamp from local time.`] : []),
     '',
     ...(recentBlock ? [recentBlock, ''] : []),
     ...(sites.length

@@ -14,6 +14,8 @@
  * whole field — for a short human-authored note that is never wrong, only less focused.
  */
 
+import { extractValue } from './peritemMap.js';   // v2.74.1917 — sample a candidate path's value for the interrogative type sniff (peritemMap is import-free; no cycle)
+
 const _s = (v) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
 
 // A line that opens a new outline item: "4.", "a.", "iv.", "-", "*", "•" — optionally indented, tab or space.
@@ -284,4 +286,99 @@ export function termFieldKey(keysOrRecord, term, chosenKey) {
   const r = resolveFieldKey(keysOrRecord, t);
   if (!r || !r.key || r.ambiguous) return '';
   return r.key === chosenKey ? '' : r.key;
+}
+
+// ── v2.74.1912 — the INTERROGATIVE type guard ────────────────────────────────────────────────────────────────────
+// Live 125712: "who created the order?" arrived as {field:'customer', term:'created by'} → resolved to
+// customer.email → total term miss → termFieldKey rewrote the read to `createdAt` — a WHO ask answered with a
+// WHEN. The rewrite matched lexically ("created by" ≈ createdAt) and nothing asked whether the candidate field's
+// TYPE can answer the ask's interrogative. Two pure readers, applied by the caller at the same total-miss gate
+// that applies termFieldKey:
+//   · askInterrogative(ask) → 'who' | 'when' | null — only the two interrogatives with a reliable TYPE mapping
+//     (who→person, when→date); what/which/where have none and stay out.
+//   · fieldAnswersInterrogative(q, key, value) → true (this field IS an answer to that ask), false (it CANNOT
+//     be), null (can't tell — the guard then stays out of the way). Key evidence beats value evidence; the value
+//     is a corroborating sniff (ISO date shape, email shape), never the sole verdict for `false`.
+// v1912-b (review) — bare 'name' and 'vendor' are OUT of the person list: a Shopify order's `name` IS the order
+// number ('DEAKO#69872'), ProjectName is a community, VendorExplanation is prose — 'name' only counts in person
+// compounds (first/last/full/display/user name). Better a null (guard steps aside) than a wrong true (prong A
+// renders an order number as a who-answer).
+const _WHO_KEY_RE = /(email|e[-_]?mail|user|customer|owner|author|assignee|creator|contact|agent|person|homeowner|builder|(first|last|full|display)[_-]?name)/i;
+const _DATE_CAMEL_RE = /(At|On)$|(^|[_-])(at|on)$/;        // createdAt · CompletedOn · updated_at — camel needs the capital, so 'reason'/'season' never match
+const _DATE_SUFFIX_RE = /(date|time|timestamp)$/i;         // v1912-b — HubSpot's flat-lowercase wire names ('createdate', 'lastmodifieddate') carry no camel seam; a rare 'candidate'-style false hit is priced in (it only ever makes the guard step ASIDE or hold a date render)
+const _ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}([T ]|$)/;
+
+export function askInterrogative(ask, { leading = false } = {}) {
+  const raw = String(ask || '').toLowerCase();
+  const a = ` ${raw} `;
+  if (/^\s*(what|which|how|why|where)\b/.test(raw)) return null;   // v1912-b — the LEADING interrogative owns the ask ("what did she say when it shipped?" is a what-ask)
+  const q = /[^a-z]who(m|se)?[^a-z]/.test(a) ? 'who' : (/[^a-z]when[^a-z]/.test(a) ? 'when' : null);
+  if (q && leading) {
+    // v1917-b (review) — the RESOLVE-door caller demands the interrogative LEAD the ask ("who created…"): a
+    // mid-sentence who/when is usually a relative clause ("read the assignee field from when this was created"),
+    // and that guard fires on SUCCESSFUL resolutions — overriding an explicitly-named field is the exact
+    // wrong-answer class this family exists to prevent. The v1912 total-miss gate keeps the loose match: the
+    // read already failed there, so there is nothing to override.
+    const lead = raw.replace(/^[\s,]*(so|and|ok|okay|but|now|also|then)\b[\s,]*/, '').trimStart();
+    if (!lead.startsWith(q)) return null;
+  }
+  return q;
+}
+
+function _dateishField(key, value) {
+  const last = String(key || '').split('.').pop() || '';
+  if (_DATE_CAMEL_RE.test(last) || _DATE_SUFFIX_RE.test(last)) return true;
+  return typeof value === 'string' && _ISO_DATE_RE.test(value.trim());
+}
+function _personishField(key, value) {
+  if (_WHO_KEY_RE.test(String(key || ''))) return true;
+  const v = typeof value === 'string' ? value.trim() : '';
+  return !!v && /@.+\./.test(v) && !/\s/.test(v);   // an email-shaped value answers "who" whatever its key is called
+}
+
+export function fieldAnswersInterrogative(q, key, value) {
+  if (q === 'who') {
+    if (_personishField(key, value)) return true;
+    if (_dateishField(key, value)) return false;
+    return null;
+  }
+  if (q === 'when') {
+    if (_dateishField(key, value)) return true;
+    if (_personishField(key, value)) return false;
+    return null;
+  }
+  return null;
+}
+
+// v2.74.1923 — WHO has ROLES (user ruling, 2026-08-01): the interrogative guard fixed the TYPE axis and answered
+// "who created the order?" with customer.email — a person, but the WRONG person (ground truth: staff created it
+// FOR the customer, from a draft). Type-compatible is not role-compatible. These two readers let the caller
+// render ROLE-HONESTLY: when the ask names a role (creator) and the field holds a different one (customer), the
+// reply names the field's role and admits the asked role is absent — never presents one person as the other.
+// Both return null on anything unclear, and null means "stay out of the way" (current behavior).
+const _WHO_ASK_ROLES = [[/creat|made|placed|opened|filed|logged|entered|wrote/, 'creator'], [/assign/, 'assignee'], [/\bown/, 'owner'], [/sent|email|messag/, 'sender']];
+const _FIELD_WHO_ROLES = [[/creat|author/, 'creator'], [/assign/, 'assignee'], [/customer|buyer|purchas|homeowner/, 'customer'], [/owner/, 'owner'], [/vendor|supplier/, 'vendor'], [/sender/, 'sender'], [/contact/, 'contact']];
+export function askWhoRole(ask) {
+  const a = String(ask || '').toLowerCase();
+  for (const [re, role] of _WHO_ASK_ROLES) if (re.test(a)) return role;
+  return null;
+}
+export function fieldWhoRole(key) {
+  const k = String(key || '').toLowerCase();
+  for (const [re, role] of _FIELD_WHO_ROLES) if (re.test(k)) return role;
+  return null;
+}
+
+// v2.74.1917 — door #3 of the class (glf 00:43:09: interpret bound {field:"created by", term:""} — with NO term
+// the v1912 guard, which lives inside the total-term-miss gate, never ran, and "created by" resolved straight to
+// createdAt: the WHO got a WHEN through field RESOLUTION itself). The caller applies the same type check where
+// the field is CHOSEN; this helper answers "which fields on this record COULD answer the interrogative" so a
+// uniquely-compatible field (customer.email on the live case's own record) can be read instead.
+export function interrogativeFieldCandidates(record, q, { maxDepth = 4, max = 60 } = {}) {
+  if (!q || !record || typeof record !== 'object' || Array.isArray(record)) return [];
+  const out = [];
+  for (const p of deepFieldPaths(record, { maxDepth, max })) {
+    if (fieldAnswersInterrogative(q, p.path, extractValue(record, p.path)) === true && !out.includes(p.path)) out.push(p.path);
+  }
+  return out;
 }

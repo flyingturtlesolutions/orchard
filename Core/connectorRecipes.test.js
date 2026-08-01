@@ -739,7 +739,8 @@ describe('connectorRecipes — LEG-2a (v2.74.1594): the SH-T4 checklist surface 
     const ops = wanted.map((w) => w.op).sort();
     // v2.74.1905 — Search joins: the first READ persisted op (the admin bar itself, HAR-authored). The checklist
     // is precisely where its one-time by-hand capture is coached, so listing it is the point, not an accident.
-    assert.deepEqual(ops, ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer', 'Search'], 'the three SH-T5 writes + the Search read');
+    // v2.74.1921 — Timeline joins: the second READ persisted op (the order page's lazy-loaded timeline fetch).
+    assert.deepEqual(ops, ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer', 'Search', 'Timeline'], 'the three SH-T5 writes + the two persisted reads');
     for (const w of wanted) { assert.ok(w.recipeId && w.recipeName, 'each carries its recipe identity for the checklist line'); }
     assert.deepEqual(persistedOpsForHost('deako.zendesk.com'), [], 'Zendesk writes are REST — no op-hash demands');
     assert.deepEqual(persistedOpsForHost(''), []);

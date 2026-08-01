@@ -530,4 +530,37 @@ describe('renderConnectorLines — id ≡ title collapses; # is for numbers (v19
     ] }, { name: 'Rows', displayId: ['TicketId', 'name'] });
     assert.match(lines.join('\n'), /#4894068/);
   });
+  it('an id that already carries a # never gets a second one (v1915 — live "#DEAKO#71644")', () => {
+    const lines = renderConnectorLines({ results: [
+      { name: 'DEAKO#71644', createdAt: '2026-07-31', displayFulfillmentStatus: 'UNFULFILLED' },
+    ] }, { name: 'Rows', displayId: ['name'] });
+    const text = lines.join('\n');
+    assert.doesNotMatch(text, /#DEAKO#71644/);
+    assert.match(text, /DEAKO#71644/);
+  });
+});
+
+describe('primaryList — the Shopify order TIMELINE shape (v1921, pinned on the HAR capture)', () => {
+  // Faithful reduction of admin.shopify.com.har #2 entry 116: data carries TWO siblings — staffMember (the
+  // VIEWING admin, a record with an id — must NOT hijack the list) and node (the order envelope whose
+  // events.edges IS the data). The v1907 envelope rule must unwrap the connection, newest-first, as-is.
+  const TIMELINE = { data: {
+    staffMember: { id: 'gid://shopify/StaffMember/83662733446', initials: ['K', 'O'], avatar: { id: null, transformedSrc: 'https://cdn.example/x', __typename: 'Image' }, __typename: 'StaffMember' },
+    node: { id: 'gid://shopify/Order/6818042937478', events: { edges: [
+      { cursor: 'c1', node: { id: 'gid://shopify/BasicEvent/2', createdAt: '2025-10-20T17:03:32Z', criticalAlert: false, merchantVisible: true, message: 'Kat Owens (deleted) created return DEAKO#59987-R1.', eventLabel: 'order_return_created', attributeToApp: false, attributeToUser: true, additionalContent: null, secondaryMessage: null, channelIcon: null, appIcon: null, __typename: 'BasicEvent' }, __typename: 'EventEdge' },
+      { cursor: 'c2', node: { id: 'gid://shopify/BasicEvent/1', createdAt: '2025-10-09T23:53:59Z', criticalAlert: false, merchantVisible: true, message: 'Kat Owens (deleted) created this order for Divine Monkam from draft order <a href="https://x/draft_orders/1">#D23279</a>.', eventLabel: 'order_placed', attributeToApp: false, attributeToUser: true, additionalContent: null, secondaryMessage: null, channelIcon: null, appIcon: null, __typename: 'BasicEvent' }, __typename: 'EventEdge' },
+    ], pageInfo: { hasNextPage: false, hasPreviousPage: false, __typename: 'PageInfo' }, __typename: 'EventConnection' }, __typename: 'Order' },
+  }, extensions: { cost: { requestedQueryCost: 215 } } };
+  it('unwraps the events connection — the CREATOR event is a row, the viewing staffMember never is', () => {
+    const rows = primaryList(TIMELINE);
+    assert.equal(rows.length, 2);
+    assert.match(rows[1].message, /created this order for/);
+    assert.equal(rows[0].eventLabel, 'order_return_created');
+  });
+  it('renders actor sentences via displayId message — no wrapper, no # sigil on prose', () => {
+    const text = renderConnectorLines(TIMELINE, { name: 'Shopify order timeline', displayId: ['message'] }).join('\n');
+    assert.match(text, /created this order for/);
+    assert.doesNotMatch(text, /StaffMember|83662733446/);
+    assert.doesNotMatch(text, /• #/);
+  });
 });

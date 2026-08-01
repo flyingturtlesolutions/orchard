@@ -89,6 +89,12 @@ function recipeParamSchema(params) {
     // semantics (live: `address {type:string}` was bound "greensboro" once and skipped once — a bare name+type gives
     // the router nothing to bind BY). Curated text, capped; rendered through sanitizeToolString like every tool string.
     if (p && p.hint) slot.hint = String(p.hint).slice(0, 140);
+    // v2.74.1925 (review) — HOP 3 for the machine-bind declaration. `machineOnly`/`fromField` (v1922) rode hop 1
+    // fine (recipeFromCatalogEntry copies `params` whole) and died HERE: the projected leg carries param NAMES on
+    // `leg.params` and this schema — there is no `tool.params` for a reader to find (the v1854/v1864 inert-reader
+    // class, invariant #3's field-reader hop). The consumer reads leg.paramSchema.properties.<name>.fromField.
+    if (p && p.machineOnly === true) slot.machineOnly = true;
+    if (p && p.fromField) slot.fromField = String(p.fromField);
     properties[name] = slot;
     if (p && p.required) required.push(name);
   }
@@ -139,6 +145,70 @@ export function missingRequiredParams(legOrRecipe, params = {}) {
     if (resolved && Object.prototype.hasOwnProperty.call(resolved, name)) continue;
     const v = (params && typeof params === 'object') ? params[name] : undefined;
     if (v == null || String(v).trim() === '') out.push(name);
+  }
+  return out;
+}
+
+/**
+ * v2.74.1911 — the IDENTIFIER-PROVENANCE gate. Live 125712: "what is the sku of the smart switch gen 2?" routed
+ * to shopify_product_by_sku with params {"sku":"DK-SW-02"} — the router's own `why` said it outright: *"Gen 2
+ * typically corresponds to DK-SW-02 based on Deako's naming pattern"*. Params are bound by GENERATION, so nothing
+ * structural stops the model "extracting" a value from its own world-knowledge; the leg then spends a real call
+ * on a key that exists nowhere and the miss renders as "no such product" — with the invented key never shown.
+ * Same honesty family as the count/scope rules, one rung deeper: an identifier the conversation never contained
+ * is a FABRICATION, not an extraction.
+ *
+ * PURE. Returns [{name, value}] for every bound identifier-class param whose value appears NOWHERE in
+ * `contextText` (ask + recent turns + focus labels/values, caller-assembled). Class is name-shaped:
+ *   · hard-id terms (sku/id/number/email/handle/sha/…) → gated;
+ *   · a BARE entity noun (order/task/ticket/claim/job/…) → gated (those params take numbers/ids);
+ *   · any open descriptor in the name (query/status/type/name/…) → NEVER gated — free-word params are
+ *     legitimately paraphrased ("do we sell dimmers" → query:"dimmer").
+ * resolve-marked params are skipped (their fill layers — defaultPath, context division, human→id mapping — are
+ * provenance-clean by construction), and so is the urlParam slot (executor-filled). Matching is case-insensitive
+ * with an alphanumeric-collapse fallback so "DK-SW-02" is found in "dk sw 02"; a value too short to judge
+ * (<2 alnum chars) passes.
+ */
+const _ID_OPEN_RE = /(^|-)(query|text|word|words|search|term|name|title|status|type|kind|filter|sort|tag|label|note|reason|description|section|find|division|market|state|city|address)(s)?(-|$)/;
+const _ID_HARD_RE = /(^|-)(sku|id|gid|uid|guid|number|num|no|email|handle|sha|hash|token|code|tracking|phone|zip|postal)(s)?(-|$)/;   // v1911-b — 'gid' (customer_gid was the primary identifier of two write legs and sailed through ungated)
+const _ID_ENTITY = new Set(['order', 'task', 'ticket', 'claim', 'job', 'invoice', 'po', 'customer']);
+// v1911-b (review) — element-wise containment. String([64776,64777]) is '64776,64777', which can never appear in
+// "merge tickets 64776 and 64777" — an array-valued identifier param (the catalog's merge source_ids) is judged
+// per ELEMENT. And a digits-only value gets an E.164 allowance: the model legitimately normalizes "(555) 123-4567"
+// to "+15551234567" (the catalog's own hints invite it), so a >10-digit value passes when its national 10-digit
+// tail is present.
+function _containedIn(hay, hayAl, v) {
+  const vl = String(v).trim().toLowerCase();
+  const vAl = vl.replace(/[^a-z0-9]+/g, '');
+  if (vAl.length < 2) return true;
+  if (hay.includes(vl) || hayAl.includes(vAl)) return true;
+  if (/^\d+$/.test(vAl) && vAl.length > 10 && hayAl.includes(vAl.slice(-10))) return true;
+  return false;
+}
+export function identifierClassParam(name) {
+  const n = String(name || '').replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  if (!n) return false;
+  if (_ID_OPEN_RE.test(n)) return false;
+  if (_ID_HARD_RE.test(n)) return true;
+  return _ID_ENTITY.has(n);
+}
+export function inventedIdentifierParams(legOrRecipe, params = {}, contextText = '') {
+  const o = (legOrRecipe && typeof legOrRecipe === 'object') ? legOrRecipe : null;
+  if (!o || !params || typeof params !== 'object') return [];
+  const tool = (o.tool && typeof o.tool === 'object') ? o.tool : o;
+  const urlP = (tool.urlParam && tool.urlParam.name) || (o.urlParam && o.urlParam.name) || null;
+  const resolved = (tool.resolve && typeof tool.resolve === 'object') ? tool.resolve : (o.resolve && typeof o.resolve === 'object' ? o.resolve : null);
+  const hay = String(contextText || '').toLowerCase();
+  const hayAl = hay.replace(/[^a-z0-9]+/g, '');
+  const out = [];
+  for (const [name, raw] of Object.entries(params)) {
+    if (raw == null || typeof raw === 'boolean') continue;
+    if (name === urlP) continue;
+    if (resolved && Object.prototype.hasOwnProperty.call(resolved, name)) continue;
+    if (!identifierClassParam(name)) continue;
+    const vals = (Array.isArray(raw) ? raw : [raw]).filter((x) => x != null && typeof x !== 'object' && typeof x !== 'boolean').map((x) => String(x).trim()).filter(Boolean);
+    const missing = vals.filter((x) => !_containedIn(hay, hayAl, x));
+    if (missing.length) out.push({ name, value: missing.join(', ') });
   }
   return out;
 }

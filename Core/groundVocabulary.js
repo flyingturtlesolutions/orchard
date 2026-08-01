@@ -21,6 +21,17 @@ const _GRAMMAR = new Set([
   'foreach', 'each', 'every', 'all', 'per', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'into', 'onto', 'of',
   'for', 'with', 'and', 'or', 'then', 'new', 'own', 'its', 'their', 'my', 'me', 'it', 'them', 'this', 'that',
   'please', 'also', 'now',
+  // v2.74.1914 — the CLOSED CLASSES. Live 125712: the pre-ask warm followed TARGET to vendorsuite six times in a
+  // row on matches like "(how)", "(can, you)", "(any)" — words generic in ENGLISH, not in the corpus.
+  // Distinctiveness is corpus-relative: it demotes "open" because many grounds speak it, but it CANNOT demote a
+  // function word that only one ground's does-prose happens to contain. Closed classes don't grow with the
+  // catalog, so a curated list is safe HERE — the rot lesson applies to open-class nouns/verbs, which stay out
+  // of this set and under distinctiveness weighting.
+  'how', 'what', 'which', 'who', 'whom', 'whose', 'when', 'where', 'why',
+  'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must',
+  'does', 'did', 'done', 'are', 'was', 'were', 'has', 'have', 'had', 'been', 'being', 'not', 'than',
+  'you', 'your', 'yours', 'our', 'ours', 'they', 'she', 'her', 'hers', 'him', 'his',
+  'any', 'some', 'none', 'both', 'either', 'neither', 'few', 'several', 'many', 'much', 'most', 'more', 'less', 'least',
 ]);
 
 /** Tokenize free text → lowercase content terms (≥3 chars, non-grammar, non-Orchard). Trailing-s singularized
