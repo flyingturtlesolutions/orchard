@@ -1736,10 +1736,9 @@ textarea {
    VIEW = blue (kept) · CASE = green · WORKFLOW = violet (matching its step chips). */
 .rail-item-badge.case { background: rgba(76, 175, 125, 0.18); color: var(--c-x-ok-soft); }
 .rail-item-badge.wf { background: rgba(160, 122, 201, 0.18); color: var(--c-x-violet-soft); }
-/* WFT-1 (UI type review) — a workflow card's NAME is a headline, not a child label: undo the is-subtask
-   de-emphasis (which correctly dims a CASE row's title, but here made the name the dimmest text on the card,
-   identical to its own metadata). Keep is-subtask for structure; override only the colour + weight. */
-.rail-item.is-workflow .rail-item-title { color: var(--c-text); font-weight: 500; }
+/* WFT-1 moved below the .is-subtask dim rule (was here at equal specificity + EARLIER source order, so the
+   dim rule won and the fix never rendered — caught in the view/case review). See the consolidated rule after
+   `.rail-item.is-subtask .rail-item-title`. */
 .rail-item-badge.design { background: rgba(160, 122, 201, 0.18); color: var(--c-x-violet-soft); }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
 .rail-item-badge {
   display: inline-block;
@@ -1800,6 +1799,13 @@ textarea {
 @media (prefers-reduced-motion: reduce) { .rail-new-app .rail-add-desc, .rail-wf-add .rail-add-desc { transition: none; } }
 .rail-new-app:hover .rail-item-title { color: var(--c-text); }
 .rail-item.is-subtask .rail-item-title { font-weight: 400; color: var(--c-text-subtle); }
+/* WFT-1 / C1 (type review · view+case) — a workflow OR case NAME is the card's headline, not a child label:
+   undo the is-subtask de-emphasis for both (it made the name the dimmest text, identical to its own
+   timestamp). The child relationship is still carried by the leaf glyph, the type badge, and the section
+   nesting — colour-dimming the name was redundant and cost list-scanning legibility. MUST sit after the dim
+   rule above (equal specificity → source order decides). is-workflow rows have no `.app` class; case rows do. */
+.rail-item.is-workflow .rail-item-title,
+.rail-item.is-subtask.app .rail-item-title { color: var(--c-text); font-weight: 500; }
 .rail-item.has-children { padding-right: 64px; }   /* clear the action cluster, which sits left of the delete button */
 
 /* ── Rail peek/pin (v2.74.1774, DESIGN_panel_surfaces.md §8) ─────────────────────────────────────────────
@@ -2108,7 +2114,10 @@ textarea {
 .rail-item-summary {
   font-size: 11px;
   line-height: 1.35;
-  font-weight: 600;
+  /* C2 (type review) — the recent-activity PEEK is supporting context, not the headline: weight 400 so it no
+     longer out-weights the name (it was 600 — bolder than every title, so the preview read as more important
+     than the card's own identity). Colour stays muted (a shade above the timestamp). */
+  font-weight: 400;
   color: var(--c-text-muted);   /* v2.74.1228 — one shade brighter than the timestamp (.rail-item-meta stays --c-text-subtle) */
   display: -webkit-box;
   -webkit-box-orient: vertical;
