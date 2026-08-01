@@ -798,7 +798,12 @@ async function _renderRailListNow() {
   // wiggle ("cards appear and disappear"). Defer while the pointer is anywhere inside the rail, or while a
   // peek/height-animation is live. USER-ACTION renders (force) land regardless — the click already spent the
   // hover state they cared about.
-  const _engaged = () => { try { return _railRunBusy > 0 || live.matches(':hover') || !!live.querySelector('.rail-section.peek, .sliding'); } catch { return false; } };   // v1822 — a reporting card must not be swapped away
+  const _engaged = () => { try { return live.matches(':hover') || !!live.querySelector('.rail-section.peek, .sliding'); } catch { return false; } };
+  // v2.74.WFC-1 (UI review #2) — a live card RUN is an ABSOLUTE fence: even a force render yields to it. A
+  // forced rebuild (delete/schedule/parked on ANOTHER card, openRail) destroys the running card's <li> nodes —
+  // the observer + step hook then write progress into detached elements while the visible card sits frozen.
+  // Force overrides hover/peek (the user's click already spent that state), but never a run's DOM.
+  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }
   if (!_force && _engaged()) {
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
@@ -1004,6 +1009,7 @@ async function _renderRailListNow() {
   // moved nodes). No empty-await window, ever. v1815 — RE-CHECK before swapping: a render that passed the head
   // check while idle can arrive here mid-peek/mid-animation (the awaits take real time; the churn is constant)
   // and would destroy the animating node — the "animations no longer evident" regression.
+  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }   // WFC-1 — re-check at swap time too (the fetch awaits let a run start mid-build)
   if (!_force && _engaged()) {
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
@@ -3540,6 +3546,7 @@ function _mkIconBtn(iconName, ariaLabel, fn, { title = '', size = 16, once = fal
   const b = document.createElement('button');
   b.className = 'wf-card-act';
   b.type = 'button';
+  b.dataset.icon = iconName;   // WFC-5 (UI review #5) — lets CSS keep the primary (run) chip always-visible
   b.setAttribute('aria-label', String(ariaLabel || iconName));
   b.title = title || String(ariaLabel || '');
   b.innerHTML = (Icons[iconName] || Icons.x)(size);
@@ -9237,11 +9244,23 @@ function _railWorkflowRow(row, parentConv) {
   acts.className = 'rail-item-actions wf-ov-actions';   // wf-ov-actions → _wfScheduleInline swaps it for the picker
   acts.dataset.rowAction = '';
   const rerender = () => { void _renderRailList({ force: true }); };   // v1816 — action renders land now
-  acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async () => {
+  acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async (btn) => {
     // v1822 (user directive) — the run REPORTS IN THE CARD and the rail STAYS OPEN. No desk switch: the
     // pinned clauses are self-contained (PP-0c). The chain writes into a message-shaped host inside the
     // card's detail (which pins open for the run); deeper output (fan-out bubbles, offers) still lands in
     // the thread behind the rail for later reading, and §6.5 history records the run either way.
+    // WFC-1 (UI review #1) — ONE card run at a time: the step hook (window.__wfStepHook), the abort flag
+    // (_walkAbortFlag), and the chain state are shared GLOBALS — a second concurrent run overwrites the
+    // first's hook (its receipts render on the wrong card) and stomps the abort flag. Refuse politely,
+    // re-enable this button (the once-guard disabled it on click), and point at the run already going.
+    if (_railRunBusy > 0) {
+      if (btn) btn.disabled = false;
+      try {
+        const active = document.querySelector('#rail-list .wf-card-run.wf-run-live')?.closest('.rail-item');
+        if (active) { active.classList.add('wf-run-blocked'); active.scrollIntoView({ block: 'nearest' }); setTimeout(() => active.classList.remove('wf-run-blocked'), 1200); }
+      } catch { /* */ }
+      return;
+    }
     const inner = item.querySelector('.wf-row-detail-inner');
     if (!inner) return;
     item.querySelector('.wf-card-run')?.remove();
@@ -9332,18 +9351,19 @@ function _railWorkflowRow(row, parentConv) {
         else if (r.outcome === 'stopped') bits.push('stopped');
         else if (r.created) bits.push(`${r.created} new case${r.created === 1 ? '' : 's'}`);
         if (bits.length && _pbRef) _pbRef.tick(bits.join(' · '));
-        // WC-2 (v2.74.1846) — the OUTCOME lands on the chip itself, not just the tick text: no-op = amber ring
-        // (ran, produced nothing), stopped/failed = red ring + the cause as a hover title. Inline styles on
-        // purpose (CSS vars, both modes) — the chip classes are lane-owned and this must not depend on a
-        // stylesheet edit landing in step. An ok chip is left to the existing step-done treatment.
+        // WC-2 (v2.74.1846) — the OUTCOME lands on the chip itself, not just the tick text. WFC-3 (UI review
+        // #3): a colour ring + `title` alone fails WCAG 1.4.1 (colour-only) and is invisible to touch/AT, and a
+        // no-op wearing the step-done ✓ LIES (silence-is-not-success). So each outcome also stamps a
+        // data-outcome that drives a distinct NON-COLOUR glyph via CSS (✓ effect · ∅ nothing · ✗ failed),
+        // overriding the plain ✓. The inline ring stays as reinforcement + the lane-independence guard.
         const _chip = _chips[Number(r.index) - 1];
-        if (_chip && r.outcome === 'no-op') { _chip.style.outline = '2px solid var(--border-warning, #BA7517)'; _chip.style.outlineOffset = '1px'; _chip.title = `ran — nothing created or updated${r.skipped ? ` (${r.skipped} already existed)` : ''}`; }
-        else if (_chip && (r.outcome === 'stopped' || r.outcome === 'failed')) { _chip.style.outline = '2px solid var(--border-danger, #A32D2D)'; _chip.style.outlineOffset = '1px'; _chip.title = r.note || r.outcome; }
+        if (_chip && r.outcome === 'no-op') { _chip.dataset.outcome = 'no-op'; _chip.style.outline = '2px solid var(--border-warning, #BA7517)'; _chip.style.outlineOffset = '1px'; _chip.title = `ran — nothing created or updated${r.skipped ? ` (${r.skipped} already existed)` : ''}`; }
+        else if (_chip && (r.outcome === 'stopped' || r.outcome === 'failed')) { _chip.dataset.outcome = 'failed'; _chip.style.outline = '2px solid var(--border-danger, #A32D2D)'; _chip.style.outlineOffset = '1px'; _chip.title = r.note || r.outcome; }
         // v2.74.1848 (live report: "none of the changes are evident") — the HAPPY path was deliberately left
         // looking unchanged, which made the whole arc invisible on a clean run. An ok-with-effect chip now gets
         // a green ring + the set arithmetic as its hover title, so a receipt-driven success is DISTINGUISHABLE
         // from the old prose-parsed one at a glance — and every outcome state now has a mark.
-        else if (_chip && r.outcome === 'ok' && ((r.created || 0) + (r.updated || 0)) > 0) { _chip.style.outline = '2px solid var(--border-success, #3B6D11)'; _chip.style.outlineOffset = '1px'; _chip.title = `rows ${r.rowsIn ?? '?'}→${r.rowsOut ?? '?'} · ${r.created || 0} new${r.updated ? `, ${r.updated} updated` : ''}`; }
+        else if (_chip && r.outcome === 'ok' && ((r.created || 0) + (r.updated || 0)) > 0) { _chip.dataset.outcome = 'effect'; _chip.style.outline = '2px solid var(--border-success, #3B6D11)'; _chip.style.outlineOffset = '1px'; _chip.title = `rows ${r.rowsIn ?? '?'}→${r.rowsOut ?? '?'} · ${r.created || 0} new${r.updated ? `, ${r.updated} updated` : ''}`; }
       } catch { /* cosmetic — never breaks the run */ } };
       _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
         .then(() => { _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); }); _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2); })

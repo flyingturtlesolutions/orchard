@@ -1968,6 +1968,26 @@ textarea {
 .rail-item.is-workflow .wf-card-act { width: 24px; height: 24px; opacity: 0; transition: opacity var(--t-fast), background var(--t-fast); }
 .rail-item.is-workflow:hover .wf-card-act,
 .rail-item.is-workflow:focus-within .wf-card-act { opacity: 1; }
+/* WFC-5 (UI review #5) — the PRIMARY action is always reachable: the ▶ run chip never hides (a card with a
+   name and "2 steps" and no visible way to run it fails on touch, where there is no hover, and reads as inert
+   on desktop). The secondary chips (schedule/history/delete) stay hover-revealed. */
+.rail-item.is-workflow .wf-card-act[data-icon="run"],
+.rail-item.is-workflow .wf-card-act[data-icon="runHeadless"] { opacity: 0.62; }
+.rail-item.is-workflow:hover .wf-card-act[data-icon="run"],
+.rail-item.is-workflow:hover .wf-card-act[data-icon="runHeadless"],
+.rail-item.is-workflow .wf-card-act[data-icon="run"]:hover,
+.rail-item.is-workflow .wf-card-act[data-icon="run"]:focus-visible { opacity: 1; }
+
+/* WFC-3 (UI review #3) — each run outcome carries a distinct NON-COLOUR glyph, overriding the plain done ✓,
+   so the state survives greyscale, touch, and screen readers (the ring is reinforcement, not the sole channel). */
+.wf-row-steps li[data-outcome="effect"].step-done::after { content: " ✓"; color: var(--c-x-ok-soft); }
+.wf-row-steps li[data-outcome="no-op"].step-done::after { content: " ∅"; color: var(--c-x-warn, #BA7517); }
+.wf-row-steps li[data-outcome="failed"]::after { content: " ✗"; color: var(--c-x-danger, #A32D2D); }
+
+/* WFC-1 (UI review #1) — a second card run is refused; the card already running briefly flashes to say "that one". */
+.rail-item.wf-run-blocked { animation: wf-blocked-flash 1.2s ease; }
+@keyframes wf-blocked-flash { 0%, 100% { box-shadow: inset 2px 0 0 var(--fill-accent, #378ADD); } 25%, 75% { box-shadow: inset 3px 0 0 var(--border-warning, #BA7517), 0 0 0 1px var(--border-warning, #BA7517); } }
+@media (prefers-reduced-motion: reduce) { .rail-item.wf-run-blocked { animation: none; outline: 2px solid var(--border-warning, #BA7517); } }
 
 /* the GROUP — an app/admin row + its case rows, one hover zone. Case rows are ALWAYS in the DOM; peek/pin
    reveal them with a max-height transition (the card-expand feel). inert is managed in JS for focus safety. */
