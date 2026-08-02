@@ -46,7 +46,22 @@ const _unwrapNodes = (arr) => arr.map((x) => (x && typeof x === 'object' && x.no
 // "no warranty details" twice — the render never even saw the task object.
 const _recordShaped = (o) => !!(o && typeof o === 'object' && !Array.isArray(o) && (_pick(o, ID_KEYS) != null || _suffixId(o) != null || _displayName(o) != null));
 
-export function primaryList(value, _depth = 0) {
+export function primaryList(value, opts = 0) {
+  // v2.74.1936 — an optional DECLARED path wins over every heuristic below. UPS's list read returns a status
+  // ENVELOPE — {status, statusCode, transactionId, …, recentlyTrackedData:[10]} — whose seven own scalars make it
+  // record-shaped, so CX-9h correctly refuses to treat it as a list container and the rows were unreachable. The
+  // v1907 rule only covers a SCALAR-LESS envelope. Rather than widen a heuristic (and guess wrong on the next
+  // site), the recipe DECLARES where its rows live: `listPath` rides the leg and the render passes it here.
+  // Back-compatible: the second arg was `_depth` (a number) and still is when a number is passed.
+  const _o = (typeof opts === 'number') ? { _depth: opts } : (opts || {});
+  const _depth = _o._depth || 0;
+  const _lp = typeof _o.listPath === 'string' ? _o.listPath.trim() : '';
+  if (_lp && value && typeof value === 'object') {
+    let node = value;
+    for (const seg of _lp.split('.')) { node = (node && typeof node === 'object') ? node[seg] : undefined; }
+    if (Array.isArray(node)) return _unwrapNodes(node);
+    // a declared path that is absent falls through to the heuristics — a shape change degrades, never throws
+  }
   if (Array.isArray(value)) return _unwrapNodes(value);
   if (!value || typeof value !== 'object') return null;
   for (const k of LIST_KEYS) if (Array.isArray(value[k])) return _unwrapNodes(value[k]);
@@ -69,7 +84,7 @@ export function primaryList(value, _depth = 0) {
   }
   for (const v of Object.values(value)) if (Array.isArray(v) && v.length && v[0] && typeof v[0] === 'object') return _unwrapNodes(v);
   if (_depth < 5) for (const v of Object.values(value)) {                              // recurse: data → customers → edges
-    if (v && typeof v === 'object' && !Array.isArray(v)) { const found = primaryList(v, _depth + 1); if (found) return found; }
+    if (v && typeof v === 'object' && !Array.isArray(v)) { const found = primaryList(v, { _depth: _depth + 1 }); if (found) return found; }
   }
   return null;
 }
@@ -382,8 +397,8 @@ export function recordDetails(o) {
  * extra fields (a Shopify customer's email/phone/orders/tags/location — the profile, not a bare bullet), + a url.
  * `name` is the leg label. CX-7 (v2.74.1392) — the single-record enrichment (a 1-result lookup showed just #id name).
  */
-export function renderConnectorLines(value, { name = 'Results', displayId = null } = {}) {
-  const list = primaryList(value);
+export function renderConnectorLines(value, { name = 'Results', displayId = null, listPath = '' } = {}) {
+  const list = primaryList(value, { listPath });   // v1936 — the recipe's declared row path, when it has one
   if (list && list.length > 1) {
     const head = `${name} (${list.length})`;
     const lines = list.slice(0, MAX_ROWS).map((o) => {

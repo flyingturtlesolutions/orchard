@@ -84,7 +84,17 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'find the product with sku DK-SW-01', expect: { legId: 'shopify_product_by_sku' }, expectParams: { sku: 'DK-SW-01' }, mustNotResolve: ['shopify_search_products'], mintedAt: 'v2.74.1904' },
   // v2.74.1921 — the order timeline (HAR-authored): actor-bearing events are ONLY here — a who/what-happened ask
   // on an order must reach the events leg, never settle for the order record's customer.
-  { ask: 'show the order timeline — who created it and what has happened since', expect: { legId: 'shopify_order_events' }, mintedAt: 'v2.74.1921' },
+  { ask: 'show the order timeline — what has happened on it recently', expect: { legId: 'shopify_order_events' }, mintedAt: 'v2.74.1921' },
+  // v2.74.1926 — the creator ask must reach the LAST-page leg: the recent-events window is newest-first, so the
+  // creation event is outside it on any busy order (a silent miss biased toward audited orders).
+  { ask: 'who created this order?', expect: { legId: 'shopify_order_creator' }, mustNotResolve: ['shopify_order_events'], mintedAt: 'v2.74.1926' },
+  // v2.74.1928 — the orders BREADTH read: every "across the orders" question starts here (the queue leg is
+  // hardcoded open+unfulfilled and cannot answer a filtered or historical ask).
+  { ask: 'find orders tagged draft from this week', expect: { legId: 'shopify_orders_search' }, mintedAt: 'v2.74.1928' },
+  // v2.74.1936 — UPS (HAR-authored). The by-number read is the composition target (an order's tracking number
+  // feeds it); the recent list is the params-free entry point and the ground's canary.
+  { ask: 'where is package 1Z27691W0233595715?', expect: { legId: 'ups_track' }, expectParams: { tracking: '1Z27691W0233595715' }, mintedAt: 'v2.74.1936' },
+  { ask: 'what packages have I tracked recently?', expect: { legId: 'ups_recent' }, mintedAt: 'v2.74.1936' },
   { ask: "how's the store doing today", expect: { legId: 'shopify_shop_pulse' } },
   { ask: 'show the unfulfilled orders', expect: { legId: 'shopify_orders_queue' } },
   { ask: 'create a shopify profile for the homeowner', expect: { legId: 'shopify_create_customer' } },   // trace-adjacent (the find-or-create flow)

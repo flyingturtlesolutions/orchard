@@ -107,6 +107,17 @@ function _planExec(leg, params = {}, ctx = {}) {
                           // CX-7 (v2.74.1386) — Shopify-class transport markers: gql read POSTs, sniffed CSRF, tab-URL params
                           gql: t.gql === true, csrf: t.csrf || null, urlParam: t.urlParam || null, contentType: t.contentType || null,
                           persistedOp: t.persistedOp || null,   // CX-7b — sniffed per-store op hash fills {op_sha}
+                          // v2.74.1940 — HOP 4. The catalog→record→leg seal (Core/hopSeal.test.js) stops at the
+                          // LEG; this projection (leg.tool → the executor's payload) is a fourth hop with no
+                          // seal, and all three v1936 UPS fields died here silently: apiHost (so the URL was
+                          // built from the ride TAB's host instead of the API host), csrfHeader (so the token
+                          // would ride as x-csrf-token), and the READ declaration (so the executor's non-GET
+                          // fail-safe blocked both legs as unconfirmed writes — `INVOKE ▸ blocked
+                          // write-needs-confirm [ups_recent]`, live). `mode` is the leg's own verdict:
+                          // 'ask' means recipeToLeg already applied the §9 rules, so passing it is not a
+                          // second opinion — it is the FIRST one, arriving where it is enforced.
+                          apiHost: t.apiHost || null, csrfHeader: t.csrfHeader || null,
+                          readOnly: mode === 'ask',
                           shopProbe: t.shopProbe === true,      // CX-7c — `{shop{name}}` liveness probe before the call
                           // §18 — the arm guard checks the per-Ground recipe at INVOKE_SESSION. v2.74.1340 (review A):
                           // send the BARE stored id (tool.recipeId) — the prefixed leg.key (`me.zendesk.read_ticket`)

@@ -47,7 +47,14 @@ export function entitiesFrom(recipes) {
     if (!e.joinParam && _str(d.param)) e.joinParam = _str(d.param);
     if (!e.matchOn && _str(d.matchOn)) e.matchOn = _str(d.matchOn);
     if (!e.labels.length && Array.isArray(d.label)) e.labels = d.label.filter(Boolean).slice();
-    for (const c of (Array.isArray(d.also) ? d.also : [])) if (c && !e.children.includes(c)) e.children.push(c);
+    // v2.74.1930 — an `also` entry may be a bare id OR a re-keying object ({id, from, param, pick, extract} —
+    // v1928). `children` is a list of RECIPE IDS by contract, so read the id off either form: pushing the raw
+    // object made `includes` never dedupe (object identity) and handed consumers a record where they expect a
+    // string. Caught by applying the VendorSuite synthetic-leg audit to the new Shopify sidecar.
+    for (const c of (Array.isArray(d.also) ? d.also : [])) {
+      const cid = _str(typeof c === 'string' ? c : (c && c.id));
+      if (cid && !e.children.includes(cid)) e.children.push(cid);
+    }
     e.paths.push({
       id: _str(r.id),
       name: _str(r.name),

@@ -118,6 +118,9 @@ export const DECISION_MARKERS = [
   { key: 'obs-param', src: "OBS_PARAM ▸" },
   { key: 'target', src: "TARGET ▸" },
   { key: 'invoke', src: "INVOKE ▸" },
+  // EX-1 (v2.74.1946) — a self-reload or a programmatic ask is the loop ACTING on its own build; if it were absent
+  // here, a `-decisions-` download could not say whether the run it is grading was even exercised (invariant #1).
+  { key: 'exercise', src: "EXERCISE ▸" },
   { key: 'heal', src: "HEAL ▸", metric: true, metricPattern: 'HEAL ▸ suspect' },
   { key: 'vitals', src: "VITALS ▸", metric: true, metricPattern: 'VITALS ▸ case opened' },
   { key: 'dash', src: "DASH ▸" },

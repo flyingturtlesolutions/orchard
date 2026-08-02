@@ -63,6 +63,12 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   // the root of the "re-learn per ride" churn (see Invariant #3). Additive: a field absent on the entry stays absent on the
   // record (no empty keys), so a plain Zendesk-read record is byte-identical to before.
   if (e.write === true) rec.write = true;
+  // v2.74.1936 — an EXPLICIT `write: false` must survive hop 1 too. Hop 2 method-derives write for any
+  // non-GET (the §9 fail-safe) with a gql-read exception carved at v1468 — and UPS is the first PLAIN-JSON
+  // POST READ, a shape the catalog had no way to declare: the seeded leg came out mode 'act' while the
+  // curated twin was 'ask', so a read would have demanded a HITL confirm on the seeded path only. Dropping
+  // a `false` here is what made the declaration unsayable; the fail-safe still governs an ABSENT write.
+  else if (e.write === false) rec.write = false;
   if (e.destructive === true) rec.destructive = true;                 // kept explicit too (safetyClass already encodes it)
   // v2.74.1855 — appHost rides hop 1 (found by the hop SEAL on its first run: all 60 entries projected
   // tool.appHost:null on the seeded path while the curated twin kept it — the executor reads appHost for
@@ -95,7 +101,10 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   if (e.drill && typeof e.drill === 'object') rec.drill = e.drill;
   if (e.resolve && typeof e.resolve === 'object') rec.resolve = e.resolve;   // CX-9b (v1434) — per-param resolve specs
   if (e.identityGql && typeof e.identityGql === 'object') rec.identityGql = e.identityGql;   // v1479 — {me} from a GraphQL identity read (endpoint/body/idPath) when the REST probe can't (agent-id vs user-id)
-  for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'probeAccept', 'persistedOp', 'csrf', 'autoRequires', 'capClass', 'displayId', 'joinKey', 'writeMap']) {   // DK-2 — capClass:'presence' survives the seeded path too; CP-1 — probeAccept (json-liveness) rides the seeded path; CX-9k — displayId (the human row-id keys) rides too (Invariant #3 hop 1)
+  // v2.74.1936 — `apiHost` (the API lives on a SIBLING host of the ride tab — UPS: page www.ups.com, API
+  // webapis.ups.com) and `csrfHeader` (the token's header NAME differs per site — UPS sends x-xsrf-token).
+  // Both are mechanical transport markers, so they ride hop 1 with the rest (Invariant #3).
+  for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'probeAccept', 'persistedOp', 'csrf', 'csrfHeader', 'apiHost', 'listPath', 'autoRequires', 'capClass', 'displayId', 'joinKey', 'writeMap']) {   // DK-2 — capClass:'presence' survives the seeded path too; CP-1 — probeAccept (json-liveness) rides the seeded path; CX-9k — displayId (the human row-id keys) rides too (Invariant #3 hop 1)
     if (e[k] != null && e[k] !== '') rec[k] = e[k];
   }
   if (e.requestHeaders && typeof e.requestHeaders === 'object') rec.requestHeaders = e.requestHeaders;

@@ -13,7 +13,7 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts } from '../../Core/connectorRecipes.js';   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm
+import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts, opCaptureHint } from '../../Core/connectorRecipes.js';   // v1935 — opCaptureHint: the executor's refusal must name the gesture that actually banks THIS op   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm
 import { pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill; v1758 — rideTabUrlPatterns; v1759 — isCsrfColdFailure
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
@@ -25,6 +25,7 @@ import { providerScopes } from '../../Core/mcpServers.js';                      
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
 import { armRideAuthCapture, markEngineBusy } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js); FL-1c — SHOW_SOURCES busy-marks its driven navigation (Invariant #2)
 import { reportAuthSignal } from './connections.js';   // CP-1 (v2.74.1506) — every auth outcome feeds the connections registry (one write door)
+import { droppedSearchFields, droppedSearchDetail } from '../../Core/searchWarnings.js';   // v1927 — an unrecognized search field is DROPPED and the rows come back unfiltered (proven live); the response says so and the only failure mode is not looking
 import { payloadShapeLine, payloadShapeKey } from '../../Core/payloadShape.js';   // v1872 — the keys-only response shape (Invariant #1: `PAYLOAD ▸`); v1888 — payloadShapeKey: the length-normalised comparison key, so a list's length is not a "new shape"
 import { assessLiveness } from '../../Core/connectionPresence.js';   // CP-1 — the json-liveness probe verdict (the ride-outcome→signal classifier moved into the VT-0 funnel, Core/vitals.js)
 
@@ -352,7 +353,8 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   // own fail-closed write belt (second belt): only a caller that already passed the HITL gate hands it a write.
   const fetchVia = (tabId, url, method, body, confirmed = false, contentType = '', extra = null) =>
     chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body, contentType: contentType || undefined, confirmed: confirmed === true,
-      headers: (extra && extra.headers) || undefined, gqlRead: !!(extra && extra.gqlRead) } }, { frameId: 0 });   // CX-7 — sniffed-CSRF header + the gql-read carve-out flag (re-validated page-side)
+      headers: (extra && extra.headers) || undefined, gqlRead: !!(extra && extra.gqlRead),
+      readOnly: !!(extra && extra.readOnly) } }, { frameId: 0 });   // CX-7 — sniffed-CSRF header + the gql-read carve-out flag (re-validated page-side); v1941 — `readOnly`: belt #2's carve-out for a DECLARED non-gql read (a JSON body cannot describe itself the way a gql document can — see the belt for what that costs)
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
   // SUBframe as "live" while frame 0 is dead). On a frame-0 connection error, force-reinject + retry once.
   const fetchViaHealed = async (tabId, url, method, body, confirmed = false, contentType = '', extra = null) => {
@@ -380,7 +382,20 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   function _csrfSnifferFunc() {
     try {
       if (window.__ahubCsrfSniff) return; window.__ahubCsrfSniff = true;
-      var post = function (tok) { try { window.postMessage({ __ahub_sniffed_csrf: { token: String(tok).slice(0, 400), host: location.host } }, location.origin); } catch (e) { /* */ } };
+      // v2.74.1945 — twin of the document_start tee's counters (ContentScripts/shopifyCsrfSniffer.js). Names+counts
+      // only, never a token value. Kept in lockstep so `sniff-stats TEE-ABSENT` means absent, not "the other twin ran".
+      var stats = { req: 0, hdr: 0, matched: 0, names: {}, at: 0 };
+      window.__ahubCsrfStats = stats;
+      var note = function (n) { try { var k = String(n || '').toLowerCase(); if (!k) return; stats.hdr++; if (/csrf|xsrf|token|verif/.test(k)) stats.names[k] = (stats.names[k] || 0) + 1; } catch (e) { /* */ } };
+      var noteAll = function (h) {
+        try {
+          if (!h) return;
+          if (typeof Headers !== 'undefined' && h instanceof Headers) { h.forEach(function (v, k) { note(k); }); return; }
+          if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) note(h[i][0]); return; }
+          for (var k in h) note(k);
+        } catch (e) { /* */ }
+      };
+      var post = function (tok) { try { stats.matched++; stats.at = Date.now(); window.postMessage({ __ahub_sniffed_csrf: { token: String(tok).slice(0, 400), host: location.host } }, location.origin); } catch (e) { /* */ } };
       // CX-7b — PERSISTED-OP capture: the admin's mutations POST /api/operations/<sha>/<OpName>/shopify/<handle>;
       // the sha is per-store + rotates on deploys. Capturing the URL off the SPA's own traffic (the user performing
       // the action once by hand) banks the op for replay — the CS stack's save-shopify-session step, done in-tab.
@@ -394,15 +409,19 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
       var scan = function (h) {
         try {
           if (!h) return null;
-          if (typeof Headers !== 'undefined' && h instanceof Headers) return h.get('x-csrf-token');
-          if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) if (String(h[i][0]).toLowerCase() === 'x-csrf-token') return h[i][1]; return null; }
-          for (var k in h) if (String(k).toLowerCase() === 'x-csrf-token') return h[k];
+          // v2.74.1936 — watch EVERY known csrf header spelling, not one: UPS sends `x-xsrf-token` and the
+          // hardcoded name made the whole sniff mechanism structurally blind to that site.
+          var NAMES = ['x-csrf-token', 'x-xsrf-token', 'x-xsrf-header'];
+          if (typeof Headers !== 'undefined' && h instanceof Headers) { for (var n0 = 0; n0 < NAMES.length; n0++) { var hv = h.get(NAMES[n0]); if (hv) return hv; } return null; }
+          if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) if (NAMES.indexOf(String(h[i][0]).toLowerCase()) >= 0) return h[i][1]; return null; }
+          for (var k in h) if (NAMES.indexOf(String(k).toLowerCase()) >= 0) return h[k];
         } catch (e) { /* */ }
         return null;
       };
       var of = window.fetch;
       window.fetch = function (input, init) {
         try {
+          stats.req++; noteAll(init && init.headers); if (input && typeof input === 'object' && input.headers) noteAll(input.headers);
           var tok = scan(init && init.headers) || (input && typeof input === 'object' && input.headers ? scan(input.headers) : null); if (tok) post(tok);
           postOp(typeof input === 'string' ? input : (input && input.url));
         } catch (e) { /* */ }
@@ -410,12 +429,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
       };
       var osrh = XMLHttpRequest.prototype.setRequestHeader;
       XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-        try { if (String(name).toLowerCase() === 'x-csrf-token' && value) post(value); } catch (e) { /* */ }
+        try { note(name); if (['x-csrf-token', 'x-xsrf-token', 'x-xsrf-header'].indexOf(String(name).toLowerCase()) >= 0 && value) post(value); } catch (e) { /* */ }   // v1936 — any known csrf spelling
         return osrh.apply(this, arguments);
       };
       var oopen = XMLHttpRequest.prototype.open;
       XMLHttpRequest.prototype.open = function (method, url) {
-        try { postOp(url); } catch (e) { /* */ }
+        try { stats.req++; postOp(url); } catch (e) { /* */ }
         return oopen.apply(this, arguments);
       };
     } catch (e) { /* */ }
@@ -533,6 +552,22 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
       while (!tok && Date.now() < deadline) { await new Promise((r) => setTimeout(r, 500)); tok = await ask(); }
     }
     if (tok) { _sniffedCsrf.set(origin, { token: tok, at: Date.now() }); await _persistCsrf(origin, tok); }
+    // v2.74.1945 — WHEN THE WELL IS DRY, SAY WHICH KIND OF DRY. Read the page-side tee's counters (never its token).
+    // req=0        → the tee is live but the SPA issued NO request in the window (idle page; waking it is the fix)
+    // req>0 hdr=0  → requests flow but carry no headers we can see (wrong interception surface)
+    // names=[…]    → a token-ish header IS present under a spelling we don't watch — the v1936 class, self-reporting
+    // no stats obj → the document_start tee never ran on this origin at all (manifest match / CSP / world problem)
+    // This exists because "dry" was one string for four different failures and cost five eliminated hypotheses.
+    if (!tok) {
+      try {
+        const st = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: () => (window.__ahubCsrfStats || null) });
+        const s = st && st[0] && st[0].result;
+        const names = s && s.names ? Object.keys(s.names).slice(0, 6).join(',') : '';
+        Logger.info('ride', s
+          ? `INVOKE ▸ csrf sniff-stats ${origin} req=${s.req} hdr=${s.hdr} matched=${s.matched}${names ? ` names=[${names}]` : ' names=[none]'}`
+          : `INVOKE ▸ csrf sniff-stats ${origin} TEE-ABSENT (document_start sniffer never ran on this origin)`);
+      } catch { /* stats are diagnostics: never let them fail an acquire */ }
+    }
     return tok || null;
   }
 
@@ -768,7 +803,14 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // STATIC — params fill only `variables`). Validated here on the template AND re-validated on the final body
           // at the content-script boundary (belt #2) — a mutation document always needs the write gate.
           const isGqlRead = !!(payload && payload.gql === true && method === 'POST' && payload.body && typeof payload.body === 'object' && isReadOnlyGql(payload.body.query));
-          const isWrite = (method !== 'GET' && method !== 'HEAD') && !isGqlRead;
+          // v2.74.1940 — a DECLARED read may be a non-GET. The gql carve-out above covers a POST whose document
+          // is provably read-only; UPS's reads are plain-JSON POSTs, which this rule called writes and fail-closed
+          // at the confirm gate (`INVOKE ▸ blocked write-needs-confirm [ups_recent]`, live). `readOnly` is the
+          // LEG's own mode ('ask') — the §9 classification recipeToLeg already performed on a curated
+          // `write:false`. A harvested record with no write declaration still projects mode 'act' and stays
+          // gated, so the fail-safe holds for exactly the inputs it was written to protect. Applied at BOTH
+          // executors: INVOKE_SESSION and SESSION_REPLAY (the seeded path) must never disagree about what a write is.
+          const isWrite = (method !== 'GET' && method !== 'HEAD') && !isGqlRead && !(payload && payload.readOnly === true);
           // v2.74.1857 — EVERY early exit names itself (`INVOKE ▸ blocked …`, the family the two narrated exits
           // already used). The lint's first ritual catch (gl 103120, 74 min after Experiment B landed): a
           // dispatch died in one of these bare sendResponses and the trace could not say WHICH — an exit that
@@ -889,12 +931,32 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // the capture (their save-shopify-session step, in-tab); the next attempt replays it.
           if (payload && payload.persistedOp) {
             delete args.op_sha;
-            const op = await _bankedOp(origin, String(payload.persistedOp));
+            const _opName = String(payload.persistedOp);
+            let op = await _bankedOp(origin, _opName);
+            // v2.74.1935 — PULL BEFORE REFUSING. The tab's buffer may hold the op while the bank does not: a
+            // csrf-less recipe never reaches `_acquireSniffedCsrf` (the only place that harvested ops), so a
+            // read whose op the user has just triggered was refused with the evidence sitting one message away.
+            if (!op) {
+              try {
+                const r = await chrome.tabs.sendMessage(tab.id, { type: 'GET_SNIFFED_CSRF', payload: {} }, { frameId: 0 });
+                if (r && r.ops && Object.keys(r.ops).length) { await _persistSniffedOps(origin, r.ops); op = await _bankedOp(origin, _opName); }
+                try { Logger.info('ride', `SESSION ▸ op pull ${origin} → ${(r && r.ops) ? (Object.keys(r.ops).join(',') || 'none') : 'no-reply'}`); } catch { /* */ }
+              } catch { try { Logger.info('ride', `SESSION ▸ op pull ${origin} → dead-port`); } catch { /* */ } }
+            }
             if (op && op.sha) args.op_sha = op.sha;
             else {
+              // The MAIN-world re-inject stays as the COLD-INSTALL fallback only (a tab opened before the
+              // extension existed). It is not recovery: re-wrapping fetch cannot manufacture traffic that has
+              // already happened — the v1930 misreading.
               try { await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: _csrfSnifferFunc }); } catch { /* */ }
-              try { Logger.info('ride', `INVOKE ▸ blocked op-not-captured (${String(payload.persistedOp)}) @${origin}`); } catch { /* */ }
-              sendResponse({ success: false, error: 'op-not-captured', origin, hint: `do one ${String(payload.persistedOp)} by hand in the admin (e.g. create any customer) while this tab stays open — Orchard captures the operation and can replay it from then on` });
+              try { Logger.info('ride', `INVOKE ▸ blocked op-not-captured (${_opName}) @${origin} · banked=0`); } catch { /* */ }
+              // v2.74.1935 — the hint NAMES THE RIGHT GESTURE. It hardcoded "e.g. create any customer", which
+              // fires CustomerCreate and NEVER the op being asked for: a user following it exactly stayed broken
+              // forever (live — they tried twice). The per-op coaching already existed in the catalog and this
+              // executor simply never called it. `opNotCaptured` lets the panel offer the reload affordance that
+              // already re-banks ops but was gated on a csrf-only flag.
+              sendResponse({ success: false, error: 'op-not-captured', origin, opNotCaptured: true, op: _opName,
+                host: appHost || origin, hint: opCaptureHint(_opName) });
               return;
             }
           }
@@ -956,10 +1018,21 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // unbound). NEVER send it: `{taskId}` URL-encodes to %7BtaskId%7D and the app returns http-500. Refuse honestly,
           // naming the param — the same discipline the SESSION_REPLAY twin now enforces (keep both in lockstep).
           { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { try { Logger.info('ride', `INVOKE ▸ blocked needs-${_miss[1]} (unfilled endpoint param) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: _enumHint(payload, _miss[1]) }); return; } }
-          const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
+          // v2.74.1936 — CROSS-HOST API. Until UPS every ground's API sat on the same origin as the page the
+          // ride borrows; UPS's page is www.ups.com and its API is webapis.ups.com. The fetch still happens IN
+          // the page, so it is exactly the request the SPA itself makes (same site, CORS already configured) —
+          // only the URL's host differs. Declared per recipe, so every existing leg keeps riding its own origin.
+          const _apiHost = String((payload && payload.apiHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          const url = `https://${_apiHost || origin}${path.startsWith('/') ? path : '/' + path}`;
           let body = undefined;
           const contentType = String((payload && payload.contentType) || '');
-          if (isWrite || isGqlRead) {
+          // v2.74.1943 — SITE #7 of the "non-GET is a write unless GraphQL" assumption, and the first one that carries
+          // the PAYLOAD. The v1941 readOnly carve-out cleared UPS through both write belts by making isWrite false —
+          // which silently excluded it here, so the POST went out with NO BODY and (line below) NO CSRF HEADER, and
+          // the trace read `no-csrf empty` while a good token sat banked. A non-GET READ carries a body exactly like a
+          // write does: classify by METHOD for transport, by intent (isWrite) for SAFETY. Never conflate the two again.
+          const _carriesPayload = isWrite || isGqlRead || (method !== 'GET' && method !== 'HEAD');
+          if (_carriesPayload) {
             // v1342 — panel may pre-fill via fillWriteBody (string body + contentType); else template fillBody.
             // CX-7 — a gql READ builds its body too (the query document + filled variables).
             if (typeof payload.body === 'string') body = payload.body;
@@ -969,12 +1042,18 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // a 403 = stale/missing token → clear bank, soft-wake the idle SPA, force re-mint + retry (v1759), then
           // surface honestly with the interact-once hint only if warm still failed.
           let extra = isGqlRead ? { gqlRead: true } : null;
+          if (payload && payload.readOnly === true) extra = { ...(extra || {}), readOnly: true };   // v1941 — carry the leg's §9 verdict to belt #2, which cannot re-derive it from a JSON body
           const _rideHdrs = (payload && payload.requestHeaders && typeof payload.requestHeaders === 'object') ? payload.requestHeaders : null;
           if (_rideHdrs) extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ..._rideHdrs } };
           // v2.74.1905 — a persisted-op GET carries the token too: the HAR shows x-csrf-token on the admin bar's
           // own Search GET, and the leg that mirrors it must send what the surface sends (RH-0a: headers are route).
-          if ((isWrite || isGqlRead || (payload && payload.persistedOp)) && payload && payload.csrf === 'sniff') {
-            extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { 'x-csrf-token': csrfTok } : {}) } };
+          let _sentCsrf = false;   // v2.74.1943 — did this request actually CARRY a token? (governs the cold-clear below)
+          if ((_carriesPayload || (payload && payload.persistedOp)) && payload && payload.csrf === 'sniff') {
+            // v2.74.1936 — the token's HEADER NAME is per-site (UPS sends `x-xsrf-token`). Defaults to
+            // x-csrf-token, so every existing recipe sends exactly what it sent before.
+            const _csrfHdr = String((payload && payload.csrfHeader) || 'x-csrf-token').toLowerCase();
+            extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { [_csrfHdr]: csrfTok } : {}) } };
+            _sentCsrf = !!csrfTok;
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
           _mark('fetch');
@@ -984,7 +1063,11 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // ago — live 201402 spent ~50s/ask rediscovering the 403). Fail fast instead, and say so on the reply
           // (`csrfNoToken`) so the panel skips ITS silent re-invoke too and offers the warm affordance.
           if (reply && reply.success === false && isCsrfColdFailure({ error: reply.error, hint: reply.hint, csrf: payload && payload.csrf })) {
-            await _clearBankedCsrf(origin);
+            // v2.74.1943 — only DISCARD the banked token if this request actually SENT it. Pre-1943 the site-#7 gate
+            // withheld the header and this line then ate the good token on the way out, so every UPS attempt banked a
+            // fresh token and immediately destroyed it — which is what `csrf prewarm www.ups.com:miss` was really
+            // reporting. A no-csrf failure on a request that carried no token is evidence about the GATE, not the token.
+            if (_sentCsrf) await _clearBankedCsrf(origin);
             let tok2 = null;
             if (csrfTok) {
               try { Logger.info('ride', `INVOKE ▸ csrf-cold warm → retry [${payload.recipeId || ''}]`); } catch { /* */ }
@@ -994,7 +1077,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             }
             if (tok2) {
               csrfTok = tok2;
-              reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), 'x-csrf-token': tok2 } });
+              reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), [String((payload && payload.csrfHeader) || 'x-csrf-token').toLowerCase()]: tok2 } });   // v1936 — same per-site header name on the re-mint retry
             }
             if (reply && reply.success === false && isCsrfColdFailure({ error: reply.error, hint: reply.hint, csrf: payload && payload.csrf })) {
               reply = { ...reply, csrfNoToken: !tok2, hint: 'no CSRF token yet — use “Warm & retry” below, or click once in the admin tab and re-ask' };
@@ -1017,6 +1100,21 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               }
             }
             if (msg) reply = { success: false, error: 'graphql-error', detail: msg.slice(0, 200), origin };
+          }
+          // v2.74.1927 — THE SEARCH-FIELD TRAP, sibling of the 200-is-not-ok trap above and strictly nastier: a
+          // search backend that does not recognize a filter DROPS it and returns the UNFILTERED set. Proven live
+          // (HAR #3): `staff_member:"Kat Owens"` came back with `code:"invalid_field"` in
+          // extensions.search[].warnings AND fifty rows — the plain recent list. Nothing downstream can tell that
+          // from a real result: same shape, same count discipline, same render. A leg that asked a question the
+          // server declined to answer must FAIL, not hand back a population it never filtered.
+          // Applies to every present and future search-bearing read (no per-leg opt-in) because the evidence is
+          // in the RESPONSE, not the declaration. `INVOKE ▸` is reused deliberately — no new decision marker.
+          if (reply && reply.success && reply.value && typeof reply.value === 'object') {
+            const _dropped = droppedSearchFields(reply.value);
+            if (_dropped.length) {
+              try { Logger.warn('ride', `INVOKE ▸ search field dropped by ${origin} [${(payload && payload.recipeId) || '?'}]: ${_dropped.join(', ')} — the rows are UNFILTERED, failing instead of answering`); } catch { /* */ }
+              reply = { success: false, error: 'search-field-dropped', detail: droppedSearchDetail(_dropped).slice(0, 240), hint: 'ask a different way — that filter does not exist on this site', origin };
+            }
           }
           // CX-7e — surface the tab-derived urlParam (handle) so the panel can build the record's human page for
           // "show profile" (the itemUrl needs {handle}, which lives on the ride tab, not on the record). TRUSTED.
@@ -1141,6 +1239,30 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           _sniffedCsrf.set(host, { token, at: Date.now() });
           await _persistCsrf(host, token);
           if (!prev || prev.token !== token) { try { Logger.info('conn', `VITALS ▸ csrf banked ${host} (push)`); } catch { /* */ } }
+          sendResponse({ success: true });
+        } catch { sendResponse({ success: false }); }
+      })();
+      return true;
+    },
+
+    // v2.74.1935 — THE OP BANK GETS THE PUSH HALF TOO. The token got it at v1853 for exactly this reason and the
+    // op bank was left pull-only, which produced the 21:50-21:55 wedge: a ride's own `ensureContentScript` heal
+    // re-injected the content script, whose eager IIFE re-initialises `window.__ahubSniffOps = {}` — so the heal
+    // restored the pipe and DISCARDED the buffer in the same act, while a 404 cleared the storage bank a second
+    // later. Both copies of the sha died at once and refill was impossible without a document load. Pushing each
+    // op as it is seen makes it durable within milliseconds of the user browsing, so neither a heal, an SW
+    // restart, nor a cleared bank can strand it. Same sender validation and the same shape checks as the tee.
+    'SNIFFED_OP_SEEN': (payload, sender, sendResponse) => {
+      (async () => {
+        try {
+          const host = String((payload && payload.host) || '').toLowerCase();
+          const name = String((payload && payload.name) || '');
+          const sha = String((payload && payload.sha) || '');
+          let senderHost = '';
+          try { senderHost = new URL((sender && sender.tab && sender.tab.url) || '').host.toLowerCase(); } catch { /* */ }
+          if (!host || host !== senderHost || !csrfSniffHosts().includes(host)) { sendResponse({ success: false }); return; }
+          if (!/^[a-f0-9]{16,64}$/i.test(sha) || !/^\w{1,60}$/.test(name)) { sendResponse({ success: false }); return; }
+          await _persistSniffedOps(host, { [name]: { sha, handle: (payload && payload.handle) ? String(payload.handle).slice(0, 80) : null } });
           sendResponse({ success: true });
         } catch { sendResponse({ success: false }); }
       })();
@@ -1312,7 +1434,14 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const _bodyObj = (payload && payload.body && typeof payload.body === 'object') ? payload.body
             : ((payload && typeof payload.body === 'string') ? (() => { try { return JSON.parse(payload.body); } catch { return null; } })() : null);
           const isGqlRead = !!(payload && payload.gql === true && method === 'POST' && _bodyObj && isReadOnlyGql(String(_bodyObj.query || '')));
-          const isWrite = (method !== 'GET' && method !== 'HEAD') && !isGqlRead;
+          // v2.74.1940 — a DECLARED read may be a non-GET. The gql carve-out above covers a POST whose document
+          // is provably read-only; UPS's reads are plain-JSON POSTs, which this rule called writes and fail-closed
+          // at the confirm gate (`INVOKE ▸ blocked write-needs-confirm [ups_recent]`, live). `readOnly` is the
+          // LEG's own mode ('ask') — the §9 classification recipeToLeg already performed on a curated
+          // `write:false`. A harvested record with no write declaration still projects mode 'act' and stays
+          // gated, so the fail-safe holds for exactly the inputs it was written to protect. Applied at BOTH
+          // executors: INVOKE_SESSION and SESSION_REPLAY (the seeded path) must never disagree about what a write is.
+          const isWrite = (method !== 'GET' && method !== 'HEAD') && !isGqlRead && !(payload && payload.readOnly === true);
           // §18 arm guard (v2.74.1340, review A) — SESSION_REPLAY is where HARVESTED recipes execute, so it re-checks
           // armable at run time exactly like INVOKE_SESSION: a recipe disabled / un-accepted / rejected in Studio after
           // projection must not run. Same fall-through semantics: no {groundId, recipeId} or no stored record → proceed.
@@ -1393,7 +1522,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // fillBody after the {me} bind, so ID:'{me}' becomes the real id instead of silently dropping. The legacy
           // pre-filled `body` string stays for callers that still send it; template wins when both are present.
           let reqBody = null;
-          if (isWrite || isGqlRead) {
+          // v2.74.1943 — SITES #9/#10 of the same class: the SESSION_REPLAY twin must stay in lockstep with the
+          // INVOKE_SESSION path (same rule as the unfilled-{param} refusal). A non-GET read carries body + contentType.
+          const _carriesPayload = isWrite || isGqlRead || (method !== 'GET' && method !== 'HEAD');
+          if (_carriesPayload) {
             if (payload && payload.bodyTemplate && typeof payload.bodyTemplate === 'object') {
               const _filled = fillBody(payload.bodyTemplate, args);
               reqBody = _filled != null ? JSON.stringify(_filled) : null;
@@ -1401,7 +1533,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               reqBody = (payload && typeof payload.body === 'string') ? payload.body : ((payload && payload.body != null) ? JSON.stringify(payload.body) : null);   // v1468 — a gql READ carries its document
             }
           }
-          const contentType = (isWrite || isGqlRead) ? String((payload && payload.contentType) || '') : '';
+          const contentType = _carriesPayload ? String((payload && payload.contentType) || '') : '';
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!path) { try { Logger.info('ride', `SESSION_REPLAY ▸ blocked replay-missing-fields [${(payload && payload.recipeId) || '?'}]`); } catch { /* v2.74.1857 — every exit names itself */ } sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
           // v2.74.1433 — an unfilled `{param}` reaching here is a missing required param; never dispatch it (a literal

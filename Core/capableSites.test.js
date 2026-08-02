@@ -35,6 +35,19 @@ describe('capableSitesCatalog — curated + broker classes', () => {
     assert.equal(ac.origin, 'https://workspace.aircall.io');     // click = bind
     assert.equal(cat.find((e) => e.key === 'connector:zendesk').needsInstance, true);   // zendesk stays a guided class (real per-tenant subdomains)
   });
+  it('v1939 — a www-CANONICAL site is concrete: `www` is not a tenant, and stripping it made UPS unpickable', () => {
+    // Live: the UPS card could not be selected at all. `_host()` strips `www.` (correct for dedup — a ground at
+    // www.foo.com and one at foo.com are the same site), but the tenant test COUNTS LABELS, so www.ups.com became
+    // the 2-label ups.com and demanded "yourteam.ups.com" — an address UPS has no concept of. The label count now
+    // reads the host as AUTHORED, and the bound origin is the host the site actually serves.
+    const cat = capableSitesCatalog({ curated: [{ app: 'ups', appHost: 'www.ups.com', write: false }, { app: 'zendesk', appHost: 'zendesk.com', write: false }], broker: [], linkedProviders: [] });
+    const ups = cat.find((e) => e.key === 'connector:ups');
+    assert.equal(ups.needsInstance, false, 'clicking the card must BIND, not re-prompt for a tenant');
+    assert.equal(ups.concrete, true);
+    assert.equal(ups.origin, 'https://www.ups.com', 'the bound origin keeps www — it is what the ground, the sniff allow-list and seeding all key on');
+    assert.equal(ups.host, 'ups.com', 'the class host stays normalized so a www/apex ground still matches this class');
+    assert.equal(cat.find((e) => e.key === 'connector:zendesk').needsInstance, true, 'a REAL tenant class is unaffected');
+  });
   it('a broker class shows ONLY when its provider is linked (an unlinked pick reads as dead)', () => {
     assert.equal(capableSitesCatalog({ curated: [], broker: BRK, linkedProviders: [] }).length, 0);
     const linked = capableSitesCatalog({ curated: [], broker: BRK, linkedProviders: ['hubspot'] });

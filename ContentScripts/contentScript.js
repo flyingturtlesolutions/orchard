@@ -74,6 +74,16 @@ window.__agentHubContentScriptLoaded = true;
         const o = ev.data && ev.data.__ahub_sniffed_op;
         if (o && o.sha && o.name && o.host === location.host && /^[a-f0-9]{16,64}$/i.test(String(o.sha)) && /^\w{1,60}$/.test(String(o.name))) {
           window.__ahubSniffOps[String(o.name)] = { sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null, at: Date.now() };
+          // v2.74.1935 — PUSH each NEW op to the SW bank, exactly as the token does above (throttle: value-change
+          // only). Pull-only left an op alive ONLY in this world's buffer — and a ride's own content-script heal
+          // re-runs this IIFE, zeroing that buffer while restoring the pipe (the 21:50 wedge: heal + a 404 emptied
+          // both copies of the sha in one second, with no way back short of a document load). An orphaned
+          // context's push throws 'context invalidated' and dies in the catch; the fresh script re-pushes.
+          if (!window.__ahubPushedOps) window.__ahubPushedOps = {};
+          if (window.__ahubPushedOps[String(o.name)] !== String(o.sha)) {
+            window.__ahubPushedOps[String(o.name)] = String(o.sha);
+            try { chrome.runtime.sendMessage({ type: 'SNIFFED_OP_SEEN', payload: { host: location.host, name: String(o.name), sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null } }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
+          }
         }
       } catch { /* */ }
     });
@@ -6291,7 +6301,18 @@ var MESSAGE_HANDLERS = {
         // v2.74.1340 (review A) — SECOND write belt AT THE EXECUTION BOUNDARY: this handler used to run any non-GET
         // handed to it (the confirm belt lived only in INVOKE_SESSION). Now a write must carry the confirmed:true the
         // HITL gate stamped — a future/rogue background path that skips the first belt is refused HERE too.
-        if (method !== 'GET' && method !== 'HEAD' && !(payload && payload.confirmed === true) && !gqlReadOk) {
+        // v2.74.1941 — a DECLARED read may be a non-GET (UPS's reads are plain-JSON POSTs). Belt #2 cannot verify
+        // that claim the way it verifies `gqlRead` — a GraphQL body describes itself, a JSON body does not — so be
+        // explicit about what this costs: for a non-gql read the belt degrades from INDEPENDENT verification to
+        // "belt #1 classified this, and said so in a field it had to set on purpose". That is still real
+        // defence-in-depth against the case this belt was written for (a future background path that forgets the
+        // gate entirely is refused, because it would set neither flag), and it is NOT protection against a path
+        // that sets `readOnly` wrongly — which is the same exposure `confirmed` already has.
+        // The alternative was worse: either every non-GET read stays unusable, or the background launders reads as
+        // `confirmed:true`, which would destroy the word that means A HUMAN APPROVED THIS. Keeping the claims
+        // distinct means the trace can still tell a human-approved write from a declared read.
+        const declaredRead = !!(payload && payload.readOnly === true);
+        if (method !== 'GET' && method !== 'HEAD' && !(payload && payload.confirmed === true) && !gqlReadOk && !declaredRead) {
           sendResponse({ success: false, error: 'write-needs-confirm' }); return;
         }
         const headers = Object.assign({ Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, (payload && payload.headers) || {});
@@ -6360,6 +6381,16 @@ var MESSAGE_HANDLERS = {
             const o = ev.data && ev.data.__ahub_sniffed_op;
             if (o && o.sha && o.name && o.host === location.host && /^[a-f0-9]{16,64}$/i.test(String(o.sha)) && /^\w{1,60}$/.test(String(o.name))) {
               window.__ahubSniffOps[String(o.name)] = { sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null, at: Date.now() };
+          // v2.74.1935 — PUSH each NEW op to the SW bank, exactly as the token does above (throttle: value-change
+          // only). Pull-only left an op alive ONLY in this world's buffer — and a ride's own content-script heal
+          // re-runs this IIFE, zeroing that buffer while restoring the pipe (the 21:50 wedge: heal + a 404 emptied
+          // both copies of the sha in one second, with no way back short of a document load). An orphaned
+          // context's push throws 'context invalidated' and dies in the catch; the fresh script re-pushes.
+          if (!window.__ahubPushedOps) window.__ahubPushedOps = {};
+          if (window.__ahubPushedOps[String(o.name)] !== String(o.sha)) {
+            window.__ahubPushedOps[String(o.name)] = String(o.sha);
+            try { chrome.runtime.sendMessage({ type: 'SNIFFED_OP_SEEN', payload: { host: location.host, name: String(o.name), sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null } }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
+          }
             }
           } catch { /* */ }
         });

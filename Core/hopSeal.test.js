@@ -43,6 +43,12 @@ const ENTRY_FIELD_MAP = new Set([
   // transport (recipeToLeg → tool)
   'method', 'endpoint', 'params', 'body', 'bodyType', 'contentType', 'gql', 'csrf', 'urlParam', 'persistedOp',
   'requestHeaders', 'shopProbe',
+  // v2.74.1936 — the UPS pair, both threaded to `tool` through all three hops (the seal proves it):
+  //   apiHost    — the API lives on a SIBLING host of the ride tab (page www.ups.com, API webapis.ups.com); the
+  //                executor builds the URL from it instead of the tab's origin. Every prior ground was same-origin.
+  //   csrfHeader — the sniffed token's header NAME is per-site (UPS: x-xsrf-token). Defaults to x-csrf-token at
+  //                the executor, so every existing recipe sends exactly what it sent before.
+  'apiHost', 'csrfHeader', 'listPath',
   // safety axes (→ mode/safety/tool booleans)
   'write', 'destructive', 'outward', 'reversible',
   // identity + presence probes (→ tool)

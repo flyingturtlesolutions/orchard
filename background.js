@@ -42,6 +42,7 @@ import { createDiscoveryHandlers } from './background/handlers/discovery.js';  /
 import { createForageHandlers } from './background/handlers/forage.js';  // §19 — Forage: the read-safe nav-following recipe-capture crawler
 import { createWorkflowDebugHandlers } from './background/handlers/workflowDebug.js';  // v2.74.953 (CR-X3c) — the workflow + debugger domain
 import { createConnectorHandlers } from './background/handlers/connector.js';  // v2.74.1151 (CX-3) — the connector domain (session-ride)
+import { createExerciserHandlers } from './background/handlers/exerciser.js';  // EX-1 (v2.74.1946) — self-reload + programmatic ask (the loop's two missing hands)
 import { createCanvasHandlers } from './background/handlers/canvas.js';  // v2.74.1205 (CA-4) — the canvas domain (RENDER_CANVAS → the presentation tab)
 import { createFleetHandlers, registerFleetAlarmListener } from './background/handlers/fleet.js';  // FL-6 (v2.74.1355) — the fleet clock trigger (scheduled headless sweeps)
 import { createConnectionsHandlers, registerConnTransitionListener, readConnRegistry, reportAuthSignal } from './background/handlers/connections.js';  // CP-1/2 (v2.74.1506) — the connections auth-presence registry; VT (v2.74.1570) — the heartbeat moved into the vitals scheduler; the transition listener feeds vitals incidents + the sign-in catch-up
@@ -1775,6 +1776,7 @@ const _sgMessageHandlers = {
   ...createFleetHandlers({ invokeSgHandler: _invokeSgHandler }),   // FL-6 (v1355) — FLEET_SCHEDULE (set/off/status); the alarm listener registers below
   ...createConnectionsHandlers({ invokeSgHandler: _invokeSgHandler }),   // CP-1/2 (v1506) — CONN_LIST / CONN_CHECK / CONN_FOCUS (the auth-presence registry)
   ...createPipelineHandlers(),   // PP (v2.74.1665) — PIPELINE_OPEN_ITEMS / PIPELINE_RECORD_ITEM / PIPELINE_CASES / PIPELINE_CLOSE_CASE
+  ...createExerciserHandlers(),   // EX-1 (v2.74.1946) — DEV_RELOAD_EXTENSION / DEV_RUN_ASK: the loop can restart the build it just made and put an ask through the front door
   ...createVitalsHandlers(),   // VT-2 (v2.74.1571) — VITALS_STATUS / VITALS_BADGE / VITALS_CHECK_NOW (the Admin desk's read surface)
   ...createCadenceHandlers(),   // CD-1 (v2.74.1692) — WORKFLOW_TRIGGER_SET / WORKFLOW_RUNS / WORKFLOW_RUN_FIRE (arm a cadence · read run history · manual headless fire)
 

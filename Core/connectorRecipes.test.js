@@ -707,7 +707,10 @@ describe('DK-7 (v2.74.1488) — the each-mode marker rides the resolve spec thro
   it('v2.74.1559 — drill.also (dossier sidecar reads) survives the LEG-projection path; the contacts leg projects with the id discipline', () => {
     const legs = recipeLegs({ account: 'me', trusted: true });
     const q = legs.find((l) => l && l.tool && l.tool.recipeId === 'vs_warranty_tasks');
-    assert.deepEqual(q.tool.drill.also, ['vs_task_contacts'], 'hop 3 rebuilds drill field-by-field — a dropped `also` would be invisible on the seeded path (invariant #3)');
+    // v2.74.1928 — the projected shape is now NORMALIZED to objects (an entry may re-key itself with
+    // from/param/pick/extract; a bare-string catalog entry becomes `{id}`). The invariant-#3 point is unchanged
+    // and stronger: hop 3 rebuilds drill field-by-field, and it must carry the WHOLE entry, not just its id.
+    assert.deepEqual(q.tool.drill.also, [{ id: 'vs_task_contacts' }], 'hop 3 rebuilds drill field-by-field — a dropped `also` would be invisible on the seeded path (invariant #3)');
     const c = legs.find((l) => l && l.tool && l.tool.recipeId === 'vs_task_contacts');
     assert.ok(c, 'vs_task_contacts projects a leg');
     assert.equal(c.tool.endpoint, '/api/Vendor/Warranty/TaskContacts/{taskId}');
@@ -740,7 +743,10 @@ describe('connectorRecipes — LEG-2a (v2.74.1594): the SH-T4 checklist surface 
     // v2.74.1905 — Search joins: the first READ persisted op (the admin bar itself, HAR-authored). The checklist
     // is precisely where its one-time by-hand capture is coached, so listing it is the point, not an accident.
     // v2.74.1921 — Timeline joins: the second READ persisted op (the order page's lazy-loaded timeline fetch).
-    assert.deepEqual(ops, ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer', 'Search', 'Timeline'], 'the three SH-T5 writes + the two persisted reads');
+    // v2.74.1926 — order_creator rides the SAME op (one sha, one bank entry, one capture hint) — so the wanted
+    // list must not gain a duplicate: the checklist asks a human to capture each OP once, not each leg.
+    assert.deepEqual([...new Set(ops)], ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer', 'OrderListData', 'Search', 'Timeline'], 'the three SH-T5 writes + the three persisted reads');
+    assert.equal(ops.filter((o) => o === 'Timeline').length, 1, 'two legs, ONE Timeline capture demand');
     for (const w of wanted) { assert.ok(w.recipeId && w.recipeName, 'each carries its recipe identity for the checklist line'); }
     assert.deepEqual(persistedOpsForHost('deako.zendesk.com'), [], 'Zendesk writes are REST — no op-hash demands');
     assert.deepEqual(persistedOpsForHost(''), []);

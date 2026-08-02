@@ -274,6 +274,61 @@ describe('v2.74.1925 — the machine-bind declaration survives HOP 3 (invariant 
     assert.equal(slot.machineOnly, true, 'machineOnly survives projection');
     assert.equal(slot.fromField, 'id', 'fromField survives projection — this is what the fill reads');
   });
+  it('v1926 — the creator leg reads the LAST page (the creation event is the OLDEST)', () => {
+    const entry = CONNECTOR_RECIPES.find((e) => e && e.id === 'shopify_order_creator');
+    assert.ok(entry, 'the creator leg is in the catalog');
+    const vars = JSON.parse(decodeURIComponent(entry.endpoint.split('variables=')[1]).replace('{orderGid}', 'gid://shopify/Order/9'));
+    assert.equal(vars.last, 3, 'a small TAIL — same-second ties and preamble events, selected by label not position');
+    assert.equal(vars.first, null, 'a Relay connection takes one direction at a time');
+    assert.equal(vars.id, 'gid://shopify/Order/9', 'the gid lands inside the JSON string');
+    const events = CONNECTOR_RECIPES.find((e) => e && e.id === 'shopify_order_events');
+    assert.equal(entry.persistedOp, events.persistedOp, 'same persisted op — the sha pins the DOCUMENT, not the variables');
+    assert.doesNotMatch(events.does, /who creat/i, 'the recent-events leg must not promise the creator it can truncate away');
+    assert.match(entry.does, /who creat/i);
+  });
+  it('v1928 — a STRUCTURED drill.also entry survives hop 3 (the silent-drop the review caught)', () => {
+    // The previous projector did `.filter((x) => _str(x))`, which stringifies an object to '' — so a re-keying
+    // sidecar worked on the CURATED path (hop 1 copies `drill` whole) and vanished on the SEEDED one. That is
+    // invariant #3's "works curated, dies seeded" class, and this test is the reason it cannot come back.
+    const entry = CONNECTOR_RECIPES.find((e) => e && e.id === 'shopify_orders_search');
+    assert.ok(entry, 'the orders breadth leg is in the catalog');
+    const leg = recipeToLeg(entry, { host: 'admin.shopify.com', groundId: 'g1' });
+    const also = leg.tool.drill.also;
+    assert.equal(also.length, 1);
+    assert.equal(also[0].id, 'shopify_order_creator');
+    assert.equal(also[0].from, 'id', 'the sidecar re-keys off the row gid, NOT the primary drill join (an order number 404s the timeline)');
+    assert.equal(also[0].param, 'orderGid');
+    assert.deepEqual(also[0].pick, { field: 'eventLabel', equals: 'order_placed' });
+    assert.equal(also[0].extract[0].as, 'createdBy');
+    assert.match(also[0].extract[0].pattern, /created this order/);
+  });
+  it('v1928 — a BARE-STRING also entry still projects (the shape that shipped for two months)', () => {
+    const leg = recipeToLeg({ id: 'x', app: 'x', appHost: 'h.com', endpoint: '/a', params: [], drill: { via: 'v', param: 'p', from: 'f', also: ['sidecar_one', 'sidecar_two'] } }, { host: 'h.com', groundId: 'g' });
+    assert.deepEqual(leg.tool.drill.also, [{ id: 'sidecar_one' }, { id: 'sidecar_two' }]);
+  });
+  it('v1928 — junk also entries drop, and the cap holds', () => {
+    const leg = recipeToLeg({ id: 'x', app: 'x', appHost: 'h.com', endpoint: '/a', params: [], drill: { via: 'v', param: 'p', from: 'f', also: [null, {}, { from: 'a' }, 'ok', 'b', 'c', 'd', 'e'] } }, { host: 'h.com', groundId: 'g' });
+    assert.ok(leg.tool.drill.also.every((a) => a && a.id), 'no id, no entry');
+    assert.ok(leg.tool.drill.also.length <= 4);
+  });
+  it('v1928 — the orders breadth leg carries a free query slot and the row-gid join key', () => {
+    const entry = CONNECTOR_RECIPES.find((e) => e && e.id === 'shopify_orders_search');
+    const vars = JSON.parse(decodeURIComponent(entry.endpoint.split('variables=')[1]).replace('{query}', 'status:open'));
+    assert.equal(vars.query, 'status:open', 'the filter lands inside the JSON string');
+    assert.equal(vars.ordersFirst, 50);
+    assert.equal(vars.sortKey, 'PROCESSED_AT');
+    assert.equal(vars.reverse, true, 'newest first');
+    assert.equal(vars.after, null, 'v1 does not paginate — the 50 is a bound the answer must name');
+    const q = (entry.params || []).find((p) => p.name === 'query');
+    assert.equal(q.required, false, 'blank is legal: the newest orders, unfiltered');
+    // v2.74.1929 — REACHABILITY is the contract now, not just honesty. The v1928 wording ("there is NO filter
+    // for who created an order") was true of the SITE and taught the router to refuse an ask the machinery could
+    // already answer (live clarify, 21:41). The does must DECLARE the derived field so the capability is
+    // nameable, AND keep the caveat as a cost rather than a refusal.
+    assert.match(entry.does, /createdBy/, 'the derived field must be nameable — an unnameable capability is unbuilt');
+    assert.match(entry.does, /no creator filter/i, 'the site limitation stays stated (it is why this is per-order)');
+    assert.doesNotMatch(entry.does, /staff_member/i, 'and it must never suggest the invalid search field');
+  });
   it('a plain param gains neither key (additive, no empty slots)', () => {
     const entry = CONNECTOR_RECIPES.find((e) => e && e.id === 'shopify_order');
     const leg = recipeToLeg(entry, { host: 'admin.shopify.com', groundId: 'g1' });

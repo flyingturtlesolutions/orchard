@@ -106,3 +106,25 @@ describe('synthEntity — the generated descriptor', () => {
     assert.equal(findLegDescriptor(null), null);
   });
 });
+
+describe('v2.74.1930 — `children` is a list of RECIPE IDS whichever form the catalog declares', () => {
+  // v1928 made a `drill.also` entry either a bare id or a re-keying object ({id, from, param, pick, extract}).
+  // entitiesFrom pushed the raw entry, so an object landed in `children` where consumers expect a string AND
+  // `includes` could never dedupe it (object identity). Found by auditing the new Shopify sidecar against the
+  // VendorSuite synthetic-leg contract rather than by a failure — the regression was latent.
+  it('an OBJECT also-entry contributes its id, not the object', () => {
+    const [e] = entitiesFrom([{ id: 'list', drill: { via: 'detail', param: 'p', from: 'f', also: [{ id: 'sidecar', from: 'id', param: 'gid' }] } }]);
+    assert.deepEqual(e.children, ['sidecar']);
+  });
+  it('bare strings still work, and the two forms dedupe against each other', () => {
+    const [e] = entitiesFrom([
+      { id: 'a', drill: { via: 'detail', param: 'p', from: 'f', also: ['sidecar'] } },
+      { id: 'b', drill: { via: 'detail', param: 'p', from: 'f', also: [{ id: 'sidecar' }, 'other'] } },
+    ]);
+    assert.deepEqual(e.children, ['sidecar', 'other'], 'one entity, one child list, no duplicate from the other form');
+  });
+  it('junk entries contribute nothing', () => {
+    const [e] = entitiesFrom([{ id: 'a', drill: { via: 'detail', param: 'p', from: 'f', also: [null, {}, { from: 'x' }, ''] } }]);
+    assert.deepEqual(e.children, []);
+  });
+});

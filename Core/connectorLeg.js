@@ -74,6 +74,38 @@ export function pruneSchema(inputSchema) {
   return { type: 'object', properties: out, required: Array.isArray(s.required) ? s.required.slice() : [] };
 }
 
+/**
+ * v2.74.1928 — ONE normalizer for a `drill.also` entry, both forms. PURE.
+ *   'vs_task_contacts'                                        → { id: 'vs_task_contacts' }
+ *   { id, from, param, pick:{field,equals}, extract:[{from,as,pattern}] }  → the same, validated
+ * `from`/`param` re-key the sidecar off a DIFFERENT row field than the primary drill's join value. `pick`
+ * selects one row of the sidecar result by field value (never by position — a timeline is newest-first and
+ * ties exist). `extract` writes captured prose into named fields: `pattern` is a curated regex applied to the
+ * picked row's `from` field, `as` names the field it becomes; with no pattern the value is copied verbatim
+ * (a boolean like attributeToUser rides that path). Returns null for junk so a bad entry drops loudly-in-tests
+ * rather than half-existing.
+ */
+function _alsoEntry(x) {
+  if (typeof x === 'string' || typeof x === 'number') { const id = _str(x); return id ? { id } : null; }
+  if (!x || typeof x !== 'object') return null;
+  const id = _str(x.id);
+  if (!id) return null;
+  const out = { id };
+  if (_str(x.from)) out.from = _str(x.from);
+  if (_str(x.param)) out.param = _str(x.param);
+  if (x.pick && typeof x.pick === 'object' && _str(x.pick.field)) {
+    out.pick = { field: _str(x.pick.field), equals: _str(x.pick.equals) };
+  }
+  if (Array.isArray(x.extract)) {
+    const ex = x.extract
+      .filter((e) => e && typeof e === 'object' && _str(e.from) && _str(e.as))
+      .map((e) => ({ from: _str(e.from), as: _str(e.as), ...(_str(e.pattern) ? { pattern: _str(e.pattern).slice(0, 200) } : {}) }))
+      .slice(0, 6);
+    if (ex.length) out.extract = ex;
+  }
+  return out;
+}
+
 // A recipe's own param list → the same {type:object, properties, required} skeleton. PURE.
 function recipeParamSchema(params) {
   const properties = {};
@@ -280,7 +312,17 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
         ...(_str(r.drill.from) ? { from: _str(r.drill.from) } : {}),
         ...(_str(r.drill.matchOn) ? { matchOn: _str(r.drill.matchOn) } : {}),
         ...(Array.isArray(r.drill.label) ? { label: r.drill.label.filter((x) => _str(x)).slice(0, 10) } : {}),
-        ...(Array.isArray(r.drill.also) ? { also: r.drill.also.filter((x) => _str(x)).slice(0, 4) } : {}),   // v2.74.1559 — sidecar reads the dossier pulls with the same join id (invariant #3: hop 3 rebuilds drill field-by-field)
+        // v2.74.1559 — sidecar reads: the dossier pulls with the same join id (invariant #3: hop 3 rebuilds drill
+        // field-by-field). v2.74.1928 — an entry may now be an OBJECT that RE-KEYS itself: `{id, from, param}`
+        // when the sidecar's join value is a different field from the primary drill's (the timeline needs the
+        // row's internal gid, while the primary joins on the order NUMBER — passing the number 404s), plus
+        // optional `pick` (select ONE row of the sidecar's result by field value) and `extract` (write matched
+        // prose into named fields the later clauses can read). The old bare-string form is unchanged.
+        // ⚠ The previous line was `.filter((x) => _str(x))`, which stringifies an object to '' and DROPPED it —
+        // silently, and only on the SEEDED path (hop 1 copies `drill` whole, so the curated twin kept working).
+        // That is the invariant-#3 "works curated, dies seeded" class this very comment warns about, caught in
+        // review before it shipped. Normalize both forms here so every projection carries the same shape.
+        ...(Array.isArray(r.drill.also) ? { also: r.drill.also.map(_alsoEntry).filter(Boolean).slice(0, 4) } : {}),
       } : null,
       // CX-9b (v2.74.1434) — per-param `resolve` specs (human value → canonical id via one of the app's own reads;
       // Core/rideParamResolve.js). The panel dispatch resolves BEFORE the executor, so both transports benefit.
@@ -288,8 +330,13 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       autoRequires: _str(r.autoRequires) || null,
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
       // CX-7 — a GraphQL READ is a POST with a body (the query document), so the body threads for gql recipes too
-      body: ((write || r.gql === true) && r.body && typeof r.body === 'object') ? r.body : null,
-      bodyType: _str(r.bodyType) || (write && r.body ? 'json' : null),         // v1342 — json | form | raw (fillWriteBody)
+      // v2.74.1936 — a NON-GET READ may carry a body. The condition was `write || gql`, which encodes "a POST
+      // with a body is either a write or a GraphQL document" — true of every ground until UPS, whose reads are
+      // plain-JSON POSTs (`{"TrackingNumber":["1Z…"]}`). The leg projected with body:null and would have POSTed
+      // an empty request. Same root assumption as the mode bug one hop up (harvestedRecipeLegs), caught by the
+      // same probe. A GET still projects null — a declared body on a non-GET is intentional by construction.
+      body: ((write || r.gql === true || String(r.method || 'GET').toUpperCase() !== 'GET') && r.body && typeof r.body === 'object') ? r.body : null,
+      bodyType: _str(r.bodyType) || ((r.body && String(r.method || 'GET').toUpperCase() !== 'GET') ? 'json' : null),         // v1342 — json | form | raw (fillWriteBody); v1936 — any non-GET body defaults json, not writes only
       contentType: _str(r.contentType) || null,
       verifyIdentity: r.verifyIdentity === true,
       identityProbe: _str(r.identityProbe) || null,
@@ -303,6 +350,13 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       csrf: _str(r.csrf) || null,
       urlParam: (r.urlParam && typeof r.urlParam === 'object' && _str(r.urlParam.name) && _str(r.urlParam.pattern)) ? { name: _str(r.urlParam.name), pattern: _str(r.urlParam.pattern) } : null,
       persistedOp: _str(r.persistedOp) || null,   // CX-7b — {op_sha} fills from the per-origin op bank (sniffed, never curated/model data)
+      // v2.74.1936 — CROSS-HOST API + the token's header NAME. Every ground until UPS put its API on the same
+      // origin as the page it rides; UPS's page is www.ups.com and its API is webapis.ups.com (same SITE, so
+      // the page's own fetch is allowed — this leg does exactly what the SPA does). `csrfHeader` defaults to
+      // x-csrf-token at the executor, so every existing recipe is byte-identical.
+      apiHost: _str(r.apiHost) || null,
+      listPath: _str(r.listPath) || null,   // v1936 — where this response's ROWS live, when heuristics can't reach them (a status envelope)
+      csrfHeader: _str(r.csrfHeader) || null,
       shopProbe: r.shopProbe === true,             // CX-7c — run the `{shop{name}}` liveness probe before the call
       requestHeaders: (r.requestHeaders && typeof r.requestHeaders === 'object') ? r.requestHeaders : null,
     },

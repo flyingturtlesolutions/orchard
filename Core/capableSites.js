@@ -100,7 +100,12 @@ export function capableSitesCatalog({ curated = CONNECTOR_RECIPES, broker = BROK
   const connClasses = new Map();   // app → { app, host, label, reads, writes }
   for (const r of (Array.isArray(curated) ? curated : [])) {
     if (!r || !r.app || !r.appHost) continue;
-    const c = connClasses.get(r.app) || { app: r.app, host: _host(r.appHost), label: _title(r.app), reads: 0, writes: 0 };
+    // v2.74.1939 — keep the RAW appHost beside the normalized one. `_host()` strips `www.` (right for dedup: a
+    // ground at www.foo.com and one at foo.com are the same site), but the tenant test below counts LABELS, so
+    // stripping it turns a www-canonical site into a bare 2-label class and demands a tenant subdomain that does
+    // not exist. Live: the UPS card could not be selected — clicking it re-asked for "yourteam.ups.com" forever.
+    // `www` is definitionally NOT a tenant, so the deep test must read the host as authored.
+    const c = connClasses.get(r.app) || { app: r.app, host: _host(r.appHost), raw: String(r.appHost || '').toLowerCase().replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').replace(/\/+$/, ''), label: _title(r.app), reads: 0, writes: 0 };
     if (r.write) c.writes += 1; else c.reads += 1;
     connClasses.set(r.app, c);
   }
@@ -152,8 +157,12 @@ export function capableSitesCatalog({ curated = CONNECTOR_RECIPES, broker = BROK
   //    Only a bare 2-label TENANT class (zendesk.com — each team its own subdomain) needs a typed instance.
   for (const [app, cc] of connClasses) {
     if (usedApp.has(app)) continue;
-    const deep = String(cc.host || '').split('.').length >= 3;
-    out.push({ key: `connector:${app}`, origin: deep ? _origin(cc.host) : null, host: cc.host, label: cc.label, kind: 'connector', offers: [_offer(cc)], concrete: deep, needsInstance: !deep, groundId: null, provider: null });
+    // v2.74.1939 — count labels on the RAW host (www.ups.com → 3 → concrete), and bind the RAW origin so the
+    // stored connection is the host the site actually serves (www.ups.com), which is also what the ground, the
+    // sniff allow-list and the seeding all key on. `host` stays normalized for class↔instance matching above.
+    const _raw = String(cc.raw || cc.host || '');
+    const deep = _raw.split('.').length >= 3;
+    out.push({ key: `connector:${app}`, origin: deep ? _origin(_raw) : null, host: cc.host, label: cc.label, kind: 'connector', offers: [_offer(cc)], concrete: deep, needsInstance: !deep, groundId: null, provider: null });
   }
   // 6) broker classes with no concrete instance → bind the provider host directly (no instance to type).
   for (const bc of brokerClasses) {

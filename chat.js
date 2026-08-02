@@ -46,6 +46,7 @@ import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/p
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg, missingRequiredParams, inventedIdentifierParams } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate; v1911 — the identifier-provenance gate
+import { misboundIdentifierParams } from './Core/identifierShapes.js';   // SG-1 (v2.74.1947) — the any-slot shape guard: a UPS 1Z must not bind a Shopify order slot
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
 import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, drillTargetRedirect, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
@@ -2423,8 +2424,9 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
     // v2.74.1559 — SIDECAR reads (drill.also, catalog-owned): pulled per case with the SAME join id and merged
     // into the dossier — a case is born knowing its homeowner CONTACTS, not just the address. Read-only belt.
     const alsoLegs = [];
-    for (const aid of (Array.isArray(dj.also) ? dj.also : [])) {
-      try { const al = await _rideDrillLeg(leg, aid, leg.tool.groundId || null); if (al && !(al.tool && al.tool.write)) alsoLegs.push(al); } catch { /* sidecars are best-effort */ }
+    for (const _a of (Array.isArray(dj.also) ? dj.also : [])) {   // v1928 — entries carry their own re-key/pick/extract spec
+      const _spec = _alsoSpec(_a);
+      try { const al = await _rideDrillLeg(leg, _spec.id, leg.tool.groundId || null); if (al && !(al.tool && al.tool.write)) alsoLegs.push({ leg: al, spec: _spec }); } catch { /* sidecars are best-effort */ }
     }
     if (viaLeg) {
       for (let k = 0; k < foItems.length; k++) {
@@ -2450,11 +2452,13 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
         if (dr.ok) {
           const detailObj0 = primaryObject(dr.value) || dr.value;
           const mergedObj = (detailObj0 && typeof detailObj0 === 'object' && !Array.isArray(detailObj0)) ? { ...detailObj0 } : {};
-          for (const al of alsoLegs) {
+          for (const { leg: al, spec: _asp } of alsoLegs) {
             try {
-              const pn = (((al.params || (al.tool && al.tool.params)) || []).find((p) => p && p.required) || {}).name || dj.param || 'id';
-              const adr = await _rideExecOnce(al, { [pn]: joinId }, { groundId: leg.tool.groundId || null });
-              if (adr.ok) Object.assign(mergedObj, _sidecarFields(adr.value, al));
+              const pn = _asp.param || (((al.params || (al.tool && al.tool.params)) || []).find((p) => p && p.required) || {}).name || dj.param || 'id';
+              const jv = _asp.from ? row[_asp.from] : joinId;   // v1928 — the sidecar's own join field, when it re-keys
+              if (jv == null || jv === '') continue;
+              const adr = await _rideExecOnce(al, { [pn]: jv }, { groundId: leg.tool.groundId || null });
+              if (adr.ok) Object.assign(mergedObj, _sidecarFields(adr.value, al, _asp));
             } catch { /* a failed sidecar keeps the dossier */ }
           }
           const lines = dossierLines(mergedObj, { max: 24, displayId: _legDisplayId(viaLeg) || _legDisplayId(leg) });   // the full record earns a bigger budget than a row
@@ -4472,21 +4476,42 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
   const _dj = (!fp && srcLeg && srcLeg.tool && srcLeg.tool.drill && srcLeg.tool.drill.via && srcLeg.tool.drill.from) ? srcLeg.tool.drill : null;
   if (_dj) {
     const viaLeg = await _rideDrillLeg(srcLeg, _dj.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
-    if (viaLeg) {
-      let got = 0;
-      for (let k = 0; k < use.length; k++) {
-        if (_walkAbortFlag.requested) break;
+    // v2.74.1929 — THE SIDECAR REACHES THIS DOOR TOO. This enrich read only the `via` leg, so a field that lives
+    // ONLY in a sidecar's declared `extract` (createdBy, from the order's creation event) was absent here no
+    // matter what — the composition was built and unaskable (the v1928 live clarify). A sidecar-only field now
+    // resolves through the ordinary "read <field> on these" ask, which is the door users actually take.
+    const runSidecars = await _sidecarRunner(srcLeg, _dj);
+    if (viaLeg || runSidecars) {
+      // v2.74.1930 — EIGHT-WIDE, like every other ride fan-out. Per-row enrich is the same shape as the find
+      // scan and the each fan (N independent reads on one session), and it was the only one still serial.
+      const _t0 = Date.now();
+      const _perRow = (viaLeg ? 1 : 0) + ((_dj.also || []).length && runSidecars ? (_dj.also || []).length : 0);
+      let got = 0; let done = 0;
+      await _rideLanes(use.length, async (k) => {
+        if (_walkAbortFlag.requested) return;
         const joinId = use[k] && use[k][_dj.from];
-        if (joinId == null || joinId === '') continue;
-        _setMessageBody(msg, `Opening each record for “${escHtml(fr.field)}”… ${k + 1}/${use.length}`);
-        let dr = null;
-        try { dr = await _rideExecOnce(viaLeg, { [_dj.param || 'id']: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null }); } catch { dr = null; }
-        if (!dr || !dr.ok) continue;
-        const detail = primaryObject(dr.value) || dr.value;
-        if (detail && typeof detail === 'object' && !Array.isArray(detail)) { use[k] = { ...use[k], ...detail }; got++; }
-      }
+        // the primary drill needs its join id; a re-keyed sidecar may not (it reads its own field off the row)
+        if ((joinId == null || joinId === '') && !runSidecars) { done++; return; }
+        let merged = null;
+        if (viaLeg && joinId != null && joinId !== '') {
+          let dr = null;
+          try { dr = await _rideExecOnce(viaLeg, { [_dj.param || 'id']: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null }); } catch { dr = null; }
+          const detail = (dr && dr.ok) ? (primaryObject(dr.value) || dr.value) : null;
+          if (detail && typeof detail === 'object' && !Array.isArray(detail)) merged = { ...use[k], ...detail };
+        }
+        if (runSidecars) {
+          const extra = await runSidecars(use[k], joinId);
+          if (extra && Object.keys(extra).length) merged = { ...(merged || use[k]), ...extra };
+        }
+        if (merged) { use[k] = merged; got++; }
+        done++;
+        _setMessageBody(msg, `Opening each record for “${escHtml(fr.field)}”… ${done}/${use.length}`);
+      });
       fp = _resolve();
-      try { _orchLog(`FIELD_READ ▸ enriched ${got}/${use.length} row(s) via ${_dj.via} → field ${fp ? `"${fp.path}"` : 'STILL absent'}`); } catch { /* */ }
+      // The COST is stated in the trace (the VendorSuite `FIND ▸ … est=` discipline): reads spent, lanes, wall
+      // clock. No spend gate here yet — `use` is already row-capped upstream, so the unbounded case this would
+      // guard is unreachable; when that cap rises, the `_FIND_AUTO_MS` ceiling is the mechanism to reuse.
+      try { _orchLog(`FIELD_READ ▸ enriched ${got}/${use.length} row(s) via ${viaLeg ? _dj.via : '—'}${runSidecars ? ` +${(_dj.also || []).length} sidecar(s)` : ''} — ${use.length * _perRow} read(s) ×${Math.min(_RIDE_CONC, use.length)} lanes in ${((Date.now() - _t0) / 1000).toFixed(1)}s → field ${fp ? `"${fp.path}"` : 'STILL absent'}`); } catch { /* */ }
     }
   }
   if (!fp && _tied && _tied.length) {
@@ -4840,20 +4865,30 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     if (_bDrilled || !_bdjTool) return false;
     _bDrilled = true;   // one drill per branch run, whoever asks first
     const viaLeg = await _rideDrillLeg(srcLeg, _bdjTool.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
-    if (!viaLeg) return false;
-    let got = 0;
-    for (let k = 0; k < use.length; k++) {
-      if (_walkAbortFlag.requested) break;
+    const runSidecars = await _sidecarRunner(srcLeg, _bdjTool);   // v1929 — the third enrich door; a sidecar-only field (createdBy) is what "sort these by who created them" branches ON
+    if (!viaLeg && !runSidecars) return false;
+    const _t0 = Date.now();
+    let got = 0; let done = 0;
+    await _rideLanes(use.length, async (k) => {   // v1930 — same lane budget as every other ride fan-out
+      if (_walkAbortFlag.requested) return;
       const joinId = use[k] && use[k][_bdjTool.from];
-      if (joinId == null || joinId === '') continue;
-      _setMessageBody(msg, `Opening each record for “${escHtml(String(forLabel))}”… ${k + 1}/${use.length}`);
-      let dr = null;
-      try { dr = await _rideExecOnce(viaLeg, { [_bdjTool.param || 'id']: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null }); } catch { dr = null; }
-      if (!dr || !dr.ok) continue;
-      const detail = primaryObject(dr.value) || dr.value;
-      if (detail && typeof detail === 'object' && !Array.isArray(detail)) { use[k] = { ...use[k], ...detail }; got++; }
-    }
-    try { _orchLog(`BRANCH ▸ enriched ${got}/${use.length} row(s) via ${_bdjTool.via} for "${forLabel}"`); } catch { /* */ }
+      if ((joinId == null || joinId === '') && !runSidecars) { done++; return; }
+      let merged = null;
+      if (viaLeg && joinId != null && joinId !== '') {
+        let dr = null;
+        try { dr = await _rideExecOnce(viaLeg, { [_bdjTool.param || 'id']: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null }); } catch { dr = null; }
+        const detail = (dr && dr.ok) ? (primaryObject(dr.value) || dr.value) : null;
+        if (detail && typeof detail === 'object' && !Array.isArray(detail)) merged = { ...use[k], ...detail };
+      }
+      if (runSidecars) {
+        const extra = await runSidecars(use[k], joinId);
+        if (extra && Object.keys(extra).length) merged = { ...(merged || use[k]), ...extra };
+      }
+      if (merged) { use[k] = merged; got++; }
+      done++;
+      _setMessageBody(msg, `Opening each record for “${escHtml(String(forLabel))}”… ${done}/${use.length}`);
+    });
+    try { _orchLog(`BRANCH ▸ enriched ${got}/${use.length} row(s) via ${viaLeg ? _bdjTool.via : '—'}${runSidecars ? ` +${(_bdjTool.also || []).length} sidecar(s)` : ''} ×${Math.min(_RIDE_CONC, use.length)} lanes in ${((Date.now() - _t0) / 1000).toFixed(1)}s for "${forLabel}"`); } catch { /* */ }
     return got > 0;
   };
   // v2.74.1899 — DETERMINISTIC arms get the v1690 resolve too. The live unknowns were `record has no field "Vendor
@@ -5619,8 +5654,9 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
     const preCap = Math.max(1, Math.min(map.cap || _MAP_WINDOW, rows.length));
     const viaLeg = await _rideDrillLeg(srcLeg, _dj.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
     const alsoLegs = [];
-    for (const aid of (Array.isArray(_dj.also) ? _dj.also : [])) {
-      try { const al = await _rideDrillLeg(srcLeg, aid, (srcLeg.tool && srcLeg.tool.groundId) || null); if (al && !(al.tool && al.tool.write)) alsoLegs.push(al); } catch { /* sidecars are best-effort */ }
+    for (const _a of (Array.isArray(_dj.also) ? _dj.also : [])) {
+      const _spec = _alsoSpec(_a);
+      try { const al = await _rideDrillLeg(srcLeg, _spec.id, (srcLeg.tool && srcLeg.tool.groundId) || null); if (al && !(al.tool && al.tool.write)) alsoLegs.push({ leg: al, spec: _spec }); } catch { /* sidecars are best-effort */ }
     }
     if (!viaLeg) { try { _orchLog(`MAP ▸ enrich SKIPPED — "${_dj.via}" leg unavailable; the list rows must carry "${map.itemField}"`); } catch { /* */ } }
     else {
@@ -5636,14 +5672,22 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
         if (!dr || !dr.ok) continue;
         const detail = primaryObject(dr.value) || dr.value;
         const merged = { ...enriched[k], ...((detail && typeof detail === 'object' && !Array.isArray(detail)) ? detail : {}) };
-        for (const al of alsoLegs) {
+        for (const { leg: al, spec: _asp } of alsoLegs) {
           try {
-            const pn = (((al.params || (al.tool && al.tool.params)) || []).find((p) => p && p.required) || {}).name || _dj.param || 'id';
-            const adr = await _rideExecOnce(al, { [pn]: joinId }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null });
+            // v2.74.1928 — the sidecar may RE-KEY: its join value can be a different row field from the primary
+            // drill's (`from`) bound to a different param (`param`). Live case: the primary joins the order
+            // NUMBER while the creation-event read needs the row's internal gid — passing the number 404s, which
+            // is the single hard blocker the review named. Falls back to the old behaviour when unspecified.
+            const pn = _asp.param || (((al.params || (al.tool && al.tool.params)) || []).find((p) => p && p.required) || {}).name || _dj.param || 'id';
+            const jv = _asp.from ? (enriched[k] && enriched[k][_asp.from]) : joinId;
+            if (jv == null || jv === '') continue;
+            const adr = await _rideExecOnce(al, { [pn]: jv }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null });
             if (adr && adr.ok) {
-              Object.assign(merged, _sidecarFields(adr.value, al));
-              const _cl = primaryList(adr.value);   // PM-7 (v1634) — keep the FULL contact list; _sidecarFields flattens to contact[0], the ladder needs each contact's roles
-              if (Array.isArray(_cl) && _cl.length) merged.__contacts = [...(merged.__contacts || []), ..._cl];
+              Object.assign(merged, _sidecarFields(adr.value, al, _asp));
+              if (!(_asp.pick || _asp.extract)) {
+                const _cl = primaryList(adr.value);   // PM-7 (v1634) — keep the FULL contact list; _sidecarFields flattens to contact[0], the ladder needs each contact's roles
+                if (Array.isArray(_cl) && _cl.length) merged.__contacts = [...(merged.__contacts || []), ..._cl];
+              }
             }
           } catch { /* a sidecar miss keeps the detail */ }
         }
@@ -6096,7 +6140,80 @@ function _accreteFocusFromRead({ leg, params = null, labels = null, value, label
 // v2.74.1559 — flatten a SIDECAR read (drill.also: contacts…) into dossier fields: the first entry's scalars,
 // keys prefixed by the leg's noun ("Contact" + FirstName…), + a compact roll-up of additional entries. Defensive
 // (the response shape is only known live); collisions lose to the prefix, never overwrite the task's own fields.
-function _sidecarFields(value, alsoLeg) {
+// v2.74.1928 — a `drill.also` entry is now either a bare id or a re-keying object; recipeToLeg normalizes both
+// to `{id, from?, param?, pick?, extract?}` (Core/connectorLeg.js `_alsoEntry`). These two readers are what every
+// call site uses so the shapes can never drift apart again.
+const _alsoId = (a) => (typeof a === 'string' ? a : ((a && a.id) || ''));
+const _alsoSpec = (a) => ((a && typeof a === 'object') ? a : { id: String(a || '') });
+// v2.74.1929 — ONE sidecar runner, shared by every enrich loop. The v1881 gap was three copies of the drill
+// enrich of which only TWO ever read `also` — so a sidecar's derived fields (createdBy…) were unreachable from
+// the fieldRead and branch doors, which are exactly the doors a user's ask takes ("read who created each of
+// these", "sort them by who created them"). Resolving the legs ONCE per enrich (not per row) matters: it is a
+// storage read per leg, and a 50-row enrich would otherwise do it 50 times.
+// v2.74.1930 — ONE lane-pool helper, the VendorSuite fan-out idiom (`_RIDE_CONC` workers pulling an index
+// cursor) that the find scan, the each fan-out and the sweep all use — and that the drill ENRICH loops did not.
+// They were serial: 50 rows × ~390ms = ~20s of wall clock for work the same session runs eight-wide elsewhere.
+// The budget is deliberately the SHARED constant: these fan-outs contend for one browser session, so the number
+// belongs in one place (the v1880 ruling). `worker` receives the index and must not throw.
+async function _rideLanes(n, worker, conc = _RIDE_CONC) {
+  const total = Math.max(0, n | 0);
+  if (!total) return;
+  let next = 0;
+  const lane = async () => { while (next < total) { const i = next++; await worker(i); } };
+  await Promise.all(Array.from({ length: Math.min(conc, total) }, lane));
+}
+async function _sidecarRunner(srcLeg, dj) {
+  const legs = [];
+  for (const _a of (Array.isArray(dj && dj.also) ? dj.also : [])) {
+    const spec = _alsoSpec(_a);
+    if (!spec.id) continue;
+    try {
+      const al = await _rideDrillLeg(srcLeg, spec.id, (srcLeg.tool && srcLeg.tool.groundId) || null);
+      if (al && !(al.tool && al.tool.write)) legs.push({ leg: al, spec });
+    } catch { /* sidecars are best-effort by contract */ }
+  }
+  if (!legs.length) return null;
+  /** Merge every sidecar's declared fields for ONE row. Never throws; a miss simply adds nothing. */
+  return async (row, fallbackJoinId) => {
+    const out = {};
+    for (const { leg: al, spec } of legs) {
+      try {
+        const pn = spec.param || (((al.params || (al.tool && al.tool.params)) || []).find((p) => p && p.required) || {}).name || dj.param || 'id';
+        const jv = spec.from ? (row && row[spec.from]) : fallbackJoinId;
+        if (jv == null || jv === '') continue;
+        const adr = await _rideExecOnce(al, { [pn]: jv }, { groundId: (srcLeg.tool && srcLeg.tool.groundId) || null });
+        if (adr && adr.ok) Object.assign(out, _sidecarFields(adr.value, al, spec));
+      } catch { /* a sidecar miss keeps the row */ }
+    }
+    return out;
+  };
+}
+function _sidecarFields(value, alsoLeg, spec = null) {
+  // v2.74.1928 — DECLARED extraction. With `pick`, choose the sidecar row by FIELD VALUE (never position — a
+  // timeline is newest-first and same-second ties exist); with `extract`, write captured prose into NAMED fields
+  // the later clauses can read, and emit ONLY those (a declared intent replaces the generic flatten, which would
+  // otherwise spray a dozen prefixed event fields — and their PII — across every row).
+  if (spec && (spec.pick || spec.extract)) {
+    const out = {};
+    try {
+      const list = primaryList(value);
+      const rows = Array.isArray(list) ? list : [primaryObject(value)].filter(Boolean);
+      let row = rows[0] || null;
+      if (spec.pick && spec.pick.field) {
+        row = rows.find((r) => r && String(r[spec.pick.field] ?? '') === String(spec.pick.equals ?? '')) || null;
+      }
+      if (!row) return out;   // the declared row is absent — say nothing rather than the nearest thing
+      for (const ex of (Array.isArray(spec.extract) ? spec.extract : [])) {
+        const raw = row[ex.from];
+        if (raw == null) continue;
+        if (!ex.pattern) { if (typeof raw !== 'object') out[ex.as] = raw; continue; }
+        let m = null;
+        try { m = new RegExp(ex.pattern).exec(String(raw)); } catch { m = null; }   // a curated pattern; a bad one extracts nothing
+        if (m) out[ex.as] = String(m[1] != null ? m[1] : m[0]).trim();
+      }
+    } catch { /* an unreadable sidecar adds nothing */ }
+    return out;
+  }
   const out = {};
   try {
     const tail = String((alsoLeg.tool && alsoLeg.tool.recipeId) || alsoLeg.key || 'extra').split('_').pop().replace(/s$/i, '');
@@ -7999,8 +8116,17 @@ async function _cachedHostRecipes(host, { groundId = null } = {}) {
   // record's own `origin` is the truth (harvestedRecipeLegs stamps the PASSED host onto every projection, so a
   // post-projection check is too late). Foreign rows are named once per cache fill so the pollution stays
   // diagnosable rather than silently steering whoever reads the store next.
+  // v2.74.1937 — BARE BOTH SIDES. The v1919-b filter bare'd only the RECORD's origin while comparing against
+  // the caller's host verbatim, so on a www-prefixed ground every legitimate record read as foreign:
+  //   ground 'www.ups.com' · record origin 'www.ups.com' → _bare → 'ups.com' !== 'www.ups.com' → DROPPED.
+  // Invisible on every ground that shipped before (admin.shopify.com, vendorsuite.drhorton.com — no www),
+  // and fatal on the first one that has a www: it filtered BOTH UPS legs out of the store and reported them
+  // as pollution ('27 foreign recipe(s) stored under www.ups.com (ups.com, …)' — the count was mostly ME).
+  // The review flagged exactly this asymmetry as a nit and the verifier refuted it as unreproducible; it
+  // reproduced on the next ground authored. Comparing bare-to-bare also makes the subdomain intent explicit.
   const _bare = (s) => String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
-  const _own = recipes.filter((r) => r && _bare(r.origin) === h);
+  const _hb = _bare(h);
+  const _own = recipes.filter((r) => r && _bare(r.origin) === _hb);
   if (_own.length < recipes.length) {
     const _foreign = [...new Set(recipes.filter((r) => r && _bare(r.origin) !== h).map((r) => _bare(r.origin) || '(no origin)'))].slice(0, 3);
     try { _orchLog(`RIDE_RESOLVE ▸ ${recipes.length - _own.length} foreign recipe(s) stored under ${h} (${_foreign.join(', ')}) — filtered from every reader`); } catch { /* */ }
@@ -11162,7 +11288,7 @@ async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = fa
     if (leg.tool.replay === 'headers') {
       const _gqlRead = leg.tool.write !== true && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object' && isReadOnlyGql(String(leg.tool.body.query || ''));
       const _rb = _gqlRead ? _filledConnectorWrite(leg, p) : null;
-      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
+      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, readOnly: leg.mode === 'ask', apiHost: leg.tool.apiHost || null, csrfHeader: leg.tool.csrfHeader || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
     } else {
       const plan = planExec(leg, p, { tabId, groundId });
       if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, quiet ? { ...plan.payload, quiet: true } : plan.payload);
@@ -11624,7 +11750,8 @@ async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, w
     // `drill.also` are exactly the ones a user names directly. `_drillTo` carries the original target here; it
     // is honored only when the parent's own drill declares it (`via` or `also`), so it can never point anywhere
     // the catalog has not already sanctioned.
-    const _sanctioned = [dj.via, ...(Array.isArray(dj.also) ? dj.also : [])].filter(Boolean);
+    // v1928 — `also` entries may be objects now; the sanction list is of recipe IDs, so read the id off either form.
+    const _sanctioned = [dj.via, ...(Array.isArray(dj.also) ? dj.also.map(_alsoId) : [])].filter(Boolean);
     const _wantId = (_drillTo && _sanctioned.includes(_drillTo)) ? _drillTo : dj.via;
     const viaLeg = await _rideDrillLeg(leg, _wantId, groundId);
     if (!viaLeg) return null;   // details read unavailable/unarmed → fall back to the plain list render
@@ -12278,6 +12405,22 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   // tell them apart. Without the exemption every human-number drill dead-ends in a false "I won't guess" AFTER
   // the join already found the record — the v1866 class, re-introduced verbatim.
   if (leg && leg.domain === 'connector' && !_drilled && !_redirected) _fillMachineParamsFromFocus(leg, params);   // v1922 — machineOnly + fromField: the record's value wins BEFORE any judging, and also fills a param the model left blank (else the required-param clarify fires with the answer sitting in focus)
+  // SG-1 (v2.74.1947) — THE SHAPE GUARD, ahead of the provenance gate and NOT conditioned on `_modelBound`.
+  // Live 15:46 (twice): with the UPS legs absent from the palette, "track 1Z27691W0233595715" routed to
+  // `me.shopify.shopify_order` and the POST returned 200 — a wrong act that grades as a success and reinforces.
+  // Provenance cannot catch this: the value IS in the ask, so it is perfectly "provenanced" — it is simply an
+  // identifier for a different site. Deliberately NOT gated on _modelBound/_drilled: a mis-shaped id is wrong
+  // whoever supplied it, and a drill handing a UPS number to a Shopify order slot is the same defect.
+  if (leg && leg.domain === 'connector') {
+    const _mis = misboundIdentifierParams(leg, params);
+    if (_mis.length) {
+      const _m0 = _mis[0];
+      try { _orchLog(`PARAM ▸ misbound ${_m0.name}="${_scrubHead(_m0.value, 30)}" is ${_m0.label} (${_m0.owner}) but this leg rides ${_m0.host} → clarify (no call spent) [${(leg.tool && leg.tool.recipeId) || leg.key || ''}]`); } catch { /* */ }
+      _setMessageBody(msg, `That looks like **${_m0.label}**, but **${leg.name || leg.key}** reads from ${_m0.host} — it would look up \`${escHtml(String(_m0.value))}\` as ${_m0.name} there and answer about the wrong thing. ${_m0.owner === 'UPS' ? 'If you want the package tracked, connect UPS in this conversation and ask again.' : `Give me a ${_m0.name} for ${_m0.host} and I'll run it.`}`, { markdown: true });
+      _orchFinalize(msg);
+      return false;
+    }
+  }
   if (leg && leg.domain === 'connector' && _modelBound.size && !_drilled && !_redirected) {
     let _inv = inventedIdentifierParams(leg, params, _provenanceHay(ask, history)).filter((p) => _modelBound.has(p.name));
     let _reWhy = 'value absent from ask+turns';
@@ -12656,7 +12799,11 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // v2.74.1853 — the csrf-cold dead end gets an AFFORDANCE, not coaching (live 201402: "click anywhere in the
     // admin tab" read as "retry the ask" — two ~50s ladders, no click). The button reloads the ride tab (boot
     // traffic IS the guaranteed capture) and re-sends this same ask through the front door.
-    if (res && res.csrfNoToken) _csrfWarmBar(msg, { host: (leg.tool && (leg.tool.sessionHost || leg.tool.appHost || leg.tool.origin)) || '', retryAsk: ask });
+    // v2.74.1935 — the OP path gets the same affordance. RELOAD_RIDE_TAB already re-banks ops as a side effect
+    // (a reload re-fires the SPA's boot traffic and the document_start tee catches it), but the bar was gated on
+    // `csrfNoToken`, a flag only the CSRF path sets — so the one button that fixes an uncaptured op never
+    // rendered, and the user was left with a hint that named the wrong gesture (live 21:50-21:55).
+    if (res && (res.csrfNoToken || res.opNotCaptured)) _csrfWarmBar(msg, { host: res.host || (leg.tool && (leg.tool.sessionHost || leg.tool.appHost || leg.tool.origin)) || '', retryAsk: ask, op: res.op || '' });
     return false;
   }
   if (leg.domain === 'connector') {
@@ -15960,10 +16107,10 @@ function _connSignInBar(msg, origins, { retryAsk = null, onRetry = null } = {}) 
 // SPA's boot traffic; the CSRF_TOKEN_SEEN push banks it durably), and putting the reload behind the USER'S
 // click needs no unsaved-work gate. On warmed, the ask re-sends through the front door — the RH-1d idiom,
 // same gates as typing it.
-function _csrfWarmBar(msg, { host = '', retryAsk = '' } = {}) {
+function _csrfWarmBar(msg, { host = '', retryAsk = '', op = '' } = {}) {   // v1935 — `op`: the same bar serves an uncaptured persisted op (a reload re-fires the SPA boot traffic that banks it)
   if (!host) return;
   const bar = _orchActionBar(msg);
-  const btn = _mkBtn(`⟳ Warm ${host} & retry`, async () => {
+  const btn = _mkBtn(op ? `⟳ Reload ${host} & retry` : `⟳ Warm ${host} & retry`, async () => {
     btn.disabled = true; btn.textContent = `Reloading ${host}…`;
     let r = null;
     try { r = await _orchReq('RELOAD_RIDE_TAB', { host }); } catch { /* */ }
@@ -16281,6 +16428,39 @@ try {
   chrome.runtime.onMessage.addListener((m) => {
     if (!m || m.type !== 'WORKFLOW_PARKED_CHANGED') return;
     void _renderActiveRailTab();
+  });
+} catch { /* */ }
+// EX-1 (v2.74.1946) — THE PROGRAMMATIC ASK. The exerciser's panel half: prefill the composer and call
+// sendChatMessage() — the REAL front door, not a parallel path. Invariant #4 is the whole reason it is shaped this
+// way: the composer clear and the user-bubble echo happen ONCE at the top of sendChatMessage, so an injected ask
+// that dispatched its own turn would double-echo and skip every entry-scoped reset (_lastFieldMiss,
+// _ctxFilledParams, the duplicate-send belt). Prefilling is the documented `seed:` exception, and it means an
+// exercised ask is INDISTINGUISHABLE from a typed one — which is the point: the loop must test the door users use.
+//
+// We answer BEFORE awaiting the turn. A turn can run 20s; the caller learns nothing from waiting, because the
+// OUTCOME lives in the fleet trace and is graded against the pass's VALIDATE block. The response carries the
+// conversation id instead — the loop's four INCONCLUSIVE ticks on 2026-08-02 included asks sent into a
+// conversation without the connection (`PALETTE ▸ 118`), and this is what lets it notice that itself.
+//
+// KNOWN EDGE, not a bug: sendChatMessage drops an IDENTICAL ask within 3s (the v1553 duplicate-send belt). An
+// exerciser replaying one ask twice in a burst will see the second silently swallowed — vary the text or wait.
+try {
+  chrome.runtime.onMessage.addListener((m, _sender, respond) => {
+    if (!m || m.type !== 'DEV_ASK_INJECT') return;
+    (async () => {
+      try {
+        const ask = String((m.payload && m.payload.ask) || '').trim();
+        const input = $('chat-input');
+        if (!ask)   { respond({ success: false, error: 'no-ask' }); return; }
+        if (!input) { respond({ success: false, error: 'no-composer' }); return; }
+        input.value = ask;
+        respond({ success: true, conversationId: _currentConversationId || null });
+        await sendChatMessage();
+      } catch (e) {
+        try { respond({ success: false, error: String((e && e.message) || 'inject-failed') }); } catch { /* already answered */ }
+      }
+    })();
+    return true;   // async responder
   });
 } catch { /* */ }
 // VT-2b — one reconcile at boot: incidents opened while the panel was closed still mint their cases.

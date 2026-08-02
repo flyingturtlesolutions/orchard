@@ -459,13 +459,86 @@ export const CONNECTOR_RECIPES = [
   // page-authored HTML (<a href>) — they stay on the escape-first render path (injection boundary).
   { ...SH, id: 'shopify_order_events', name: 'Shopify order timeline', method: 'GET', gql: false, persistedOp: 'Timeline',
     displayId: ['message'],
-    does: 'the order TIMELINE by the order\'s INTERNAL gid — every event with its actor and time: who created it (and from what draft), returns, refunds, fulfillments, emails sent. Answers "who created/refunded/fulfilled this order" and "what happened on it". First use may need one order page scrolled to its timeline by hand to bank the operation',
+    // v2.74.1926 — the `does` no longer promises the CREATOR. This window is `first:15` over a NEWEST-FIRST
+    // connection, so `order_placed` (the oldest event) falls outside it on any busy order — and the bias is
+    // exactly wrong: every return, refund and email pushes creation one slot further out, so it would miss
+    // precisely on the orders someone bothers to audit. Creator asks route to `shopify_order_creator` below.
+    does: 'the RECENT events on an order by its INTERNAL gid — the latest 15, newest first: returns, refunds, fulfillments, emails sent, notes. Answers "what has happened on this order lately". For the order\'s CREATOR use the order-creator lookup instead. First use may need one order page scrolled to its timeline by hand to bank the operation',
     endpoint: '/api/operations/{op_sha}/Timeline/shopify/{handle}?operationName=Timeline&variables=%7B%22id%22%3A%22{orderGid}%22%2C%22first%22%3A15%2C%22last%22%3Anull%2C%22before%22%3Anull%2C%22after%22%3Anull%7D',
     // v2.74.1922 — fromField: a machineOnly param binds from the RECORD, never from generation (live 123241: the
     // model CONSTRUCTED "gid://shopify/Order/59987" from the DEAKO number while the true gid sat in focus; the
     // act door's fill reads the newest focus record/list's `id` and overrides a generated value). The field rides
     // hop 1 verbatim (recipeFromCatalogEntry copies `params` whole), so the seeded path carries it too.
     params: [{ name: 'orderGid', type: 'string', required: true, machineOnly: true, fromField: 'id', hint: 'the order\'s INTERNAL gid (`id` on an order row, gid://shopify/Order/…) — never the DEAKO# number; fetch the order first, then ask from it' }] },
+  // v2.74.1926 — THE CREATION EVENT, from the OTHER END of the connection. The v1921 timeline reads `first:15`
+  // over a NEWEST-FIRST list, so `order_placed` — the OLDEST event — silently falls outside the window on any
+  // busy order: HTTP 200, fifteen well-formed edges, no creator, no error. The failure is biased toward exactly
+  // the orders a human would audit (each return/refund/email pushes creation one slot further out), which is the
+  // v1874 "truncation that parses as complete" class. Reading the LAST page instead makes the creation event
+  // structurally reachable regardless of history length.
+  //
+  // `last:3` not `last:1`: same-second events tie (the capture shows two at 17:04:15), and some orders open with
+  // a preamble event before the placement — so take a small tail and SELECT BY LABEL, never by position. The
+  // reader picks `eventLabel === 'order_placed'`; if that label is absent from the tail the honest answer is
+  // "couldn't determine", never the nearest row. Same persisted op (`Timeline` — one sha, one bank entry, one
+  // capture hint): the sha pins the DOCUMENT, and `$last`/`$before`/`$after` are already declared variables that
+  // every captured call transmits as null. `first` is sent as null because a Relay connection rejects both
+  // directions at once.
+  //
+  // Cheaper AND less exposed than the wide window: ~6 cost points instead of ~18, ~1KB instead of ~7.5KB, and the
+  // 15-event window's customer emails, addresses and line items never leave the site (the DESIGN_llm_privacy
+  // minimization direction, applied at the leg rather than at the redactor).
+  //
+  // ⚠ LIVE-UNVERIFIED, two ways (the capture holds ONE order, and it was draft-converted): whether Relay accepts
+  // `first:null,last:3` on this document, and whether `order_placed` is the oldest label for a STOREFRONT order
+  // as it is for a draft conversion. Both fail loudly (empty edges / no matching label), never silently.
+  { ...SH, id: 'shopify_order_creator', name: 'Who created a Shopify order', method: 'GET', gql: false, persistedOp: 'Timeline',
+    displayId: ['message'],
+    does: 'WHO CREATED an order (and from what draft) by its INTERNAL gid — reads the order\'s creation event itself, so it is correct however long the order\'s history is. Use this for "who created/placed this order"; for recent activity use the order timeline. First use may need one order page scrolled to its timeline by hand to bank the operation',
+    endpoint: '/api/operations/{op_sha}/Timeline/shopify/{handle}?operationName=Timeline&variables=%7B%22id%22%3A%22{orderGid}%22%2C%22first%22%3Anull%2C%22last%22%3A3%2C%22before%22%3Anull%2C%22after%22%3Anull%7D',
+    params: [{ name: 'orderGid', type: 'string', required: true, machineOnly: true, fromField: 'id', hint: 'the order\'s INTERNAL gid (`id` on an order row, gid://shopify/Order/…) — never the DEAKO# number; fetch the order first, then ask from it' }] },
+  // v2.74.1928 — THE ORDERS BREADTH LEG, HAR-authored (HAR #3, entry 727 — the orders index with a filter typed).
+  // Everything before it reads orders through a FIXED lens: the queue is hardcoded open+unfulfilled, by-customer
+  // takes an email, by-number takes one order. This is the index itself with its search slot open, which is what
+  // any "across the orders" question needs — and the composition that answers "which orders did <staff> create"
+  // reads its collection from here, then drills each row's `id` into the creation event (no other leg exposes a
+  // gid per row alongside a free filter).
+  //
+  // The query slot speaks SHOPIFY SEARCH SYNTAX, and the v1927 gate is what makes handing it a model-composed
+  // string safe: an unrecognized field is DROPPED by the server and the rows come back UNFILTERED, so without
+  // that gate this leg would be a fabrication engine (proven: `staff_member:"…"` → invalid_field + 50 unfiltered
+  // rows). The valid vocabulary from the same capture's filter drawer: status, financial_status,
+  // fulfillment_status, delivery_status, return_status, chargeback_status, current_total_price, delivery_method,
+  // destination, tag, processed_at, channel, risk_level, discount_code, product_id, credit_card_last4 — and
+  // NOTHING for staff/creator, which is exactly why the per-item composition exists.
+  //
+  // Verbatim variables from the capture except `query`: sortKey PROCESSED_AT + reverse (newest first),
+  // ordersFirst 50, `skipCustomer:true` KEPT (purchasingEntity already carries buyer identity, so the customer
+  // fragment is redundant PII on 50 rows). Rows: {id (gid — the join key), name (DEAKO#…), createdAt/processedAt,
+  // displayFinancialStatus, displayFulfillmentStatus, attribution, tags, purchasingEntity{email,firstName,…}}.
+  // NO cursor param in v1: `after` stays null and the read is honestly capped at 50 — a bound the answer names
+  // rather than a completeness it can't back (pageInfo.hasNextPage rides the response for the render to say so).
+  { ...SH, id: 'shopify_orders_search', name: 'Search Shopify orders', method: 'GET', gql: false, persistedOp: 'OrderListData',
+    listUrl: '/store/{handle}/orders', displayId: ['name'], joinKey: ['purchasingEntity.email'],
+    coverage: 'selection',
+    // v2.74.1929 — the `does` DECLARES THE DERIVED FIELD. The first wording ended "there is NO filter for who
+    // created an order", which is true of the SITE and taught the router to refuse the ask outright (live
+    // 21:41 — a clarify that listed the menu and declined, while the machinery to answer it was already
+    // wired). A capability the model cannot name is unbuilt (unreachable-clause ruling), so the text now says
+    // what Orchard CAN do — read `createdBy` per order — and keeps the honest caveat as a COST, not a refusal.
+    does: 'search ORDERS across the store with a filter, newest first (up to 50): by status, payment/fulfillment status, tag, date (processed_at:>2026-07-25), channel, total, product, discount — the orders index itself; blank filter = the most recent orders. Each row can also be read for WHO CREATED it (the field `createdBy`, plus `createdByHuman`) — the site has no creator filter, so that is read per order and then filtered here: ask for the orders, then read or sort by createdBy',
+    endpoint: '/api/operations/{op_sha}/OrderListData/shopify/{handle}?operationName=OrderListData&variables=%7B%22batchingV2Enabled%22%3Atrue%2C%22ordersFirst%22%3A50%2C%22ordersLast%22%3Anull%2C%22before%22%3Anull%2C%22after%22%3Anull%2C%22query%22%3A%22{query}%22%2C%22sortKey%22%3A%22PROCESSED_AT%22%2C%22reverse%22%3Atrue%2C%22skipPurchasingEntity%22%3Afalse%2C%22skipBusinessEntity%22%3Afalse%2C%22skipCustomer%22%3Atrue%2C%22skipFulfillmentDetails%22%3Afalse%2C%22skipShippingAddress%22%3Afalse%2C%22skipAutoSelectUnfulfilledDetails%22%3Atrue%2C%22savedViewId%22%3Anull%7D',
+    // The per-row sidecar: the creation event, re-keyed from the row's OWN gid (`from:'id'` → `param:'orderGid'`)
+    // — the primary drill's join value is the order NUMBER and would 404 the timeline. `pick` selects the
+    // creation edge by LABEL (never by position: the tail is newest-first and ties exist), `extract` writes the
+    // actor prose into a real FIELD so a branch can filter it deterministically, with no per-item LLM.
+    drill: { via: 'shopify_order', param: 'order', from: 'name', matchOn: 'order',
+      label: ['name', 'id', 'displayFulfillmentStatus', 'displayFinancialStatus'],
+      also: [{ id: 'shopify_order_creator', from: 'id', param: 'orderGid',
+        pick: { field: 'eventLabel', equals: 'order_placed' },
+        extract: [{ from: 'message', as: 'createdBy', pattern: '^(.+?)\\s+created this order' },
+          { from: 'attributeToUser', as: 'createdByHuman' }] }] },
+    params: [{ name: 'query', type: 'string', required: false, hint: 'Shopify order search syntax (status:open, tag:vip, financial_status:paid, processed_at:>2026-07-01) or blank for the newest orders — there is no staff/creator field' }] },
   { ...SH, id: 'shopify_search_products', name: 'Search Shopify products', itemUrl: '/store/{handle}/products/{id}',
     displayId: ['title'],
     does: 'search Shopify products by title or free words (with variants, price, inventory; drafts and archived included — say so when a hit is not ACTIVE), riding your admin login. For an exact SKU use the by-SKU lookup',
@@ -862,6 +935,61 @@ export const CONNECTOR_RECIPES = [
     endpoint: acGqlEndpoint('closeConversationByCallID_Mutation'),
     body: acGqlBody('closeConversationByCallID_Mutation', { callID: '{callId}' }),
     params: [{ name: 'callId', type: 'string', required: true, hint: 'the Aircall call id from the conversation/call read — NOT the Zendesk ticket id' }] },
+
+  // ── UPS (v2.74.1936) — HAR-authored from www.ups.com.har (2026-08-01, with content). ─────────────────────────
+  // v2.74.1938 — appHost is `www.ups.com`, NOT `ups.com`. The two-label form broke TWO things at once, both
+  // silently, and both only visible from the user's side of the panel:
+  //   · SETUP treats a 2-label appHost as a per-TENANT class (yourteam.zendesk.com) and will not bind it without
+  //     a typed instance (`Core/capableSites.js`: deep = host.split('.').length >= 3 → concrete). So the UPS card
+  //     could not be SELECTED at all — clicking it just re-asked for an address UPS does not have.
+  //   · the token PUSH was rejected: sender validation is `csrfSniffHosts().includes(host)`, the real sender host
+  //     is www.ups.com, and 'ups.com' does not match it — so the xsrf token could never bank however many times
+  //     the page was visited.
+  // The manifest tee matches `*://*.ups.com/*` (covers www), and the apex redirects to www in practice.
+  // THE CARRIER GROUND. Why it matters beyond one more site: Shopify orders already carry
+  // `fulfillments.trackingInfo.number` and the v1903 deep walk already reads it, so a track-by-number leg closes
+  // a chain no single site offers — warranty task → homeowner → Shopify order → tracking number → carrier scan
+  // history. Three grounds, one ask.
+  //
+  // TRANSPORT — two firsts, both generalized rather than special-cased (v1936):
+  //   · CROSS-HOST: the page is www.ups.com, the API is webapis.ups.com. Same SITE, so the page's own fetch is
+  //     allowed and this leg makes exactly the request the SPA makes; `apiHost` names it and the executor builds
+  //     the URL from there instead of the ride tab's origin.
+  //   · CSRF HEADER NAME: UPS sends `x-xsrf-token`, not `x-csrf-token`. The sniff mechanism was hardcoded to one
+  //     spelling and was therefore structurally blind to this entire site; the tees now watch every known
+  //     spelling and `csrfHeader` declares which one to SEND.
+  // No cookies ride the cross-origin API host in the capture — the xsrf token is the auth, which is exactly the
+  // `csrf: 'sniff'` shape (captured off the SPA's own traffic, never curated, never model-supplied).
+  { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token',
+    contentType: 'application/json', verifyIdentity: false, write: false,   // a plain-JSON POST that READS (v1936: the catalog's first — see rideRecipe hop 1)
+    id: 'ups_track', name: 'Track a UPS package', displayId: ['trackingNumber'], listPath: 'trackDetails', itemUrl: '/track?tracknum={tracking}&loc=en_US',
+    does: 'TRACK a UPS package by its tracking number (1Z…): current status, delivery date/time, who signed for it, where it was left, and the full scan history city by city. Use for "where is / did it arrive / what happened to" a shipment — the tracking number comes from the order or shipment record',
+    endpoint: '/track/api/Track/GetStatus?loc=en_US',
+    // Body verbatim from the capture (entry 1673, a SUCCESSFUL track); TrackingNumber is an ARRAY — the API takes
+    // several at once, and v1 fills exactly one so the answer is about the package the user named.
+    body: { Locale: 'en_US', TrackingNumber: ['{tracking}'], isBarcodeScanned: false, Requester: 'quic', ClientUrl: 'https://www.ups.com/track?loc=en_US&requester=QUIC/trackdetails', returnToValue: '', AssociatedBcdnNumber: null },
+    // Response: { statusCode, trackedDateTime, trackDetails: [ { trackingNumber, packageStatus:'Delivered',
+    //   packageStatusType:'D', deliveredDateDetail, receivedBy:'PETE', leftAt:'Dock', milestones[5],
+    //   shipmentProgressActivities[17]{date,time,location,activityScan}, shipToAddress{}, … } ] }.
+    // A NOT-FOUND is a 200 with trackDetails[0].errorCode '504' + errorText — the answer-shaper must read that as
+    // an honest miss, never as "no status" (captured live: two of the three tracks in the HAR were exactly this).
+    params: [{ name: 'tracking', type: 'string', required: true, hint: 'the UPS tracking number, e.g. 1Z27691W0233595715 (case-insensitive; the 1Z form is what orders carry)' }] },
+
+  // The LIST leg and the ground's CANARY: params-free, so the daily visit has something safe to run (the LEG-1
+  // discipline — a ground whose every read needs a param sits drift-blind between real uses).
+  { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token',
+    contentType: 'application/json', verifyIdentity: false, write: false,   // a plain-JSON POST that READS (v1936: the catalog's first — see rideRecipe hop 1)
+    id: 'ups_recent', name: 'Recently tracked UPS packages', displayId: ['trackingNumber'], listPath: 'recentlyTrackedData', listUrl: '/track?loc=en_US',
+    pulse: { kind: 'liveness' }, coverage: 'selection',
+    does: 'the packages recently tracked on this UPS account — tracking number, status (Delivered / In Transit), the status date and time, and who shipped it. Use for "what have I been tracking" or to find a package whose number you do not have to hand',
+    endpoint: '/track/api/RecentlyTrackedData/GetRecentlyTrackedData?loc=en_US',
+    body: { defaultValue: '12', Locale: 'en_US' },
+    // Response: { status:'SUCCESS', recentlyTrackedData: [ { trackingNumber, packageStatusDescription,
+    //   packageStatusDateInfo{packageStatusDate,packageStatusDateAndYear,packageStatusTime}, shipperName,
+    //   statusCode, statusDescription } ] } — 10 rows in the capture, shipperName 'DEAKO, INC.'.
+    // drill: a row's own tracking number feeds the by-number read, so "what happened to that one" works from the list.
+    drill: { via: 'ups_track', param: 'tracking', from: 'trackingNumber', matchOn: 'tracking', label: ['trackingNumber', 'packageStatusDescription', 'shipperName'] },
+    params: [] },
 ];
 
 // The "useful subset" render shape (CS Tools normalizeTicket — 10 of ~80 fields). Pure; used by the CX-4a.2 list render.
@@ -921,13 +1049,25 @@ export function askNamesOtherSystem(ask, legHost) {
 // with the tab open); these helpers expose the catalog's DEMANDS on it, so the `ops` viewer can show wanted-vs-
 // banked instead of only what happens to be captured — the by-hand banking session becomes a checklist.
 
-/** The catalog's persisted-op WRITES for a host. PURE. @returns {Array<{op, recipeId, recipeName}>} */
+/** The catalog's persisted-op WRITES for a host. PURE. @returns {Array<{op, recipeId, recipeName}>}
+ * v2.74.1926 — DEDUPED BY OP. The checklist asks a human to perform each OPERATION once by hand; the unit of
+ * capture is the op-sha, not the leg. Two legs can ride one document with different variables (order_events and
+ * order_creator both use `Timeline`), and listing it twice would ask for the same gesture twice and read as two
+ * outstanding demands when one capture satisfies both. First declarer names the row. */
 export function persistedOpsForHost(host) {
   const h = String(host || '').toLowerCase();
   if (!h) return [];
-  return CONNECTOR_RECIPES
-    .filter((r) => r && r.persistedOp && r.appHost && (h === r.appHost || h.endsWith(`.${r.appHost}`)))
-    .map((r) => ({ op: String(r.persistedOp), recipeId: r.id, recipeName: r.name }));
+  const seen = new Set();
+  const out = [];
+  for (const r of CONNECTOR_RECIPES) {
+    if (!r || !r.persistedOp || !r.appHost) continue;
+    if (!(h === r.appHost || h.endsWith(`.${r.appHost}`))) continue;
+    const op = String(r.persistedOp);
+    if (seen.has(op)) continue;
+    seen.add(op);
+    out.push({ op, recipeId: r.id, recipeName: r.name });
+  }
+  return out;
 }
 
 // How a human banks each op — the "do it once by hand" coaching, per op (reversible test actions on purpose).
@@ -939,6 +1079,8 @@ const _OP_CAPTURE_HINTS = {
   Search: 'type anything into the admin search bar once (the magnifying glass, top bar) — that banks the search operation',
   // v2.74.1921 — the second READ persisted op: the order page's timeline fetch (it lazy-loads on scroll).
   Timeline: 'open any order page and scroll down to its timeline once — that banks the timeline operation',
+  // v2.74.1928 — the orders index itself (the breadth read behind any across-the-orders question).
+  OrderListData: 'open the Orders list once (Orders in the left nav) — that banks the order-index operation',
 };
 /** The by-hand capture instruction for an op. PURE (a safe default for unmapped ops). */
 export function opCaptureHint(op) {
