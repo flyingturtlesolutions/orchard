@@ -9,11 +9,10 @@ import { OVERVIEW_ID, ADMIN_ID } from './appDef.js';
 const roles = (rows) => rows.map((r) => r.role);
 
 describe('railTree — buildRailTree', () => {
-  it('always pins Overview first, the Admin desk as the LAST conversation, and New-app last, even with no conversations', () => {
+  it('v2.74.1942 — NO Front/overview pin (removed; Admin inherits home); Admin is the LAST conversation, New-app last', () => {
     const rows = buildRailTree([]);
-    assert.equal(rows[0].role, 'overview');
-    assert.equal(rows[0].id, OVERVIEW_ID);
-    assert.equal(rows[rows.length - 2].role, 'admin', 'VT-2 (v2.74.1582) — the vitals fixture is PERMANENT and sits at the BOTTOM (the operator console under the work), just above the constructor entry');
+    assert.equal(rows.some((r) => r.role === 'overview'), false, 'the Front desk pin is gone — Admin is the home now');
+    assert.equal(rows[rows.length - 2].role, 'admin', 'VT-2 (v2.74.1582) — the vitals fixture is PERMANENT and sits at the BOTTOM; v1942 it is also the home');
     assert.equal(rows[rows.length - 2].id, ADMIN_ID);
     assert.equal(rows[rows.length - 1].role, 'new-app');
     assert.equal(rows[rows.length - 1].id, null);
@@ -115,15 +114,15 @@ describe('railTree — buildRailTree', () => {
     assert.equal(row.role, 'plain');
   });
 
-  it('active flags the right row: a real id marks that row, null marks Overview', () => {
+  it('active flags the right row: a real id marks that row, null marks the ADMIN home (v1942, was Overview)', () => {
     const summaries = [{ id: 'app1', title: 'Inbox', kind: 'agent', appId: 'inbox', updatedAt: 100 }];
 
     const appActive = buildRailTree(summaries, { activeId: 'app1' });
     assert.equal(appActive.find((r) => r.id === 'app1').active, true);
-    assert.equal(appActive.find((r) => r.role === 'overview').active, false);
+    assert.equal(appActive.find((r) => r.role === 'admin').active, false);
 
     const homeActive = buildRailTree(summaries, { activeId: null });
-    assert.equal(homeActive.find((r) => r.role === 'overview').active, true);
+    assert.equal(homeActive.find((r) => r.role === 'admin').active, true, 'null = the Admin home is active');
     assert.equal(homeActive.find((r) => r.id === 'app1').active, false);
   });
 
@@ -132,8 +131,8 @@ describe('railTree — buildRailTree', () => {
       { id: 'old', title: 'Old', kind: 'agent', updatedAt: 10 },
       { id: 'new', title: 'New', kind: 'agent', appId: 'x', updatedAt: 99 },
     ]);
-    // drop the Overview pin (first) and the trailing fixtures (Admin desk + New-app, v2.74.1582); the middle is recency-ordered
-    const middle = rows.slice(1, -2).map((r) => r.id);
+    // v1942 — no leading Overview pin anymore; drop only the trailing fixtures (Admin + New-app); recency-ordered
+    const middle = rows.slice(0, -2).map((r) => r.id);
     assert.deepEqual(middle, ['new', 'old']);
   });
 });

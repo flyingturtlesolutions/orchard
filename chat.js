@@ -206,7 +206,7 @@ async function _ensureConversation() {
   if (_currentConversationId) return _currentConversationId;
   if (_ensureConversationPromise) return _ensureConversationPromise;
   _ensureConversationPromise = (async () => {
-    const conv = await _ensureOverviewConversation();   // v2.74.1234 — a raw chat with no active conversation IS the general-assistant Overview thread (not a throwaway)
+    const conv = await _ensureAdminConversation();   // v2.74.1942 — the ADMIN view inherited the Front desk's home role: a raw chat with no active conversation lands in the Admin thread (the general-assistant home)
     _currentConversationId = conv.id;
     _refreshRailIfOpen().catch(() => {});   // v2.74.1042 — show the just-minted conversation in an open drawer
     return conv.id;
@@ -3395,7 +3395,7 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
   // v2.74.1338 (review B) — `policyConfig` = the ORIGINATING conversation's config: a chain/plan started in a
   // read-only app must stay gated by THAT app's policy even after the user switches conversations mid-run.
   if (!actAllowed(policyConfig ?? _currentConversationConfig)) {
-    _setMessageBody(msg, 'This desk is read-only — it watches and reports, but won’t run actions that change things. Switch to the Front desk (or a non-read-only desk) to act.');
+    _setMessageBody(msg, 'This desk is read-only — it watches and reports, but won’t run actions that change things. Switch to a non-read-only desk to act.');   // v1942 — Front desk removed; the generic guidance stands
     try { _orchLog(`WRITE_GATE ▸ blocked "${intent || capabilityId || 'act'}" — track writePolicy:never`); } catch { /* */ }
     _orchFinalize(msg);
     return;

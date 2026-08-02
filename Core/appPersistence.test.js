@@ -15,10 +15,10 @@ describe('railTree — pinned sorts to the top (AP-1)', () => {
       { id: 'a', title: 'Pinned app', appId: 'support', pinned: true, updatedAt: 100 },
       { id: 'b', title: 'Fresh chat', updatedAt: 999 },
     ], { activeId: null });
-    assert.equal(rows[0].role, 'overview');     // Overview always first
-    assert.equal(rows[1].id, 'a');              // then the pinned app, despite older updatedAt (the Admin fixture moved to the BOTTOM, v2.74.1582)
-    assert.equal(rows[1].pinned, true);
-    assert.equal(rows[2].id, 'b');
+    // v2.74.1942 — no Front/overview pin above; the pinned app is first, despite older updatedAt.
+    assert.equal(rows[0].id, 'a');
+    assert.equal(rows[0].pinned, true);
+    assert.equal(rows[1].id, 'b');
   });
   it('among unpinned, recency still wins', () => {
     const rows = buildRailTree([{ id: 'x', title: 'older', updatedAt: 1 }, { id: 'y', title: 'newer', updatedAt: 2 }]);
@@ -26,18 +26,15 @@ describe('railTree — pinned sorts to the top (AP-1)', () => {
   });
 });
 
-describe('railTree — Overview peek = last active conversation (v2.74.1219)', () => {
-  it('the overview peek = the Overview conversation\'s OWN summary, and it is NOT duplicated as a plain row (v2.74.1234)', () => {
+describe('railTree — the Front/Overview conversation is RETIRED (v2.74.1942)', () => {
+  it('no overview pin exists, and a stored OVERVIEW_ID conversation is fully hidden (not a pin, not a plain row)', () => {
     const rows = buildRailTree([
       { id: OVERVIEW_ID, title: 'Overview', updatedAt: 500, summary: 'my last general reply' },
       { id: 'b', title: 'Recent chat', updatedAt: 900, summary: 'the latest direction' },
     ], { activeId: null });
-    assert.equal(rows.find((r) => r.role === 'overview').summary, 'my last general reply');   // its OWN last message
-    assert.deepEqual(rows.filter((r) => r.role === 'plain').map((r) => r.id), ['b']);          // the Overview conversation is excluded from the plain rows (pin only)
-  });
-  it('no Overview conversation yet → overview peek null', () => {
-    assert.equal(buildRailTree([], {}).find((r) => r.role === 'overview').summary, null);
-    assert.equal(buildRailTree([{ id: 'a', title: 'an app chat', updatedAt: 5, summary: 's' }], {}).find((r) => r.role === 'overview').summary, null);
+    assert.equal(rows.some((r) => r.role === 'overview'), false, 'the Front pin is gone');
+    assert.equal(rows.some((r) => r.id === OVERVIEW_ID), false, 'a retired OVERVIEW_ID conversation is excluded entirely');
+    assert.deepEqual(rows.filter((r) => r.role === 'plain').map((r) => r.id), ['b']);
   });
 });
 

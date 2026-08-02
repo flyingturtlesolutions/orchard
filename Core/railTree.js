@@ -75,16 +75,10 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
 
   const rows = [];
 
-  // 1) Overview — pinned first, reserved (cannot be created/deleted, §2). Active when nothing else is (home state).
-  // v2.74.1234 — the Overview is a REAL persistent general-assistant conversation, so its peek = ITS OWN last message
-  // (from its index entry's summary), not an echo of another app. Null until it has activity.
-  const overviewConv = visible.find((c) => c.id === OVERVIEW_ID) || null;
-  rows.push({
-    id: OVERVIEW_ID, role: 'overview', title: 'Front desk', icon: 'home', depth: 0,   // Front-desk adopt (v2.74.1507) — the display noun; OVERVIEW_ID + role token stay internal
-    hasChildren: false, expanded: false, active: activeId == null || activeId === OVERVIEW_ID,
-    count: 0, kind: 'agent',
-    summary: (overviewConv && overviewConv.summary) ? overviewConv.summary : null,
-  });
+  // 1) v2.74.1942 (user directive) — the FRONT DESK is removed; the ADMIN view inherits its home role. No
+  // top pin is emitted here anymore; the Admin fixture (below, at the BOTTOM) is now the home — active when
+  // nothing else is selected (see its `active` field). A stored OVERVIEW_ID conversation is retired: excluded
+  // from `top` above and no longer pinned, so it is invisible (history retained, not deleted).
 
   // 2) Apps + plain conversations, by recency. An expanded app is immediately followed by its sub-task rows.
   for (const c of top) {
@@ -142,7 +136,8 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
   const adminOpen = expandedSet.has(ADMIN_ID);
   rows.push({
     id: ADMIN_ID, role: 'admin', title: 'Admin desk', icon: 'vitals', depth: 0,
-    hasChildren: adminSubs.length > 0, expanded: adminOpen, active: activeId === ADMIN_ID,
+    // v2.74.1942 — Admin inherits the Front desk's home role: active when nothing else is selected.
+    hasChildren: adminSubs.length > 0, expanded: adminOpen, active: activeId == null || activeId === ADMIN_ID,
     count: adminSubs.length, kind: 'agent',
     summary: (adminConv && adminConv.summary) ? adminConv.summary : null,
   });
