@@ -395,7 +395,15 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           for (var k in h) note(k);
         } catch (e) { /* */ }
       };
-      var post = function (tok) { try { stats.matched++; stats.at = Date.now(); window.postMessage({ __ahub_sniffed_csrf: { token: String(tok).slice(0, 400), host: location.host } }, location.origin); } catch (e) { /* */ } };
+      // v2.74.1952 — twin of the document_start tee's RETAIN (ContentScripts/shopifyCsrfSniffer.js). Keep in
+      // lockstep: the recovery read below looks for __ahubCsrfLast whichever tee wired first.
+      var post = function (tok) {
+        try {
+          stats.matched++; stats.at = Date.now();
+          window.__ahubCsrfLast = { token: String(tok).slice(0, 400), at: Date.now(), host: location.host };
+          window.postMessage({ __ahub_sniffed_csrf: { token: String(tok).slice(0, 400), host: location.host } }, location.origin);
+        } catch (e) { /* */ }
+      };
       // CX-7b — PERSISTED-OP capture: the admin's mutations POST /api/operations/<sha>/<OpName>/shopify/<handle>;
       // the sha is per-store + rotates on deploys. Capturing the URL off the SPA's own traffic (the user performing
       // the action once by hand) banks the op for replay — the CS stack's save-shopify-session step, done in-tab.
@@ -558,6 +566,23 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     // names=[…]    → a token-ish header IS present under a spelling we don't watch — the v1936 class, self-reporting
     // no stats obj → the document_start tee never ran on this origin at all (manifest match / CSP / world problem)
     // This exists because "dry" was one string for four different failures and cost five eliminated hypotheses.
+    // v2.74.1952 — RECOVER FROM THE PAGE WORLD before reporting a dry well. The isolated content script is wiped
+    // by every extension reload; the page-world tee is not, and since v1952 it retains its last token. Reading it
+    // here turns eight reloads' worth of lost captures into one recovered one. TTL-bounded by the same
+    // CSRF_TTL_MS hygiene rule as the bank — validity is still decided by the server (a 403 clears via the v1759
+    // cold ladder), this only refuses to serve something stale by days.
+    if (!tok) {
+      try {
+        const rec = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: () => (window.__ahubCsrfLast || null) });
+        const last = rec && rec[0] && rec[0].result;
+        if (last && last.token && last.host === origin && (Date.now() - (last.at || 0)) < CSRF_TTL_MS) {
+          tok = String(last.token);
+          _sniffedCsrf.set(origin, { token: tok, at: Date.now() });
+          await _persistCsrf(origin, tok);
+          try { Logger.info('ride', `INVOKE ▸ csrf RECOVERED from page-world tee ${origin} (age ${Math.round((Date.now() - last.at) / 1000)}s) — the isolated relay had been wiped`); } catch { /* */ }
+        }
+      } catch { /* recovery is best-effort; the stats read below still speaks */ }
+    }
     if (!tok) {
       try {
         const st = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: () => (window.__ahubCsrfStats || null) });
@@ -1234,7 +1259,14 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const token = (payload && payload.token) ? String(payload.token).slice(0, 400) : '';
           let senderHost = '';
           try { senderHost = new URL((sender && sender.tab && sender.tab.url) || '').host.toLowerCase(); } catch { /* */ }
-          if (!host || !token || host !== senderHost || !csrfSniffHosts().includes(host)) { sendResponse({ success: false }); return; }
+          // v2.74.1952 — SAY WHICH refusal. Four distinct rejections collapsed into one silent {success:false},
+          // so a dropped push was indistinguishable from a push that never arrived — which is why the relay took
+          // five hypotheses to localize. Hosts are logged, the token never is.
+          if (!host || !token || host !== senderHost || !csrfSniffHosts().includes(host)) {
+            const why = !token ? 'no-token' : !host ? 'no-host' : (host !== senderHost) ? `host-mismatch (claimed ${host}, sender ${senderHost || '?'})` : `host-not-a-sniff-target (${host})`;
+            try { Logger.info('conn', `VITALS ▸ csrf push REFUSED — ${why}`); } catch { /* */ }
+            sendResponse({ success: false, error: why }); return;
+          }
           const prev = _sniffedCsrf.get(host);
           _sniffedCsrf.set(host, { token, at: Date.now() });
           await _persistCsrf(host, token);

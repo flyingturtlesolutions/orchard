@@ -22,7 +22,21 @@
     var stats = { req: 0, hdr: 0, matched: 0, names: {}, at: 0 };
     window.__ahubCsrfStats = stats;
     var note = function (n) { try { var k = String(n || '').toLowerCase(); if (!k) return; stats.hdr++; if (/csrf|xsrf|token|verif/.test(k)) stats.names[k] = (stats.names[k] || 0) + 1; } catch (e) { /* */ } };
-    var post = function (tok) { try { stats.matched++; stats.at = Date.now(); window.postMessage({ __ahub_sniffed_csrf: { token: String(tok).slice(0, 400), host: location.host } }, location.origin); } catch (e) { /* */ } };
+    // v2.74.1952 — RETAIN, don't only ANNOUNCE. This tee lives in the PAGE's world, so it survives an extension
+    // reload; the isolated content script that receives its postMessage does NOT — it is re-injected empty. Live
+    // 2026-08-02: `req` climbed 44→66 across eight extension reloads while `matched` stayed at 1, i.e. the tee
+    // captured a token once at page load and every reload since then erased the only copy of it. The tee then
+    // stayed silent because post() fires only on a FRESH header observation and an idle SPA issues no new
+    // token-bearing request. Holding the last value here lets a re-injected consumer RECOVER it instead of
+    // waiting for a request that will never come. Page-world storage is no wider a surface than the postMessage
+    // it already sends to the same page — and it is never logged (the stats read carries names and counts only).
+    var post = function (tok) {
+      try {
+        stats.matched++; stats.at = Date.now();
+        window.__ahubCsrfLast = { token: String(tok).slice(0, 400), at: Date.now(), host: location.host };
+        window.postMessage({ __ahub_sniffed_csrf: { token: String(tok).slice(0, 400), host: location.host } }, location.origin);
+      } catch (e) { /* */ }
+    };
     var OP_RE = /\/api\/operations\/([a-f0-9]{16,64})\/(\w+)\/shopify\/([^/?#]+)/i;
     var postOp = function (u) { try { var m = String(u || '').match(OP_RE); if (m) window.postMessage({ __ahub_sniffed_op: { sha: m[1], name: m[2], handle: m[3], host: location.host } }, location.origin); } catch (e) { /* */ } };
     var scan = function (h) {
