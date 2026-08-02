@@ -84,6 +84,7 @@ export const DECISION_MARKERS = [
   { key: 'forage', src: "FORAGE ▸" },
   { key: 'session-replay', src: "SESSION_REPLAY ▸" },
   { key: 'answer-guard', src: "ANSWER_GUARD ▸" },
+  { key: 'shape', src: "SHAPE ▸" },   // v2.74.1964 — the additive-reply outcome (answer+records / answer-only / …): makes "is Fix A running" a gl grep
   { key: 'demo-write', src: "DEMO_WRITE ▸" },
   { key: 'connector-invoke', src: "CONNECTOR_INVOKE ▸" },
   { key: 'connector-link', src: "CONNECTOR_LINK ▸" },

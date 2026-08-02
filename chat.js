@@ -6136,7 +6136,7 @@ function _pinReadFocus(leg, value) {
   if (!leg || value == null) return;
   const rows = (primaryList(value) || []).filter((r) => r && typeof r === 'object');
   const noun = nounFromLeg(leg) || 'record';
-  // v2.74.1960 — THE RECIPE'S OWN `displayId` COMES FIRST. Live 20:13 a UPS read pinned the label "Track a UPS
+  // v2.74.1964 — THE RECIPE'S OWN `displayId` COMES FIRST. Live 20:13 a UPS read pinned the label "Track a UPS
   // package" — the LEG's name, not the record's — because a trackDetails row carries none of the generic
   // identity fields guessed at below, so it fell through to leg.name. A focus entry labelled with the capability
   // instead of the thing is useless for binding ("that package" would match the tool, not the package), and by
@@ -6161,7 +6161,7 @@ function _pinReadFocus(leg, value) {
   };
   let entry = null;
   if (rows.length === 1) {
-    // v2.74.1960 — a RECORD's label must name the RECORD. If the row yields no identity (no displayId match, no
+    // v2.74.1964 — a RECORD's label must name the RECORD. If the row yields no identity (no displayId match, no
     // generic field), pin NOTHING rather than falling back to the leg's name: an entry labelled with the
     // capability cannot serve a referent — "that package" would match the tool, not the package — and a useless
     // entry is worse than none, because it occupies the working set and can win a binding it cannot satisfy.
@@ -12798,6 +12798,10 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const rlines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(rr.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) }) : null;
       const listBody = (rlines && rlines.length) ? rlines.join('\n') : '';
       const body = (answer && listBody) ? `${answer}\n\n${listBody}` : (answer || listBody);
+      // v2.74.1964 — validate Fix A (additive) is RUNNING from gl, not by eye: record which branch fired + whether the
+      // shaper set showRecords. If every line reads `answer-only` with no `+showRecords`, A is built-but-inert (the model
+      // never triggers the additive list) — the failure mode a quiet-day eyeball would miss.
+      try { _orchLog(`SHAPE ▸ ${answer ? (listBody ? 'answer+records' : 'answer-only') : (listBody ? 'records-only' : 'empty')}${(shaped && shaped.showRecords) ? ' +showRecords' : ''}`); } catch { /* */ }
       _setMessageBody(msg, body || 'Done.', { markdown: true });   // v1949 — connector rows are markdown; render fresh == reload
       return true;
     }
@@ -12926,6 +12930,10 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const lines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(res.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) }) : null;
       const listBody = (lines && lines.length) ? lines.join('\n') : '';
       const body = (answer && listBody) ? `${answer}\n\n${listBody}` : (answer || listBody);
+      // v2.74.1964 — validate Fix A (additive) is RUNNING from gl, not by eye: record which branch fired + whether the
+      // shaper set showRecords. If every line reads `answer-only` with no `+showRecords`, A is built-but-inert (the model
+      // never triggers the additive list) — the failure mode a quiet-day eyeball would miss.
+      try { _orchLog(`SHAPE ▸ ${answer ? (listBody ? 'answer+records' : 'answer-only') : (listBody ? 'records-only' : 'empty')}${(shaped && shaped.showRecords) ? ' +showRecords' : ''}`); } catch { /* */ }
       _setMessageBody(msg, body || 'Done.', { markdown: true });   // v1949 — connector rows are markdown; render fresh == reload
       // FC-6 (v2.74.1959) — PIN WHAT WE JUST READ, so the next pronoun has something to bind to.
       // Live 19:49: "search Shopify for Divine Monkam" returned data.customers.edges[1] with id/name/email, and
