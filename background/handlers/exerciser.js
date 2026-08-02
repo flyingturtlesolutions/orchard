@@ -22,6 +22,15 @@
 
 import { Logger } from '../../Core/Logger.js';
 
+// EX-3 (v2.74.1950) — THE QUEUE THAT SURVIVES THE RELOAD.
+// The obvious sequence "reload, then run the asks" cannot be written as a sequence: the reload tears down the
+// panel that would run them. So the intent is PERSISTED first and drained by whoever boots next. This is what
+// makes a build self-verifying without anything outside Chrome — no debugging port, no cloud, no human ritual.
+// Bounded on purpose: a stale queue must never wake up days later and drive a browser nobody is watching.
+export const EXERCISE_QUEUE_KEY = 'devExerciseQueue';
+const QUEUE_TTL_MS = 10 * 60e3;   // a queue older than this is abandoned, not run
+const MAX_ASKS = 10;
+
 export function createExerciserHandlers() {
   return {
     // Restart the extension. The caller is answered BEFORE the reload, because chrome.runtime.reload() tears down
@@ -33,6 +42,40 @@ export function createExerciserHandlers() {
       try { sendResponse({ success: true, reloading: true }); } catch { /* */ }
       // Small delay so the response and the log line both flush before the context dies.
       setTimeout(() => { try { chrome.runtime.reload(); } catch { /* */ } }, 200);
+      return true;
+    },
+
+    // Queue a run of asks and (optionally) reload into it — the self-verifying pass, in one call.
+    //
+    //   chrome.runtime.sendMessage({ type:'DEV_EXERCISE', payload:{ asks:['track 1Z…'], reload:true } })
+    //
+    // With reload:true the order is: persist → answer → restart → the panel boots, finds the queue, drains it.
+    // With reload:false the queue is drained immediately by whichever panel is already open. Either way the
+    // OUTCOME is the fleet trace; this returns only that the intent was recorded.
+    'DEV_EXERCISE': (payload, sender, sendResponse) => {
+      (async () => {
+        const asks = (Array.isArray(payload && payload.asks) ? payload.asks : [])
+          .map((a) => String(a || '').trim()).filter(Boolean).slice(0, MAX_ASKS);
+        if (!asks.length) { sendResponse({ success: false, error: 'no-asks' }); return; }
+        const reload = (payload && payload.reload) === true;
+        try {
+          await chrome.storage.local.set({ [EXERCISE_QUEUE_KEY]: { asks, at: Date.now(), reload } });
+        } catch (e) {
+          sendResponse({ success: false, error: 'queue-write-failed' }); return;
+        }
+        try { Logger.info('background', `EXERCISE ▸ queued ${asks.length} ask(s)${reload ? ' + reload' : ''}`); } catch { /* */ }
+        if (reload) {
+          // Answer BEFORE restarting, for the same reason DEV_RELOAD_EXTENSION does.
+          sendResponse({ success: true, queued: asks.length, reloading: true });
+          try { Logger.info('background', 'EXERCISE ▸ reload requested (exercise-queue) — extension restarting'); } catch { /* */ }
+          setTimeout(() => { try { chrome.runtime.reload(); } catch { /* */ } }, 200);
+          return;
+        }
+        // No reload: nudge whatever panel is open to drain now. A closed panel is not an error — the queue
+        // simply waits for the next boot, which is the whole point of persisting it.
+        try { await chrome.runtime.sendMessage({ type: 'DEV_EXERCISE_DRAIN' }); } catch { /* no panel open */ }
+        sendResponse({ success: true, queued: asks.length, reloading: false });
+      })();
       return true;
     },
 
