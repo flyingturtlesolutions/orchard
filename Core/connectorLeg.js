@@ -365,6 +365,9 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       // serves /track and /ship under SEPARATE data-protection key rings, and a ship token cannot decrypt at
       // track). The cookie NAME differs per app, so a cookie-sourced token is app-correct BY CONSTRUCTION.
       csrfCookie: _str(r.csrfCookie) || null,
+      // HZ-1 (v2.74.1956) — the SOURCE's retention window. Read by the answer path (Core/sourceHorizon.js), never
+      // by the executor: it shapes what an EMPTY result is allowed to claim, and must never gate the call itself.
+      retention: (r.retention && typeof r.retention === 'object') ? { ...r.retention } : null,
       shopProbe: r.shopProbe === true,             // CX-7c — run the `{shop{name}}` liveness probe before the call
       requestHeaders: (r.requestHeaders && typeof r.requestHeaders === 'object') ? r.requestHeaders : null,
     },

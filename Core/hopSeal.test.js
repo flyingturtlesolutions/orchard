@@ -48,7 +48,7 @@ const ENTRY_FIELD_MAP = new Set([
   //                executor builds the URL from it instead of the tab's origin. Every prior ground was same-origin.
   //   csrfHeader — the sniffed token's header NAME is per-site (UPS: x-xsrf-token). Defaults to x-csrf-token at
   //                the executor, so every existing recipe sends exactly what it sent before.
-  'apiHost', 'csrfHeader', 'csrfCookie', 'listPath',
+  'apiHost', 'csrfHeader', 'csrfCookie', 'retention', 'listPath',
   // safety axes (→ mode/safety/tool booleans)
   'write', 'destructive', 'outward', 'reversible',
   // identity + presence probes (→ tool)

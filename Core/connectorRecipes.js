@@ -969,9 +969,10 @@ export const CONNECTOR_RECIPES = [
   // /ship/api tokens prefix CfDJ8E_X1zdo… — and a ship token cannot decrypt at track. The bank keys on origin
   // alone (`rideCsrf:${origin}`), so the two collide in one slot. A token sniffed here may belong to the wrong app.
   { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token', csrfCookie: 'X-XSRF-TOKEN-ST',
+    retention: { days: 120, approximate: true, source: 'UPS published policy: standard tracking stays online ~120 days' },   // HZ-1 — an empty result past this is "aged out", not "no such package"
     contentType: 'application/json', verifyIdentity: false, write: false,   // a plain-JSON POST that READS (v1936: the catalog's first — see rideRecipe hop 1)
     id: 'ups_track', name: 'Track a UPS package', displayId: ['trackingNumber'], listPath: 'trackDetails', itemUrl: '/track?tracknum={tracking}&loc=en_US',
-    does: 'TRACK a UPS package by its tracking number (1Z…): current status, delivery date/time, who signed for it, where it was left, and the full scan history city by city. Use for "where is / did it arrive / what happened to" a shipment — the tracking number comes from the order or shipment record',
+    does: 'TRACK a UPS package by its tracking number (1Z…): current status, delivery date/time, who signed for it, where it was left, and the full scan history city by city. Use for "where is / did it arrive / what happened to" a shipment — the tracking number comes from the order or shipment record. COVERS ABOUT THE LAST 120 DAYS: UPS drops standard tracking after roughly 4 months, so an older shipment returns nothing even though the number is valid',
     endpoint: '/track/api/Track/GetStatus?loc=en_US',
     // v2.74.1954 — CORRECTION: this said "verbatim from the capture (entry 1673)". It is not. Entry 1673 carries a
     // 5-field body with a different ClientUrl; this is the entry-1545 field set with a hand-edited ClientUrl that
@@ -989,6 +990,7 @@ export const CONNECTOR_RECIPES = [
   // The LIST leg and the ground's CANARY: params-free, so the daily visit has something safe to run (the LEG-1
   // discipline — a ground whose every read needs a param sits drift-blind between real uses).
   { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token', csrfCookie: 'X-XSRF-TOKEN-ST',
+    retention: { days: 120, approximate: true, source: 'UPS published policy: standard tracking stays online ~120 days' },   // HZ-1 — an empty result past this is "aged out", not "no such package"
     contentType: 'application/json', verifyIdentity: false, write: false,   // a plain-JSON POST that READS (v1936: the catalog's first — see rideRecipe hop 1)
     id: 'ups_recent', name: 'Recently tracked UPS packages', displayId: ['trackingNumber'], listPath: 'recentlyTrackedData', listUrl: '/track?loc=en_US',
     pulse: { kind: 'liveness' }, coverage: 'selection',
