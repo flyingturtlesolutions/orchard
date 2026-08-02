@@ -6322,7 +6322,19 @@ var MESSAGE_HANDLERS = {
           // no headless load, the CS Tools blueprint). A missing token means the page is logged out / not the app. Belt #2.
           // CX-7 — a background-SUPPLIED token (the sniffed x-csrf-token) satisfies this; a gql READ with no token at
           // all may still try cookie-only (the 403 surfaces honestly) — a WRITE without any token never runs.
-          const supplied = headers['x-csrf-token'] || headers['X-CSRF-Token'];
+          // v2.74.1953 — ELEVENTH SITE of the hardcoded-header-name class, and the one that VALIDATES what the
+          // other ten produce. v1936 taught both tees every known spelling and taught the sender to attach the
+          // per-site name (UPS uses `x-xsrf-token`), but this check still asked for `x-csrf-token` alone — so a
+          // correctly-acquired, correctly-attached UPS token was invisible here, the DOM meta fallback found
+          // nothing on ups.com, and the belt hard-rejected `no-csrf` in 19ms while the SW held a valid token.
+          // The belt's INTENT is "a write without a token never runs"; that is preserved exactly — it still
+          // requires a token, it just no longer requires one particular NAME. Case-insensitive across all
+          // spellings, so a header set as X-XSRF-Token counts too.
+          const _CSRF_NAMES = ['x-csrf-token', 'x-xsrf-token', 'x-xsrf-header'];
+          let supplied = null;
+          for (const _k of Object.keys(headers)) {
+            if (_CSRF_NAMES.indexOf(String(_k).toLowerCase()) >= 0 && headers[_k]) { supplied = headers[_k]; break; }
+          }
           if (!supplied) {
             const metaTok = document.querySelector('meta[name="csrf-token"]');
             const csrf = metaTok && metaTok.getAttribute('content');
