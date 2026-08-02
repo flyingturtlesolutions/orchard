@@ -142,6 +142,7 @@ function _renderRideClass(card, ground) {
     const sec = rideSection(recipes);
     const countEl = row.querySelector('[data-ride-count]');
     if (countEl) countEl.textContent = String(sec.count) + (sec.pending ? ` · ${sec.pending} pending` : '');
+    try { _studioSectionUX(_rideCard.card); } catch { /* v1943 — mark the Recipes section now its count has settled */ }
     // §18 — bulk "accept all reads": one click accepts every pending GET (auto-safe); writes still need an individual ✓.
     const pendingReads = recipes.filter((r) => r && r.reviewState === 'pending' && r.safetyClass === 'auto').length;
     const bulkBtn = row.querySelector('[data-ride-bulk]');
@@ -2754,9 +2755,45 @@ async function refreshGroundList() {
   }
 }
 
+// UI density (Studio grounds review, v2.74.1943) — every section HEAD becomes a collapse toggle, and EMPTY
+// sections default to collapsed so a Ground card shows what EXISTS, not its full ~13-section taxonomy. The
+// header still reads (label · count · ＋Add), so an empty section is one scannable line instead of a
+// head + "No X yet" block. Idempotent (data flags): safe to call per-card AND again when an async section
+// (Ride Recipes) fills its count in later.
+function _studioSectionUX(scope) {
+  scope?.querySelectorAll?.('.ground-section-row').forEach((row) => {
+    const head = row.querySelector('.ground-section-head');
+    if (head && !head.dataset.uxToggle) { head.dataset.uxToggle = '1'; head.classList.add('section-toggle'); }
+    if (row.dataset.uxEmpty) return;   // decide "empty" ONCE (and only once the count has settled)
+    const cnt = row.querySelector('.ground-section-count');
+    const raw = cnt ? String(cnt.textContent || '').trim() : '';
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n)) {
+      row.dataset.uxEmpty = '1';
+      if (n === 0) row.classList.add('ground-section-empty', 'section-collapsed');
+    } else if (raw !== '' && raw !== '…') {
+      // no numeric count (e.g. Site Map / Chrome) — fall back to a body empty-state check
+      row.dataset.uxEmpty = '1';
+      const body = row.querySelector('.ground-section-body');
+      const bodyEmpty = body && (body.children.length === 0 || (body.children.length === 1 && body.firstElementChild?.classList.contains('empty-state')));
+      if (bodyEmpty) row.classList.add('ground-section-empty', 'section-collapsed');
+    }
+    // raw '' or '…' → count not settled (async) → leave for a later pass
+  });
+}
+
 async function _refreshGroundListImpl() {
   const grounds = await StorageManager.getAllGrounds();
   const list    = $('ground-list');
+  // wire the ONE delegated collapse toggle (a section head click folds its body; action controls do not)
+  if (list && !list.__sectionUXWired) {
+    list.__sectionUXWired = true;
+    list.addEventListener('click', (e) => {
+      const head = e.target.closest('.ground-section-head.section-toggle');
+      if (!head || e.target.closest('button, a, input, label, .toggle-switch')) return;
+      head.closest('.ground-section-row')?.classList.toggle('section-collapsed');
+    });
+  }
 
   if (grounds.length === 0) {
     list.innerHTML = '<p class="empty-state">No grounds yet. Add one above.</p>';
@@ -4031,6 +4068,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
     // the Ride class (its Recipes section, async-loaded + edit-wired) and a Broker placeholder. Fire-and-forget render.
     _renderRideClass(card, ground);
 
+    _studioSectionUX(card);   // v1943 — collapse empty sections + arm the head toggles (Drive sections; Ride marks itself when its count lands)
     // Finally append the fully-assembled card to the list
     list.appendChild(card);
 }

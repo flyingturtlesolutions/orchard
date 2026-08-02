@@ -5489,6 +5489,23 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .ground-section-head .btn-secondary.tiny {
   margin-left: auto;
 }
+/* Studio grounds density (v2.74.1943, UX review) — section-level collapse + empty compaction. Every section
+   head is a toggle (a leading chevron), and empty sections collapse to a single scannable head line instead
+   of a head + "No X yet" block. Populated sections stay expanded; click any head to fold/unfold it. */
+.ground-section-head.section-toggle { cursor: pointer; }
+.ground-section-head.section-toggle::before {
+  content: '▾';
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted);
+  margin-right: 3px;
+  flex-shrink: 0;
+}
+.ground-section-row.section-collapsed .ground-section-head.section-toggle::before { content: '▸'; }
+.ground-section-row.section-collapsed .ground-section-body { display: none; }
+.ground-section-row.section-collapsed .ground-section-head { margin-bottom: 0; }
+.ground-section-row.section-collapsed { padding-bottom: 9px; }
+.ground-section-empty .ground-section-head { opacity: 0.6; }   /* an empty section reads as secondary */
 .ground-section-body {
   display: flex;
   flex-direction: column;
