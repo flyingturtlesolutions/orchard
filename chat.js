@@ -947,9 +947,10 @@ async function _renderRailListNow() {
     const g = document.createElement('div');
     g.className = 'rail-group';
     g.appendChild(el);
-    // v1817 (user directive) — both sections ALWAYS exist on a desk (an empty one holds just its ＋ row);
-    // the admin fixture gets cases only.
-    _grpWfs = (row.role === 'app') ? _mkSection(g, 'rail-sec-wfs', _expandedWfs.has(row.id)) : null;
+    // v2.74.1934 (user directive) — WORKFLOWS moved to the Automations TAB: the Conversations accordion keeps
+    // only the CASES section per desk. _grpWfs stays null, so the workflow rows, the ＋ Workflow row, and the
+    // parked-into-wfs insertion below all no-op here; they render in _renderRailAutomations instead.
+    _grpWfs = null;
     _grpCases = _mkSection(g, 'rail-sec-cases', row.expanded);
     // TL-1 (v2.74.1796, §14.2) — creation stays reachable with a thread up: the section ends in a ＋ Workflow
     // row (the landing's card now shows only in true launch state). Parked + workflow rows insert BEFORE it.
@@ -1311,9 +1312,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   // v2.74.1777 ("one class") — the workflows button MIRRORS the cases button: icon + count, always visible when
   // the desk has workflows, hover peeks its section, click pins. (PS-3's open-the-overlay glyph is retired with
   // the overlay itself.)
-  const wfBtn = (row.role === 'app' && !isDev)
-    ? `<button class="rail-item-wf" data-row-action title="Workflows — hover to peek, click to pin open" aria-label="Workflows (${row.wfCount || 0}) — click to pin open" aria-pressed="${_expandedWfs.has(conv.id)}">${Icons.workflow(14)}${row.wfCount > 0 ? `<span class="rail-case-count">${row.wfCount}</span>` : ''}</button>`
-    : '';
+  const wfBtn = '';   // v2.74.1934 — the workflows button is gone from desk rows: workflows live in the Automations tab now
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
   // on SUB-TASK rows, so the parent's headless auto-run shows live per child ("Working…" → the result).
@@ -1343,10 +1342,10 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     _railTogglePin(item, '.rail-sec-wfs', _expandedWfs, conv.id, e.currentTarget);
   });
 
-  // PS-6/1777 — the parked badge is a DOOR: it pins the workflows section open (the approve rows live there).
+  // PS-6/1934 — the parked badge is a DOOR to the approve rows, which now live in the Automations tab.
   item.querySelector('.rail-item-badge.parked')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!_expandedWfs.has(conv.id)) _railTogglePin(item, '.rail-sec-wfs', _expandedWfs, conv.id, item.querySelector('.rail-item-wf'));
+    _switchRailTab('automations');
   });
 
   // v2.74.1223 (message-input redesign) — SINGLE-click SELECTS this conversation as the message-input target and KEEPS
@@ -3469,28 +3468,15 @@ function _disableProposalButtons(id) {
 // explore results, intent menus) was DOM-only — a panel reload rehydrated a user-half-only transcript.
 // Upserts by the bubble's stable messageId (safe to call again when a reteach upgrades the text); never
 // touches the legacy invocation path, which has its own finalize.
-// ── v2.74.1505 — the IL glyph THINKS: the in-flight bubble's ◈ facet-cycles + pulses (A+B), and the header brand
-// mark pulses while ANY run is live (C — visible when the bubble has scrolled away). Marked at the long-run entry
+// ── v2.74.1505 — the IL glyph THINKS: the in-flight bubble's ◈ facet-cycles + pulses. Marked at the long-run entry
 // points (interpret / the chain runner / the IL answer fallback), cleared UNCONDITIONALLY at _orchFinalize and at
-// every chain exit (the runner's finally); a busy bubble that gets REMOVED (interpret handing off to dispatch)
-// re-syncs the header via a messages-list observer — a DOM scan, not a refcount, so nothing can leak stuck-on.
-let _ilBusyObserver = null;
-function _ilSyncHeader() {
-  try {
-    const busy = !!document.querySelector('#messages .message-avatar.il-busy');
-    const mark = document.querySelector('.app-brand-mark');
-    if (mark) mark.classList.toggle('il-busy', busy);
-  } catch { /* */ }
-}
+// every chain exit (the runner's finally).
+// v2.74.1934 — the header-mirror pulse went away with the app brand label (chat.html), and with it the
+// messages-list observer that re-synced the header when a busy bubble was removed.
 function _ilBusy(msg, on) {
   try {
     const av = msg && msg.querySelector ? msg.querySelector('.message-avatar') : null;
     if (av) av.classList.toggle('il-busy', !!on);
-    if (!_ilBusyObserver) {
-      const host = $('messages');
-      if (host) { _ilBusyObserver = new MutationObserver(_ilSyncHeader); _ilBusyObserver.observe(host, { childList: true }); }
-    }
-    _ilSyncHeader();
   } catch { /* */ }
 }
 // v2.74.1512 — the reply REVEAL: a settled reply reads in LINE BY LINE (a typing-effect rhythm), never as one
@@ -9268,7 +9254,7 @@ function _railWorkflowRow(row, parentConv) {
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions wf-ov-actions';   // wf-ov-actions → _wfScheduleInline swaps it for the picker
   acts.dataset.rowAction = '';
-  const rerender = () => { void _renderRailList({ force: true }); };   // v1816 — action renders land now
+  const rerender = () => { void _renderActiveRailTab({ force: true }); };   // v1816/1934 — action renders land now, on whichever tab the card is shown
   acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async (btn) => {
     // v1822 (user directive) — the run REPORTS IN THE CARD and the rail STAYS OPEN. No desk switch: the
     // pinned clauses are self-contained (PP-0c). The chain writes into a message-shaped host inside the
@@ -9502,13 +9488,13 @@ function _railParkedRow(p) {
     if (meta) meta.textContent = (res && res.success !== false)
       ? (v === 'parked' ? 'sent — the run continued and stopped at the NEXT write' : 'done — the run ' + (v === 'complete' ? 'completed' : (v || 'finished')))
       : 'couldn’t resume — ' + _errWord(res && res.error);
-    setTimeout(() => { void _renderRailList({ force: true }); }, 1400);
+    setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1400);
   }));
   acts.appendChild(_mkBtn('✕ Cancel', async () => {
     try { await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
     const meta = item.querySelector('.rail-item-meta');
     if (meta) meta.textContent = 'cancelled — the write was not sent';
-    setTimeout(() => { void _renderRailList({ force: true }); }, 1400);
+    setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1400);
   }));
   item.appendChild(acts);
   return item;
@@ -9521,23 +9507,29 @@ function _railParkedRow(p) {
 // its owning desk name via the parentConv passed to the row.
 async function _renderRailAutomations() {
   const live = $('rail-automations'); if (!live) return;
+  // WFC-2 parity (v2.74.1934) — a live card RUN is an absolute fence: re-rendering would destroy the running
+  // card's DOM (its observer + step hook then write into detached nodes). Defer like _renderRailListNow does.
+  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
   const container = document.createElement('div');
   let all = [];
   try { all = await ConversationStore.list(); } catch { /* */ }
   const desks = all.filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev');
-  // resolve every bank to its owning desk (the class-key sweep, mirrored from _renderRailListNow)
-  const wfRows = [];   // { wf, parentConv }
+  // v2.74.1934 — ALL workflows (not just scheduled), grouped BY DESK: resolve every bank to its owning desk
+  // (the class-key sweep, mirrored from _renderRailListNow). Ownerless banks show nowhere (v1814).
+  const wfByDesk = new Map();   // deskConv.id → { desk, wfs: [] }
   try {
     const banks = await listAllWorkflows();
     for (const b of banks) {
       if (!b || !Array.isArray(b.items) || !b.items.length) continue;
       const key = String(b.appId);
       const owner = desks.find((c) => String(c.instanceId) === key || String(c.appId) === key);
-      if (!owner) continue;   // ownerless banks show nowhere (v1814)
+      if (!owner) continue;
+      let g = wfByDesk.get(owner.id);
+      if (!g) { g = { desk: owner, wfs: [] }; wfByDesk.set(owner.id, g); }
       for (const w of b.items) {
-        if (!w || !(w.trigger && w.trigger.enabled)) continue;   // scheduled only
+        if (!w) continue;
         const wf = w.appId ? w : { ...w, appId: key };
-        if (!wfRows.some((r) => r.wf.id === wf.id)) wfRows.push({ wf, parentConv: owner });
+        if (!g.wfs.some((x) => x.id === wf.id)) g.wfs.push(wf);
       }
     }
   } catch { /* */ }
@@ -9545,10 +9537,11 @@ async function _renderRailAutomations() {
   let parked = [];
   try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : []; } catch { /* */ }
 
-  if (!parked.length && !wfRows.length) {
+  const groups = [...wfByDesk.values()].filter((g) => g.wfs.length);
+  if (!parked.length && !groups.length) {
     const empty = document.createElement('div');
     empty.className = 'rail-automations-empty';
-    empty.textContent = 'No automations yet. Give a workflow a schedule (its ⏱ chip) and it appears here — it runs on the clock and reports its runs.';
+    empty.textContent = 'No workflows yet. Open a view and use its ＋ Workflow to save a multi-step task — it appears here, and can run on a schedule.';
     container.appendChild(empty);
     live.replaceChildren(...container.childNodes);
     return;
@@ -9558,12 +9551,31 @@ async function _renderRailAutomations() {
     container.appendChild(h);
     for (const p of parked) container.appendChild(_railParkedRow(p));
   }
-  if (wfRows.length) {
-    const h = document.createElement('div'); h.className = 'rail-auto-group'; h.textContent = `Scheduled (${wfRows.length})`;
+  // desks by recency; within a desk, scheduled (soonest-due) first, then the rest
+  groups.sort((a, b) => (b.desk.updatedAt || 0) - (a.desk.updatedAt || 0));
+  for (const g of groups) {
+    const h = document.createElement('div'); h.className = 'rail-auto-group';
+    h.textContent = String(g.desk.title || 'View');
     container.appendChild(h);
-    // soonest-due first
-    wfRows.sort((a, b) => ((a.wf.trigger && a.wf.trigger.nextDue) || Infinity) - ((b.wf.trigger && b.wf.trigger.nextDue) || Infinity));
-    for (const { wf, parentConv } of wfRows) container.appendChild(_railWorkflowRow({ wf, wfKey: wf.appId }, parentConv));
+    g.wfs.sort((a, b) => {
+      const ad = (a.trigger && a.trigger.enabled && a.trigger.nextDue) || Infinity;
+      const bd = (b.trigger && b.trigger.enabled && b.trigger.nextDue) || Infinity;
+      return ad - bd;
+    });
+    for (const wf of g.wfs) container.appendChild(_railWorkflowRow({ wf, wfKey: wf.appId }, g.desk));
+    // ＋ Workflow — creation stays reachable per desk (the desk-row ＋ Workflow row is gone from Conversations)
+    const add = document.createElement('div');
+    add.className = 'rail-item is-subtask rail-wf-add';
+    add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>'
+      + '<div class="rail-item-meta rail-add-desc">save a multi-step task you run often — it can run on a schedule</div>';
+    add.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      _closeRail();
+      if (g.desk.id !== _currentConversationId) await _openConvFullTimeline(g.desk);
+      _promptWorkflowIntent();
+    });
+    _wireRowKeyboard(add, () => add.click(), 'New workflow in ' + String(g.desk.title || 'this view'));
+    container.appendChild(add);
   }
   if (!live.isConnected) return;
   live.replaceChildren(...container.childNodes);
@@ -16268,7 +16280,7 @@ try {
 try {
   chrome.runtime.onMessage.addListener((m) => {
     if (!m || m.type !== 'WORKFLOW_PARKED_CHANGED') return;
-    void _renderRailList();
+    void _renderActiveRailTab();
   });
 } catch { /* */ }
 // VT-2b — one reconcile at boot: incidents opened while the panel was closed still mint their cases.
