@@ -101,9 +101,9 @@ describe('answerShapePrompt — readShapeFacts (deterministic count + MINIMIZED 
 });
 
 describe('answerShapePrompt — buildAnswerShapeMessages', () => {
-  it('renders the question + the minimized facts; the contract names count + showList', () => {
+  it('renders the question + the minimized facts; the contract names count + showRecords', () => {
     const { system, user } = buildAnswerShapeMessages({ ask: 'how many tickets do I have?', facts: readShapeFacts(TICKETS) });
-    assert.match(system, /showList/);
+    assert.match(system, /showRecords/);
     assert.match(system, /use the provided "count" VERBATIM/i);
     assert.match(user, /QUESTION: how many tickets do I have\?/);
     assert.match(user, /"count":3/);
@@ -112,16 +112,19 @@ describe('answerShapePrompt — buildAnswerShapeMessages', () => {
 });
 
 describe('answerShapePrompt — parseAnswerShapeOutput', () => {
-  it('a shaped answer', () => {
-    assert.deepEqual(parseAnswerShapeOutput('{"answer":"You have 3 open tickets."}'), { answer: 'You have 3 open tickets.', showList: false });
+  it('a bare answer → answer only, no list (showRecords false)', () => {
+    assert.deepEqual(parseAnswerShapeOutput('{"answer":"You have 3 open tickets."}'), { answer: 'You have 3 open tickets.', showRecords: false });
   });
-  it('showList sentinel → defer to the deterministic render', () => {
-    assert.deepEqual(parseAnswerShapeOutput('{"showList":true}'), { answer: null, showList: true });
+  it('v1948 ADDITIVE — answer + showRecords:true → both the sentence AND the list', () => {
+    assert.deepEqual(parseAnswerShapeOutput('{"answer":"Your 12 open tickets:","showRecords":true}'), { answer: 'Your 12 open tickets:', showRecords: true });
   });
-  it('unparseable / empty → fall back to the render', () => {
-    assert.deepEqual(parseAnswerShapeOutput('not json'), { answer: null, showList: false });
-    assert.deepEqual(parseAnswerShapeOutput('{}'), { answer: null, showList: false });
-    assert.deepEqual(parseAnswerShapeOutput('{"answer":""}'), { answer: null, showList: false });
+  it('legacy {"showList":true} (no answer) still lists — back-compat maps to showRecords', () => {
+    assert.deepEqual(parseAnswerShapeOutput('{"showList":true}'), { answer: null, showRecords: true });
+  });
+  it('unparseable / empty → fall back to the render (no answer, no list)', () => {
+    assert.deepEqual(parseAnswerShapeOutput('not json'), { answer: null, showRecords: false });
+    assert.deepEqual(parseAnswerShapeOutput('{}'), { answer: null, showRecords: false });
+    assert.deepEqual(parseAnswerShapeOutput('{"answer":""}'), { answer: null, showRecords: false });
   });
 });
 

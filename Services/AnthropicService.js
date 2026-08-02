@@ -5470,19 +5470,19 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * Interrogator ANSWER-SHAPE (v2.74.1267) — shape a connector read's answer to the QUESTION ("how many" → a number)
    * instead of dumping the list render. HYBRID: the model PHRASES + picks the shape but never COUNTS — `facts` carries
    * the EXACT count + a MINIMIZED sample ({id,title,status}, no record bodies; DESIGN_llm_privacy.md §3 minimization).
-   * Cheap tier (small bounded input). Returns {answer, showList}: a non-empty answer → show it; showList → the caller
-   * renders the list deterministically; a miss → {answer:null, showList:false} (caller falls back to the render).
-   * PURE prompt+parse in Core/answerShapePrompt.js. Fails safe.
+   * Cheap tier (small bounded input). Returns {answer, showRecords}: the answer is ALWAYS primary; showRecords ALSO
+   * lists the records beneath it (v1948 additive — was an either/or showList). A miss → {answer:null, showRecords:false}
+   * (caller falls back to the render). PURE prompt+parse in Core/answerShapePrompt.js. Fails safe.
    * CX-9d (v2.74.1437) — `scope`: the filters CODE already applied (resolved division label, status) so the shaper
    * never re-filters pre-scoped rows against the question's own words (the greensboro division-vs-city live miss).
    * @param {{ ask:string, facts:object, scope?:string }} args
-   * @returns {Promise<{ answer:string|null, showList:boolean }>}
+   * @returns {Promise<{ answer:string|null, showRecords:boolean }>}
    */
   static async shapeAnswer({ ask, facts, scope } = {}) {
-    if (!String(ask || '').trim() || !facts || typeof facts !== 'object' || !(await AnthropicService.hasLlm())) return { answer: null, showList: false };
+    if (!String(ask || '').trim() || !facts || typeof facts !== 'object' || !(await AnthropicService.hasLlm())) return { answer: null, showRecords: false };
     const { system, user } = buildAnswerShapeMessages({ ask, facts, scope, today: new Date().toISOString() });   // v1903 — the clock (the builder stays pure; caught missing in the v1909 bcp — the failed patch run took it down and only the builder half was re-applied); v1913 — FULL timestamp: the date-only stamp made "less than 1 hour ago" arithmetic against an invented time
     const res = await AnthropicService.#call(system, user, 300, [], { role: 'routing', operation: 'answer-shape' });
-    if (!res || res.success === false) return { answer: null, showList: false };
+    if (!res || res.success === false) return { answer: null, showRecords: false };
     return parseAnswerShapeOutput(res.text);
   }
 

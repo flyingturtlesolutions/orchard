@@ -1131,16 +1131,17 @@ export function createSgMessageHandlers(ctx) {
     },
 
     // ANSWER-SHAPE (v2.74.1267) — the interrogator's final stage: chat.js sends the user's question + the deterministic,
-    // MINIMIZED facts (count + a {id,title,status} sample — no record bodies); we return {answer, showList}. The model
-    // shapes + phrases; the count is code's. A miss → {answer:null, showList:false} → chat.js renders the list as before.
+    // MINIMIZED facts (count + a {id,title,status} sample — no record bodies); we return {answer, showRecords}. The
+    // model shapes + phrases; the count is code's. v1948 ADDITIVE: the answer is primary, showRecords ALSO lists the
+    // records beneath it. A miss → {answer:null, showRecords:false} → chat.js renders the list as before.
     SHAPE_ANSWER: async (payload, _sender, sendResponse) => {
       try {
         const ask = String(payload?.ask ?? '').trim();
         const facts = (payload && typeof payload.facts === 'object') ? payload.facts : null;
         const scope = String(payload?.scope ?? '').trim();   // CX-9d (v1437) — the params CODE already applied (resolved labels)
-        if (!ask || !facts) { sendResponse({ success: true, answer: null, showList: false }); return; }
+        if (!ask || !facts) { sendResponse({ success: true, answer: null, showRecords: false }); return; }
         const shaped = await AnthropicService.shapeAnswer({ ask, facts, scope });
-        sendResponse({ success: true, answer: shaped.answer, showList: shaped.showList });
+        sendResponse({ success: true, answer: shaped.answer, showRecords: shaped.showRecords });
       } catch (err) {
         Logger.error('background', `SHAPE_ANSWER failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

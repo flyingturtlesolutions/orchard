@@ -4,7 +4,7 @@
 // HYBRID + PRIVACY-FIRST: the LLM SHAPES + phrases, but it never COUNTS — `readShapeFacts` hands it the EXACT
 // deterministic count plus a MINIMIZED sample ({id, title, status} only — NO record bodies; the data-minimization lever
 // from DESIGN_llm_privacy.md). Grounding: quantities come from `count` (code, not the model); the LIST shape uses the
-// deterministic render (showList → the CALLER renders, never the LLM re-emitting #ids it could mangle).
+// deterministic render (showRecords → the CALLER renders the list beneath the answer, never the LLM re-emitting #ids it could mangle).
 // PURE: no chrome / DOM / LLM / clock.
 
 import { primaryList, primaryObject, summarizeItem, recordDetails, itemFields, roleFlags } from './connectorRender.js';
@@ -295,11 +295,11 @@ export function readShapeFacts(value, { sampleN = 12, displayId = null, ask = ''
   return { kind: 'empty', count: 0, sampleN: 0, sample: [] };
 }
 
-const _SYSTEM = `You answer the user's QUESTION from a structured READ RESULT — real data from their connected app. Reply with ONLY a JSON object.
+const _SYSTEM = `You answer the user's QUESTION from a structured READ RESULT — real data from their connected app. Reply with ONLY a JSON object with two keys:
+- "answer": ALWAYS present — a short, direct answer in the shape the question asks for.
+- "showRecords": true to ALSO list the underlying records BENEATH your answer (set true for a "show me / list / get my …" request, or whenever naming/listing the items helps the reader); false for a pure count or yes/no where the rows would be noise. The app renders the records itself from the data — you never re-emit them.
 
-Two shapes:
-- {"answer":"<a short, direct answer in the shape the question asks for>"}
-- {"showList":true}  ← use this when the user just wants to SEE the records (a "show me / list / get my …" request); the app renders the list itself.
+The answer and the record list are ADDITIVE, not either/or: even when showRecords is true, still write the one-line answer (e.g. "You have 12 open tickets:" or "The 3 most urgent, oldest first:") — it heads the list.
 
 RULES:
 - Match the question's shape: "how many / number of" → a count; "which / what / who" → name the item(s) (#id + title); "is there / any / do I have" → yes or no, with which; otherwise a one-line grounded summary.
@@ -354,18 +354,21 @@ function _firstJson(text) {
 }
 
 /**
- * Parse the shaper output → {answer, showList}. PURE. {"showList":true} → the caller renders the list; a non-empty
- * answer → show it; anything else (unparseable / empty) → {answer:null, showList:false} so the caller falls back to the
- * deterministic render. The answer is capped (a chat line, not a document).
+ * Parse the shaper output → {answer, showRecords}. PURE. The answer is capped (a chat line, not a document).
+ * v2.74.1948 — ADDITIVE (was an either/or `showList`): the answer is ALWAYS primary; `showRecords` ALSO renders the
+ * deterministic record list BENEATH it. This ends the nondeterministic prose-XOR-list lottery — a shaped sentence used
+ * to SUPPRESS the list, and a bare `{showList:true}` used to SUPPRESS the sentence, and the model's pick between them
+ * was a coin flip. Back-compat: a legacy `{"showList":true}` (no answer) still maps to {answer:null, showRecords:true},
+ * so the caller falls back to the list exactly as before; unparseable / empty → {answer:null, showRecords:false}.
  * @param {string} text
- * @returns {{ answer: string|null, showList: boolean }}
+ * @returns {{ answer: string|null, showRecords: boolean }}
  */
 export function parseAnswerShapeOutput(text) {
   const obj = _firstJson(text);
-  if (!obj || typeof obj !== 'object') return { answer: null, showList: false };
-  if (obj.showList === true) return { answer: null, showList: true };
+  if (!obj || typeof obj !== 'object') return { answer: null, showRecords: false };
   const answer = _str(obj.answer).slice(0, 600);
-  return { answer: answer || null, showList: false };
+  const showRecords = obj.showRecords === true || obj.showList === true;   // showList: a legacy emit still lists
+  return { answer: answer || null, showRecords };
 }
 
 // v2.74.1887 — DOES THIS SENTENCE MAKE A QUANTITY CLAIM? The shared predicate for the two guarantees below.

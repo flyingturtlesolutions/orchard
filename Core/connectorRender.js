@@ -18,6 +18,15 @@ const LIST_KEYS = ['results', 'tickets', 'comments', 'users', 'orders', 'custome
 const OBJ_KEYS = ['ticket', 'user', 'order', 'customer', 'product', 'record', 'item', 'result', 'shop'];
 const MAX_ROWS = 25;
 
+// v2.74.1949 — MARKDOWN-READOUT helpers. `_escMd` neutralizes the markdown pair-forming delimiters in UNTRUSTED data
+// so a field value renders LITERALLY and cannot inject emphasis / a code span / a link — nor corrupt a surrounding
+// `**bold**` wrapper. This renderer (markdown.js) has NO backslash-escape, so we swap the delimiters for visual
+// lookalikes rather than `\*`. `_` is left alone: it is inert inside words (sent_to_3PL, emails) and only italicizes a
+// space-delimited _word_, a harmless cosmetic. Escape-first HTML safety is unchanged — renderMarkdown still escapes.
+const _escMd = (s) => String(s ?? '').replace(/\*/g, '∗').replace(/`/g, 'ˋ').replace(/\[/g, '⟦').replace(/\]/g, '⟧');
+const _sig = (id) => (/^[A-Za-z]*#?[\d-]+$/.test(String(id)) && !String(id).includes('#')) ? '#' : '';   // v1907 — the number-only # sigil
+const _escBt = (id) => String(id).replace(/`/g, '');   // an id sits inside a code span — a stray backtick would close it
+
 const _str = (x) => String(x ?? '').replace(/\s+/g, ' ').trim();
 const _trunc = (x, n) => { const t = _str(x); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 // First SCALAR (non-object) value among `keys`, or null. Skips nested objects (e.g. requester:{…}).
@@ -391,17 +400,22 @@ export function recordDetails(o) {
 }
 
 /**
- * Render a connector result into chat lines, or null when nothing is displayable (→ the caller shows "Done."). PURE.
- * A LIST of >1 → a header `name (N):` + one bullet per item, capped at 25 with a "+ N more" note (never a silent cap).
- * A SINGLE record (a list of one, or a wrapped object) → the FULL record: id/title/status, body, then its salient
- * extra fields (a Shopify customer's email/phone/orders/tags/location — the profile, not a bare bullet), + a url.
- * `name` is the leg label. CX-7 (v2.74.1392) — the single-record enrichment (a 1-result lookup showed just #id name).
+ * Render a connector result into chat lines (MARKDOWN), or null when nothing is displayable (→ "Done."). PURE.
+ * A LIST of >1 → a bold header `**name** (N)` + one `- ` list item per row (id in a code span, bold title, status),
+ * capped at 25 with a "+ N more" note (never a silent cap). A SINGLE record → the FULL record: a bold id/title/status
+ * head, its body, then its salient extra fields as `- **Label:** value` (a Shopify customer's email/phone/orders/…),
+ * + a url. `name` is the leg label. CX-7 (v2.74.1392) — the single-record enrichment.
+ *
+ * v2.74.1949 — the output is MARKDOWN (was flat plain text with literal `• `). Every CALLER now renders it with
+ * {markdown:true}, so a fresh reply matches its reloaded self (they diverged: fresh was set plain, reload re-rendered
+ * markdown — chat.js:375/379). Untrusted title/status/field values ride `_escMd` so page data renders literally and
+ * cannot inject emphasis / a code span / a link (§9). Lines are joined with `\n`; blank-line entries ('') separate the
+ * header/body/field blocks so the renderer sees real list + paragraph boundaries.
  */
 export function renderConnectorLines(value, { name = 'Results', displayId = null, listPath = '' } = {}) {
   const list = primaryList(value, { listPath });   // v1936 — the recipe's declared row path, when it has one
   if (list && list.length > 1) {
-    const head = `${name} (${list.length})`;
-    const lines = list.slice(0, MAX_ROWS).map((o) => {
+    const rows = list.slice(0, MAX_ROWS).map((o) => {
       const it = summarizeItem(o, { displayId });
       // CX-9c (v2.74.1436) — a row with NO recognized name/status (an app shape outside the key vocabulary, e.g. a
       // VendorSuite warranty row) falls back to its generic fields ("3955 Gallery Chase · Cumming, GA 30028 · …")
@@ -409,22 +423,26 @@ export function renderConnectorLines(value, { name = 'Results', displayId = null
       const label = it.title || itemFields(o, { max: 4 }).map(([, v]) => v).join(' · ') || '(no title)';
       // v2.74.1907 — id ≡ label collapses (displayId ['title'] made every product row read "#Smart Switch Smart
       // Switch"), and the # sigil is reserved for number-shaped ids — "#Smart Switch" is not a number.
-      const _idPart = (it.id != null && String(it.id) !== String(label)) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) && !String(it.id).includes('#') ? '#' : ''}${it.id} ` : '';
-      return `• ${_idPart}${label}${it.status ? ` — ${it.status}` : ''}`;
+      const _idPart = (it.id != null && String(it.id) !== String(label)) ? `\`${_sig(it.id)}${_escBt(it.id)}\` ` : '';
+      return `- ${_idPart}**${_escMd(label)}**${it.status ? ` — ${_escMd(String(it.status))}` : ''}`;
     });
-    if (list.length > MAX_ROWS) lines.push(`… +${list.length - MAX_ROWS} more`);
-    return [`${head}:`, ...lines];
+    const out = [`**${_escMd(name)}** (${list.length})`, '', ...rows];
+    if (list.length > MAX_ROWS) out.push('', `_+${list.length - MAX_ROWS} more_`);
+    return out;
   }
-  if (list && list.length === 0) return [`${name} (0).`];
+  if (list && list.length === 0) return [`**${_escMd(name)}** (0).`];
   const obj = (list && list.length === 1) ? list[0] : primaryObject(value);   // a single result renders as the FULL record
   if (obj) {
     const it = summarizeItem(obj, { full: true, displayId });
-    const _hidPart = (it.id != null && String(it.id) !== String(it.title || '')) ? `${/^[A-Za-z]*#?[\d-]+$/.test(String(it.id)) && !String(it.id).includes('#') ? '#' : ''}${it.id} ` : '';   // v1907 — same collapse as the bullet rows
-    const out = [`${_hidPart}${it.title || ''}${it.status ? ` — ${it.status}` : ''}`.trim() || '(no details)'];
-    if (it.body) out.push(it.body);
+    const _hidPart = (it.id != null && String(it.id) !== String(it.title || '')) ? `\`${_sig(it.id)}${_escBt(it.id)}\` ` : '';   // v1907 — same collapse as the bullet rows
+    const titlePart = it.title ? `**${_escMd(String(it.title))}**` : '';
+    const head = `${_hidPart}${titlePart}${it.status ? ` — ${_escMd(String(it.status))}` : ''}`.trim();
+    const out = [head || '_(no details)_'];
+    if (it.body) out.push('', _escMd(String(it.body)));
     const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));   // don't repeat the title/status/id as an extra
-    for (const [k, v] of _extraFields(obj, used, { max: 12 })) out.push(`${_label(k)}: ${v}`);   // CX-9g — the single-record budget
-    if (it.url) out.push(it.url);
+    const fields = _extraFields(obj, used, { max: 12 });   // CX-9g — the single-record budget
+    if (fields.length) { out.push(''); for (const [k, v] of fields) out.push(`- **${_escMd(_label(k))}:** ${_escMd(String(v))}`); }
+    if (it.url) out.push('', _escMd(String(it.url)));
     return out;
   }
   return null;

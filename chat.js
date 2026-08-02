@@ -3977,13 +3977,13 @@ async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', 
   // NL FALLBACK — the parts no saved capability covered now run through the NL pipeline ON THE RESULTING PAGE
   // (where the filters live). Offer rather than auto-run (precision-first: an unproven plan touching the page).
   if (gaps.length) {
-    _setMessageBody(msg, `${readouts.length ? readouts.join('\n') + '\n\n' : ''}${total ? `Ran ${total} step${total > 1 ? 's' : ''}. ` : ''}I haven’t saved: ${gaps.join(', ')} — try to work ${gaps.length > 1 ? 'them' : 'it'} out from the page?`);
+    _setMessageBody(msg, `${readouts.length ? readouts.join('\n') + '\n\n' : ''}${total ? `Ran ${total} step${total > 1 ? 's' : ''}. ` : ''}I haven’t saved: ${gaps.join(', ')} — try to work ${gaps.length > 1 ? 'them' : 'it'} out from the page?`, { markdown: true });   // v1949 — readouts carry markdown connector rows
     const bar = _orchActionBar(msg);
     bar.appendChild(_mkBtn(`✨ Try ${gaps.length > 1 ? 'them' : 'it'}`, () => { bar.remove(); _orchTryGaps(appendMessage({ role: 'assistant', body: '' }), { tabId, groundId, gaps }); }));
     bar.appendChild(_mkBtn('● Show me instead', () => { bar.remove(); _orchRecordFlow(appendMessage({ role: 'assistant', body: '' }), { groundId, tabId, ask: gaps[0] }); }));
     return;
   }
-  _setMessageBody(msg, readouts.length ? readouts.join('\n') : `Done — ran all ${total} steps.`);
+  _setMessageBody(msg, readouts.length ? readouts.join('\n') : `Done — ran all ${total} steps.`, { markdown: true });   // v1949 — readouts carry markdown connector rows
   // T2 — a fresh compound that ran cleanly (no gaps) can be PROMOTED to a durable composite (cache hit next time).
   if (!savedComposite && !gaps.length) _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps });
 }
@@ -11499,7 +11499,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
     _rideEachCursor = { at: Date.now(), leg, ask, tabId, groundId, params, each: { name: each.name, values: all, total }, offset: ranTo };
     secs.push(`Paused at ${ranTo}/${total} — say “continue” for the rest (${remaining} more).`);
   }
-  _setMessageBody(msg, [head, ...secs].join('\n\n'));
+  _setMessageBody(msg, [head, ...secs].join('\n\n'), { markdown: true });   // v1949 — the fan sections carry markdown connector rows
   // v2.74.1856 — Experiment B: the RENDERED terminal receipt (the tally line says what was fetched; this says
   // what was DELIVERED — the seam the 07-27 "vanished rows" pass could not distinguish from a silent death).
   try { _orchLog(`RIDE_EACH ▸ rendered ${totalRows} row(s) · ${nonEmpty.length}/${view.length} ${noun} group(s)${remaining > 0 ? ` · paused ${ranTo}/${total}` : ''}`); } catch { /* */ }
@@ -12701,7 +12701,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // digested anyway — but "details" means the fields, not a summary). Lists still digest (N records can't full-render).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
       const flines = renderConnectorLines(rr.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
-      if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
+      if (flines) { _setMessageBody(msg, flines.join('\n'), { markdown: true }); return true; }   // v1949 — markdown record render
     }
     _refreshResolveCacheFrom(leg, rr.value);   // v1880 — a live read of a via-target teaches the resolver's cache
     if (_maybeContextAnswer(msg, { leg, ask, value: rr.value })) return true;   // v1872 — the twin call (see the helper: a seeded leg rides THIS door)
@@ -12715,10 +12715,17 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       try { _orchLog(`ANSWER_GUARD ▸ count claim unsupported — no metric in the payload; rendering the record instead`); } catch { /* */ }
       shaped = null;
     }
-    if (shaped && shaped.answer) { _setMessageBody(msg, `${ensureScopeNamed(shaped.answer, Object.values(_resolvedLabels || {}))}`); return true; }   // v1887 — a count/existence claim names its scope even when the generator forgets
-    const rlines = renderConnectorLines(rr.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) });
-    _setMessageBody(msg, rlines ? `${rlines.join('\n')}` : 'Done.');
-    return true;
+    // v2.74.1948 — ADDITIVE reply (was either/or): the shaped answer sentence is ALWAYS primary (with the v1887 scope
+    // guarantee); the record list renders BENEATH it when the shaper set showRecords, and stands ALONE when there is no
+    // answer (a miss / a dropped count claim). Ends the nondeterministic prose-XOR-list lottery the review flagged.
+    {
+      const answer = (shaped && shaped.answer) ? ensureScopeNamed(shaped.answer, Object.values(_resolvedLabels || {})) : '';
+      const rlines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(rr.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) }) : null;
+      const listBody = (rlines && rlines.length) ? rlines.join('\n') : '';
+      const body = (answer && listBody) ? `${answer}\n\n${listBody}` : (answer || listBody);
+      _setMessageBody(msg, body || 'Done.', { markdown: true });   // v1949 — connector rows are markdown; render fresh == reload
+      return true;
+    }
   }
   // CX-5c (v2.74.1311) — a BROKER (OAuth/MCP) WRITE: show the EXACT tool call in the same HITL confirm gate as a
   // ride write (CX-6), and fire only on the user's confirm — INVOKE_CONNECTOR ALSO fail-closes without confirmed:true
@@ -12826,7 +12833,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
       const flines = renderConnectorLines(res.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
-      if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
+      if (flines) { _setMessageBody(msg, flines.join('\n'), { markdown: true }); return true; }   // v1949 — markdown record render
     }
     _refreshResolveCacheFrom(leg, res.value);   // v1880 — the twin call
     if (_maybeContextAnswer(msg, { leg, ask, value: res.value })) return true;
@@ -12836,12 +12843,17 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       try { _orchLog(`ANSWER_GUARD ▸ count claim unsupported — no metric in the payload; rendering the record instead`); } catch { /* */ }
       shaped = null;
     }
-    if (shaped && shaped.answer) { _setMessageBody(msg, `${ensureScopeNamed(shaped.answer, Object.values(_resolvedLabels || {}))}`); return true; }   // v1887 — the twin call: the scope guarantee
-    // CX-4c — GENERIC render: ANY app's read (tickets, comments, users, orders, messages…) → its salient fields, not
-    // just tickets. PII stays in the user's own panel; the result is UNTRUSTED page data → rendered as escaped text only.
-    const lines = renderConnectorLines(res.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) });
-    _setMessageBody(msg, lines ? `${lines.join('\n')}` : 'Done.');
-    return true;
+    // v2.74.1948 — ADDITIVE reply (twin of the replay tail): the shaped answer is primary (v1887 scope guarantee); the
+    // CX-4c GENERIC record render (ANY app's read → its salient fields; UNTRUSTED page data → escaped text only, PII
+    // stays in the user's own panel) renders BENEATH it when showRecords, or ALONE on a miss / a dropped count claim.
+    {
+      const answer = (shaped && shaped.answer) ? ensureScopeNamed(shaped.answer, Object.values(_resolvedLabels || {})) : '';
+      const lines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(res.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) }) : null;
+      const listBody = (lines && lines.length) ? lines.join('\n') : '';
+      const body = (answer && listBody) ? `${answer}\n\n${listBody}` : (answer || listBody);
+      _setMessageBody(msg, body || 'Done.', { markdown: true });   // v1949 — connector rows are markdown; render fresh == reload
+      return true;
+    }
   }
   if (leg.key === 'LIST_TABS') {
     const tabs = Array.isArray(res.tabs) ? res.tabs : [];

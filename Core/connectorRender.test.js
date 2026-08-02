@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
+import { renderMarkdown } from '../markdown.js';   // v1949 — assert the RENDERED HTML, not eyeball the panel
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -93,15 +94,16 @@ describe('createdRecordId — the record a WRITE created (CX-7f, for "show it" a
 });
 
 describe('renderConnectorLines — the chat lines', () => {
-  it('a ticket list → header (N): + bullets; an empty list → header.', () => {
+  it('a ticket list → bold header + markdown rows; an empty list → header.', () => {
     const lines = renderConnectorLines({ results: [{ id: 1, subject: 'A', status: 'open' }, { id: 2, subject: 'B', status: 'open' }] }, { name: 'My open Zendesk tickets' });
-    assert.equal(lines[0], 'My open Zendesk tickets (2):');
-    assert.equal(lines[1], '• #1 A — open');
-    assert.deepEqual(renderConnectorLines({ tickets: [] }, { name: 'Tickets' }), ['Tickets (0).']);
+    assert.equal(lines[0], '**My open Zendesk tickets** (2)');
+    assert.equal(lines[1], '');                          // v1949 — blank line so the renderer sees a real list block
+    assert.equal(lines[2], '- `#1` **A** — open');
+    assert.deepEqual(renderConnectorLines({ tickets: [] }, { name: 'Tickets' }), ['**Tickets** (0).']);
   });
   it('a SINGLE-record list renders as the full record (v2.74.1392), not a bare bullet', () => {
     const lines = renderConnectorLines({ comments: [{ id: 9, body: 'Call me back' }] }, { name: 'Conversation' });
-    assert.deepEqual(lines, ['#9 Call me back']);        // content as title; no header/bullet for a lone record
+    assert.deepEqual(lines, ['`#9` **Call me back**']);  // content as title; no header/bullet for a lone record
   });
   it('CX-7: a single Shopify customer renders its PROFILE (email/phone/orders/tags/location), not #id name', () => {
     const gql = { data: { customers: { edges: [{ node: {
@@ -109,13 +111,13 @@ describe('renderConnectorLines — the chat lines', () => {
       phone: '+15551234567', numberOfOrders: 3, tags: ['vip', 'wholesale'], defaultAddress: { city: 'Austin', province: 'TX', country: 'US' },
     } }] } } };
     const lines = renderConnectorLines(gql, { name: 'Find a Shopify customer by email' });
-    assert.equal(lines[0], '#12345 Divine Monkam');       // name + shortened gid
+    assert.equal(lines[0], '`#12345` **Divine Monkam**');   // name + shortened gid (v1949 markdown head)
     const text = lines.join('\n');
-    assert.match(text, /Email: d@example\.com/);
-    assert.match(text, /Phone: \+15551234567/);
-    assert.match(text, /Orders: 3/);                      // aliased label (numberOfOrders → "Orders")
-    assert.match(text, /Tags: vip, wholesale/);
-    assert.match(text, /Location: Austin, TX, US/);       // aliased (defaultAddress → "Location")
+    assert.match(text, /\*\*Email:\*\* d@example\.com/);
+    assert.match(text, /\*\*Phone:\*\* \+15551234567/);
+    assert.match(text, /\*\*Orders:\*\* 3/);              // aliased label (numberOfOrders → "Orders")
+    assert.match(text, /\*\*Tags:\*\* vip, wholesale/);
+    assert.match(text, /\*\*Location:\*\* Austin, TX, US/); // aliased (defaultAddress → "Location")
   });
   it('CX-7e: a single Shopify ORDER surfaces payment/total/tracking (the nested CS fields), deduped vs the shown status', () => {
     const gql = { data: { orders: { edges: [{ node: {
@@ -127,12 +129,12 @@ describe('renderConnectorLines — the chat lines', () => {
       returns: [], refunds: [], tags: ['draft', 'FOC', 'sent-to-3PL'],
     } }] } } };
     const text = renderConnectorLines(gql, { name: 'Look up a Shopify order' }).join('\n');
-    assert.match(text, /#6818042937478 DEAKO#12043 — FULFILLED/);   // primary status = fulfillment
-    assert.match(text, /Payment: PAID/);                            // the SECOND status now shows (was dropped)
-    assert.match(text, /Total: 0\.00 USD/);                         // money nested 2 deep, formatted
-    assert.match(text, /Tracking: UPS 1Z999/);                      // pulled from fulfillments[].trackingInfo
-    assert.match(text, /Customer: d@example\.com/);
-    assert.ok(!/Fulfillment: FULFILLED/.test(text));                // not duplicated as an extra (dedup vs shown status)
+    assert.match(text, /#6818042937478.+\*\*DEAKO#12043\*\* — FULFILLED/);   // primary status = fulfillment (v1949 markdown head)
+    assert.match(text, /\*\*Payment:\*\* PAID/);                    // the SECOND status now shows (was dropped)
+    assert.match(text, /\*\*Total:\*\* 0\.00 USD/);                 // money nested 2 deep, formatted
+    assert.match(text, /\*\*Tracking:\*\* UPS 1Z999/);              // pulled from fulfillments[].trackingInfo
+    assert.match(text, /\*\*Customer:\*\* d@example\.com/);
+    assert.ok(!/\*\*Fulfillment:\*\*/.test(text));                  // not duplicated as an extra (dedup vs shown status)
   });
   it('CX-7f: a returned/refunded order surfaces Payment + Return status + Refund amount (the live gap)', () => {
     const gql = { data: { orders: { edges: [{ node: {
@@ -144,26 +146,53 @@ describe('renderConnectorLines — the chat lines', () => {
       tags: [],
     } }] } } };
     const text = renderConnectorLines(gql, { name: 'Look up a Shopify order' }).join('\n');
-    assert.match(text, /Payment: PARTIALLY_REFUNDED/);              // the return/refund state the coarse status hid
-    assert.match(text, /Return: 1 \(in progress\)/);               // returns connection unwrapped + status
-    assert.match(text, /Refunded: 86\.40 USD/);                    // refund amount (nested money in a list)
-    assert.match(text, /Tracking: FedEx 7712345/);
+    assert.match(text, /\*\*Payment:\*\* PARTIALLY_REFUNDED/);      // the return/refund state the coarse status hid
+    assert.match(text, /\*\*Return:\*\* 1 \(in progress\)/);       // returns connection unwrapped + status
+    assert.match(text, /\*\*Refunded:\*\* 86\.40 USD/);            // refund amount (nested money in a list)
+    assert.match(text, /\*\*Tracking:\*\* FedEx 7712345/);
   });
   it('caps a long list at 25 with a "+ N more" note (no silent truncation)', () => {
     const big = Array.from({ length: 30 }, (_, i) => ({ id: i, subject: `t${i}` }));
     const lines = renderConnectorLines({ results: big }, { name: 'X' });
-    assert.equal(lines.length, 1 + 25 + 1);                                  // header + 25 rows + the "+5 more"
-    assert.equal(lines[lines.length - 1], '… +5 more');
+    assert.equal(lines.length, 1 + 1 + 25 + 1 + 1);                          // header + blank + 25 rows + blank + "+5 more"
+    assert.equal(lines[lines.length - 1], '_+5 more_');
   });
   it('a single object → id/title/status + body + a user-facing url', () => {
     const lines = renderConnectorLines({ ticket: { id: 7, subject: 'Boom', status: 'open', description: 'It broke', html_url: 'https://x.com/t/7' } }, { name: 'Ticket' });
-    assert.equal(lines[0], '#7 Boom — open');
-    assert.equal(lines[1], 'It broke');
-    assert.equal(lines[2], 'https://x.com/t/7');
+    assert.equal(lines[0], '`#7` **Boom** — open');
+    assert.equal(lines[2], 'It broke');                                      // v1949 — lines[1] is the block-separating blank
+    assert.equal(lines[4], 'https://x.com/t/7');
   });
   it('nothing displayable → null (caller shows "Done.")', () => {
     assert.equal(renderConnectorLines({ ok: true }, {}), null);
     assert.equal(renderConnectorLines(null, {}), null);
+  });
+});
+
+// v2.74.1949 — THE RENDER IS TESTABLE, NOT EYEBALL-ONLY. renderConnectorLines + renderMarkdown are both pure, so
+// "does the reply render as styled markdown (a <ul> with <code> id chips + <strong> titles) rather than literal ** / -"
+// is a harness assertion — the exact thing that used to need a live panel look. Only the CSS STYLING of this HTML and
+// the live LLM path remain a live-eye concern.
+describe('renderConnectorLines → renderMarkdown — styled HTML, not literal syntax', () => {
+  it('a list becomes a real <ul> with <code> id chips + <strong> titles; no literal ** or "- `" leaks', () => {
+    const html = renderMarkdown(renderConnectorLines({ results: [{ id: 1, subject: 'A', status: 'open' }, { id: 2, subject: 'B', status: 'open' }] }, { name: 'My open tickets' }).join('\n'));
+    assert.match(html, /<strong>My open tickets<\/strong>/, 'bold header');
+    assert.match(html, /<ul class="md-ul">/, 'a real list, not literal dashes');
+    assert.match(html, /<code[^>]*>#1<\/code>/, 'the id is a monospace chip');
+    assert.match(html, /<strong>A<\/strong>/, 'the title is bold');
+    assert.doesNotMatch(html, /\*\*/, 'no raw bold markers survive');
+    assert.doesNotMatch(html, />\s*- `/, 'no raw list-dash survives');
+  });
+  it('the single-record render becomes bold head + a <ul> of **Label:** fields', () => {
+    const html = renderMarkdown(renderConnectorLines({ ticket: { id: 7, subject: 'Boom', status: 'open', description: 'It broke', assignee: 'Kim' } }, { name: 'Ticket' }).join('\n'));
+    assert.match(html, /<code[^>]*>#7<\/code>/);
+    assert.match(html, /<strong>Boom<\/strong>/);
+    assert.match(html, /<li>.*Assignee.*<\/li>/s);   // a salient field rendered as a list item
+  });
+  it('injected markdown/HTML in UNTRUSTED data renders inert (no <img>, no data-driven <strong>)', () => {
+    const html = renderMarkdown(renderConnectorLines({ results: [{ id: 1, subject: '**PWNED** <img src=x onerror=alert(1)>', status: 'ok' }, { id: 2, subject: 'safe', status: 'ok' }] }, { name: 'X' }).join('\n'));
+    assert.doesNotMatch(html, /<img/, 'HTML escaped by renderMarkdown');
+    assert.doesNotMatch(html, /<strong>PWNED<\/strong>/, 'data cannot inject emphasis (escMd)');
   });
 });
 
@@ -213,10 +242,10 @@ describe('CX-9c — vocabulary-less rows (VendorSuite shape) render their real f
 
   it('renderConnectorLines: a MULTI-row list shows real fields, never "(no title)"', () => {
     const lines = renderConnectorLines([ROW(), ROW({ TaskNumber: '4090741', AddressLine1: '456 Oak Ave' })], { name: 'Warranty tasks' });
-    assert.equal(lines.length, 3);             // header + 2 rows
-    assert.match(lines[1], /#4090740/);
-    assert.match(lines[1], /3955 Gallery Chase/);
-    assert.doesNotMatch(lines[1], /\(no title\)/);
+    assert.equal(lines.length, 4);             // header + blank + 2 rows (v1949)
+    assert.match(lines[2], /#4090740/);
+    assert.match(lines[2], /3955 Gallery Chase/);
+    assert.doesNotMatch(lines[2], /\(no title\)/);
   });
 
   it('itemLabels: fan-out labels carry the fields fallback too', () => {
@@ -436,10 +465,10 @@ describe('CX-9k (v2.74.1617) — recipe-declared displayId: the HUMAN row id win
   });
   it('renderConnectorLines threads displayId into list rows AND the single-record head', () => {
     const lines = renderConnectorLines({ results: [{ ...ROW }, { ...ROW, TicketId: 555 }] }, { name: 'Tasks', displayId: ['TicketId'] });
-    assert.ok(lines[1].startsWith('• #4867009 '), lines[1]);
-    assert.ok(lines[2].startsWith('• #555 '), lines[2]);
+    assert.ok(lines[2].startsWith('- `#4867009` '), lines[2]);   // v1949 — lines[1] is the blank block-separator
+    assert.ok(lines[3].startsWith('- `#555` '), lines[3]);
     const single = renderConnectorLines({ results: [{ ...ROW }] }, { name: 'Task', displayId: ['TicketId'] });
-    assert.ok(single[0].startsWith('#4867009'), single[0]);
+    assert.ok(single[0].startsWith('`#4867009`'), single[0]);
   });
 });
 
@@ -561,6 +590,6 @@ describe('primaryList — the Shopify order TIMELINE shape (v1921, pinned on the
     const text = renderConnectorLines(TIMELINE, { name: 'Shopify order timeline', displayId: ['message'] }).join('\n');
     assert.match(text, /created this order for/);
     assert.doesNotMatch(text, /StaffMember|83662733446/);
-    assert.doesNotMatch(text, /• #/);
+    assert.doesNotMatch(text, /`#/);                        // v1949 — no code-span # sigil on a prose row
   });
 });
