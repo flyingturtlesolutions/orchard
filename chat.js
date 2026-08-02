@@ -6056,6 +6056,15 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
   // v2.74.1858 — THE live case (gl 121742): two `INVOKE ▸ → FAIL Failed to fetch` legs whose failure never
   // reached the ledger, so the turn's receipt claimed "nothing failed". A leg that failed IS the turn failing.
   if (!res || res.success === false) { _ledgerError(); return { ok: false, error: res && res.error, hint: res && res.hint, detail: res && res.detail }; }
+  // FC-8 (v2.74.1963) — PIN WHERE A READ RETURNS, NOT WHERE IT RENDERS. v1959 wired one render site, v1962 wired
+  // four, and live 20:43 the DECOMPOSED child still pinned nothing: the chain path collects values through
+  // _chainConnectorRun -> _runConnectorLeg and never renders per-clause, so NO render site could ever have
+  // covered it. Rendering is a DISPLAY concern; pinning is about what was READ. This is the one choke point
+  // every caller shares (_ilRunBuiltin, _chainConnectorRun x3, the each fan-out), so coverage stops being a
+  // function of how many call sites I happened to notice — the blind spot that cost two passes and two
+  // partially-true PASSes. Reads only: a write result is not a referent, and pinning one would let a later
+  // demonstrative bind to a mutation instead of to a record.
+  try { if (!leg || !leg.tool || leg.tool.write !== true) _pinReadFocus(leg, res.value); } catch { /* focus is an assist; never fail a delivered read over it */ }
   return { ok: true, value: res.value };
 }
 
@@ -6134,12 +6143,21 @@ function _pinReadFocus(leg, value) {
   // FC-6's own FAIL arm a label naming something not in the read is a failure. `displayId` exists precisely to
   // declare which field IDENTIFIES a row (ups_track: ['trackingNumber']) and the renderer already honours it —
   // the pin was the one consumer that didn't. Declared identity beats guessed identity, always.
+  // v2.74.1962 — HUMAN NAME first, THEN the declared id. v1960 put `displayId` first and that was half right:
+  // it rescued UPS (trackingNumber IS what a person calls a package) and regressed Shopify customers, which
+  // declare `displayId: ['email']` — so live 20:37 pinned an email where 20:12 had pinned "Divine Monkam".
+  // The two fields answer different questions: `displayId` names the field that IDENTIFIES a row for joins and
+  // URL dereferencing, while a focus LABEL is read by a person deciding what "that customer" means. Conflating
+  // them cost a good label. Name-ish wins when present, declared id saves the rows that have no name, and
+  // email/id remain the last resort — which yields "Divine Monkam" AND the tracking number, not one or the other.
   const _ids = _legDisplayId(leg) || [];
   const _lbl = (r) => {
     if (!r || typeof r !== 'object') return '';
+    const _human = String((r.name || r.title || r.label || r.displayName
+      || [r.firstName, r.lastName].filter(Boolean).join(' ')) || '').trim();
+    if (_human) return _human;
     for (const k of _ids) { const v = r[k]; if (v != null && String(v).trim()) return String(v).trim(); }
-    return String((r.name || r.title || r.label || r.displayName
-      || [r.firstName, r.lastName].filter(Boolean).join(' ') || r.email || r.id) || '').trim();
+    return String((r.email || r.id) || '').trim();
   };
   let entry = null;
   if (rows.length === 1) {
@@ -12916,7 +12934,6 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       // flow ever pinned, so a generic ride read left the working set empty and bindReferent() was handed
       // nothing. `clarify` was the honest output of an empty focus — the referent stage was never at fault.
       // "search for X" then "get their most recent order" is the most ordinary two-step a person types.
-      try { _pinReadFocus(leg, res.value); } catch { /* focus is an assist; never fail a delivered answer over it */ }
       return true;
     }
   }
