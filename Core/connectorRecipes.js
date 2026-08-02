@@ -958,15 +958,26 @@ export const CONNECTOR_RECIPES = [
   //   · CSRF HEADER NAME: UPS sends `x-xsrf-token`, not `x-csrf-token`. The sniff mechanism was hardcoded to one
   //     spelling and was therefore structurally blind to this entire site; the tees now watch every known
   //     spelling and `csrfHeader` declares which one to SEND.
-  // No cookies ride the cross-origin API host in the capture — the xsrf token is the auth, which is exactly the
-  // `csrf: 'sniff'` shape (captured off the SPA's own traffic, never curated, never model-supplied).
-  { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token',
+  // v2.74.1954 — CORRECTION. This block previously read "No cookies ride the cross-origin API host in the
+  // capture — the xsrf token is the auth". That was wrong and load-bearing: the HAR is Chrome-SANITIZED (zero
+  // Cookie and zero Set-Cookie across all 1775 entries, on every host including analytics), so it shows redaction,
+  // not absence. Cookies do ride — `credentials:'include'` is unconditional at contentScript.js and
+  // www.ups.com→webapis.ups.com is same-site. Do not re-reason from "the token is the auth"; it is a double-submit
+  // scheme, and UPS's own analytics beacons carry `cp.X-XSRF-TOKEN-ST`, i.e. the SPA READS that cookie and echoes
+  // it into the header. Header-sniffing sees only the echo, and only while the app is firing requests.
+  // ALSO: this host runs TWO ASP.NET apps with SEPARATE key rings — /track/api tokens prefix CfDJ8Jcj9Ghl…,
+  // /ship/api tokens prefix CfDJ8E_X1zdo… — and a ship token cannot decrypt at track. The bank keys on origin
+  // alone (`rideCsrf:${origin}`), so the two collide in one slot. A token sniffed here may belong to the wrong app.
+  { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token', csrfCookie: 'X-XSRF-TOKEN-ST',
     contentType: 'application/json', verifyIdentity: false, write: false,   // a plain-JSON POST that READS (v1936: the catalog's first — see rideRecipe hop 1)
     id: 'ups_track', name: 'Track a UPS package', displayId: ['trackingNumber'], listPath: 'trackDetails', itemUrl: '/track?tracknum={tracking}&loc=en_US',
     does: 'TRACK a UPS package by its tracking number (1Z…): current status, delivery date/time, who signed for it, where it was left, and the full scan history city by city. Use for "where is / did it arrive / what happened to" a shipment — the tracking number comes from the order or shipment record',
     endpoint: '/track/api/Track/GetStatus?loc=en_US',
-    // Body verbatim from the capture (entry 1673, a SUCCESSFUL track); TrackingNumber is an ARRAY — the API takes
-    // several at once, and v1 fills exactly one so the answer is about the package the user named.
+    // v2.74.1954 — CORRECTION: this said "verbatim from the capture (entry 1673)". It is not. Entry 1673 carries a
+    // 5-field body with a different ClientUrl; this is the entry-1545 field set with a hand-edited ClientUrl that
+    // matches no captured call. Harmless so far, but "verbatim" invites trusting it over the HAR — it is not a
+    // transcript. TrackingNumber is an ARRAY (the API takes several); v1 fills exactly one so the answer is about
+    // the package the user named.
     body: { Locale: 'en_US', TrackingNumber: ['{tracking}'], isBarcodeScanned: false, Requester: 'quic', ClientUrl: 'https://www.ups.com/track?loc=en_US&requester=QUIC/trackdetails', returnToValue: '', AssociatedBcdnNumber: null },
     // Response: { statusCode, trackedDateTime, trackDetails: [ { trackingNumber, packageStatus:'Delivered',
     //   packageStatusType:'D', deliveredDateDetail, receivedBy:'PETE', leftAt:'Dock', milestones[5],
@@ -977,7 +988,7 @@ export const CONNECTOR_RECIPES = [
 
   // The LIST leg and the ground's CANARY: params-free, so the daily visit has something safe to run (the LEG-1
   // discipline — a ground whose every read needs a param sits drift-blind between real uses).
-  { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token',
+  { app: 'ups', appHost: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', csrf: 'sniff', csrfHeader: 'x-xsrf-token', csrfCookie: 'X-XSRF-TOKEN-ST',
     contentType: 'application/json', verifyIdentity: false, write: false,   // a plain-JSON POST that READS (v1936: the catalog's first — see rideRecipe hop 1)
     id: 'ups_recent', name: 'Recently tracked UPS packages', displayId: ['trackingNumber'], listPath: 'recentlyTrackedData', listUrl: '/track?loc=en_US',
     pulse: { kind: 'liveness' }, coverage: 'selection',

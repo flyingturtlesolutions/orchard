@@ -6316,6 +6316,22 @@ var MESSAGE_HANDLERS = {
           sendResponse({ success: false, error: 'write-needs-confirm' }); return;
         }
         const headers = Object.assign({ Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, (payload && payload.headers) || {});
+        // v2.74.1955 — SOURCE THE CSRF TOKEN FROM THE COOKIE when the recipe declares one. Proven live
+        // 2026-08-02 18:41 on www.ups.com/track: `X-XSRF-TOKEN-ST` is readable here, a POST carrying it returns
+        // 200, and the identical POST with no token returns 401 — so 401 was "wrong/absent token", not headers
+        // and not cookies. This runs ON the page, which is the only context that can read document.cookie.
+        // It WINS over the sniffed header value deliberately: the sniffed one is a retained echo that may be
+        // stale, or may belong to a different app on the same host (webapis.ups.com fronts /track and /ship under
+        // separate key rings), whereas the cookie is current and named per-app. Falls through silently when the
+        // cookie is absent (HttpOnly/path-scoped) so the sniffed token remains the fallback, not a hard failure.
+        if (payload && payload.csrfCookie) {
+          try {
+            const _want = String(payload.csrfCookie);
+            const _hit = document.cookie.split('; ').find((c) => c.slice(0, c.indexOf('=')) === _want);
+            const _val = _hit ? _hit.slice(_hit.indexOf('=') + 1) : '';
+            if (_val) headers[String(payload.csrfHeader || 'x-csrf-token').toLowerCase()] = _val;
+          } catch { /* cookie access can throw in exotic contexts — the sniffed token still rides */ }
+        }
         let fetchBody;
         if (method !== 'GET' && method !== 'HEAD') {
           // CX-6 (write) — read the CSRF token straight off the live page's DOM (the content script is ON the page —
@@ -6352,7 +6368,20 @@ var MESSAGE_HANDLERS = {
         const text = await res.text();
         let value = null, isJson = false;
         try { value = JSON.parse(text); isJson = true; } catch { /* non-JSON body */ }
-        if (!res.ok) { sendResponse({ success: false, error: `http-${res.status}`, json: isJson }); return; }
+        // v2.74.1954 — KEEP WHAT THE SERVER SAID. `text` and `res.headers` are already in hand and were thrown
+        // away here, so in four hours of diagnosing a 401 we never once saw UPS's own explanation of it — the
+        // single most informative artifact available, discarded one line after being read. `www-authenticate`
+        // names the challenging layer (edge vs app), which is exactly the distinction the 401 turns on.
+        // Bounded to 300 chars and only on FAILURE, so this cannot become a body-logging channel.
+        if (!res.ok) {
+          sendResponse({
+            success: false, error: `http-${res.status}`, json: isJson,
+            serverSaid: typeof text === 'string' ? text.slice(0, 300) : null,
+            wwwAuth: res.headers.get('www-authenticate') || null,
+            contentType: ct.slice(0, 60),
+          });
+          return;
+        }
         // A 2xx that isn't JSON on a JSON endpoint is a login / Cloudflare-challenge HTML page (CS Tools lesson) —
         // not a real result. Don't pass it back as a misleading success (it would parse-error or read as junk).
         if (!isJson) { sendResponse({ success: false, error: 'non-json', status: res.status, contentType: ct.slice(0, 60), hint: 'login or challenge page?' }); return; }

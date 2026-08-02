@@ -357,6 +357,14 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       apiHost: _str(r.apiHost) || null,
       listPath: _str(r.listPath) || null,   // v1936 — where this response's ROWS live, when heuristics can't reach them (a status envelope)
       csrfHeader: _str(r.csrfHeader) || null,
+      // v2.74.1955 — CSRF FROM THE COOKIE. Proven live 2026-08-02 18:41: `X-XSRF-TOKEN-ST` is readable from
+      // document.cookie, a request carrying it returns 200, and the identical request with NO token returns 401 —
+      // so 401 is this endpoint's "bad or missing token" and our failures were a wrong-token problem, not a
+      // headers or cookies problem. Header-sniffing only ever sees the SPA's ECHO of this cookie, and only while
+      // the app happens to be firing requests; worse, it cannot tell two apps apart on one host (webapis.ups.com
+      // serves /track and /ship under SEPARATE data-protection key rings, and a ship token cannot decrypt at
+      // track). The cookie NAME differs per app, so a cookie-sourced token is app-correct BY CONSTRUCTION.
+      csrfCookie: _str(r.csrfCookie) || null,
       shopProbe: r.shopProbe === true,             // CX-7c — run the `{shop{name}}` liveness probe before the call
       requestHeaders: (r.requestHeaders && typeof r.requestHeaders === 'object') ? r.requestHeaders : null,
     },

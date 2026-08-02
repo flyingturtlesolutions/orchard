@@ -116,7 +116,7 @@ function _planExec(leg, params = {}, ctx = {}) {
                           // write-needs-confirm [ups_recent]`, live). `mode` is the leg's own verdict:
                           // 'ask' means recipeToLeg already applied the §9 rules, so passing it is not a
                           // second opinion — it is the FIRST one, arriving where it is enforced.
-                          apiHost: t.apiHost || null, csrfHeader: t.csrfHeader || null,
+                          apiHost: t.apiHost || null, csrfHeader: t.csrfHeader || null, csrfCookie: t.csrfCookie || null,
                           readOnly: mode === 'ask',
                           shopProbe: t.shopProbe === true,      // CX-7c — `{shop{name}}` liveness probe before the call
                           // §18 — the arm guard checks the per-Ground recipe at INVOKE_SESSION. v2.74.1340 (review A):

@@ -104,7 +104,7 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   // v2.74.1936 — `apiHost` (the API lives on a SIBLING host of the ride tab — UPS: page www.ups.com, API
   // webapis.ups.com) and `csrfHeader` (the token's header NAME differs per site — UPS sends x-xsrf-token).
   // Both are mechanical transport markers, so they ride hop 1 with the rest (Invariant #3).
-  for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'probeAccept', 'persistedOp', 'csrf', 'csrfHeader', 'apiHost', 'listPath', 'autoRequires', 'capClass', 'displayId', 'joinKey', 'writeMap']) {   // DK-2 — capClass:'presence' survives the seeded path too; CP-1 — probeAccept (json-liveness) rides the seeded path; CX-9k — displayId (the human row-id keys) rides too (Invariant #3 hop 1)
+  for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'probeAccept', 'persistedOp', 'csrf', 'csrfHeader', 'csrfCookie', 'apiHost', 'listPath', 'autoRequires', 'capClass', 'displayId', 'joinKey', 'writeMap']) {   // DK-2 — capClass:'presence' survives the seeded path too; CP-1 — probeAccept (json-liveness) rides the seeded path; CX-9k — displayId (the human row-id keys) rides too (Invariant #3 hop 1)
     if (e[k] != null && e[k] !== '') rec[k] = e[k];
   }
   if (e.requestHeaders && typeof e.requestHeaders === 'object') rec.requestHeaders = e.requestHeaders;

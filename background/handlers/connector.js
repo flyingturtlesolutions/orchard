@@ -1079,6 +1079,11 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             const _csrfHdr = String((payload && payload.csrfHeader) || 'x-csrf-token').toLowerCase();
             extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { [_csrfHdr]: csrfTok } : {}) } };
             _sentCsrf = !!csrfTok;
+            // v2.74.1955 — hand the CONTENT SCRIPT the cookie name so it can source the token itself. It runs ON
+            // the page and can read document.cookie; the SW cannot. A cookie-sourced token beats a sniffed one on
+            // both axes that have bitten us: it is always CURRENT (no retained/stale capture) and it is
+            // APP-CORRECT (the name is per-app, so the /track and /ship key rings can no longer collide).
+            if (payload && payload.csrfCookie) extra = { ...extra, csrfCookie: String(payload.csrfCookie), csrfHeader: _csrfHdr };
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
           _mark('fetch');
@@ -1099,6 +1104,16 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               tok2 = await _acquireSniffedCsrf(tab.id, origin, { force: true, wake: true });
             } else {
               try { Logger.info('ride', `INVOKE ▸ csrf-cold — sniff dry, fast-fail [${payload.recipeId || ''}] (no second wake)`); } catch { /* */ }
+            }
+            // v2.74.1954 — THE RE-MINT MUST ACTUALLY BE A RE-MINT. v1952's page-world recovery made `force:true`
+            // meaningless: the acquire falls through to `__ahubCsrfLast` and returns the SAME RETAINED value, so
+            // the "retry" re-sent the token that had just been rejected. Live 17:49 the three recoveries logged
+            // ages 969/980/991s — one capture from 17:33:13, read three times. Consequence: across a whole day of
+            // 401/no-csrf failures a FRESH token was never once tested, so the staleness hypothesis was never
+            // actually under test. Requiring a DIFFERENT value restores the control this ladder is supposed to be.
+            if (tok2 && tok2 === csrfTok) {
+              try { Logger.info('ride', `INVOKE ▸ csrf re-mint returned the SAME token — not retrying (idle page, nothing fresh to capture) [${payload.recipeId || ''}]`); } catch { /* */ }
+              tok2 = null;
             }
             if (tok2) {
               csrfTok = tok2;
@@ -1178,7 +1193,11 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             // (`121 ok, 0 failed, 22 row(s)`), and a FAILURE still logs individually — which is the only part a
             // roll-up cannot express.
             if (!(payload && payload.quiet && _ok)) {
-              Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${_ok ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}`);
+              // v2.74.1954 — carry the SERVER's own words on a failure (contentScript now returns them). A whole
+              // day of 401 diagnosis ran without ever seeing what UPS actually said; `www-authenticate` names the
+              // challenging layer, which is the edge-vs-app distinction the 401 turns on. Failure path only.
+              const _said = (!_ok && reply) ? `${reply.wwwAuth ? ` auth="${String(reply.wwwAuth).slice(0, 60)}"` : ''}${reply.serverSaid ? ` said="${String(reply.serverSaid).replace(/\s+/g, ' ').slice(0, 140)}"` : ''}` : '';
+              Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${_ok ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}${_said}`);
               // v2.74.1872 — the KEYS-ONLY shape of what came back. `object{2}` above says a fetch succeeded and
               // nothing about its structure, which is why "correct fetch, wrong field reaches prose" kept getting
               // diagnosed as a routing bug — the one stage with no instrument absorbs the blame. Paths + leaf TYPES
