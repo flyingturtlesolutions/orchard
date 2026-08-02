@@ -197,30 +197,10 @@ textarea {
   gap: var(--sp-2);
 }
 
-.app-brand {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex: 1;
-  justify-content: center;
-}
-
-.app-brand-mark {
-  font-size: 16px;
-  color: var(--c-accent);
-  font-weight: 600;
-}
-
-.app-brand-name {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  color: var(--c-text-muted);
-}
-
 .app-header-actions {
   display: flex;
   gap: var(--sp-1);
+  margin-left: auto;
 }
 
 /* v2.71.7 — Running-invocations transport bar.
@@ -1716,7 +1696,11 @@ textarea {
 .rail-tab.active { color: var(--c-text); border-bottom-color: var(--c-accent, #378ADD); }
 .rail-tab:focus-visible { outline: 2px solid var(--c-accent, #378ADD); outline-offset: 2px; border-radius: 2px; }
 /* the automations panel shares the list layout; a hidden tabpanel takes no space */
-.rail-automations[hidden] { display: none; }
+/* v2.74.1941 — a hidden tabpanel must actually hide: .rail-list sets display:flex, which OVERRODE the UA
+   [hidden]{display:none} by specificity, so the Conversations panel (#rail-list) stayed visible on the
+   Automations tab. This rule (higher specificity than .rail-list) restores it for BOTH panels (both carry
+   the .rail-list class). */
+.rail-list[hidden] { display: none; }
 .rail-automations-empty { padding: var(--sp-4) var(--sp-3); font-size: 12px; color: var(--c-text-subtle); line-height: 1.5; }
 .rail-auto-group { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-text-subtle); padding: var(--sp-2) var(--sp-2) 2px; }
 
@@ -3141,9 +3125,9 @@ textarea {
 .foreach-iteration-row.error   .step-icon { color: var(--c-x-error); }
 
 /* ── v2.74.1505 — the IL glyph THINKS while a request is in flight ─────────────────────────────────────────────
-   A+B: the in-flight bubble's ◈ facet-cycles (◇→◈→◆) + the avatar softly pulses; C: the header brand mark pulses
-   whenever ANY run is live (the active bubble may be scrolled away). Marked at the long-run entries, cleared at
-   _orchFinalize / every chain exit (chat.js _ilBusy). Reduced motion → a static dimmed glyph, no animation. */
+   The in-flight bubble's ◈ facet-cycles (◇→◈→◆) and the avatar softly pulses. Marked at the long-run entries,
+   cleared at _orchFinalize / every chain exit (chat.js _ilBusy). Reduced motion → a static dimmed glyph, no
+   animation. (v2.74.1934 — the header brand mark went away with the app label, so its mirror pulse is gone.) */
 .message.assistant .message-avatar.il-busy,
 .message.thinking .message-avatar.il-busy {
   position: relative;
@@ -3161,9 +3145,6 @@ textarea {
   color: #fff;
   animation: il-facet 1.26s steps(1, end) infinite;
 }
-.app-brand-mark.il-busy {
-  animation: il-pulse 1.26s ease-in-out infinite;
-}
 @keyframes il-facet {
   0%   { content: '◇'; }
   33%  { content: '◈'; }
@@ -3177,8 +3158,7 @@ textarea {
   .message.assistant .message-avatar.il-busy,
   .message.thinking .message-avatar.il-busy,
   .message.assistant .message-avatar.il-busy::before,
-  .message.thinking .message-avatar.il-busy::before,
-  .app-brand-mark.il-busy { animation: none; opacity: 0.7; }
+  .message.thinking .message-avatar.il-busy::before { animation: none; opacity: 0.7; }
 }
 
 /* ── v2.74.1509 — delete a saved custom desk from the gallery ("Your desks") ──────────────────────────────────── */
