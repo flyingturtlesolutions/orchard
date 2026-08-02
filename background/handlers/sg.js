@@ -18,6 +18,7 @@ import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tie
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
 import { CONNECTOR_RECIPES, fillEndpoint, isReadOnlyGql } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection; CX-9o — fillEndpoint derives the section-nav pages; RH-1c — the heal apply re-validates a gql recipe's document is a READ
+import { absentTargetLegs } from '../../Core/unconnectedCapability.js';   // UC-1 (v2.74.1957) — the target ground has armed legs this conversation cannot see
 import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads, armable as rideArmable, curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI); CX-9r — catalog-armed origins from open tabs
 import { groundVocabIndex } from '../../Core/rideVocab.js';   // CX-9q (v1462) — DOMAIN-MATCH vocab with HOST-level distinctiveness (a dup ground reinforces, never annihilates)
 import { DRIVE_ARTIFACTS, seedFromCatalog as seedDriveFromCatalog, mergeArtifacts as driveMergeArtifacts, seededDriveLegs, buildDriveFragment, buildDriveStrategy } from '../../Core/driveArtifacts.js';   // HL-1 (v2.74.1454) — the BUILT-IN DRIVE catalog (heterogeneous legs: ride answers, drive shows) + hydrate-on-first-use builders
@@ -1840,6 +1841,37 @@ export function createSgMessageHandlers(ctx) {
           const _scopeStr = Object.entries(_byScope).map(([s, n]) => `${s}:${n}`).join(' ');
           Logger.info('background', `PALETTE ▸ ${retrieved.length} leg(s) — rag:${ragLegs.length} conn:${connLegs.length} ride[${_scopeStr || '—'}] broker:${brokerLegs.length} fleet:${fleetLegs.length} panel:${panelOfferedLegs().length}${composeLeg ? ' compose:1' : ''}`);
         } catch { /* never block interpret on its own observability */ }
+        // UC-1 (v2.74.1957) — THE TARGET GROUND HAS ARMED LEGS THAT ARE ABSENT FROM THIS PALETTE.
+        // Live 19:11: TARGET resolved www.ups.com (TR-4/tab visitor), the ground had two armed legs, the
+        // conversation did not carry the connection, so they never projected and the router answered `navigate`
+        // at conf 0.95 — opening the tracking page instead of tracking, with nothing said about why. A wrong ACT
+        // gets noticed; this plausible DOWNGRADE does not, and it teaches the user the feature half-works.
+        // Cheap-first by construction: the palette membership test is a scan of what we already have, and the
+        // storage reads only happen in the rare case where the target ground contributed NOTHING.
+        let unconnected = null;
+        // v2.74.1958 — DISABLED, and the reason is the bug. Live 19:38 it fired on a turn with `PALETTE ▸ 120 ·
+        // conn:50` whose very next line was `→ act leg=me.ups.ups_track` → `ok list[1]`: the legs were present,
+        // used, and successful, and the detector called them absent. It fired on EVERY turn.
+        // ROOT CAUSE: `groundId` here is the AMBIENT ground (active tab / conversation), not the ask's
+        // TARGET-resolved ground. `leg.tool.groundId` is set correctly (connectorRecipes.js:1282); I compared it
+        // against the wrong ground, so whenever the active ground differed from the ground owning the palette's
+        // ride legs — the normal case with several connections — nothing matched and it reported "absent".
+        // A false-positive nag on every turn is strictly worse than the silence it was built to fix: the note
+        // would appear next to answers that WORKED, which teaches users to ignore it, and an honest warning
+        // people have learned to skip is worse than no warning at all. Inert until it reads the TARGET ground
+        // (the value behind `TARGET ▸ tier=…`), which is a different variable than this one.
+        const UC1_ENABLED = false;
+        try {
+          if (UC1_ENABLED && groundId && !retrieved.some((l) => String((l && (l.groundId || (l.tool && l.tool.groundId))) || '') === groundId)) {
+            const _gs = await StorageManager.getAllGrounds();
+            const _g = (_gs || []).find((g) => g && g.id === groundId);
+            const _origin = String((_g && (_g.origin || _g.url)) || '');
+            const _recs = _origin ? await _readRideRecipesMerged(groundId, _origin) : [];
+            unconnected = absentTargetLegs({ groundId, paletteLegs: retrieved, armedRecipes: (_recs || []).filter((r) => r && rideArmable(r)) });
+            if (unconnected) unconnected.host = _origin;   // the panel names the SITE, not the ground id — a gnd_ hash means nothing to a reader
+            if (unconnected) Logger.info('background', `PALETTE ▸ UNCONNECTED — target ground has ${unconnected.count} armed leg(s) absent from this conversation (${unconnected.names.slice(0, 2).join(', ')}); the router will substitute unless the answer says so`);
+          }
+        } catch { /* detection is advisory — never fail an interpret over it */ }
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just
@@ -1879,7 +1911,7 @@ export function createSgMessageHandlers(ctx) {
         // whether this pick came from a warm recall vs a fresh vocab match — visible without cross-referencing the palette.
         let _pScope = ''; try { const _pl = retrieved.find((l) => l && legRef(l) === _pick); if (_pl && _pl.scope) _pScope = ` scope:${_pl.scope}`; } catch { /* */ }
         Logger.info('route', `INTERPRET_ASK "${_scrubHead(ask, 60)}" → ${decision.intent} leg=${_pick.slice(0, 60)}${_pNames ? ` params:{${_pNames}}` : ''}${_pScope} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
-        sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
+        sendResponse({ success: true, decision, groundId: groundId || null, retrieved, unconnected });   // UC-1 — the panel turns this into an honest sentence instead of a silent substitution
       } catch (err) {
         Logger.error('background', `INTERPRET_ASK failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

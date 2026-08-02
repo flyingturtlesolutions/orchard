@@ -55,6 +55,8 @@ import { contextSpecsFor, contextAskFor, contextAnswerLine, viaTargets } from '.
    // v1872 — "which division am I in right now" answered from the RESOLVER's defaultPath, not the shaper
 import { classifyQuery, partitionFields, findInRows, filterRows, scanCells, estimateScan, findVerdict, isReferentialQuery, noMatchLine, scanNegativeLine, MEASURED_MS_PER_READ } from './Core/corpusFind.js';   // v1887 — noMatchLine: the negative names the surface it searched; v1888 — scanNegativeLine: the same rule at the scan's two doors
 import { entityFor, coverageOf } from './Core/synthEntity.js';
+import { unconnectedNote } from './Core/unconnectedCapability.js';   // UC-1 (v2.74.1957) — say the capability exists but is not connected here, instead of substituting
+import { emptyResultNote } from './Core/sourceHorizon.js';   // HZ-1 (v2.74.1956) — an empty read past a source's retention window is "aged out", not "no such record"
 import { isExistentialAsk, isCollectiveAsk, existentialToken, askedMetric, superlativeAsk } from './Core/askScope.js';   // v1884 — "any/one/first" means anywhere, not the narrowest default; v1889 — askedMetric: a zero COUNT is as empty as zero rows
 import { rideCacheKey, makeRideCache } from './Core/rideCache.js';   // v1881 — the age-aware row cache: populate from every read, serve only where age cannot change the answer   // v1877 — the ENTITY the find generates from (drill block = entity graph) + partition-vs-selection   // v1875 — vs_task_find's pure half: query kind, field partition, scan cells, cost, verdict
 import { armable as rideArmable, hostRideInventory, formatHostRideInventory } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard; v1761 — TR-1 meta host inventory
@@ -4350,10 +4352,10 @@ const _MAP_AUTHY = /^(http-40[13]|session-expired|not-logged-in|timeout|network)
 // → the sentinel is appended and the value-param falls back to the first string param the leg bound.
 async function _mapResolveTarget(readAsk, tabId) {
   const probe = /\{value\}/i.test(readAsk) ? readAsk.replace(/\{value\}/gi, _MAP_SENTINEL) : `${readAsk} ${_MAP_SENTINEL}`;
-  let raw = null; let retrieved = []; let groundId = null;
+  let raw = null; let retrieved = []; let groundId = null; let unconnected = null;   // UC-1 (v2.74.1957)
   try {
     const r = await _orchReq('INTERPRET_ASK', { ask: probe, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
-    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
+    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; unconnected = r.unconnected || null; }
   } catch { return { leg: null, why: 'interpret-failed' }; }
   const d = raw ? applyConfidenceGate(normalizeInterpretDecision(raw, { retrieved }), { minConfidence: 0.6 }) : null;
   if (!d || d.intent !== 'act' || !d.capabilityId) return { leg: null, why: (d && d.why) || 'no-target-leg' };
@@ -4441,7 +4443,15 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
       }
     } else { rows = rowsFromValue(cr.value); srcLeg = cr.leg || null; }
   }
-  if (!rows.length) { _setMessageBody(msg, 'Nothing to read — the list came back empty.'); _orchFinalize(msg); return { ok: false }; }
+  // HZ-1 (v2.74.1956) — an empty read from a source with a RETENTION WINDOW is ambiguous, and the ambiguity
+  // favours the wrong reading: "came back empty" sounds like *no such record*, when past the horizon it means
+  // *the record aged out*. UPS keeps standard tracking ~120 days. Same family as searchWarnings' fails-open trap
+  // — a result whose SCOPE differs from the ask's is being reported as if it matched.
+  if (!rows.length) {
+    const _hz = emptyResultNote(srcLeg);   // srcLeg — the leg that PRODUCED these rows; `leg` is not in scope here
+    _setMessageBody(msg, `Nothing to read — the list came back empty.${_hz ? ` ${_hz}` : ''}`);
+    _orchFinalize(msg); return { ok: false };
+  }
 
   const cap = Math.max(1, Math.min(fr.cap || _MAP_WINDOW, rows.length));
   const capped = rows.length > cap;
@@ -6101,6 +6111,53 @@ function _priorForClause() {
   try { _orchLog(`FOCUS ▸ prior from focus — ${e.kind} "${e.label}" (${e.kind === 'list' ? `${e.rows.length} row(s)` : 'record'}, ${Math.max(0, Math.round((Date.now() - (e.at || 0)) / 1000))}s old) — the module prior died with the panel`); } catch { /* */ }
   return { value, leg };
 }
+// FC-6 (v2.74.1959) — a successful ride READ becomes the conversation's working set, so the next pronoun binds.
+//
+// Four rules, each protecting against a way this could be worse than the silence it replaces:
+//   · ZERO rows pin NOTHING. An empty read must never become a bindable referent, or "that customer" resolves to
+//     a hole and we answer confidently about nobody.
+//   · EXACTLY ONE row is a RECORD, not a list. A search that matched one customer IS that customer — structurally
+//     a list, semantically a record — and that mismatch is the whole live bug: `data.customers.edges[1]` was a
+//     single match nothing pinned.
+//   · The noun comes from `nounFromLeg`, so "that customer" / "that order" / "that ticket" each bind to the leg
+//     that produced them rather than to whatever was read most recently.
+//   · NOT `pinned: true`. A pinned entry is exempt from eviction; a read is ordinary working state and must age
+//     out normally, or a stale record outlives its relevance and quietly wins a later binding.
+function _pinReadFocus(leg, value) {
+  if (!leg || value == null) return;
+  const rows = (primaryList(value) || []).filter((r) => r && typeof r === 'object');
+  const noun = nounFromLeg(leg) || 'record';
+  // v2.74.1960 — THE RECIPE'S OWN `displayId` COMES FIRST. Live 20:13 a UPS read pinned the label "Track a UPS
+  // package" — the LEG's name, not the record's — because a trackDetails row carries none of the generic
+  // identity fields guessed at below, so it fell through to leg.name. A focus entry labelled with the capability
+  // instead of the thing is useless for binding ("that package" would match the tool, not the package), and by
+  // FC-6's own FAIL arm a label naming something not in the read is a failure. `displayId` exists precisely to
+  // declare which field IDENTIFIES a row (ups_track: ['trackingNumber']) and the renderer already honours it —
+  // the pin was the one consumer that didn't. Declared identity beats guessed identity, always.
+  const _ids = _legDisplayId(leg) || [];
+  const _lbl = (r) => {
+    if (!r || typeof r !== 'object') return '';
+    for (const k of _ids) { const v = r[k]; if (v != null && String(v).trim()) return String(v).trim(); }
+    return String((r.name || r.title || r.label || r.displayName
+      || [r.firstName, r.lastName].filter(Boolean).join(' ') || r.email || r.id) || '').trim();
+  };
+  let entry = null;
+  if (rows.length === 1) {
+    // v2.74.1960 — a RECORD's label must name the RECORD. If the row yields no identity (no displayId match, no
+    // generic field), pin NOTHING rather than falling back to the leg's name: an entry labelled with the
+    // capability cannot serve a referent — "that package" would match the tool, not the package — and a useless
+    // entry is worse than none, because it occupies the working set and can win a binding it cannot satisfy.
+    // A LIST is different and keeps `leg.name`: "Recently tracked UPS packages" genuinely names the collection.
+    const _rl = _lbl(rows[0]);
+    if (_rl) entry = focusRecordEntry({ label: _rl, noun, fields: rows[0], leg, at: Date.now() });
+  } else if (rows.length > 1) {
+    entry = focusListEntry({ label: leg.name || `${noun} results`, noun, rows, leg, at: Date.now() });
+  }
+  if (!entry) return;   // zero rows, or the entry helpers refused it (no label / no fields) — stay silent
+  _pushFocusEntry(entry);
+  try { _orchLog(`FOCUS ▸ pinned ${entry.kind} "${String(entry.label).slice(0, 40)}" (${noun}${entry.kind === 'list' ? `, ${rows.length} rows` : ''}) from [${(leg.tool && leg.tool.recipeId) || leg.key || '?'}]`); } catch { /* */ }
+}
+
 function _pushFocusEntry(entry, convId = null) {
   if (!entry) return;
   // FC-6 (v2.74.1586) — the focus write is FENCED to the conversation the ask was typed in: a slow read that
@@ -12852,6 +12909,14 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       const listBody = (lines && lines.length) ? lines.join('\n') : '';
       const body = (answer && listBody) ? `${answer}\n\n${listBody}` : (answer || listBody);
       _setMessageBody(msg, body || 'Done.', { markdown: true });   // v1949 — connector rows are markdown; render fresh == reload
+      // FC-6 (v2.74.1959) — PIN WHAT WE JUST READ, so the next pronoun has something to bind to.
+      // Live 19:49: "search Shopify for Divine Monkam" returned data.customers.edges[1] with id/name/email, and
+      // four seconds later "get the most recent order for that customer" → clarify. ZERO `FOCUS ▸` lines exist in
+      // the whole day's traces: Core/conversationFocus.js has the entire mechanism, but only the record-OPENING
+      // flow ever pinned, so a generic ride read left the working set empty and bindReferent() was handed
+      // nothing. `clarify` was the honest output of an empty focus — the referent stage was never at fault.
+      // "search for X" then "get their most recent order" is the most ordinary two-step a person types.
+      try { _pinReadFocus(leg, res.value); } catch { /* focus is an assist; never fail a delivered answer over it */ }
       return true;
     }
   }
@@ -13252,6 +13317,18 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   // site whose TRUE origin we hold — never navigate to a world-knowledge-minted domain (live: "on vendorsuite…" →
   // "Opened vendorsuite.com", a wrong guess; the site is vendorsuite.drhorton.com), and FOCUS the site's existing tab
   // instead of opening a duplicate (focusOnly — the live tab's page is never blown away).
+  // UC-1 (v2.74.1957) — DO NOT SUBSTITUTE SILENTLY. Live 19:11: the ask resolved to www.ups.com, that ground had
+  // two armed legs, the conversation did not carry the connection, and the router answered  at conf
+  // 0.95 — opening the tracking page instead of tracking, with nothing said about why. A wrong ACT is loud; this
+  // plausible DOWNGRADE is not, and it teaches the user the feature half-works rather than that it is unconnected
+  // HERE. Only fires when the target ground contributed NOTHING to the palette, so a normal navigate is untouched.
+  if (d.intent === 'navigate' && unconnected) {
+    const _n = unconnectedNote(unconnected, unconnected.host || '');   // sg.js stamps the target ground's own origin — never borrow a host from an unrelated palette leg
+    if (_n) {
+      try { _orchLog(`ROUTE ▸ navigate WITHHELD — ${unconnected.count} armed leg(s) on the target ground are absent from this conversation`); } catch { /* */ }
+      _setMessageBody(msg, _n, { markdown: true }); _orchFinalize(msg); return true;
+    }
+  }
   if (d.intent === 'navigate') {
     const t = (retrieved || []).find((c) => c && c.scope === 'target' && c.tool && (c.tool.origin || c.tool.appHost));
     if (t) {
@@ -16473,6 +16550,74 @@ try {
       }
     })();
     return true;   // async responder
+  });
+} catch { /* */ }
+// EX-3 (v2.74.1950) — DRAIN THE EXERCISE QUEUE. The sequence "reload, then run the asks" cannot be written as a
+// sequence, because the reload destroys the panel that would run them. So DEV_EXERCISE persists the intent and
+// this drains it on the other side of the restart — which is what lets a build verify itself with nothing outside
+// Chrome involved.
+//
+// Four bounds, each for a failure I would rather not debug later:
+//   · TTL — a queue from days ago must never wake up and drive a browser nobody is watching.
+//   · CLEARED FIRST — before dispatching, not after. A crash or a mid-drain reload would otherwise replay the
+//     queue on every boot forever, and an infinite self-driving loop is the worst bug this file could ship.
+//   · SERIAL + SPACED — awaits each turn, then waits past the v1553 duplicate-send belt (identical text inside 3s
+//     is swallowed). Firing them together would interleave engine runs and corrupt each other's DOM waits, which
+//     is the live-165125 failure that motivated the belt.
+//   · NO WRITES — asks only. Both write belts still refuse an unconfirmed write, so this cannot complete one; the
+//     bound here is against queueing a burst of them and burying the confirmations.
+const EXERCISE_QUEUE_KEY = 'devExerciseQueue';
+let _draining = false;
+async function _drainExerciseQueue() {
+  if (_draining) return;
+  _draining = true;
+  try {
+    const got = await chrome.storage.local.get(EXERCISE_QUEUE_KEY);
+    const q = got && got[EXERCISE_QUEUE_KEY];
+    await chrome.storage.local.remove(EXERCISE_QUEUE_KEY);        // clear BEFORE running — never replay
+    const asks = (q && Array.isArray(q.asks)) ? q.asks : [];
+    if (!asks.length) return;
+    if (!q.at || (Date.now() - q.at) > 10 * 60e3) {
+      try { _orchLog(`EXERCISE ▸ queue ABANDONED — ${asks.length} ask(s), older than 10m`); } catch { /* */ }
+      return;
+    }
+    const input = $('chat-input');
+    if (!input) { try { _orchLog('EXERCISE ▸ queue dropped — no composer'); } catch { /* */ } return; }
+    // v2.74.1951 — REPLAY THE PRE-RELOAD EVIDENCE. Live 16:58 both `queued`/`reload requested` lines were lost
+    // (racy unawaited Logger writes + a 200ms teardown), leaving 2 of 6 declared PASS markers permanently
+    // unsatisfiable for any restart-spanning check. The queue record itself was written with an AWAITED set, so
+    // it survived — re-log it here, after the boot, where nothing is racing.
+    try { _orchLog(`EXERCISE ▸ queued ${asks.length} ask(s)${q.reload ? ' + reload' : ''} at ${new Date(q.at).toISOString().slice(11, 19)}Z (replayed post-boot)`); } catch { /* */ }
+    const _conv = String(_currentConversationId || '');
+    try { _orchLog(`EXERCISE ▸ draining ${asks.length} queued ask(s) in conversation ${_conv || '?'}`); } catch { /* */ }
+    // v2.74.1951 — DEFECT 2, made LOUD rather than fixed. Live 16:58 the queue drained into
+    // `vtc_vt_presence_vendorsuite_…` — a VITALS incident case, not a work desk — giving `PALETTE ▸ 9` and a
+    // TR-7/teach target. The ask still routed correctly, which is the danger: a run in the wrong conversation
+    // produces evidence that LOOKS valid. Switching conversations means driving the Rail's state machine, which
+    // is a bigger change than this earns; until then the trace must say so, so a grader can mark it inconclusive
+    // instead of believing a palette that was never the intended one.
+    if (/^vtc_/.test(_conv) || _conv === 'ADMIN' || _conv === 'OVERVIEW') {
+      try { _orchLog(`EXERCISE ▸ WARNING — draining into a non-work conversation (${_conv}); its palette will NOT match a desk, so grade this run INCONCLUSIVE`); } catch { /* */ }
+    }
+    for (let i = 0; i < asks.length; i++) {
+      const ask = String(asks[i] || '').trim();
+      if (!ask) continue;
+      try { _orchLog(`EXERCISE ▸ ask ${i + 1}/${asks.length} — "${_scrubHead(ask, 60)}"`); } catch { /* */ }
+      input.value = ask;
+      try { await sendChatMessage(); } catch (e) { try { _orchLog(`EXERCISE ▸ ask ${i + 1} threw — ${String((e && e.message) || e).slice(0, 80)}`); } catch { /* */ } }
+      if (i < asks.length - 1) await new Promise((r) => setTimeout(r, 4000));   // > the 3s duplicate-send belt
+    }
+    try { _orchLog(`EXERCISE ▸ drain complete — ${asks.length} ask(s)`); } catch { /* */ }
+  } catch (e) {
+    try { _orchLog(`EXERCISE ▸ drain failed — ${String((e && e.message) || e).slice(0, 80)}`); } catch { /* */ }
+  } finally { _draining = false; }
+}
+// On boot (after the panel has settled) and on demand when no reload was involved.
+try { setTimeout(() => { void _drainExerciseQueue(); }, 3000); } catch { /* */ }
+try {
+  chrome.runtime.onMessage.addListener((m) => {
+    if (!m || m.type !== 'DEV_EXERCISE_DRAIN') return;
+    void _drainExerciseQueue();
   });
 } catch { /* */ }
 // VT-2b — one reconcile at boot: incidents opened while the panel was closed still mint their cases.
