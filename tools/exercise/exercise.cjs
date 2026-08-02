@@ -123,16 +123,38 @@ function evaluate(target, expression, { timeoutMs = 30000 } = {}) {
   });
 }
 
-/** The panel is the only context that can dispatch a turn, and the only one whose sendMessage reaches the SW. */
-async function panelTarget() {
+/** Every open Orchard panel. Plural on purpose — see panelTarget. */
+async function panels() {
   const { mine, id } = await targets();
-  const panel = mine.find((t) => t.type === 'page' && /chat\.html/i.test(String(t.url)));
-  if (!panel) {
+  return { id, mine, list: mine.filter((t) => t.type === 'page' && /chat\.html/i.test(String(t.url))) };
+}
+
+/**
+ * The panel is the only context that can dispatch a turn, and the only one whose sendMessage reaches the SW.
+ *
+ * v2.74.1957 — REFUSE WHEN THERE IS MORE THAN ONE. The id allow-list guarantees we only ever touch Orchard, but
+ * it cannot disambiguate WITHIN one id: the debugging port is per USER DATA DIR, and this machine has Orchard
+ * loaded in three profiles (Default, Profile 3, Profile 5) with four typically open at once. Every one of those
+ * panels answers to the same extension id, so `mine.find(...)` — take the first — could reload the right
+ * extension (reload is global) while dispatching the ask into the WRONG instance. The fleet trace would then show
+ * nothing and the run would look like a silent no-op. That is precisely the wrong-target class the allow-list
+ * exists to prevent, so it must fail LOUD rather than pick.
+ */
+async function panelTarget() {
+  const { id, mine, list } = await panels();
+  if (!list.length) {
     const seen = mine.map((t) => `${t.type} ${String(t.url).replace(`chrome-extension://${id}/`, '')}`).join(', ') || 'none';
     die('the Orchard side panel is not open (no chat.html target)',
       `open the side panel and retry — extension ${id}; targets seen: ${seen}`);
   }
-  return panel;
+  if (list.length === 1) return list[0];
+  const pick = process.env.ORCHARD_PANEL;
+  if (pick != null && list[Number(pick)]) return list[Number(pick)];
+  console.error(`\n  ✗ ${list.length} Orchard panels are open — refusing to guess which one to drive.\n`);
+  list.forEach((t, i) => console.error(`      [${i}] ${String(t.title || '(untitled)').slice(0, 40).padEnd(40)} ${t.id}`));
+  console.error('\n    Close the others, or name one:  ORCHARD_PANEL=<n> node tools/exercise/exercise.cjs …');
+  console.error('    (chrome://version in each window shows its Profile Path, if you need to tell them apart.)\n');
+  process.exit(1);
 }
 
 const send = (msg) => `chrome.runtime.sendMessage(${JSON.stringify(msg)})`;
@@ -143,8 +165,14 @@ async function cmdStatus() {
   console.log(`  extension ${id}`);
   if (!mine.length) return die('no Orchard targets — is the extension loaded in this Chrome profile?');
   for (const t of mine) console.log(`    · ${t.type.padEnd(15)} ${String(t.url).replace(`chrome-extension://${id}/`, '')}`);
-  const panel = mine.find((t) => t.type === 'page' && /chat\.html/i.test(String(t.url)));
-  if (!panel) { console.log('\n  panel     CLOSED — `ask` and `reload` need it open\n'); return; }
+  // v2.74.1957 — report ALL panels, not the first. On a multi-profile machine "the panel" is not a thing.
+  const open = mine.filter((t) => t.type === 'page' && /chat\.html/i.test(String(t.url)));
+  if (!open.length) { console.log('\n  panel     CLOSED — `ask` and `reload` need it open\n'); return; }
+  if (open.length > 1) {
+    console.log(`\n  panels    ${open.length} OPEN — reload is global, but ask/exercise would need ORCHARD_PANEL=<n>:`);
+    open.forEach((t, i) => console.log(`     [${i}] ${String(t.title || '(untitled)').slice(0, 40).padEnd(40)} ${t.id}`));
+  }
+  const panel = open[0];
   const v = await evaluate(panel, 'chrome.runtime.getManifest().version', { timeoutMs: 5000 });
   console.log(`\n  live      v${v}`);
   console.log(`  repo      v${manifest().version}`);
