@@ -1860,17 +1860,52 @@ export function createSgMessageHandlers(ctx) {
         // would appear next to answers that WORKED, which teaches users to ignore it, and an honest warning
         // people have learned to skip is worse than no warning at all. Inert until it reads the TARGET ground
         // (the value behind `TARGET ▸ tier=…`), which is a different variable than this one.
-        const UC1_ENABLED = false;
+        // UC-2 (v2.74.1966) — RE-ENABLED, reading the TARGET ground this time.
+        // UC-1 (v1957) compared the AMBIENT ground (active tab / conversation) against the palette, so whenever
+        // the active ground differed from the ground owning the palette's ride legs — the normal case with
+        // several connections — nothing matched and it fired on EVERY turn, including turns whose very next line
+        // was a successful invoke. Its own FAIL arm caught it on the first live turn and it was disabled.
+        // The right variable was already here: `target` (sg.js:1591) carries the RESOLVED target that the panel
+        // computed and logged as `TARGET ▸ tier=…/target=…`. That is the ground the ask actually asked about.
+        //
+        // Live confirmations this is worth saying out loud, all four with the same shape:
+        //   15:46  a UPS tracking number bound a Shopify ORDER leg and returned 200 (SG-1 now refuses it)
+        //   19:11  "track 1Z…" → navigate, silently, at conf 0.95
+        //   21:26  "track 1Z…" → navigate, then `IL ▸ missing required tracking` — the number was IN the ask
+        //   21:27  "use ups to track 1Z…" → clarify "UPS is not among the connected sites"  <- the HONEST one
+        // The 21:27 line proves the system CAN say this; it just only says it on one of several paths.
         try {
-          if (UC1_ENABLED && groundId && !retrieved.some((l) => String((l && (l.groundId || (l.tool && l.tool.groundId))) || '') === groundId)) {
-            const _gs = await StorageManager.getAllGrounds();
-            const _g = (_gs || []).find((g) => g && g.id === groundId);
-            const _origin = String((_g && (_g.origin || _g.url)) || '');
-            const _recs = _origin ? await _readRideRecipesMerged(groundId, _origin) : [];
-            unconnected = absentTargetLegs({ groundId, paletteLegs: retrieved, armedRecipes: (_recs || []).filter((r) => r && rideArmable(r)) });
-            if (unconnected) unconnected.host = _origin;   // the panel names the SITE, not the ground id — a gnd_ hash means nothing to a reader
-            if (unconnected) Logger.info('background', `PALETTE ▸ UNCONNECTED — target ground has ${unconnected.count} armed leg(s) absent from this conversation (${unconnected.names.slice(0, 2).join(', ')}); the router will substitute unless the answer says so`);
+          // UC-3 (v2.74.1967) — the RESOLVED target arrives as payload.resolvedTarget and carries groundId
+          // DIRECTLY. UC-2 read `target` (the conversation's CONFIGURED binding, null on every ordinary turn) and
+          // so never ran — live 21:38 `TARGET ▸ TR-1/explicit target=www.ups.com` + `PALETTE ▸ 118` produced a
+          // silent navigate with no UNCONNECTED line. Prefer the groundId; fall back to a host lookup only if an
+          // older panel sends host alone.
+          const _rt = (payload && payload.resolvedTarget) || null;
+          const _tOrigin = String((_rt && _rt.host) || (target && target.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          if (_tOrigin || (_rt && _rt.groundId)) {
+            const _gs = (_rt && _rt.groundId) ? null : await StorageManager.getAllGrounds();
+            const _gid = (_rt && _rt.groundId) || _groundIdForUrl(_tOrigin, _gs);
+            // Cheap-first: the membership scan uses data already in hand, and the storage read only happens when
+            // the TARGET ground contributed nothing at all — the rare case, not every turn (UC-1's fatal flaw).
+            if (_gid && !retrieved.some((l) => String((l && (l.groundId || (l.tool && l.tool.groundId))) || '') === _gid)) {
+              const _recs = await _readRideRecipesMerged(_gid, _tOrigin);
+              unconnected = absentTargetLegs({ groundId: _gid, paletteLegs: retrieved, armedRecipes: (_recs || []).filter((r) => r && rideArmable(r)) });
+              if (unconnected) {
+                unconnected.host = _tOrigin;   // the panel names the SITE — a gnd_ hash means nothing to a reader
+                Logger.info('background', `PALETTE ▸ UNCONNECTED — ${_tOrigin} has ${unconnected.count} armed leg(s) absent from this conversation (${unconnected.names.slice(0, 2).join(', ')})`);
+              }
+            }
           }
+          // UC-4 (v2.74.1968) — THE PROBE. Three attempts (v1957 ambient ground, v1966 bound target, v1967
+          // resolved target) all produced SILENCE, and silence cannot distinguish "the input was missing" from
+          // "the ground was in the palette after all" from "no armed recipes were found". I said the next step
+          // would not be a fourth variable, and it is not: this line makes the computation state itself.
+          // It logs on EVERY turn that has a resolved target — cheap (no storage reads, all values in hand) and
+          // temporary. Remove it once the announcement is verified.
+          try {
+            const _p = (payload && payload.resolvedTarget) || null;
+            Logger.info('background', `PALETTE ▸ uc-probe rt=${_p ? (_p.groundId || _p.host || '(no id/host)') : 'ABSENT'} tier=${(_p && _p.tier) || '—'} legs=${retrieved.length} → ${unconnected ? `FIRED(${unconnected.count})` : 'silent'}`);
+          } catch { /* */ }
         } catch { /* detection is advisory — never fail an interpret over it */ }
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the

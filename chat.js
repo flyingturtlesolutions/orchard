@@ -2369,6 +2369,11 @@ async function _resolveFanoutFilter(clauseText, tabId) {
   if (!mayDeclareFilter(clauseText)) return null;
   let raw = null; let retrieved = [];
   try {
+    // UC-3 (v2.74.1967) — send the RESOLVED target, not just the BOUND one. `_boundTarget()` is the
+    // conversation's CONFIGURED binding and is null unless someone set one, which is why UC-2 never ran: it read
+    // `payload.target` and got nothing on every turn. The resolved decision — the value behind `TARGET ▸ tier=…`
+    // — lives here in `_lastTargetResolve.decision` and carries `groundId` directly, so the handler needs no
+    // host lookup at all. Third variable, and this one is read from the line that logs the value, not inferred.
     const r = await _orchReq('INTERPRET_ASK', { ask: clauseText, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; }
   } catch { return null; }
@@ -3350,7 +3355,18 @@ async function _executeTask(cap, paramValues) {
 // Page-scoped HIT/MISS over the DEMONSTRATED library (Core/orchMatch via ORCH_MATCH). Tried BEFORE the legacy
 // ChatAPI.match: on a grounded HIT we run/confirm/disambiguate here; on any MISS or error we return false and
 // the existing routed flow takes over unchanged. The grounded substrate and the legacy capabilities coexist.
+// UC-5 (v2.74.1969) — ATTACH THE RESOLVED TARGET AT THE CHOKE POINT, not at call sites.
+// The v1968 probe answered three cycles of guessing in one line: `PALETTE ▸ uc-probe rt=ABSENT` — the value
+// simply never arrived. Cause: chat.js has SIX `_orchReq('INTERPRET_ASK', …)` call sites and v1967 added
+// `resolvedTarget` to exactly one of them (a clause path), while the ordinary ask runs through _tryInterpret at
+// another. That is the FOURTH "wired one of N call sites" defect today, after FC-6 (1 of 4 render sites) and
+// FC-8 (which fixed its sibling by moving to the shared return). Same remedy here: every INTERPRET_ASK, from
+// wherever, now carries the resolved decision — coverage stops being a function of which call sites I noticed.
 const _orchReq = (type, payload) => new Promise((resolve) => {
+  if (type === 'INTERPRET_ASK' && payload && typeof payload === 'object' && payload.resolvedTarget == null) {
+    const _d = (_lastTargetResolve && _lastTargetResolve.decision) || null;
+    if (_d) payload = { ...payload, resolvedTarget: { groundId: _d.groundId || null, host: _d.host || null, tier: _d.tier || null } };
+  }
   // OB-2 (v2.74.1849) — THE ROUND-TRIP CONFESSES. This wrapper always had a 120s timeout, but it resolved null
   // SILENTLY: a hung panel→SW round-trip became a two-minute stall and then a null no caller could tell apart
   // from an ordinary miss — the Rail-freeze family wore exactly this face for three diagnoses. Timeout and
