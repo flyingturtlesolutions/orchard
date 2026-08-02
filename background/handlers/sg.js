@@ -1896,16 +1896,6 @@ export function createSgMessageHandlers(ctx) {
               }
             }
           }
-          // UC-4 (v2.74.1968) — THE PROBE. Three attempts (v1957 ambient ground, v1966 bound target, v1967
-          // resolved target) all produced SILENCE, and silence cannot distinguish "the input was missing" from
-          // "the ground was in the palette after all" from "no armed recipes were found". I said the next step
-          // would not be a fourth variable, and it is not: this line makes the computation state itself.
-          // It logs on EVERY turn that has a resolved target — cheap (no storage reads, all values in hand) and
-          // temporary. Remove it once the announcement is verified.
-          try {
-            const _p = (payload && payload.resolvedTarget) || null;
-            Logger.info('background', `PALETTE ▸ uc-probe rt=${_p ? (_p.groundId || _p.host || '(no id/host)') : 'ABSENT'} tier=${(_p && _p.tier) || '—'} legs=${retrieved.length} → ${unconnected ? `FIRED(${unconnected.count})` : 'silent'}`);
-          } catch { /* */ }
         } catch { /* detection is advisory — never fail an interpret over it */ }
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the

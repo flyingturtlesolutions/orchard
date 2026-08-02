@@ -13168,10 +13168,10 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   const subTasks = await _childSummariesForCurrent();   // CV-4-reduce — THIS app's own children + their latest results (reason over them)
   const history = await _recentTurnsWindow(goal);   // Q1 — the recent-turn window (excludes this ask); shared by the interpret + both answer calls below
-  let raw = null; let retrieved = []; let groundId = null;
+  let raw = null; let retrieved = []; let groundId = null; let unconnected = null;   // UC-6 (v2.74.1970) — DECLARED IN THE SCOPE THAT USES IT
   try {
     const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: turn.seed, target: turn.target, connections: turn.connections, subTasks, history, appId: turn.appId, memoryId: turn.memoryId });
-    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
+    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; unconnected = r.unconnected || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) → v2.74.1471 — interpret unavailable (no LLM / API error) now renders HONESTLY instead of
   // cascading: the fallback chain (nav router, IL loop, legacy matcher) is LLM-backed too, so when the API itself is
