@@ -32,6 +32,22 @@ describe('targetResolve — the TR ladder (TRT-2)', () => {
     assert.equal(d.tier, 'tab', '"monday" matches no known ground → ladder continues to the tab');
     assert.deepEqual(siteRefTokens('save it to me on the page'), [], 'stop-words never read as sites');
   });
+
+  it('TR-1 explicit: INSTRUMENTAL prepositions name a target too (v1965 — live: "track order using ups" hit Shopify)', () => {
+    // The ask named its target in plain words and the parser could not see it: "using" was absent from the
+    // destination-preposition list, so TR-1 never fired and the ladder fell through to the conversation ground.
+    assert.deepEqual(siteRefTokens('track order using vendorsuite'), ['vendorsuite']);
+    assert.deepEqual(siteRefTokens('open the ticket via zendesk'), ['zendesk']);
+    assert.deepEqual(siteRefTokens('look it up through pixabay'), ['pixabay']);
+    const d = resolveTarget('track order using vendorsuite', { ...CTX, tabGroundId: 'zd' });
+    assert.equal(d.tier, 'explicit', 'an instrumental preposition is authoritative over the focused tab');
+    assert.equal(d.groundId, 'vs');
+  });
+
+  it('TR-1 explicit: "with" is NOT a target preposition — it describes a field, not a destination', () => {
+    // "orders with ups tracking" means Shopify orders CARRYING ups numbers; targeting ups would be wrong.
+    assert.deepEqual(siteRefTokens('orders with vendorsuite tracking'), []);
+  });
   it('TR-2 conversation: desk affinity picks the leg-speaking ground; the fused foreach ask resolves in-desk', () => {
     const d = resolveTarget('foreach division, open new warranty tasks in a new case', { ...CTX, deskOrigins: ['vendorsuite.drhorton.com', 'deako.zendesk.com'], tabGroundId: 'px' });
     assert.equal(d.tier, 'conversation'); assert.equal(d.groundId, 'vs');

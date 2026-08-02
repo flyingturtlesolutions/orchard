@@ -14,9 +14,22 @@ const _SITE_STOP = new Set(['it', 'me', 'them', 'us', 'you', 'the', 'a', 'an', '
   'one', 'each', 'every', 'all', 'both', 'page', 'site', 'list', 'side', 'end', 'start', 'tab', 'browser', 'web',
   'case', 'cases', 'desk', 'new']);
 
-/** Site-ish tokens the ask names after a destination preposition ("on vendorsuite", "at zendesk"). PURE. */
+/**
+ * Site-ish tokens the ask names after a destination preposition ("on vendorsuite", "at zendesk"). PURE.
+ *
+ * v2.74.1965 — INSTRUMENTAL prepositions join the destination ones. Live 20:38 "track order using ups" resolved
+ * to a SHOPIFY leg: `using` was absent from this alternation, so the ask yielded ZERO site tokens, TR-1 explicit
+ * never fired, and the ladder fell through to the conversation's ground. The user named the target in plain
+ * words and the parser could not see it — the failure was in the vocabulary, not the ladder.
+ *
+ * Widening is SAFE BY CONSTRUCTION here: `_groundForToken` matches KNOWN grounds only and an unmatched token is
+ * ignored (never minted, never a teach-trigger), so a new preposition can only ever find a real ground — it
+ * cannot invent one. What it CAN do is claim a token that was not meant as a target, which is why `with` is
+ * deliberately excluded: "orders with ups tracking" means Shopify orders carrying UPS numbers, and targeting UPS
+ * there would be wrong. `using` / `via` / `through` name the SYSTEM an action goes through, which is a target.
+ */
 export function siteRefTokens(ask) {
-  const re = /\b(?:on|onto|in|into|at|from|to)\s+([a-z][a-z0-9.&'-]{2,})/ig;
+  const re = /\b(?:on|onto|in|into|at|from|to|using|via|through)\s+([a-z][a-z0-9.&'-]{2,})/ig;
   const out = []; const seen = new Set();
   let m;
   while ((m = re.exec(String(ask || ''))) !== null) {
