@@ -22,6 +22,7 @@ import { $, escHtml, escAttr, toast, relTime, openSidepanelHere } from './shared
 import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Services/Chat/strategyResultHtml.js';
 import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.74.973) — the ONE strippable dev-bridge module (DESIGN_dev_bridge §11)
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
+import { layoutReport, formatLayoutMarker } from './Core/uiLayout.js';   // v2.74.1971 — the deterministic appearance marker (LAYOUT ▸): measure the rendered reply so "does it look right" is a gl grep
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, namesDeclaredLeg, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
@@ -1772,6 +1773,31 @@ function _setMessageBody(msg, text, { markdown = false, html = false } = {}) {
     body.textContent = text;
     body.classList.remove('md-rendered');
   }
+}
+
+// v2.74.1971 — THE LAYOUT MARKER (the deterministic appearance rung). Measure a just-rendered reply's actual layout
+// (impure: reads getBoundingClientRect + getComputedStyle off the live bubble) and emit a LAYOUT ▸ line, so "does it
+// look right" — did content OVERFLOW the panel, how many ROWS rendered, did chat.css actually STYLE the id chips — is
+// a gl grep joined to SHAPE ▸, not a live eyeball. Verdict logic is pure in Core/uiLayout.js; this only reads the DOM.
+// Fail-silent, and a no-op when the bubble is not laid out yet (hidden thread) so it never reports false zeroes.
+function _measureLayout(msg) {
+  try {
+    const body = msg && msg.querySelector && msg.querySelector('.message-body');
+    if (!body || !body.clientWidth) return null;   // not laid out / hidden → unmeasurable, skip
+    const chip = body.querySelector('code');
+    const cs = chip ? getComputedStyle(chip) : null;
+    return {
+      clientWidth: body.clientWidth, scrollWidth: body.scrollWidth,
+      rows: body.querySelectorAll('li').length,
+      chips: body.querySelectorAll('code').length,
+      bold: body.querySelectorAll('strong').length,
+      listStyled: !!body.querySelector('ul.md-ul, ol.md-ol, ul, ol'),
+      chipFont: cs ? cs.fontFamily : '', chipBg: cs ? cs.backgroundColor : '',
+    };
+  } catch { return null; }
+}
+function _reportLayout(msg, ctx) {
+  try { const m = _measureLayout(msg); if (m) _orchLog(formatLayoutMarker(ctx, layoutReport(m))); } catch { /* appearance report is advisory — never fail a render over it */ }
 }
 
 /**
@@ -12819,6 +12845,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       // never triggers the additive list) — the failure mode a quiet-day eyeball would miss.
       try { _orchLog(`SHAPE ▸ ${answer ? (listBody ? 'answer+records' : 'answer-only') : (listBody ? 'records-only' : 'empty')}${(shaped && shaped.showRecords) ? ' +showRecords' : ''}`); } catch { /* */ }
       _setMessageBody(msg, body || 'Done.', { markdown: true });   // v1949 — connector rows are markdown; render fresh == reload
+      try { _reportLayout(msg, 'reply'); } catch { /* v2.74.1971 — measure the rendered reply's layout (overflow/rows/chip-styling) into LAYOUT ▸ */ }
       return true;
     }
   }
@@ -12951,6 +12978,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
       // never triggers the additive list) — the failure mode a quiet-day eyeball would miss.
       try { _orchLog(`SHAPE ▸ ${answer ? (listBody ? 'answer+records' : 'answer-only') : (listBody ? 'records-only' : 'empty')}${(shaped && shaped.showRecords) ? ' +showRecords' : ''}`); } catch { /* */ }
       _setMessageBody(msg, body || 'Done.', { markdown: true });   // v1949 — connector rows are markdown; render fresh == reload
+      try { _reportLayout(msg, 'reply'); } catch { /* v2.74.1971 — measure the rendered reply's layout (overflow/rows/chip-styling) into LAYOUT ▸ */ }
       // FC-6 (v2.74.1959) — PIN WHAT WE JUST READ, so the next pronoun has something to bind to.
       // Live 19:49: "search Shopify for Divine Monkam" returned data.customers.edges[1] with id/name/email, and
       // four seconds later "get the most recent order for that customer" → clarify. ZERO `FOCUS ▸` lines exist in
