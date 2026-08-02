@@ -58,17 +58,27 @@ export function createExerciserHandlers() {
           .map((a) => String(a || '').trim()).filter(Boolean).slice(0, MAX_ASKS);
         if (!asks.length) { sendResponse({ success: false, error: 'no-asks' }); return; }
         const reload = (payload && payload.reload) === true;
+        // v2.74.1951 — THE RECORD CARRIES ITS OWN EVIDENCE. Live 16:58 both pre-reload log lines vanished: every
+        // Logger call is an unawaited read-modify-write on chrome.storage.local (Logger.js:359 get → :371 set),
+        // so back-to-back lines race the same ring snapshot AND a 200ms teardown lands on top. The consequence
+        // for the loop is worse than a missing line: any VALIDATE whose PASS spans a restart could never be
+        // fully satisfied, so a working fix grades partial forever and the loop slowly learns to accept
+        // incomplete evidence. Fixed by not depending on pre-reload delivery — the queue is written with an
+        // AWAITED set, so the drain can re-log this on the far side of the boot where nothing is racing it.
+        const stamp = Date.now();
         try {
-          await chrome.storage.local.set({ [EXERCISE_QUEUE_KEY]: { asks, at: Date.now(), reload } });
-        } catch (e) {
+          await chrome.storage.local.set({ [EXERCISE_QUEUE_KEY]: { asks, at: stamp, reload, requestedBy: 'DEV_EXERCISE' } });
+        } catch {
           sendResponse({ success: false, error: 'queue-write-failed' }); return;
         }
-        try { Logger.info('background', `EXERCISE ▸ queued ${asks.length} ask(s)${reload ? ' + reload' : ''}`); } catch { /* */ }
+        try { Logger.info('background', `EXERCISE ▸ queued ${asks.length} ask(s)${reload ? ' + reload' : ''}`); } catch { /* may not survive the reload — the drain re-logs it */ }
         if (reload) {
           // Answer BEFORE restarting, for the same reason DEV_RELOAD_EXTENSION does.
           sendResponse({ success: true, queued: asks.length, reloading: true });
           try { Logger.info('background', 'EXERCISE ▸ reload requested (exercise-queue) — extension restarting'); } catch { /* */ }
-          setTimeout(() => { try { chrome.runtime.reload(); } catch { /* */ } }, 200);
+          // 600ms, not 200: the awaited queue write is already durable, but give the two log lines above a real
+          // chance to land as well. They are belt-and-braces now rather than the only record.
+          setTimeout(() => { try { chrome.runtime.reload(); } catch { /* */ } }, 600);
           return;
         }
         // No reload: nudge whatever panel is open to drain now. A closed panel is not an error — the queue
