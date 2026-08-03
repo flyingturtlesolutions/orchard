@@ -66,12 +66,47 @@ export function sheetBrief({ name = 'Sheet', count = 0, headers = [], rows = [] 
 // VendorSuite read, and answered from the BRIEF not the rows. These pure predicates let chat.js catch it BEFORE routing.
 
 /** Is this ask a DATA question about the grounded sheet (vs a navigation/action ask that should route normally)? PURE. */
-export function isSheetDataAsk(text) {
+// SH-1 (v2.74.1985) — SHAPE IS NECESSARY, NOT SUFFICIENT. The regex below asks "does this LOOK like a data
+// question?" and a single generic verb satisfies it. Live: with a sheet case grounded, `list open warranty tasks
+// in Raleigh` matched on the word `list` alone, the interrogator ran over the spreadsheet, and the user was told
+// *"the sheet contains 36 open records, but they lack the identifiers and scope needed"* — for a question about
+// VendorSuite, where `Raleigh` is a D.R. Horton division and `vs_warranty_tasks` had answered it minutes earlier.
+//
+// The missing test is whether the ask is ABOUT THIS SHEET. So the caller may pass the sheet's own headers and
+// filename, and an ask whose content nouns are covered by NEITHER those NOR sheet vocabulary ("column", "row",
+// "record"…) is left to route normally. Called without that context the behaviour is unchanged, so no existing
+// caller shifts under this.
+//
+// Fourth occurrence of one defect this day — SM-1, MR-1, PS-1 and now here — all of them binding by PROXIMITY
+// (the nearest grounded thing) instead of by WHAT THE ASK NAMED.
+const _SHEET_WORDS = new Set(['column', 'header', 'field', 'row', 'record', 'entry', 'entrie', 'cell', 'sheet',
+  'file', 'data', 'table', 'spreadsheet', 'upload', 'attachment', 'csv', 'xlsx', 'value']);
+// Verbs, quantifiers and comparators the shape regex already keys on — they say HOW to read, never WHAT to read.
+const _ASK_SCAFFOLD = new Set(['list', 'show', 'get', 'give', 'tell', 'name', 'find', 'read', 'how', 'many',
+  'much', 'count', 'number', 'of', 'the', 'a', 'an', 'all', 'any', 'in', 'on', 'at', 'for', 'from', 'by', 'to',
+  'is', 'are', 'was', 'were', 'what', 'whats', 'which', 'who', 'where', 'when', 'filter', 'sum', 'total',
+  'average', 'avg', 'min', 'max', 'top', 'most', 'least', 'group', 'sort', 'distinct', 'unique', 'each', 'and',
+  'or', 'me', 'my', 'this', 'that', 'these', 'those', 'it', 'big', 'have', 'has', 'do', 'does', 'there']);
+
+const _sheetStem = (w) => (w.length > 3 && w.endsWith('s') && !/(ss|us|is)$/.test(w) ? w.slice(0, -1) : w);
+const _sheetToks = (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map(_sheetStem);
+
+export function isSheetDataAsk(text, { headers = null, name = '' } = {}) {
   const q = String(text || '').toLowerCase().trim();
   if (!q) return false;
   if (/^(open|go to|navigate|switch to|close|delete|show me the)\b/.test(q)) return false;   // navigation/action → route
-  return /\b(column|header|field|row|record|entr(?:y|ies)|cell|how many|how much|count|number of|which|filter|where|sum|total|average|avg|min|max|list|show|each|value|status|top|most|least|group|sort|distinct|unique)s?\b/.test(q)
+  const shaped = /\b(column|header|field|row|record|entr(?:y|ies)|cell|how many|how much|count|number of|which|filter|where|sum|total|average|avg|min|max|list|show|each|value|status|top|most|least|group|sort|distinct|unique)s?\b/.test(q)
     || /\bthis (sheet|file|data|table|spreadsheet)\b/.test(q);
+  if (!shaped) return false;
+  if (!Array.isArray(headers)) return true;   // no sheet context supplied → unchanged behaviour
+
+  // "this sheet"/"this file" is an explicit claim on THIS sheet and needs no noun coverage.
+  if (/\bthis (sheet|file|data|table|spreadsheet)\b/.test(q)) return true;
+
+  const owned = new Set([...headers.flatMap(_sheetToks), ..._sheetToks(name)]);
+  const nouns = _sheetToks(q).filter((t) => !_ASK_SCAFFOLD.has(t));
+  if (!nouns.length) return true;                                   // "how many?" — pure shape, no subject
+  return nouns.some((t) => _SHEET_WORDS.has(t) || owned.has(t));     // ANY covered noun keeps the sheet in play
 }
 
 /** METADATA questions (columns / row count) answered from STRUCTURE — no LLM, no row egress. null → not metadata. PURE. */

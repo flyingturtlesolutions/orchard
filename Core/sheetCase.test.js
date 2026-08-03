@@ -96,3 +96,64 @@ describe('sheetCase — the P2.5 gate: sheetMetaAnswer (deterministic, no LLM, n
     assert.equal(sheetMetaAnswer('sum the totals', ctx), null);
   });
 });
+
+describe('isSheetDataAsk — SH-1 (v2.74.1985): shape is necessary, not sufficient', () => {
+  const sheet = { headers: ['Vendor', 'Notification Date', 'Status', 'Amount', 'Invoice'], name: 'DRH_Vendor_Notification_2026-07-31' };
+
+  it('REFUSES the live hijack — "list open warranty tasks in Raleigh" matched on the word "list" alone', () => {
+    // The user got: "the sheet contains 36 open records, but they lack the identifiers and scope needed" — for a
+    // VendorSuite question that vs_warranty_tasks had answered minutes earlier.
+    assert.equal(isSheetDataAsk('list open warranty tasks in Raleigh', sheet), false);
+  });
+
+  it('still claims genuine sheet questions', () => {
+    for (const q of ['list all column names', 'how many rows?', 'which records are open',
+      'what is the total amount', 'the distinct vendors', 'sum the invoices']) {
+      assert.equal(isSheetDataAsk(q, sheet), true, q);
+    }
+  });
+
+  it('PRE-EXISTING, documented not changed: "show me the …" is read as navigation and never reaches the gate', () => {
+    // `/^(open|go to|…|show me the)\b/` refuses first. Surprising for "show me the distinct vendors" — a data
+    // question by any reading — but it predates SH-1 and is the sheet lane's call, not this fix's.
+    assert.equal(isSheetDataAsk('show me the distinct vendors', sheet), false);
+    assert.equal(isSheetDataAsk('show me the distinct vendors'), false, 'same without sheet context');
+  });
+
+  it('claims an ask naming one of THIS sheet\'s own headers', () => {
+    assert.equal(isSheetDataAsk('list the vendors by status', sheet), true);
+    assert.equal(isSheetDataAsk('which notification dates are latest', sheet), true);
+  });
+
+  it('refuses asks naming another system entirely', () => {
+    for (const q of ['list the open zendesk tickets', 'show shopify orders for this customer',
+      'which ups packages are in transit']) {
+      assert.equal(isSheetDataAsk(q, sheet), false, q);
+    }
+  });
+
+  it('"this sheet" is an explicit claim and needs no noun coverage', () => {
+    assert.equal(isSheetDataAsk('what is in this sheet', sheet), true);
+    assert.equal(isSheetDataAsk('summarize this file', sheet), true);
+  });
+
+  it('a bare shape ask with no subject still claims — "how many?" has nothing to disagree with', () => {
+    assert.equal(isSheetDataAsk('how many?', sheet), true);
+  });
+
+  it('is UNCHANGED when no sheet context is passed — no existing caller shifts', () => {
+    assert.equal(isSheetDataAsk('list open warranty tasks in Raleigh'), true, 'shape-only, exactly as before');
+    assert.equal(isSheetDataAsk('go to the orders page'), false, 'the navigation gate still fires first');
+  });
+
+  it('navigation and action asks are still refused before any of this', () => {
+    for (const q of ['open the sheet', 'go to shopify', 'delete this row', 'close the case']) {
+      assert.equal(isSheetDataAsk(q, sheet), false, q);
+    }
+  });
+
+  it('tolerates a header-less sheet and junk without throwing', () => {
+    assert.doesNotThrow(() => isSheetDataAsk('how many rows', { headers: [], name: '' }));
+    for (const junk of [null, undefined, 42, {}]) assert.doesNotThrow(() => isSheetDataAsk(junk, sheet));
+  });
+});

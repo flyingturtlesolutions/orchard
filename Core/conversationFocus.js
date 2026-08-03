@@ -53,7 +53,26 @@ function _provenance(leg, params, labels) {
     host: _str(tool.origin || tool.appHost || tool.host).toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '') || null,
     recipeId: _str(tool.recipeId) || null,
     itemUrl: _str(tool.itemUrl) || null,
-    drill: (tool.drill && tool.drill.via && tool.drill.from) ? { via: _str(tool.drill.via), from: _str(tool.drill.from), param: _str(tool.drill.param) || 'id' } : null,
+    // PV-1 (v2.74.1984) — CARRY THE WHOLE DRILL, not three of its six fields. Provenance existed so a focus entry
+    // could be re-drilled, and it kept via/from/param while dropping `also`, `matchOn` and `label`. `also` is the
+    // SIDECAR list: `vs_warranty_tasks` declares `also: ['vs_task_contacts']`, and that sidecar is the only source
+    // of `ContactEmail` — the key the warranty→order chain rides on.
+    // Live proof, same ask twice in one hour: at 13:43 the module prior supplied the REAL leg and the map logged
+    // `enriched 7/7 via vs_warranty_task +1 sidecar → field "ContactEmail"`; at 14:45 a focus-reconstructed leg
+    // gave `enriched 6/6 via vs_warranty_task → field still not found` and the map died on an empty field name.
+    // Latent since provenance was written (the focus path only ran when the module prior was dead); PS-1 made
+    // that path reachable while the prior is alive, which turned a rare bug into the common one.
+    // Whole-object, not another hand-picked subset — that choice is what created this.
+    drill: (tool.drill && tool.drill.via && tool.drill.from) ? {
+      via: _str(tool.drill.via), from: _str(tool.drill.from), param: _str(tool.drill.param) || 'id',
+      ...(_str(tool.drill.matchOn) ? { matchOn: _str(tool.drill.matchOn) } : {}),
+      ...(Array.isArray(tool.drill.label) ? { label: tool.drill.label.slice(0, 12).map(_str).filter(Boolean) } : {}),
+      // `also` entries are catalog data (a string id, or {id,from,param,pick,extract}) and must stay
+      // structured-clonable — focus is persisted to chrome.storage.
+      ...(Array.isArray(tool.drill.also) && tool.drill.also.length
+        ? { also: tool.drill.also.slice(0, 4).map((a) => (a && typeof a === 'object' ? { ...a } : _str(a))).filter(Boolean) }
+        : {}),
+    } : null,
     params: pruneFields(params, { maxKeys: 8, maxStr: 80 }),
     labels: pruneFields(labels, { maxKeys: 8, maxStr: 80 }),
   };

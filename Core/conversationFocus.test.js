@@ -91,3 +91,56 @@ describe('conversationFocus — extraction + seed fallback', () => {
     assert.ok(b && b.entry, 'a pre-FC case still binds via the seed fallback');
   });
 });
+
+describe('_provenance drill — PV-1 (v2.74.1984): the whole drill survives, sidecars included', () => {
+  const legWith = (drill) => ({ name: 'Warranty tasks', domain: 'connector',
+    tool: { origin: 'vendorsuite.drhorton.com', groundId: 'gnd_1', recipeId: 'vs_warranty_tasks', drill } });
+  const prov = (drill) => (focusListEntry({ label: 'Warranty tasks', noun: 'warranty tasks',
+    rows: [{ TaskId: '1' }], leg: legWith(drill) }) || {}).provenance || {};
+
+  const full = { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address',
+    label: ['AddressLine1', 'TaskNumber'], also: ['vs_task_contacts'] };
+
+  it('carries `also` — the sidecar that is the ONLY source of ContactEmail', () => {
+    // Without it a focus-reconstructed leg drills without its sidecar: live 14:45 logged
+    // `enriched 6/6 via vs_warranty_task → field still not found` where 13:43 had `+1 sidecar → "ContactEmail"`.
+    assert.deepEqual(prov(full).drill.also, ['vs_task_contacts']);
+  });
+
+  it('carries matchOn and label too — same class, same silent drop', () => {
+    const d = prov(full).drill;
+    assert.equal(d.matchOn, 'address');
+    assert.deepEqual(d.label, ['AddressLine1', 'TaskNumber']);
+  });
+
+  it('still carries the original three', () => {
+    const d = prov(full).drill;
+    assert.equal(d.via, 'vs_warranty_task');
+    assert.equal(d.from, 'TaskId');
+    assert.equal(d.param, 'taskId');
+  });
+
+  it('keeps an OBJECT `also` entry structured-clonable for chrome.storage', () => {
+    const d = prov({ ...full, also: [{ id: 'shopify_order_creator', from: 'id', param: 'orderGid' }] }).drill;
+    assert.deepEqual(d.also, [{ id: 'shopify_order_creator', from: 'id', param: 'orderGid' }]);
+    assert.doesNotThrow(() => structuredClone(d), 'focus is persisted; a non-clonable value would throw at write');
+  });
+
+  it('omits the optional keys entirely when the recipe declares none', () => {
+    const d = prov({ via: 'vs_warranty_task', param: 'taskId', from: 'TaskId' }).drill;
+    assert.equal('also' in d, false);
+    assert.equal('matchOn' in d, false);
+    assert.equal('label' in d, false);
+  });
+
+  it('still returns null when the drill is incomplete — via+from remain required', () => {
+    assert.equal(prov({ via: 'x' }).drill, null);
+    assert.equal(prov(null).drill, null);
+  });
+
+  it('bounds what it stores — focus rides chrome.storage, not a database', () => {
+    const d = prov({ ...full, label: new Array(40).fill('L'), also: new Array(20).fill('s') }).drill;
+    assert.equal(d.label.length, 12);
+    assert.equal(d.also.length, 4);
+  });
+});

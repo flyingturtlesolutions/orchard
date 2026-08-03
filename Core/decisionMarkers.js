@@ -56,6 +56,7 @@ export const DECISION_MARKERS = [
   { key: 'explore', src: "EXPLORE ▸" },
   { key: 'stop', src: "STOP ▸" },
   { key: 'focus', src: "FOCUS ▸" },
+  { key: 'prior', src: "PRIOR ▸" },   // PS-1 (v2.74.1982) — WHICH result set a clause bound to, and why
   { key: 'clarify', src: "CLARIFY ▸" },
   { key: 'close-tabs', src: "CLOSE_TABS ▸" },
   { key: 'devbr', src: "DEVBR ▸" },

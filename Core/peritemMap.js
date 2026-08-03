@@ -177,6 +177,23 @@ export function pickFieldPath(rows, fieldPhrase, askPhrase = fieldPhrase) {
   const top = scored[0];
   if (top && top.sc >= 40) {
     const tied = scored.filter((x) => x.sc === top.sc);
+    // FR-1 (v2.74.1980) — A LONE WINNER ON THE TYPE TOKEN ALONE IS NOT A NAME MATCH. The orphan test below is the
+    // right question ("does the record hold this token anywhere") but it was gated on a TIE, so a single candidate
+    // that matched only the generic word skipped it entirely. Live 13:45:33Z: "read the tracking number on each
+    // order" scored `Job Number` at 45 (typeTok "number") + 5 − 1 = 49, cleared the 40 floor unopposed, and
+    // returned matchedBy:'name' — then FIELD_READ reported `24 × "Job Number" → 24 found, 0 empty`. Twenty-four
+    // clean hits on a field the user never asked for, with "tracking" carried by nothing on the record. Same
+    // silent class as MR-1: every counter says success.
+    // The floor stays where it is; what changes is the CLAIM. Carrying only type tokens while a content token of
+    // the ask is absent everywhere is exactly the ambiguous case — so ask, per the v1626 discipline ("never
+    // silently pick; the caller asks"). A clean allTokens hit scores >= 100 and is untouched.
+    const orphanAll = asked.filter((t) => ![...cands.values()].some((c) => _carried(c).includes(t)));
+    if (tied.length === 1 && orphanAll.length) {
+      const carriedTop = _carried(top.c);
+      if (carriedTop.length && carriedTop.every((t) => _TYPE.has(t))) {
+        return { ambiguous: true, orphan: orphanAll, candidates: [{ path: top.c.path }] };
+      }
+    }
     if (tied.length > 1) {
       // v2.74.1882-b — ORPHAN OVER **ALL** CANDIDATES, not just the tied pair. Computed over the pair alone it said
       // "nothing matches project" for "any project number on this?" while ProjectId, ProjectCode and ProjectName were

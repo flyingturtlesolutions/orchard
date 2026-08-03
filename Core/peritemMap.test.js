@@ -351,3 +351,49 @@ describe('peritemMap — v1885: a short token must match a WHOLE WORD', () => {
       assert.deepEqual(pickFieldPath([{ X: v }], 'phone', 'phone'), { path: 'X', matchedBy: 'shape' }, v);
   });
 });
+
+describe('pickFieldPath — FR-1 (v2.74.1980): a lone winner on the type token alone is not a name match', () => {
+  // Live 13:45:33Z. The prior held VendorSuite warranty-task rows; the ask named ORDERS and a tracking number.
+  // `Job Number` scored 45 (typeTok "number") + 5 − 1 = 49, cleared the 40 floor unopposed, and FIELD_READ then
+  // reported `24 × "Job Number" → 24 found, 0 empty`. Twenty-four clean hits on a field nobody asked for.
+  const taskRows = [
+    { 'Job Number': 'J-88213', Division: 'Raleigh', ContactEmail: 'a@example.com' },
+    { 'Job Number': 'J-88250', Division: 'Raleigh', ContactEmail: 'b@example.com' },
+  ];
+
+  it('refuses to claim a name match when the ask\'s content token is on NO candidate', () => {
+    const r = pickFieldPath(taskRows, 'tracking number');
+    assert.ok(r && r.ambiguous, 'must ask, not silently pick — the v1626 discipline');
+    assert.deepEqual(r.orphan, ['tracking'], 'names the token the record does not hold');
+    assert.deepEqual(r.candidates, [{ path: 'Job Number' }]);
+  });
+
+  it('still matches cleanly when every phrase token is in the key (the >=100 path is untouched)', () => {
+    const r = pickFieldPath(taskRows, 'job number');
+    assert.equal(r.matchedBy, 'name');
+    assert.equal(r.path, 'Job Number');
+  });
+
+  it('still matches when the winner carries a NON-type token, even with an orphan present', () => {
+    // "shipping" is absent from the record, but TrackingNumber carries "tracking" — a real content token — so the
+    // match is earned. Only a winner whose ENTIRE contribution is a generic type word is gated.
+    const rows = [{ TrackingNumber: '1Z27691W0311465887', OrderName: 'DEAKO#71654' }];
+    const r = pickFieldPath(rows, 'shipping tracking number');
+    assert.equal(r.matchedBy, 'name');
+    assert.equal(r.path, 'TrackingNumber');
+  });
+
+  it('is unchanged when there is no orphan at all', () => {
+    const rows = [{ 'Order Number': 'DEAKO#71654', Total: '119.00' }];
+    const r = pickFieldPath(rows, 'order number');
+    assert.equal(r.matchedBy, 'name');
+    assert.equal(r.path, 'Order Number');
+  });
+
+  it('leaves a genuine tie on the ambiguous path with its orphan intact', () => {
+    const rows = [{ TaskNumber: '1', ClaimNumber: '2' }];
+    const r = pickFieldPath(rows, 'po number');
+    assert.ok(r && r.ambiguous);
+    assert.ok(r.candidates.length > 1, 'a real tie still reports both candidates');
+  });
+});

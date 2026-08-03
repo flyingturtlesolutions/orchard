@@ -41,7 +41,8 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { canBulkApprove, getPath, pendingSummary, targetUrls, renderProposalCards } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links; FL-10f (v1385) — the grouped review render
-import { focusRecordEntry, focusListEntry, focusFromSeedRecord, pushFocus, bindReferent, recordFind, recordDivision, nounFromLeg } from './Core/conversationFocus.js';   // FC (v2.74.1552, DESIGN_conversation_focus.md) — the conversation's working set of grounded entity handles + the pure referent binder
+import { focusRecordEntry, focusListEntry, focusFromSeedRecord, pushFocus, bindReferent, recordFind, recordDivision, nounFromLeg } from './Core/conversationFocus.js';
+import { selectPrior, describePick } from './Core/priorSelect.js';   // PS-1 (v2.74.1982) — WHICH prior the ask named; the noun in the sentence selects the rows, not recency   // FC (v2.74.1552, DESIGN_conversation_focus.md) — the conversation's working set of grounded entity handles + the pure referent binder
 import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
 import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown, queueStateLines } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown; v1375 — the queue-state breakdown
 import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half); FL-1e (v1352) — the "show work" run trace
@@ -5766,7 +5767,28 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       if (got) {
         rows = enriched;
         fp = resolveJoinField(rows, map.itemField, _declared) || fp;   // v1635 — an enrich for the LADDER keeps the already-resolved first rung
-        try { _orchLog(`MAP ▸ enriched ${got}/${preCap} row(s) via ${_dj.via}${alsoLegs.length ? ` +${alsoLegs.length} sidecar` : ''} → field ${fp ? (fp.ambiguous ? 'AMBIGUOUS' : `"${fp.path}"`) : 'still not found'}`); } catch { /* */ } }
+        // JF-1 (v2.74.1987) — WHEN THE JOIN FIELD IS NOT FOUND, SAY WHAT WAS ON THE ROW. "still not found" names
+        // the outcome and hides every input, so three build cycles guessed at it. Live 18:15:12 the SAME leg and
+        // SAME `+1 sidecar` that yielded `→ field "ContactEmail"` at 13:43 yielded `still not found` — the only
+        // difference being WHICH row set was enriched (a 6-row "Raleigh" focus entry vs a 7-row list). Without
+        // the enriched row's own keys there is no way to tell a missing sidecar from a different projection.
+        // Keys only, capped, values never — the same discipline as PAYLOAD ▸.
+        let _keys = '';
+        if (!fp) {
+          try {
+            const _r = rows.find((r) => r && typeof r === 'object') || {};
+            const _k = Object.keys(_r);
+            // JF-1b (v2.74.1988) — the 14-key cap HID THE ANSWER on its first firing: the row carried 40 keys,
+            // the visible 14 were all task/project fields, and whether a contact key existed among the other 26
+            // was exactly the question. Two changes: surface CONTACT-SHAPED keys first (the join the ladder
+            // wants), then the full list at a cap that a 40-key VendorSuite row does not exceed.
+            const _contact = _k.filter((x) => /mail|phone|contact|homeowner|customer/i.test(x));
+            _keys = ` · contact-shaped(${_contact.length}): ${_contact.slice(0, 8).join(',') || 'NONE'}`;
+            _keys += ` · row keys(${_k.length}): ${_k.slice(0, 60).join(',')}${_k.length > 60 ? ',…' : ''}`;
+            _keys += ` · asked itemField: "${map.itemField || ''}"${_declared && _declared.length ? ` · declared: ${_declared.slice(0, 4).join(',')}` : ''}`;
+          } catch { /* the probe must never break the run it is measuring */ }
+        }
+        try { _orchLog(`MAP ▸ enriched ${got}/${preCap} row(s) via ${_dj.via}${alsoLegs.length ? ` +${alsoLegs.length} sidecar` : ''} → field ${fp ? (fp.ambiguous ? 'AMBIGUOUS' : `"${fp.path}"`) : 'still not found'}${_keys}`); } catch { /* */ } }
     }
   }
   // v1626 — AMBIGUOUS ("homeowner" over HomeownerEmail + HomeownerPhone): ASK which, never silently take whichever
@@ -6195,19 +6217,44 @@ function _persistFocus() {
  * conversationFocus._provenance), which is everything `_rideDrillLeg` needs to re-drill, and nothing else is
  * invented. A focus entry that carries no provenance still supplies its ROWS — enriched rows need no leg.
  */
-function _priorForClause() {
+// PS-1 (v2.74.1982) — THE ASK NAMES THE ROWS. This returned `_lastGroundedRead` whenever it existed and the
+// FIRST focus entry otherwise: both mean "most recent", never "the one you named". A conversation holds several
+// result sets at once — 24 warranty tasks AND 6 Shopify orders — and "read the tracking number on each ORDER"
+// says which. Live 13:45 it bound to the tasks, matched `Job Number`, and reported `24 × "Job Number" → 24
+// found` while the orders read 90s earlier carried `fulfillments[].trackingInfo.number` untouched. Live 12:20 it
+// took a 1-row record for a "for each" ask. Live 04:04 it took the customer and matched `numberOfOrders`.
+// Three separate downstream fixes (SM-1, MR-1, FR-1) each made a different guesser behave better on the wrong
+// rows; none asked which rows were meant.
+//
+// The module prior is pushed FIRST, and `selectPrior` falls back to candidates[0] when no noun matches — so a
+// follow-up that works today still resolves exactly as before. The behaviour only changes when the ask names a
+// noun some other set carries better, which is the case that was broken.
+function _priorForClause(ask) {
+  const cands = [];
   if (_lastGroundedRead && _lastGroundedRead.value != null) {
-    return { value: _lastGroundedRead.value, leg: _lastGroundedRead.leg || null };
+    let _rows = []; try { _rows = rowsFromValue(_lastGroundedRead.value) || []; } catch { _rows = []; }
+    const _lg = _lastGroundedRead.leg || null;
+    let _noun = ''; try { _noun = nounFromLeg(_lg) || ''; } catch { /* a leg-less prior still competes on label */ }
+    cands.push({ id: '_last', source: 'read', noun: _noun, label: (_lg && _lg.name) || 'the last read',
+      kind: _rows.length === 1 ? 'record' : 'list', rows: _rows, at: Date.now(),
+      _value: _lastGroundedRead.value, _leg: _lg });
   }
-  const e = (_currentConversationFocus || []).find((x) => x
-    && ((x.kind === 'list' && Array.isArray(x.rows) && x.rows.length) || (x.kind === 'record' && x.fields)));
-  if (!e) return { value: null, leg: null };
+  for (const x of (_currentConversationFocus || [])) {
+    if (!x) continue;
+    if (x.kind === 'list' && Array.isArray(x.rows) && x.rows.length) cands.push({ ...x, source: 'focus', _entry: x });
+    else if (x.kind === 'record' && x.fields) cands.push({ ...x, source: 'focus', rows: [x.fields], _entry: x });
+  }
+  const sel = selectPrior(ask, cands);
+  try { _orchLog(`PRIOR ▸ ${describePick(sel.pick, sel.why)}${cands.length > 1 ? ` — of ${cands.length} set(s) in play` : ''}${sel.ambiguous.length > 1 ? ` · AMBIGUOUS: ${sel.ambiguous.map((a) => a.noun || a.label).join(' | ')}` : ''}`); } catch { /* */ }
+  if (!sel.pick) return { value: null, leg: null };
+  if (sel.pick.source === 'read') return { value: sel.pick._value, leg: sel.pick._leg || null };
+  const e = sel.pick._entry;
   const p = e.provenance || {};
   const leg = (p.host || p.groundId)
     ? { name: e.label || e.noun || 'prior read', domain: 'connector', mode: 'ask', tool: { origin: p.host || '', groundId: p.groundId || null, recipeId: p.recipeId || null, drill: p.drill || null } }
     : null;
   const value = e.kind === 'list' ? { results: e.rows } : { results: [e.fields] };
-  try { _orchLog(`FOCUS ▸ prior from focus — ${e.kind} "${e.label}" (${e.kind === 'list' ? `${e.rows.length} row(s)` : 'record'}, ${Math.max(0, Math.round((Date.now() - (e.at || 0)) / 1000))}s old) — the module prior died with the panel`); } catch { /* */ }
+  try { _orchLog(`FOCUS ▸ prior from focus — ${e.kind} "${e.label}" (${e.kind === 'list' ? `${e.rows.length} row(s)` : 'record'}, ${Math.max(0, Math.round((Date.now() - (e.at || 0)) / 1000))}s old) — from focus`); } catch { /* */ }
   return { value, leg };
 }
 // FC-6 (v2.74.1959) — a successful ride READ becomes the conversation's working set, so the next pronoun binds.
@@ -13314,7 +13361,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     // v2.74.1900 — the prior rides here too: this call passed NO prior at all, so a map with collection 'prior'
     // arriving at this door could never see one — the v1658 wired-only-one-door class, on the options bag instead
     // of the dispatch. Same durable source as the siblings below.
-    try { const _p = _priorForClause(); await _runMapClause(msg, d.map, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg }); } catch (e) { _clauseError('map', e, msg); }
+    try { const _p = _priorForClause(goal); await _runMapClause(msg, d.map, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg }); } catch (e) { _clauseError('map', e, msg); }
     return true;
   }
   // PM-9 (v2.74.1658) — the per-item OWN-RECORD field read, at THIS door too.
@@ -13333,7 +13380,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     // last grounded read the panel performed, kept precisely so a follow-up can answer from THAT record.
     try { _orchLog('DISPATCH ▸ fieldread → _runFieldReadClause @interpret-door'); } catch { /* */ }
     try {
-      const _p = _priorForClause();
+      const _p = _priorForClause(goal);
       await _runFieldReadClause(msg, d.fieldRead, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg });
     } catch (e) { _clauseError('fieldread', e, msg); }
     return true;
@@ -13355,7 +13402,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     // release unreachable). `_lastGroundedRead` is this door's prior; with none, `_runCaseClause` stops by name.
     try { _orchLog('DISPATCH ▸ case → _runCaseClause @interpret-door'); } catch { /* */ }
     try {
-      const _p = _priorForClause();
+      const _p = _priorForClause(goal);
       await _runCaseClause(msg, d.case, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg });
     } catch (e) { _clauseError('case', e, msg); }
     return true;
@@ -13363,7 +13410,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   if (d.intent === 'branch' && d.branch) {
     try { _orchLog('DISPATCH ▸ branch → _runBranchClause @interpret-door'); } catch { /* */ }
     try {
-      const _p = _priorForClause();
+      const _p = _priorForClause(goal);
       await _runBranchClause(msg, d.branch, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg });
     } catch (e) { _clauseError('branch', e, msg); }
     return true;
@@ -15819,7 +15866,11 @@ async function _spawnSheetCase(filename, rows) {
   try { await ConversationStore.updateMessage(conv.id, 'sheet_readout', { role: 'assistant', body }, { upsert: true }); } catch { /* the case still holds the sheet in focus + config */ }
   try { _orchLog(`SHEET ▸ loaded ${meta.count} row(s) from ${filename} → case ${conv.id}${parentId ? ` under ${parentId}` : ''}`); } catch { /* */ }
   try { await _selectConvForInput(conv); } catch { /* */ }                 // switch to the new case
-  _lastGroundedRead = { ...sheetGroundedRead(meta.name, rows), at: Date.now() };   // ground on the FULL set (after switch, so the rehydrate restore doesn't cap it)
+  // SH-2 (v2.74.1986) — STAMP THE OWNING CONVERSATION. _lastGroundedRead is a module global assigned at
+  // ten sites and cleared at none, so an upload armed _maybeSheetAnswer PANEL-WIDE: after the sheet loaded at
+  // 14:47:56Z the router went dark for two full hours (TARGET/INTERPRET_ASK/PALETTE all 0 in hours 14-15, vs
+  // 13/28/23 in hour 12) and even 'search vendorsuite for homeowner email' was answered off the spreadsheet.
+  _lastGroundedRead = { ...sheetGroundedRead(meta.name, rows), at: Date.now(), convId: _currentConversationId };   // ground on the FULL set (after switch, so the rehydrate restore doesn't cap it)
   try { await _revealRail(); } catch { /* */ }                            // surface the new case in the Rail
 }
 
@@ -15832,10 +15883,16 @@ async function _maybeSheetAnswer(text) {
   try {
     const g = _lastGroundedRead;
     if (!g || !g.leg || g.leg.domain !== 'file' || !g.value) return false;   // not a grounded sheet case
+    // SH-2 — and not THIS conversation's sheet case. The comment above the call site says 'a data ask INSIDE A
+    // SHEET CASE'; without this the scope was never enforced, only described.
+    if (g.convId && g.convId !== _currentConversationId) return false;
     const rows = (g.value && Array.isArray(g.value.rows)) ? g.value.rows : [];
-    if (!rows.length || !isSheetDataAsk(text)) return false;
+    if (!rows.length) return false;
+    // SH-1 (v2.74.1985) — headers/name are computed BEFORE the gate now, because the gate needs them: a
+    // shape-only test let `list open warranty tasks in Raleigh` be answered off this sheet on the word "list".
     const headers = (rows[0] && typeof rows[0] === 'object' && !Array.isArray(rows[0])) ? Object.keys(rows[0]) : [];
     const name = g.leg.name || 'the sheet';
+    if (!isSheetDataAsk(text, { headers, name })) return false;   // named something this sheet does not hold → route
     const emit = (body) => { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); try { _reportLayout(mm, 'reply'); } catch { /* */ } _orchFinalize(mm); };
     // 1) METADATA — from structure, deterministic (no LLM, no row egress)
     const meta = sheetMetaAnswer(text, { name, headers, count: rows.length });
@@ -16206,7 +16263,7 @@ async function _rehydrateConversation(conv) {
   try {
     const _sheet = conv && conv.config && conv.config.sheet;
     if (_sheet && Array.isArray(_sheet.rows) && _sheet.rows.length) {
-      _lastGroundedRead = { ...sheetGroundedRead(sheetCaseMeta({ filename: _sheet.filename, rows: _sheet.rows }).name, _sheet.rows), at: Date.now() };
+      _lastGroundedRead = { ...sheetGroundedRead(sheetCaseMeta({ filename: _sheet.filename, rows: _sheet.rows }).name, _sheet.rows), at: Date.now(), convId: _currentConversationId };   // SH-2 — the reopen re-stamps too
       try { _orchLog(`SHEET ▸ re-grounded ${_sheet.rows.length} row(s) (case reopen)`); } catch { /* */ }   // v2.74.1978 — the reopen becomes a gl line
     }
   } catch { /* grounding restore is best-effort */ }
