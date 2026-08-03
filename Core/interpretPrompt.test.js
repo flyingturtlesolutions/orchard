@@ -290,3 +290,50 @@ describe('interpretPrompt — the DETAIL line: legs\' does reaches the router (v
     assert.ok(m && m[1].length <= 140, `detail length ${m && m[1].length}`);
   });
 });
+
+describe('interpretPrompt — CONVERSATION_FOCUS (FD-1)', () => {
+  const user = (o) => buildInterpretMessages('get their last order', o).user;
+
+  it('renders the focus digest as a fenced DATA block the router can resolve a pronoun against', () => {
+    // Live: "get their last order" → map (fan out) and "get last order" → the GLOBAL queue, while "get Divine's
+    // last order" → the right leg — because that name was in the ask. The router simply had no antecedent.
+    const u = user({ focusDigest: [{ noun: 'customer', label: 'Divine Monkam' }] });
+    assert.match(u, /<CONVERSATION_FOCUS/);
+    assert.match(u, /customer: Divine Monkam/);
+    assert.match(u, /<\/CONVERSATION_FOCUS>/);
+  });
+
+  it('omits the block entirely when nothing is pinned', () => {
+    assert.doesNotMatch(user({}), /CONVERSATION_FOCUS/);
+    assert.doesNotMatch(user({ focusDigest: [] }), /CONVERSATION_FOCUS/);
+  });
+
+  it('caps at three entries — a long working set must not become a leak by volume', () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ noun: 'order', label: 'ORD-' + i }));
+    const u = user({ focusDigest: many });
+    assert.match(u, /ORD-0/); assert.match(u, /ORD-2/);
+    assert.doesNotMatch(u, /ORD-3/, 'the fourth entry and beyond are dropped');
+  });
+
+  it('carries ONLY noun and label — never the record fields (the 7th-PII-channel guard)', () => {
+    // A focus record holds fields; the router needs none of them to resolve "their". If this ever fails, a
+    // redaction audit has a new channel to account for.
+    const u = user({ focusDigest: [{ noun: 'customer', label: 'Divine Monkam',
+      fields: { email: 'someone@example.com', phone: '555-0100', numberOfOrders: 12 } }] });
+    assert.doesNotMatch(u, /someone@example\.com/);
+    assert.doesNotMatch(u, /555-0100/);
+    assert.doesNotMatch(u, /numberOfOrders/);
+  });
+
+  it('drops labelless entries and truncates long ones rather than refusing', () => {
+    const u = user({ focusDigest: [{ noun: 'customer', label: '' }, { noun: 'order', label: 'X'.repeat(200) }] });
+    assert.match(u, /CONVERSATION_FOCUS/, 'the one usable entry still renders');
+    assert.ok(!/X{100}/.test(u), 'a 200-char label is truncated');
+  });
+
+  it('tolerates junk without throwing on the routing hot path', () => {
+    for (const junk of [null, undefined, 'nope', [null, 3, {}]]) {
+      assert.doesNotThrow(() => user({ focusDigest: junk }));
+    }
+  });
+});

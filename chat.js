@@ -3389,6 +3389,13 @@ async function _executeTask(cap, paramValues) {
 // FC-8 (which fixed its sibling by moving to the shared return). Same remedy here: every INTERPRET_ASK, from
 // wherever, now carries the resolved decision — coverage stops being a function of which call sites I noticed.
 const _orchReq = (type, payload) => new Promise((resolve) => {
+  // FD-1 (v2.74.1972) — attach the FOCUS DIGEST here, at the choke point, for the same reason resolvedTarget is
+  // attached here: chat.js has SIX INTERPRET_ASK call sites and editing one of N is the defect that cost five
+  // cycles today. {noun,label} only — the record's fields never leave the panel.
+  if (type === 'INTERPRET_ASK' && payload && typeof payload === 'object' && payload.focusDigest == null) {
+    const _fx = Array.isArray(_currentConversationFocus) ? _currentConversationFocus : [];
+    if (_fx.length) payload = { ...payload, focusDigest: _fx.slice(0, 3).map((e) => ({ noun: (e && e.noun) || 'record', label: (e && e.label) || '' })).filter((e) => e.label) };
+  }
   if (type === 'INTERPRET_ASK' && payload && typeof payload === 'object' && payload.resolvedTarget == null) {
     const _d = (_lastTargetResolve && _lastTargetResolve.decision) || null;
     if (_d) payload = { ...payload, resolvedTarget: { groundId: _d.groundId || null, host: _d.host || null, tier: _d.tier || null } };
@@ -12936,6 +12943,17 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     return false;
   }
   if (leg.domain === 'connector') {
+    // FC-9 (v2.74.1973) — PIN HERE TOO. FC-8 moved the pin to `_runConnectorLeg`'s return, calling it "the one
+    // choke point every caller shares". It is not: `_ilRunBuiltin` — the MAIN IL dispatch — executes via
+    // `_orchReq(plan.channel, plan.payload)` directly and never touches `_runConnectorLeg`. So FC-8 did not widen
+    // coverage, it MOVED it: the decompose/chain family gained a pin (verified 20:12, 20:50) and this family
+    // silently lost the one FC-6 had given it. Live 04:04 a successful `shopify_customer_search` pinned NOTHING,
+    // which left every focus-dependent assertion ungradeable.
+    // The executors are now ENUMERATED rather than assumed — `res = await _orchReq(plan.channel, …)` appears at
+    // exactly three places: 6095/6103 (inside _runConnectorLeg, pinned at its return), 12920/12928 (here), and
+    // 8563 (a `confirmed:true` WRITE, which must never pin — a mutation is not a referent). Two read paths, both
+    // now pinned. Placed at the TOP of the connector branch so the drill/widen early-returns cannot skip it.
+    try { if (!leg.tool || leg.tool.write !== true) _pinReadFocus(leg, res.value); } catch { /* focus is an assist; never fail a delivered read over it */ }
     // CX-9b (v2.74.1435) — the drill join on THIS transport too (the cookie-ride/INVOKE_SESSION read tail; the
     // replay branch above has the twin call — one helper, both renders).
     {

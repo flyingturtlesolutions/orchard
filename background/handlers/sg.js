@@ -1926,7 +1926,7 @@ export function createSgMessageHandlers(ctx) {
         try { for (const l of (retrieved || [])) { if (l && l.key) { const s = capabilityShapeKey(l); if (s) _shapes[l.key] = s; } } } catch { /* recall still works without it */ }
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om, shapes: _shapes }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history });
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history, focusDigest: (payload && Array.isArray(payload.focusDigest)) ? payload.focusDigest : [] });   // FD-1 (v2.74.1972)
         // v1467 (obs #2) — name the CHOSEN LEG + bound param NAMES (never values) on the decision line. The wrong-leg
         // class ("0 warranty tasks" was Zendesk search_tickets) previously took response-vocabulary forensics to spot;
         // the pick was in `decision` all along and just never printed.

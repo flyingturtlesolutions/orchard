@@ -5337,7 +5337,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * @param {{ ask:string, retrieved?:Array, primitives?:Array, affordances?:string, seed?:string }} args
    * @returns {Promise<object>} the parsed raw decision
    */
-  static async interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history } = {}) {
+  static async interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history, focusDigest } = {}) {
     // v2.74.1317 — ground relative time: without NOW (+ the user's timezone) "tomorrow 3pm" is unresolvable, and the
     // first live broker create_event emitted a non-ISO startTime. Local wall-clock via sv-SE (YYYY-MM-DD HH:mm).
     let _now = '';
@@ -5356,6 +5356,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       objects: objects || '',    // OM — the app's object model (schema)
       subTasks: Array.isArray(subTasks) ? subTasks : [],   // CV-4-reduce — THIS app's own children + their latest results
       history: Array.isArray(history) ? history : [],   // Q1 — the recent-turn window (follow-up continuity)
+      focusDigest: Array.isArray(focusDigest) ? focusDigest : [],   // FD-1 — {noun,label} only; the record NEVER crosses this seam
     });
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
     if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };
