@@ -113,20 +113,42 @@ export function focusRecordEntry({ label, noun, fields, leg = null, params = nul
 //   focus-bound     MAP ▸ 6 × shopify lookup via a 7-rung ladder (no rung hit) → 0 matched, 6 no-match
 // The rungs were there both times (JK-1 restored joinKey); the VALUES were not.
 // Bounded like everything else that rides chrome.storage: 6 contacts, 12 scalar fields each.
-const _CONTACTS_KEY = '__contacts';   // mirrors Core/peritemMap.js — pinned equal by a test, not by hope
-function _keepContacts(src, pruned) {
-  if (!pruned) return pruned;
-  const list = (src && Array.isArray(src[_CONTACTS_KEY])) ? src[_CONTACTS_KEY] : null;
-  if (!list || !list.length) return pruned;
-  const kept = list.filter((c) => c && typeof c === 'object' && !Array.isArray(c))
-    .slice(0, 6).map((c) => pruneFields(c, { maxKeys: 12, maxStr: 200 })).filter(Boolean);
-  if (kept.length) pruned[_CONTACTS_KEY] = kept;
-  return pruned;
+// RT-1 (v2.74.1991) — GENERALISED: a stored row keeps its SHAPE, not just its scalars.
+// `_keepContacts` rescued one key by name. The round-trip contract test then found a fourth casualty of the same
+// flattening: `pickFieldPath` walks nested objects and array elements to depth 4 (v1903, added precisely so
+// `fulfillments[].trackingInfo[].number` and `variants.edges[].node.price` are findable), and a scalars-only row
+// has no such paths. That is why `read the tracking number on each order` reported `field STILL absent` off a
+// focus-bound set all day: the tracking number was in the read, and storage threw the structure away.
+// Rescuing keys one name at a time is what produced `also`, `joinKey`, `__contacts` and this — four incidents,
+// one cause. So the pruner now descends, bounded on every axis, and the contract is asserted by a test rather
+// than by a list of remembered names.
+function _pruneDeep(obj, { maxKeys = 24, maxStr = 200, depth = 3, arrayCap = 6 } = {}) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const out = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(obj)) {
+    if (n >= maxKeys) break;
+    if (v == null || v === '') continue;
+    if (typeof v === 'string') { out[k] = v.length > maxStr ? v.slice(0, maxStr) : v; n++; continue; }
+    if (typeof v === 'number' || typeof v === 'boolean') { out[k] = v; n++; continue; }
+    if (depth <= 0) continue;
+    if (Array.isArray(v)) {
+      const kept = v.slice(0, arrayCap)
+        .map((e) => (e && typeof e === 'object' ? _pruneDeep(e, { maxKeys, maxStr, depth: depth - 1, arrayCap })
+          : (typeof e === 'string' ? e.slice(0, maxStr) : (typeof e === 'number' || typeof e === 'boolean' ? e : null))))
+        .filter((e) => e != null);
+      if (kept.length) { out[k] = kept; n++; }
+      continue;
+    }
+    const sub = _pruneDeep(v, { maxKeys, maxStr, depth: depth - 1, arrayCap });
+    if (sub) { out[k] = sub; n++; }
+  }
+  return n ? out : null;
 }
 
 export function focusListEntry({ label, noun, rows, leg = null, params = null, labels = null, at = 0 } = {}) {
   const lbl = _str(label).slice(0, 80);
-  const rs = (Array.isArray(rows) ? rows : []).slice(0, 6).map((r) => _keepContacts(r, pruneFields(r, { maxKeys: 24, maxStr: 200 }))).filter(Boolean);
+  const rs = (Array.isArray(rows) ? rows : []).slice(0, 6).map((r) => _pruneDeep(r)).filter(Boolean);
   if (!lbl || !rs.length) return null;
   const n = _str(noun) || nounFromLeg(leg);
   return { kind: 'list', noun: n, nounTokens: _nounTokens(n), label: lbl, rows: rs, provenance: _provenance(leg, params, labels), at: at || 0 };

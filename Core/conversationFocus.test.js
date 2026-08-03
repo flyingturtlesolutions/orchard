@@ -211,10 +211,15 @@ describe('focusListEntry __contacts — CT-1 (v2.74.1990): the ladder\'s contact
     assert.equal('__contacts' in stored(empty)[0], false);
   });
 
-  it('tolerates junk in the contact list without throwing', () => {
-    const junk = { TaskId: '1', __contacts: [null, 'nope', 42, { Email: 'c@example.com' }] };
+  it('tolerates junk in the contact list — the LADDER still finds the real contact', async () => {
+    // RT-1 changed this deliberately: `_pruneDeep` keeps scalar array elements too, because payloads carry
+    // scalar arrays (`tags[0]`) that `_candidatePaths` walks. So junk scalars survive storage — what matters is
+    // that they cannot displace a real contact, and `ladderValues` filters to objects itself.
+    const { ladderValues, normalizeRungs } = await import('./peritemMap.js');
+    const junk = { TaskId: '1', __contacts: [null, 'nope', 42, { IsPrimary: true, Email: 'c@example.com' }] };
     assert.doesNotThrow(() => stored(junk));
-    assert.equal(stored(junk)[0].__contacts.length, 1, 'only the usable contact is kept');
+    const vals = ladderValues(stored(junk)[0], normalizeRungs([{ type: 'email', contact: 'primary' }]));
+    assert.equal(vals[0] && vals[0].value, 'c@example.com', 'junk beside it changes nothing');
   });
 });
 
@@ -237,5 +242,52 @@ describe('CT-1 end-to-end — a focus-stored row still feeds the ladder', () => 
     const stripped = { TaskId: '1' };   // what focus used to store: scalars only
     const rungs = normalizeRungs([{ type: 'email', contact: 'primary' }]);
     assert.deepEqual(ladderValues(stripped, rungs), [], 'no contacts array → no rung hit, the live 21:26 shape');
+  });
+});
+
+// ── RT-1 (v2.74.1991) — THE ROUND-TRIP CONTRACT ────────────────────────────────────────────────────────────
+// Three defects in one day (PV-1 `also`, JK-1 `joinKey`, CT-1 `__contacts`) were the same failure: a stored row
+// or leg still LOOKED valid — right shape, right count, right label — and was quietly missing the one thing the
+// next consumer needed. Each cost a live round-trip to find. This asserts the whole contract in one place: what
+// goes into focus must still satisfy every consumer that reads it back.
+describe('RT-1 — a focus round-trip preserves everything the consumers read', () => {
+  const enrichedRow = {
+    TaskId: 'T1', TaskNumber: 'TN-1', AddressLine1: '12 Elm', CityStateZip: 'Raleigh NC',
+    __contacts: [{ IsPrimary: true, Email: 'a@example.com', CellPhone: '555-0100' }],
+    // v1903 made NESTED paths findable (`fulfillments[].trackingInfo[].number`, `variants.edges[].node.price`).
+    // A read's rows carry exactly this shape.
+    fulfillments: [{ status: 'SUCCESS', trackingInfo: { number: '1ZTEST', company: 'UPS' } }],
+  };
+  const leg = { name: 'Warranty tasks', domain: 'connector',
+    tool: { origin: 'vendorsuite.drhorton.com', groundId: 'g1', recipeId: 'vs_warranty_tasks',
+      joinKey: ['email', 'phone'],
+      drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address',
+        label: ['AddressLine1'], also: ['vs_task_contacts'] } } };
+  const round = () => focusListEntry({ label: 'Warranty tasks', noun: 'warranty tasks', rows: [enrichedRow], leg });
+
+  it('the LADDER still resolves — contacts survive (CT-1)', async () => {
+    const { ladderValues, normalizeRungs } = await import('./peritemMap.js');
+    const vals = ladderValues(round().rows[0], normalizeRungs([{ type: 'email', contact: 'primary' }]));
+    assert.equal(vals[0] && vals[0].value, 'a@example.com');
+  });
+
+  it('the JOIN KEY still resolves — joinKey survives (JK-1)', () => {
+    assert.deepEqual(round().provenance.joinKey, ['email', 'phone']);
+  });
+
+  it('the DRILL still enriches — via/from/param/also/matchOn/label survive (PV-1)', () => {
+    const d = round().provenance.drill;
+    for (const k of ['via', 'from', 'param', 'also', 'matchOn', 'label']) {
+      assert.ok(k in d, `drill.${k} must survive — each absence has cost a live cycle`);
+    }
+  });
+
+  it('a NESTED field is still findable — pickFieldPath walks to depth 4 (v1903)', async () => {
+    // `read the tracking number on each order` resolves `fulfillments[].trackingInfo.number`. If storage
+    // flattens the row to scalars, that path cannot exist and the ask can never be answered off a focus set.
+    const { pickFieldPath } = await import('./peritemMap.js');
+    const hit = pickFieldPath([round().rows[0]], 'tracking number');
+    assert.ok(hit && hit.path, 'a stored row must still expose its nested paths');
+    assert.match(hit.path, /trackingInfo/);
   });
 });
