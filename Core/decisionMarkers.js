@@ -157,6 +157,10 @@ export const DECISION_MARKERS = [
   // CW (DESIGN_cloud_logs.md ruling 9) — the shipper's own honesty marker: a fleet trace must record its
   // own incompleteness, and the dashboard must see the pipeline's loss rate.
   { key: 'shipper', src: 'SHIPPER ▸', metric: true, metricPattern: 'SHIPPER ▸ gap' },
+  // PERF ▸ v2.74.1981 — TEMPORARY startup-latency instrumentation (the "3-4s after reload" investigation). Registered
+  // here so the timing line surfaces in a `gc` decisions download too, not only a `gl` full trace (invariant #1).
+  // REMOVE this entry together with the paired PERF marks in chat.js / Services/ChatAPI.js / background.js.
+  { key: 'perf', src: "PERF ▸" },
 ];
 
 /** The decisions-view filter, derived (studio.js consumes this). */

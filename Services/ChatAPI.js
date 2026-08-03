@@ -36,6 +36,7 @@
 const _MSG_TIMEOUT_MS = 60_000;
 const _send = (type, payload) => new Promise((resolve, reject) => {
   let settled = false;
+  const _t0 = Date.now();   // PERF ▸ v2.74.1981 (temp) — for the first cold-SW round-trip stamp below
   const timer = setTimeout(() => {
     if (settled) return;
     settled = true;
@@ -45,6 +46,9 @@ const _send = (type, payload) => new Promise((resolve, reject) => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
+    // PERF ▸ v2.74.1981 — TEMPORARY: stamp the FIRST panel→SW round-trip's rtt. On the returning-user reload path
+    // this is usually the cold-boot call (CAPABILITY_LIST_INVOCATIONS). Read by chat.js _perfFlush; remove when done.
+    try { const P = (typeof globalThis !== 'undefined') && globalThis.__orchPerf; if (P && P.firstRtt == null) { P.firstRtt = Date.now() - _t0; P.firstType = String(type); } } catch { /* */ }
     const err = chrome.runtime.lastError;
     if (err) reject(new Error(`${type}: ${err.message || 'message channel error'}`));
     else resolve(response);

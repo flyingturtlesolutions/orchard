@@ -160,6 +160,13 @@ Logger.setPersist(true);
 // init still has a handler to catch it.
 installGlobalErrorHandlers('background', self);
 
+// PERF ▸ v2.74.1981 — TEMPORARY SW cold-start instrumentation for the "3-4s after reload" investigation. On a COLD
+// start these top-level statements run once, after the module graph is parsed. In a service worker performance.now()
+// ≈ ms since the SW woke (its timeOrigin), so the `sw:first-dispatch since-wake` line below is the SW's own view of
+// how long the panel's first message waited for the cold boot. Remove with the paired chat.js PERF block + the
+// Core/decisionMarkers.js 'perf' entry when the measurement is banked.
+try { self.__swBootT0 = Date.now(); Logger.info('background', 'PERF ▸ sw:eval-start (cold boot begin)'); } catch (e) { /* */ }
+
 const engine = new ExecutionEngine();
 CapabilityAPI.setEngine(engine);
 
@@ -309,6 +316,9 @@ async function syncGroundAssetsAfterSave(groundId, assets = {}) {
 }
 
 _migrationPromise = _migrationPromise.then(() => refreshStoragePort());
+// PERF ▸ v2.74.1981 — TEMPORARY: confirm the top-level migrations are OFF the first-message path (they are never
+// awaited by any handler). This observer does not alter the chain. Remove with the rest of the PERF instrumentation.
+try { _migrationPromise.then(() => { try { Logger.info('background', `PERF ▸ sw:migrations-done +${Math.round(performance.now())}ms since wake`); } catch { /* */ } }); } catch { /* */ }
 
 initStoragePort(new ChromeStorageAdapter('local'));
 getIdentitySummary()
@@ -1939,6 +1949,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // evicted the window's earlier asks (gl 162926: the trace opens on 20 orphan `Message: INVOKE_SESSION` lines,
   // the tail of a fan-out whose boot line and first asks were already gone). Half a fix is a fix that measures
   // as done. Only the per-item flag is honored, so every ordinary dispatch still logs exactly as before.
+  // PERF ▸ v2.74.1981 — TEMPORARY: the FIRST message handled after a cold start, measured from SW wake
+  // (performance.now() ≈ ms since the SW's timeOrigin). Fires once per SW lifetime. Remove with the PERF block.
+  try { if (!self.__perfFirstDispatch) { self.__perfFirstDispatch = 1; Logger.info('background', `PERF ▸ sw:first-dispatch type=${type} since-wake=${Math.round(performance.now())}ms`); } } catch { /* */ }
   if (!_QUIET_MSG.has(type) && !(payload && payload.quiet === true)) Logger.debug('background', `Message: ${type}`);
 
   // Registry dispatch (R1): SG handlers call sendResponse themselves (verbatim with the old switch); the

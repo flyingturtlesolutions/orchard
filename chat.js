@@ -1855,6 +1855,7 @@ async function renderSuggestionCards() {
   const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'How can I help you today?';
 
   const capabilities = await ChatAPI.listCapabilities({ status: 'ready' });
+  try { _perfMark('cards'); } catch { /* PERF ▸ v2.74.1981 temp — empty-path cards paint AFTER the (cold-SW) listCapabilities */ }
 
   if (capabilities.length === 0) {
     // v2.74.900 — page-aware empty state, RICH-ONLY (atomic goal chips are not surfaced in chat): show the
@@ -3420,6 +3421,8 @@ const _orchReq = (type, payload) => new Promise((resolve) => {
   try {
     chrome.runtime.sendMessage({ type, payload }, (res) => {
       if (done) return; done = true; clearTimeout(timer);
+      // PERF ▸ v2.74.1981 (temp) — stamp the FIRST panel→SW round-trip's rtt (the cold-boot call after a reload).
+      try { const P = globalThis.__orchPerf; if (P && P.firstRtt == null) { P.firstRtt = Date.now() - _t0; P.firstType = String(type); } } catch { /* */ }
       if (chrome.runtime.lastError) { try { _orchLog(`SPAN ▸ ORCHREQ · FAILED · ${Date.now() - _t0}ms · cause=port · ${String(type)}`); } catch { /* */ } }
       resolve(chrome.runtime.lastError ? null : res);
     });
@@ -3437,6 +3440,24 @@ try { setInterval(() => { try { chrome.runtime.sendMessage({ type: 'PANEL_PING',
 // v2.74.818 — write a decision line (e.g. the ROUTE a turn took + its cues) into the background's PERSISTED ring
 // buffer, so a chat-side routing decision shows in the downloaded trace (the sidepanel's own console isn't logged).
 const _orchLog = (line) => { try { _orchReq('ORCH_LOG', { line: String(line) }); } catch { /* never let a log break a turn */ } };
+
+// PERF ▸ (v2.74.1981) — TEMPORARY side-panel startup instrumentation for the "3-4s after reload" investigation.
+// Marks are BUFFERED in memory and flushed as ONE _orchLog line at the END of init(), so the probe never adds its
+// own cold-SW round-trip to the path it measures. Each mark value is ms-since-panel-open (performance.now() ≈ time
+// since the panel document's navigation start, so it includes module-graph eval). The first panel→SW round-trip's
+// cold-boot rtt is stamped into globalThis.__orchPerf by _orchReq (above) and ChatAPI._send. Read the single
+// `PERF ▸ startup` line in a gl trace after ONE live reload. DELETE this block + the _perfMark/_perfFlush call
+// sites + the ChatAPI/_orchReq stamps + the background.js PERF lines + the Core/decisionMarkers.js 'perf' entry
+// once the measurement is banked.
+const __orchPerf = (globalThis.__orchPerf = globalThis.__orchPerf || { marks: [], firstRtt: null, firstType: null });
+function _perfMark(name) { try { if (__orchPerf.marks.some((m) => m.name === name)) return; __orchPerf.marks.push({ name, t: performance.now() }); } catch { /* */ } }
+function _perfFlush() {
+  try {
+    const parts = __orchPerf.marks.map((m) => `${m.name}=${Math.round(m.t)}ms`);
+    const rtt = (__orchPerf.firstRtt != null) ? ` firstORCHREQ(${__orchPerf.firstType || '?'})=${Math.round(__orchPerf.firstRtt)}ms` : '';
+    _orchLog(`PERF ▸ startup · ${parts.join(' ')}${rtt} · sinceOpen(flush)=${Math.round(performance.now())}ms`);
+  } catch { /* */ }
+}
 
 async function _orchActiveTab() {
   try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); return (tabs && tabs[0]) || null; }
@@ -15829,6 +15850,16 @@ _wireAttach();
 // ─── Init ────────────────────────────────────────────────────────────────────
 
 (async function init() {
+  // v2.74.1981 — STARTUP-LATENCY FIX (rank 1): reveal the dev/reload icon FIRST, before any panel→SW round-trip.
+  // Its reveal depends only on a LOCAL getEnabled() read (devBridge.js onReloadState). Wiring it at the END of
+  // init() — after _resumeRunningInvocations() + _refreshRunningBar(), both chrome.runtime.sendMessage round-trips
+  // that pay the service-worker COLD BOOT on a reload — made the button (and the running bar) inherit ~0.2-1.5s of
+  // SW cold-start they never needed. Hoisted here. (Was DB-2 v2.74.975 "wired at the end so _getDevBridge's deps
+  // are initialised"; those deps are all module-level fns, already defined by the time this IIFE runs, so the
+  // ordering reason no longer applies.) try/catch so a wiring failure can never block the rest of init.
+  try { _wireDevReload(); } catch (e) { try { console.warn('[chat] _wireDevReload:', e && e.message); } catch { /* */ } }
+  try { _perfMark('init'); } catch { /* PERF ▸ v2.74.1981 temp — init entered ≈ panel module-graph eval done */ }
+
   await _loadDevMode();   // v2.74.1160 — gate dev/design surfaces before any restore
   await _loadSetupStash();   // v2.74.1340 (review J-setup) — reload-survivor: an in-progress setup flow re-adopts on the next message in its conversation
   // Attempt to restore the most recent conversation. If none exists, the
@@ -15840,6 +15871,7 @@ _wireAttach();
       // v2.74.1160 — with dev mode off, don't auto-restore a dev/design conversation as the active surface.
       if (conv && conv.messages.length > 0 && !(conv.kind === 'dev' && !_devModeEnabled)) {
         await _rehydrateConversation(conv);
+        try { _perfMark('thread'); } catch { /* PERF ▸ v2.74.1981 temp — transcript painted from local storage (no SW) */ }
         // v2.71.4 — Resume running invocations. If a strategy was launched
         // and the panel was hidden mid-run, reopening should show the
         // running bubble + cancel button (not a stuck completed state).
@@ -15864,21 +15896,20 @@ _wireAttach();
   // unrelated event happened to sync. One idempotent sync per open, deferred past the boot paint.
   try { setTimeout(() => { void _syncIncidentCases(); }, 3000); } catch { /* */ }
 
-  // v2.71.7 — Refresh transport bar at end of init regardless of conversation
-  // state. Bar shows global running state — present even on an empty/new
-  // conversation surface so user always sees their running strategies.
-  await _refreshRunningBar();
-
-  // DB-2 (v2.74.975) — Dev-bridge reload icon. Wired here (not at module top
-  // level) so _getDevBridge's deps — _mkBtn et al. — are already initialised.
-  // The icon stays hidden for everyone until dev mode is on; the dot lights
-  // when the bridge changed repo files. Click reloads the whole extension to
-  // pick the edits up (DESIGN_dev_bridge §5). Inert for non-dev users.
-  _wireDevReload();
+  // v2.71.7 — Refresh the transport bar regardless of conversation state (global running state, shown even on an
+  // empty/new surface). v2.74.1981 — was `await`ed just before _wireDevReload(), which put the reload-button reveal
+  // behind this SECOND cold-SW round-trip; the reveal is now hoisted above, so this is fire-and-forget: the bar
+  // defaults .hidden (chat.html) and flips in when the SW answers, and nothing after it needs to wait on it.
+  void _refreshRunningBar();
 
   _setupAutoScroll();   // v2.74.1026 — start sticky-follow once the restored conversation is in the DOM
 
   $('chat-input').focus();
+
+  // PERF ▸ v2.74.1981 — TEMPORARY: flush the ONE consolidated startup-timing line here, at the end of init, where
+  // the SW is already warm (the restore/empty path above made the first round-trip), so the flush's own _orchLog
+  // adds no cold-SW cost to the measured path. Remove with the rest of the PERF instrumentation.
+  try { _perfFlush(); } catch { /* */ }
 })();
 
 // DB-2 (v2.74.975) — subscribe the header reload icon to devBridge state and
