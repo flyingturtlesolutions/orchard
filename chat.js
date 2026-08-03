@@ -23,7 +23,7 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.74.973) — the ONE strippable dev-bridge module (DESIGN_dev_bridge §11)
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { parseFileValue } from './Services/FileParsers.js';   // v2.74.1977 — the 2nd input type: parse an attached .xlsx/.csv (local, no egress)
-import { fileListToRows, sheetCaseMeta, sheetGroundedRead, sheetBrief, PERSIST_CAP } from './Core/sheetCase.js';   // v2.74.1977 — an uploaded sheet opens a grounded case
+import { fileListToRows, sheetCaseMeta, sheetGroundedRead, sheetBrief, isSheetDataAsk, sheetMetaAnswer, PERSIST_CAP } from './Core/sheetCase.js';   // v2.74.1977 — an uploaded sheet opens a grounded case; v1983 — the P2.5 gate
 import { layoutReport, formatLayoutMarker } from './Core/uiLayout.js';   // v2.74.1971 — the deterministic appearance marker (LAYOUT ▸): measure the rendered reply so "does it look right" is a gl grep
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
@@ -14401,6 +14401,9 @@ async function sendChatMessage() {
     const mOnSite = text.match(/^(?:show|open|view|pull\s+up|bring\s+up|go\s+to)\b[^\n]*?\b(\d{3,})\b[^\n]*\b(?:on|in)\s+(?:the\s+)?([a-z][\w.-]{2,})\s*$/i);
     if (mOnSite && await _openRecordOnSite(text, mOnSite[1], mOnSite[2].toLowerCase())) return;
   }
+  // P2.5 (v2.74.1983) — a data ask INSIDE A SHEET CASE answers over the grounded rows here, before the router can
+  // TARGET-resolve to a live tab (the gl 08-03 finding). Fires only on a sheet case + a data-question shape.
+  if (await _maybeSheetAnswer(text)) return;
   // CX-9j (v2.74.1444) — field follow-up on the last grounded read ("what are the instructions?" after a task read →
   // the record's OWN Instructions field, full text, deterministic). Acts only on a fresh read + a real field match;
   // everything else falls through untouched (so "what are the instructions?" with no recent read still routes normally).
@@ -15818,6 +15821,37 @@ async function _spawnSheetCase(filename, rows) {
   try { await _selectConvForInput(conv); } catch { /* */ }                 // switch to the new case
   _lastGroundedRead = { ...sheetGroundedRead(meta.name, rows), at: Date.now() };   // ground on the FULL set (after switch, so the rehydrate restore doesn't cap it)
   try { await _revealRail(); } catch { /* */ }                            // surface the new case in the Rail
+}
+
+// v2.74.1983 (P2.5) — THE SHEET-CASE GATE. A data ask inside a sheet case answers over the grounded ROWS BEFORE the
+// router runs, so it never TARGET-resolves to a live tab and burns a read (the gl 2026-08-03 finding: "list all column
+// names" fired an 11.6s VendorSuite read and answered from the brief). Metadata (columns / row count) is deterministic
+// (no LLM, no row egress); an analytical ask runs the interrogator over the rows — a small sheet is sent WHOLE so
+// filters are exact. Fires only on a data-question shape; navigation/action asks route normally.
+async function _maybeSheetAnswer(text) {
+  try {
+    const g = _lastGroundedRead;
+    if (!g || !g.leg || g.leg.domain !== 'file' || !g.value) return false;   // not a grounded sheet case
+    const rows = (g.value && Array.isArray(g.value.rows)) ? g.value.rows : [];
+    if (!rows.length || !isSheetDataAsk(text)) return false;
+    const headers = (rows[0] && typeof rows[0] === 'object' && !Array.isArray(rows[0])) ? Object.keys(rows[0]) : [];
+    const name = g.leg.name || 'the sheet';
+    const emit = (body) => { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); try { _reportLayout(mm, 'reply'); } catch { /* */ } _orchFinalize(mm); };
+    // 1) METADATA — from structure, deterministic (no LLM, no row egress)
+    const meta = sheetMetaAnswer(text, { name, headers, count: rows.length });
+    if (meta) { emit(meta); try { _orchLog(`SHEET ▸ answered "${_scrubHead(text, 40)}" over ${rows.length} rows (metadata)`); } catch { /* */ } return true; }
+    // 2) ANALYTICAL — the interrogator over the rows; a small sheet is sent WHOLE so filters/counts are exact
+    const facts = readShapeFacts(g.value, { ask: text, sampleN: Math.min(rows.length, 50) });
+    let shaped = null;
+    try { shaped = await _orchReq('SHAPE_ANSWER', { ask: text, facts, scope: `the uploaded sheet "${name}"` }); } catch { /* best-effort */ }
+    const answer = (shaped && shaped.answer) ? shaped.answer : '';
+    const showRows = !answer || (shaped && shaped.showRecords);
+    const lines = showRows ? (renderConnectorLines(g.value, { name }) || []) : [];
+    const body = [answer, lines.join('\n')].filter(Boolean).join('\n\n');
+    emit(body || 'I couldn’t work that out over the sheet — try naming a column.');
+    try { _orchLog(`SHEET ▸ answered "${_scrubHead(text, 40)}" over ${rows.length} rows (interrogated${answer ? '' : ', no shape'})`); } catch { /* */ }
+    return true;
+  } catch { return false; }
 }
 
 function _wireAttach() {

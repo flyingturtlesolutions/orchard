@@ -60,3 +60,30 @@ export function sheetBrief({ name = 'Sheet', count = 0, headers = [], rows = [] 
   out.push('Ask me to count, filter, or run something for each row.');
   return out.join('\n\n');
 }
+
+// ── P2.5 (v2.74.1983) — the SHEET-CASE GATE: a data ask inside a sheet case answers over the ROWS, not a live tab ──
+// gl 2026-08-03 found "list all column names" fell through the router, TARGET-resolved to a live tab, fired an 11.6s
+// VendorSuite read, and answered from the BRIEF not the rows. These pure predicates let chat.js catch it BEFORE routing.
+
+/** Is this ask a DATA question about the grounded sheet (vs a navigation/action ask that should route normally)? PURE. */
+export function isSheetDataAsk(text) {
+  const q = String(text || '').toLowerCase().trim();
+  if (!q) return false;
+  if (/^(open|go to|navigate|switch to|close|delete|show me the)\b/.test(q)) return false;   // navigation/action → route
+  return /\b(column|header|field|row|record|entr(?:y|ies)|cell|how many|how much|count|number of|which|filter|where|sum|total|average|avg|min|max|list|show|each|value|status|top|most|least|group|sort|distinct|unique)s?\b/.test(q)
+    || /\bthis (sheet|file|data|table|spreadsheet)\b/.test(q);
+}
+
+/** METADATA questions (columns / row count) answered from STRUCTURE — no LLM, no row egress. null → not metadata. PURE. */
+export function sheetMetaAnswer(ask, { name = 'the sheet', headers = [], count = 0 } = {}) {
+  const q = String(ask || '').toLowerCase();
+  const cols = Array.isArray(headers) ? headers : [];
+  const colList = cols.length ? cols.map(_codeSpan).join(', ') : '(no header row)';
+  if (/\b(column|header|field)s?\b/.test(q) && /\b(what|which|list|name|all|show|tell|how many|number)\b/.test(q)) {
+    return `**${_mdSafe(name)}** has ${cols.length} column${cols.length === 1 ? '' : 's'}: ${colList}.`;
+  }
+  if (/\b(how many|number of|count of|count the)\b.*\b(row|record|entr|line|item)s?\b/.test(q) || /\bhow big\b/.test(q) || /^\s*how many\s*\??\s*$/.test(q)) {
+    return `**${_mdSafe(name)}** has ${count} row${count === 1 ? '' : 's'} across ${cols.length} column${cols.length === 1 ? '' : 's'}.`;
+  }
+  return null;
+}

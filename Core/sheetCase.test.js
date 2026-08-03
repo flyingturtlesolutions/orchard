@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fileListToRows, sheetCaseMeta, sheetGroundedRead, sheetBrief, PERSIST_CAP } from './sheetCase.js';
+import { fileListToRows, sheetCaseMeta, sheetGroundedRead, sheetBrief, isSheetDataAsk, sheetMetaAnswer, PERSIST_CAP } from './sheetCase.js';
 
 describe('sheetCase — fileListToRows', () => {
   it('a FileParsers list(records) → plain row objects', () => {
@@ -64,5 +64,35 @@ describe('sheetCase — sheetBrief (prose, not a row dump)', () => {
   });
   it('a header-less / empty sheet still briefs safely', () => {
     assert.match(sheetBrief({ name: 'x', count: 0, headers: [], rows: [] }), /0 rows across 0 columns/);
+  });
+});
+
+describe('sheetCase — the P2.5 gate: isSheetDataAsk', () => {
+  it('fires for data questions about the sheet', () => {
+    for (const q of ['list all column names', 'how many are open', 'sum the totals', 'which rows are overdue',
+                     'get status for each', 'show the top 5', 'what columns does this have', 'filter to status open']) {
+      assert.equal(isSheetDataAsk(q), true, q);
+    }
+  });
+  it('does NOT fire for navigation / action asks (those still route)', () => {
+    for (const q of ['open zendesk', 'go to vendorsuite', 'show me the settings', 'close this', 'delete the case']) {
+      assert.equal(isSheetDataAsk(q), false, q);
+    }
+  });
+});
+
+describe('sheetCase — the P2.5 gate: sheetMetaAnswer (deterministic, no LLM, no row egress)', () => {
+  const ctx = { name: 'Q3 orders', headers: ['id', 'customer', 'total'], count: 36 };
+  it('columns question → the column list from STRUCTURE', () => {
+    assert.equal(sheetMetaAnswer('list all column names', ctx), '**Q3 orders** has 3 columns: `id`, `customer`, `total`.');
+    assert.match(sheetMetaAnswer('what columns does it have', ctx), /3 columns: `id`, `customer`, `total`/);
+  });
+  it('row-count question → the size', () => {
+    assert.match(sheetMetaAnswer('how many rows', ctx), /36 rows across 3 columns/);
+    assert.match(sheetMetaAnswer('how many', ctx), /36 rows across 3 columns/);
+  });
+  it('an ANALYTICAL ask is NOT metadata → null (falls to the interrogator)', () => {
+    assert.equal(sheetMetaAnswer('how many are open', ctx), null);
+    assert.equal(sheetMetaAnswer('sum the totals', ctx), null);
   });
 });
