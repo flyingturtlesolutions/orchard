@@ -26,6 +26,7 @@ import { layoutReport, formatLayoutMarker } from './Core/uiLayout.js';   // v2.7
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, namesDeclaredLeg, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
+import { declaredMismatchesResolved, isEntityRead } from './Core/selfMapGuard.js';   // SM-1 (v2.74.1974) — the self-map diversion tests: invention (declared vs RESOLVED) + entity-vs-field
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
 import { buildDeskLanding } from './Core/deskLanding.js';   // DL-1 (v2.74.1600) — the desk LAUNCH page (pure assembly; proven sources only)
@@ -4425,21 +4426,8 @@ async function _mapResolveTarget(readAsk, tabId) {
 
 // The executor. `priorValue` (a chain's st.lastValue) is the collection when map.collection==='prior'; else the
 // self-contained collection.readAsk is read here. Returns { ok, joined } (joined → st.lastValue for composition).
-// v1646 — is the map's resolved TARGET the same ground/host the rows came FROM? A self-map is always a
-// per-item field read wearing a map's clothes. Compares resolved identity, never wording.
-// v2.74.1648 — the DECLARED-name half of the self-map test. Live 101132: the verdict named target system
-// "vendorsuite" (the SOURCE), but no vendorsuite "customer by phone" leg exists, so the router resolved to the
-// nearest thing it could find — shopify_customer_by_phone — and searched Shopify with a TaskId, reporting the
-// tally as a "vendorsuite lookup". Comparing only the RESOLVED leg (below) misses this entirely: the invention
-// lives in the NAME, and resolution then wanders off it. Test both ends.
-function _declaresSourceSystem(declared, srcLeg) {
-  const d = String(declared || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-  if (!d) return false;
-  const host = String((srcLeg && srcLeg.tool && (srcLeg.tool.appHost || srcLeg.tool.origin)) || '').toLowerCase();
-  if (!host) return false;
-  const labels = host.replace(/^https?:\/\//, '').split('.').filter((x) => x && !/^(com|net|org|io|co|www)$/.test(x));
-  return labels.some((l) => l === d || (l.length > 3 && d.length > 3 && (l.includes(d) || d.includes(l))));
-}
+// The two self-map tests moved to Core/selfMapGuard.js at SM-1 (v2.74.1974) — they decide whether a user gets an
+// order or a count, and here the harness could not reach them. That file carries the 101132 / 04:04 rationale.
 
 function _sameGroundAsSource(target, srcLeg) {
   const th = (target && target.leg && target.leg.tool) || {};
@@ -5827,7 +5815,22 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // (live 094448's "DEAKO", a section heading inside the instructions text, which resolved to the user's real
   // Zendesk queue). Only making `target.system` optional with an explicit per-item-field-read branch fixes
   // that, because the invention happens before there is any phrasing or target to test.
-  if (_sameGroundAsSource(tgt0, srcLeg) || _declaresSourceSystem(system, srcLeg)) {
+  // SM-1 (v2.74.1974) — ENTITY vs FIELD. v1646 generalised one live case into "a self-map is ALWAYS a per-item
+  // field read wearing a map's clothes". True for "the homeowner's phone"; FALSE for "their last order", which
+  // names a RELATED RECORD. Live 04:04/04:17 that assumption sent "get their last order" through _frClean into
+  // fieldRead, which dutifully matched `numberOfOrders` — a COUNT off the pinned customer — and the user never
+  // got an order. The discriminator needs no new classifier: `tgt0` IS the readAsk resolved, so a DIFFERENT leg
+  // on the same system is by definition a related-record read, while the same leg (or none) is a field read.
+  const _tgtLeg = (tgt0 && tgt0.leg) || null;
+  const _entityRead = isEntityRead(tgt0, srcLeg);
+  const _invented = declaredMismatchesResolved(system, tgt0);
+  // Invention ALWAYS diverts — 101132 sent a TaskId to Shopify as a phone number and reported a tally, the
+  // wrong-but-plausible class. A same-ground read diverts only when it is a FIELD read; an entity read falls
+  // through to the ordinary per-row map below, which was always the right machinery for it.
+  if (_entityRead && !_invented) {
+    try { _orchLog(`MAP ▸ self-map ("${system}") → ENTITY read (${(_tgtLeg.tool && _tgtLeg.tool.recipeId) || _tgtLeg.key || '?'}) — per-row map, not a field read`); } catch { /* */ }
+  }
+  if (_invented || (_sameGroundAsSource(tgt0, srcLeg) && !_entityRead)) {
     // v2.74.1898 — HAND OFF, don't refuse. The old sentence here diagnosed itself: *"that's a per-item field read"*
     // — and the clause that does exactly that sits one function over with the SAME options bag. Live it refused
     // "for each open task in Raleigh, get the homeowner's phone and email" AFTER doing 14 successful reads (17:42),
