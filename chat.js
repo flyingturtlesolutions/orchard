@@ -22,6 +22,8 @@ import { $, escHtml, escAttr, toast, relTime, openSidepanelHere } from './shared
 import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Services/Chat/strategyResultHtml.js';
 import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.74.973) — the ONE strippable dev-bridge module (DESIGN_dev_bridge §11)
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
+import { parseFileValue } from './Services/FileParsers.js';   // v2.74.1977 — the 2nd input type: parse an attached .xlsx/.csv (local, no egress)
+import { fileListToRows, sheetCaseMeta, sheetGroundedRead, PERSIST_CAP } from './Core/sheetCase.js';   // v2.74.1977 — an uploaded sheet opens a grounded case
 import { layoutReport, formatLayoutMarker } from './Core/uiLayout.js';   // v2.74.1971 — the deterministic appearance marker (LAYOUT ▸): measure the rendered reply so "does it look right" is a gl grep
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
@@ -15733,6 +15735,71 @@ $('chat-input').addEventListener('keydown', (e) => {
 
 $('btn-chat-send').addEventListener('click', sendChatMessage);
 
+// ─── Attach a spreadsheet — the 2nd input type (v2.74.1977) ──────────────────────────────────────────────────────
+// An uploaded .xlsx / .csv OPENS A NEW CASE whose grounded working set IS the rows, so the existing read-answer /
+// aggregate / fan-out engine (field-followups, "get each", counts) operates over them exactly like a connector read.
+// Parse is LOCAL (no egress); cells are UNTRUSTED → FileParsers yields a Scope value (never instructions) and the
+// readout renders escape-first. The pure shaping is in Core/sheetCase.js.
+async function _onSheetFile(file) {
+  if (!file) return;
+  if (!/\.(xlsx|csv)$/i.test(file.name || '')) { try { toast('Attach a .xlsx or .csv file'); } catch { /* */ } return; }
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ''));
+      fr.onerror = () => reject(fr.error || new Error('read failed'));
+      fr.readAsDataURL(file);
+    });
+    const value = await parseFileValue({ filename: file.name, mimeType: file.type || '', sizeBytes: file.size || 0, dataUrl }, 'auto');
+    const rows = fileListToRows(value);
+    if (!rows.length) { try { toast(`No rows found in ${file.name}`); } catch { /* */ } return; }
+    await _spawnSheetCase(file.name, rows);
+  } catch (err) {
+    try { toast(`Couldn't read ${file.name}: ${(err && err.message) || err}`); } catch { /* */ }
+    try { _orchLog(`SHEET ▸ parse failed for ${file.name}: ${err && err.message}`); } catch { /* */ }
+  }
+}
+
+async function _spawnSheetCase(filename, rows) {
+  const meta = sheetCaseMeta({ filename, rows });
+  // parent under the active DESK if we're in one, else a top-level case conversation
+  let parentId = null;
+  try {
+    if (_currentConversationId) { const cur = await ConversationStore.load(_currentConversationId); if (cur && cur.appId && !cur.parentId) parentId = cur.id; }
+  } catch { /* top-level is fine */ }
+  const focus = focusListEntry({ label: meta.name, noun: meta.noun, rows, at: Date.now() });   // a 6-row pronoun-binding SAMPLE
+  const conv = await ConversationStore.create({
+    title: meta.title, kind: 'agent', parentId,
+    focus: focus ? [focus] : null,
+    config: { sheet: { filename, rows: rows.slice(0, PERSIST_CAP) } },   // the DURABLE working set (bounded); the full set stays in-session
+  });
+  // the case OPENS showing the sheet — a rendered readout (markdown; the SHAPE/LAYOUT markers ride it, escape-first).
+  const rendered = renderConnectorLines({ rows }, { name: meta.name }) || [];
+  const body = `**${meta.name}** — ${meta.count} row${meta.count === 1 ? '' : 's'}, ${meta.headers.length} column${meta.headers.length === 1 ? '' : 's'}.\n\n${rendered.join('\n')}`;
+  try { await ConversationStore.updateMessage(conv.id, 'sheet_readout', { role: 'assistant', body }, { upsert: true }); } catch { /* the case still holds the sheet in focus + config */ }
+  try { _orchLog(`SHEET ▸ loaded ${meta.count} row(s) from ${filename} → case ${conv.id}${parentId ? ` under ${parentId}` : ''}`); } catch { /* */ }
+  try { await _selectConvForInput(conv); } catch { /* */ }                 // switch to the new case
+  _lastGroundedRead = { ...sheetGroundedRead(meta.name, rows), at: Date.now() };   // ground on the FULL set (after switch, so the rehydrate restore doesn't cap it)
+  try { await _revealRail(); } catch { /* */ }                            // surface the new case in the Rail
+}
+
+function _wireAttach() {
+  try {
+    const btn = $('btn-attach-file'), fileInput = $('attach-file-input');
+    if (btn && fileInput) {
+      btn.addEventListener('click', () => { try { fileInput.value = ''; fileInput.click(); } catch { /* */ } });
+      fileInput.addEventListener('change', () => { const f = fileInput.files && fileInput.files[0]; if (f) void _onSheetFile(f); });
+    }
+    const row = document.querySelector('.input-row');   // drag-drop onto the composer
+    if (row) {
+      row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('file-drop'); });
+      row.addEventListener('dragleave', (e) => { e.preventDefault(); row.classList.remove('file-drop'); });
+      row.addEventListener('drop', (e) => { e.preventDefault(); row.classList.remove('file-drop'); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) void _onSheetFile(f); });
+    }
+  } catch { /* */ }
+}
+_wireAttach();
+
 // ─── Init ────────────────────────────────────────────────────────────────────
 
 (async function init() {
@@ -16042,6 +16109,15 @@ async function _rehydrateConversation(conv) {
   // in the Rail indefinitely. Navigating away IS the deferred moment; the sync's pure check is idempotent.
   const _prevConvId = String(_currentConversationId || '');
   _currentConversationId = conv.id;
+  // v2.74.1977 — a SHEET case re-grounds on reopen: restore the durable working set (config.sheet.rows) into
+  // _lastGroundedRead so field-followups / "get each" / aggregates keep operating over the sheet after a reload/switch
+  // (the persisted focus keeps only a 6-row binding sample — the full set lives here).
+  try {
+    const _sheet = conv && conv.config && conv.config.sheet;
+    if (_sheet && Array.isArray(_sheet.rows) && _sheet.rows.length) {
+      _lastGroundedRead = { ...sheetGroundedRead(sheetCaseMeta({ filename: _sheet.filename, rows: _sheet.rows }).name, _sheet.rows), at: Date.now() };
+    }
+  } catch { /* grounding restore is best-effort */ }
   if (_prevConvId.startsWith('vtc_') && _prevConvId !== String(conv.id)) { try { setTimeout(() => { void _syncIncidentCases(); }, 400); } catch { /* */ } }
   // VT-2b (v2.74.1587) — opening an incident CASE refreshes its card + action bar from the live store (deferred
   // past this paint; the persisted incident_card renders first, then the pass upserts + re-arms the bar).

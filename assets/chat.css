@@ -1076,6 +1076,30 @@ textarea {
   color: var(--c-text-subtle);
 }
 
+/* v2.74.1977 — attach a spreadsheet (the 2nd input type). A GHOST button (not accent-filled like send) + a
+   drag-drop highlight on the whole composer. Upload opens a new case grounded on the sheet's rows. */
+.attach-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--c-text-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.attach-btn:hover {
+  background: var(--c-bg-subtle);
+  color: var(--c-text);
+}
+.input-row.file-drop {
+  border-color: var(--c-accent);
+  border-style: dashed;
+  box-shadow: 0 0 0 3px var(--c-accent-bg);
+}
+
 .send-btn {
   width: 30px;
   height: 30px;
