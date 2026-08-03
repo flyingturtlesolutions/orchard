@@ -44,7 +44,14 @@ intend to cite must be copied to `logs/run/` in the same tick or it may not exis
 
 ## STEP 2 — GRADE AGAINST THE DECLARED CRITERIA, NOT AGAINST MEMORY
 
-Grep for the LAST `VALIDATE[` block. Evaluate its arms **in this order**:
+Run `node tools/glf/blocks.cjs list`. It prints every UNRETIRED block with its BUILD. *(new: audit item 2 —
+blocks are a SET, not a stack.)* STEP 2 used to grep for the LAST block, so a block became unreachable the
+moment a newer one was written: at v2.74.1988 three fixes shipped to main with their blocks sitting behind the
+newest, structurally unobservable. **Grade the OLDEST open block whose BUILD is live**, and say in one line why
+each other open block is not gradeable this tick. Retirement is an explicit act — `blocks.cjs retire <ver>
+<PASS|FAIL|SUPERSEDED|WONTFIX> <note>` — never inferred from position or from a nearby INCIDENT tag.
+
+Evaluate the chosen block's arms **in this order**:
 
 1. `BUILD` does not match this tick's fingerprint → **INCONCLUSIVE**. Name it in one line. *(new: item 2)*
 2. `SCOPE`/`REQUIRES` unmet → **INCONCLUSIVE**. Say which precondition failed. An unmet precondition is not evidence.

@@ -149,3 +149,62 @@ it('returns nothing for a clean tree', () => {
 
 console.log(`
 ${pass} passed`);
+
+// ── blocks — the open-assertion ledger (v2.74.1989) ─────────────────────────────────────────────────────────
+const { parse: parseBlocks, cmpVer } = require('./blocks.cjs');
+
+const DOC = [
+  'VALIDATE[v2.74.1980 — a field ask asks instead of answering]:',
+  '  BUILD        = abc1234+deadbeef@2.74.1981',
+  '  PASS         = something',
+  '',
+  '## an entry',
+  'VALIDATE[v2.74.1988 — the probe reports the keys]:',
+  '  BUILD        = 48bfc2f+179b0d3d@2.74.1988',
+  '',
+  'RETIRED[v2.74.1988 — PASS — contact-shaped(13) settled it]',
+].join('\n');
+
+it('an ungraded block stays OPEN no matter how many newer blocks follow it', () => {
+  // The whole defect: STEP 2 grepped for the LAST block, so v1980 became unreachable the moment v1988 was
+  // written. Three fixes shipped unverified behind exactly this.
+  const { open } = parseBlocks(DOC);
+  assert.deepEqual(open.map((b) => b.version), ['2.74.1980']);
+});
+
+it('a RETIRED line removes a block from the open set — and only that block', () => {
+  const { blocks, retired, open } = parseBlocks(DOC);
+  assert.equal(blocks.length, 2);
+  assert.equal(retired.get('2.74.1988').verdict, 'PASS');
+  assert.ok(!open.some((b) => b.version === '2.74.1988'));
+});
+
+it('carries each block\'s BUILD so the tick can tell gradeable from stale', () => {
+  assert.equal(parseBlocks(DOC).open[0].build, 'abc1234+deadbeef@2.74.1981');
+});
+
+it('a re-armed block keeps its LATEST wording, not its first', () => {
+  const doc = 'VALIDATE[v2.74.1980 — first wording]:\n  BUILD = a@1\n\nVALIDATE[v2.74.1980 — re-armed wording]:\n  BUILD = b@2';
+  const { open } = parseBlocks(doc);
+  assert.equal(open.length, 1);
+  assert.match(open[0].claim, /re-armed/);
+});
+
+it('orders by version numerically, not lexically — v1988 must not sort before v1980', () => {
+  assert.ok(cmpVer('2.74.1980', '2.74.1988') < 0);
+  assert.ok(cmpVer('2.74.19', '2.74.1980') < 0, 'lexical compare would call these equal-prefixed');
+  assert.equal(cmpVer('2.74.1980', '2.74.1980'), 0);
+});
+
+it('does NOT infer retirement from an INCIDENT tag — retirement is an act, not a guess', () => {
+  // 84 closures at passes=0 came from exactly this kind of proximity reasoning.
+  const doc = 'VALIDATE[v2.74.1980 — a claim]:\n  BUILD = a@1\n\nINCIDENT[stage=route class=x sev=live status=closed vclosed=1980 passes=1]';
+  assert.equal(parseBlocks(doc).open.length, 1, 'a closed incident nearby retires nothing');
+});
+
+it('tolerates junk and an empty document', () => {
+  for (const junk of ['', null, undefined, '## just a heading', 'VALIDATE[malformed']) {
+    assert.doesNotThrow(() => parseBlocks(junk));
+  }
+  assert.deepEqual(parseBlocks('').open, []);
+});
