@@ -144,3 +144,98 @@ describe('_provenance drill — PV-1 (v2.74.1984): the whole drill survives, sid
     assert.equal(d.also.length, 4);
   });
 });
+
+describe('_provenance joinKey — JK-1 (v2.74.1989): the LADDER survives a reconstruction', () => {
+  const leg = { name: 'Warranty tasks', domain: 'connector',
+    tool: { origin: 'vendorsuite.drhorton.com', groundId: 'gnd_1', recipeId: 'vs_warranty_tasks',
+      joinKey: ['email', 'phone'],
+      drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', also: ['vs_task_contacts'] } } };
+  const prov = () => (focusListEntry({ label: 'Warranty tasks', noun: 'warranty tasks',
+    rows: [{ TaskId: '1' }], leg }) || {}).provenance || {};
+
+  it('carries joinKey — the ONLY srcLeg.tool field a reconstruction was still dropping', () => {
+    // chat.js:5709 reads `srcLeg.tool.joinKey` to build the lookup ladder. Dropped, `_declared` is null and the
+    // ladder is empty, so a map with no named itemField has nothing to infer the join from. Live: the run on the
+    // REAL leg logged `6 × shopify lookup via a 7-rung ladder → 6 matched, 0 failed`; the runs on a
+    // focus-reconstructed leg logged `field still not found · asked itemField: ""` with no rungs at all.
+    assert.deepEqual(prov().joinKey, ['email', 'phone']);
+  });
+
+  it('bounds it — focus rides chrome.storage', () => {
+    const big = { ...leg, tool: { ...leg.tool, joinKey: new Array(30).fill('email') } };
+    const p = (focusListEntry({ label: 'x', noun: 'x', rows: [{ a: 1 }], leg: big }) || {}).provenance || {};
+    assert.ok(p.joinKey.length <= 12, 'a ladder, not a crawl — normalizeRungs caps at 12 too');
+  });
+
+  it('omits the key entirely when the recipe declares no joinKey', () => {
+    const bare = { ...leg, tool: { origin: 'x.com', groundId: 'g', recipeId: 'r' } };
+    const p = (focusListEntry({ label: 'x', noun: 'x', rows: [{ a: 1 }], leg: bare }) || {}).provenance || {};
+    assert.equal('joinKey' in p, false);
+  });
+});
+
+describe('focusListEntry __contacts — CT-1 (v2.74.1990): the ladder\'s contact list survives storage', () => {
+  const row = {
+    TaskId: '1', AddressLine1: '12 Elm', TaskNumber: 'T-1',
+    __contacts: [
+      { IsPrimary: true, Email: 'a@example.com', CellPhone: '555-0100', FirstName: 'A' },
+      { IsPrimary: false, Email: 'b@example.com', CellPhone: '555-0101', FirstName: 'B' },
+    ],
+  };
+  const stored = (r = row) => (focusListEntry({ label: 'Warranty tasks', noun: 'warranty tasks', rows: [r] }) || {}).rows || [];
+
+  it('keeps __contacts — pruneFields drops every non-scalar, and the ladder reads ONLY this array', () => {
+    // `ladderValues` (peritemMap.js:310) resolves a contact rung from row['__contacts']; the flat columns are not
+    // consulted. Live: the fresh-read map logged `hits: primary contact email x5 → 6 matched`; the identical map
+    // bound through focus logged `(no rung hit) → 0 matched, 6 no-match`, because the array never survived.
+    const kept = stored()[0];
+    assert.ok(Array.isArray(kept.__contacts), '__contacts must survive');
+    assert.equal(kept.__contacts.length, 2);
+    assert.equal(kept.__contacts[0].Email, 'a@example.com');
+    assert.equal(kept.__contacts[0].IsPrimary, true, 'the primary/other distinction drives which rung hits');
+  });
+
+  it('still prunes the flat columns as before', () => {
+    assert.equal(stored()[0].TaskId, '1');
+  });
+
+  it('bounds the contact list — focus rides chrome.storage', () => {
+    const many = { ...row, __contacts: new Array(40).fill({ IsPrimary: false, Email: 'x@example.com' }) };
+    assert.ok(stored(many)[0].__contacts.length <= 6);
+  });
+
+  it('omits the key when there are no contacts, rather than storing an empty array', () => {
+    const bare = { TaskId: '1' };
+    assert.equal('__contacts' in stored(bare)[0], false);
+    const empty = { TaskId: '1', __contacts: [] };
+    assert.equal('__contacts' in stored(empty)[0], false);
+  });
+
+  it('tolerates junk in the contact list without throwing', () => {
+    const junk = { TaskId: '1', __contacts: [null, 'nope', 42, { Email: 'c@example.com' }] };
+    assert.doesNotThrow(() => stored(junk));
+    assert.equal(stored(junk)[0].__contacts.length, 1, 'only the usable contact is kept');
+  });
+});
+
+describe('CT-1 end-to-end — a focus-stored row still feeds the ladder', () => {
+  it('ladderValues finds the contact email on a row that has been through focus storage', async () => {
+    // The contract, asserted across the seam rather than by comparing a copied constant: whatever key
+    // peritemMap reads, a stored row must still satisfy it. If either side renames `__contacts`, this fails.
+    const { ladderValues, normalizeRungs } = await import('./peritemMap.js');
+    const row = { TaskId: '1', __contacts: [{ IsPrimary: true, Email: 'a@example.com', CellPhone: '555-0100' }] };
+    const storedRow = (focusListEntry({ label: 'Tasks', noun: 'warranty tasks', rows: [row] }) || {}).rows[0];
+    const rungs = normalizeRungs([{ type: 'email', contact: 'primary' }, { type: 'phone', contact: 'primary' }]);
+    const vals = ladderValues(storedRow, rungs);
+    assert.ok(vals.length >= 1, 'the stored row must still yield a ladder value');
+    assert.equal(vals[0].value, 'a@example.com');
+    assert.equal(vals[0].type, 'email');
+  });
+
+  it('and the same row WITHOUT the fix would yield nothing — the failure this pins', async () => {
+    const { ladderValues, normalizeRungs } = await import('./peritemMap.js');
+    const stripped = { TaskId: '1' };   // what focus used to store: scalars only
+    const rungs = normalizeRungs([{ type: 'email', contact: 'primary' }]);
+    assert.deepEqual(ladderValues(stripped, rungs), [], 'no contacts array → no rung hit, the live 21:26 shape');
+  });
+});

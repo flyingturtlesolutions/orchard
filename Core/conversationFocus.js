@@ -53,6 +53,18 @@ function _provenance(leg, params, labels) {
     host: _str(tool.origin || tool.appHost || tool.host).toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '') || null,
     recipeId: _str(tool.recipeId) || null,
     itemUrl: _str(tool.itemUrl) || null,
+    // JK-1 (v2.74.1989) — the LOOKUP LADDER. `chat.js:5709` reads `srcLeg.tool.joinKey` to build `_declared`;
+    // dropped, `_declared` is null, the ladder is empty, and a map whose ask names no field (which the router is
+    // INSTRUCTED to produce — interpretPrompt.js:37 says OMIT itemField UNLESS the ask names one) has nothing to
+    // infer the join from. Live, same ask, same leg, same sidecar: on the REAL leg
+    // `6 × shopify lookup via a 7-rung ladder → 6 matched, 0 no-match, 0 failed`; on a focus-reconstructed leg
+    // `field still not found · asked itemField: ""` with no rungs at all.
+    // Third field this function has silently dropped — `also` at PV-1, `matchOn`/`label` alongside it. An
+    // enumeration of every `srcLeg.tool.*` read says joinKey is the LAST one: drill(12) groundId(12) joinKey(3)
+    // recipeId(1). Capped at 12 to match normalizeRungs' own ceiling.
+    ...(Array.isArray(tool.joinKey) && tool.joinKey.length
+      ? { joinKey: tool.joinKey.slice(0, 12).map((k) => (k && typeof k === 'object' ? { ...k } : _str(k))).filter(Boolean) }
+      : {}),
     // PV-1 (v2.74.1984) — CARRY THE WHOLE DRILL, not three of its six fields. Provenance existed so a focus entry
     // could be re-drilled, and it kept via/from/param while dropping `also`, `matchOn` and `label`. `also` is the
     // SIDECAR list: `vs_warranty_tasks` declares `also: ['vs_task_contacts']`, and that sidecar is the only source
@@ -90,9 +102,31 @@ export function focusRecordEntry({ label, noun, fields, leg = null, params = nul
 }
 
 /** A LIST focus entry (a grounded read's row set — held for field/render follow-ups; acting on it is FC-6). PURE. */
+// CT-1 (v2.74.1990) — THE LADDER'S CONTACT LIST IS NOT A SCALAR, AND `pruneFields` ONLY KEEPS SCALARS.
+// `ladderValues` (Core/peritemMap.js:310) resolves a contact rung from `row['__contacts']` — an ARRAY of contact
+// objects attached by the sidecar merge (chat.js:5759, "keep the FULL contact list; the ladder needs each
+// contact's roles"). It never consults the flat columns. `pruneFields` has branches for string/number/boolean and
+// none for arrays or objects, so the list was dropped unconditionally on the way into storage — nothing to do
+// with the maxKeys cap.
+// Live, same ask and same 6 rows, differing only in where the rows came from:
+//   fresh read      MAP ▸ 6 × shopify lookup via a 7-rung ladder (hits: primary contact email x5, other x1) → 6 matched
+//   focus-bound     MAP ▸ 6 × shopify lookup via a 7-rung ladder (no rung hit) → 0 matched, 6 no-match
+// The rungs were there both times (JK-1 restored joinKey); the VALUES were not.
+// Bounded like everything else that rides chrome.storage: 6 contacts, 12 scalar fields each.
+const _CONTACTS_KEY = '__contacts';   // mirrors Core/peritemMap.js — pinned equal by a test, not by hope
+function _keepContacts(src, pruned) {
+  if (!pruned) return pruned;
+  const list = (src && Array.isArray(src[_CONTACTS_KEY])) ? src[_CONTACTS_KEY] : null;
+  if (!list || !list.length) return pruned;
+  const kept = list.filter((c) => c && typeof c === 'object' && !Array.isArray(c))
+    .slice(0, 6).map((c) => pruneFields(c, { maxKeys: 12, maxStr: 200 })).filter(Boolean);
+  if (kept.length) pruned[_CONTACTS_KEY] = kept;
+  return pruned;
+}
+
 export function focusListEntry({ label, noun, rows, leg = null, params = null, labels = null, at = 0 } = {}) {
   const lbl = _str(label).slice(0, 80);
-  const rs = (Array.isArray(rows) ? rows : []).slice(0, 6).map((r) => pruneFields(r, { maxKeys: 24, maxStr: 200 })).filter(Boolean);
+  const rs = (Array.isArray(rows) ? rows : []).slice(0, 6).map((r) => _keepContacts(r, pruneFields(r, { maxKeys: 24, maxStr: 200 }))).filter(Boolean);
   if (!lbl || !rs.length) return null;
   const n = _str(noun) || nounFromLeg(leg);
   return { kind: 'list', noun: n, nounTokens: _nounTokens(n), label: lbl, rows: rs, provenance: _provenance(leg, params, labels), at: at || 0 };

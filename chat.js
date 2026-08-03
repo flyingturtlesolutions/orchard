@@ -6251,7 +6251,10 @@ function _priorForClause(ask) {
   const e = sel.pick._entry;
   const p = e.provenance || {};
   const leg = (p.host || p.groundId)
-    ? { name: e.label || e.noun || 'prior read', domain: 'connector', mode: 'ask', tool: { origin: p.host || '', groundId: p.groundId || null, recipeId: p.recipeId || null, drill: p.drill || null } }
+    // JK-1 (v2.74.1989) — `joinKey` rides too. An enumeration of every `srcLeg.tool.*` read in this file gives
+    // exactly four consumers — drill(12) groundId(12) joinKey(3) recipeId(1) — and joinKey was the only one the
+    // reconstruction still omitted, which left the lookup ladder empty on every focus-bound map.
+    ? { name: e.label || e.noun || 'prior read', domain: 'connector', mode: 'ask', tool: { origin: p.host || '', groundId: p.groundId || null, recipeId: p.recipeId || null, drill: p.drill || null, joinKey: Array.isArray(p.joinKey) ? p.joinKey : null } }
     : null;
   const value = e.kind === 'list' ? { results: e.rows } : { results: [e.fields] };
   try { _orchLog(`FOCUS ▸ prior from focus — ${e.kind} "${e.label}" (${e.kind === 'list' ? `${e.rows.length} row(s)` : 'record'}, ${Math.max(0, Math.round((Date.now() - (e.at || 0)) / 1000))}s old) — from focus`); } catch { /* */ }
