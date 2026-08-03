@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fileListToRows, sheetCaseMeta, sheetGroundedRead, PERSIST_CAP } from './sheetCase.js';
+import { fileListToRows, sheetCaseMeta, sheetGroundedRead, sheetBrief, PERSIST_CAP } from './sheetCase.js';
 
 describe('sheetCase — fileListToRows', () => {
   it('a FileParsers list(records) → plain row objects', () => {
@@ -44,5 +44,25 @@ describe('sheetCase — sheetGroundedRead', () => {
   });
   it('PERSIST_CAP bounds the durable working set', () => {
     assert.ok(PERSIST_CAP >= 100 && PERSIST_CAP <= 100000);
+  });
+});
+
+describe('sheetCase — sheetBrief (prose, not a row dump)', () => {
+  it('names the size + columns and previews the first row', () => {
+    const b = sheetBrief({ name: 'Q3 orders', count: 200, headers: ['id', 'customer', 'total', 'status', 'date'],
+      rows: [{ id: '1', customer: 'Alice', total: '10', status: 'open', date: '2026-01-01' }] });
+    assert.match(b, /\*\*Q3 orders\*\* — 200 rows across 5 columns\./);
+    assert.match(b, /Columns: `id`, `customer`, `total`, `status`, `date`\./);
+    assert.match(b, /First row — id: 1 · customer: Alice · total: 10 · status: open …\./);
+    assert.match(b, /count, filter, or run something for each row/);
+    assert.doesNotMatch(b, /•/);   // NOT a bullet dump
+  });
+  it('untrusted name/header/value markdown is neutralized', () => {
+    const b = sheetBrief({ name: '**PWN**', count: 1, headers: ['*col*'], rows: [{ '*col*': '`code`' }] });
+    assert.doesNotMatch(b, /\*\*PWN\*\*/);   // the bold wrapper is ours; the data's ** is a lookalike
+    assert.doesNotMatch(b, /<strong>|`code`/);
+  });
+  it('a header-less / empty sheet still briefs safely', () => {
+    assert.match(sheetBrief({ name: 'x', count: 0, headers: [], rows: [] }), /0 rows across 0 columns/);
   });
 });

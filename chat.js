@@ -23,7 +23,7 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.74.973) — the ONE strippable dev-bridge module (DESIGN_dev_bridge §11)
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { parseFileValue } from './Services/FileParsers.js';   // v2.74.1977 — the 2nd input type: parse an attached .xlsx/.csv (local, no egress)
-import { fileListToRows, sheetCaseMeta, sheetGroundedRead, PERSIST_CAP } from './Core/sheetCase.js';   // v2.74.1977 — an uploaded sheet opens a grounded case
+import { fileListToRows, sheetCaseMeta, sheetGroundedRead, sheetBrief, PERSIST_CAP } from './Core/sheetCase.js';   // v2.74.1977 — an uploaded sheet opens a grounded case
 import { layoutReport, formatLayoutMarker } from './Core/uiLayout.js';   // v2.74.1971 — the deterministic appearance marker (LAYOUT ▸): measure the rendered reply so "does it look right" is a gl grep
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
@@ -15773,9 +15773,10 @@ async function _spawnSheetCase(filename, rows) {
     focus: focus ? [focus] : null,
     config: { sheet: { filename, rows: rows.slice(0, PERSIST_CAP) } },   // the DURABLE working set (bounded); the full set stays in-session
   });
-  // the case OPENS showing the sheet — a rendered readout (markdown; the SHAPE/LAYOUT markers ride it, escape-first).
-  const rendered = renderConnectorLines({ rows }, { name: meta.name }) || [];
-  const body = `**${meta.name}** — ${meta.count} row${meta.count === 1 ? '' : 's'}, ${meta.headers.length} column${meta.headers.length === 1 ? '' : 's'}.\n\n${rendered.join('\n')}`;
+  // v2.74.1978 — the case OPENS with a brief PROSE description (what the file IS — size / columns / first-row taste),
+  // NOT a row dump (the "blob"). The rows are grounded; the user asks to count / filter / see them. Markdown,
+  // escape-first (untrusted name/headers/values neutralized in sheetBrief).
+  const body = sheetBrief({ name: meta.name, count: meta.count, headers: meta.headers, rows });
   try { await ConversationStore.updateMessage(conv.id, 'sheet_readout', { role: 'assistant', body }, { upsert: true }); } catch { /* the case still holds the sheet in focus + config */ }
   try { _orchLog(`SHEET ▸ loaded ${meta.count} row(s) from ${filename} → case ${conv.id}${parentId ? ` under ${parentId}` : ''}`); } catch { /* */ }
   try { await _selectConvForInput(conv); } catch { /* */ }                 // switch to the new case
@@ -15790,12 +15791,22 @@ function _wireAttach() {
       btn.addEventListener('click', () => { try { fileInput.value = ''; fileInput.click(); } catch { /* */ } });
       fileInput.addEventListener('change', () => { const f = fileInput.files && fileInput.files[0]; if (f) void _onSheetFile(f); });
     }
-    const row = document.querySelector('.input-row');   // drag-drop onto the composer
-    if (row) {
-      row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('file-drop'); });
-      row.addEventListener('dragleave', (e) => { e.preventDefault(); row.classList.remove('file-drop'); });
-      row.addEventListener('drop', (e) => { e.preventDefault(); row.classList.remove('file-drop'); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) void _onSheetFile(f); });
-    }
+    // v2.74.1978 — DROP ANYWHERE on the panel (the input-row-only zone was too small to hit). Prevent the browser from
+    // navigating to a dropped file. A file-drag that carries NO bytes — the usual WEBMAIL-attachment case (it drags as a
+    // link, unreadable cross-origin) — is REPORTED honestly instead of silently doing nothing; 📎 is the sure path.
+    const _fileIntent = (e) => { try { return Array.from((e.dataTransfer && e.dataTransfer.types) || []).includes('Files'); } catch { return false; } };
+    const _hl = (on) => { try { const r = document.querySelector('.input-row'); if (r) r.classList.toggle('file-drop', on); } catch { /* */ } };
+    document.addEventListener('dragover', (e) => { if (_fileIntent(e)) { e.preventDefault(); _hl(true); } });
+    document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) _hl(false); });
+    document.addEventListener('drop', (e) => {
+      const hasFile = !!(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length);
+      if (!hasFile && !_fileIntent(e)) return;   // not a file drag at all — leave the browser default alone
+      e.preventDefault(); _hl(false);
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) { void _onSheetFile(f); return; }
+      try { toast('Couldn’t read that drop — download the attachment first, then drag the file in or use 📎'); } catch { /* */ }
+      try { _orchLog(`SHEET ▸ drop no-file (webmail attachment?) — types: ${Array.from((e.dataTransfer && e.dataTransfer.types) || []).join(',')}`); } catch { /* */ }
+    });
   } catch { /* */ }
 }
 _wireAttach();
@@ -16116,6 +16127,7 @@ async function _rehydrateConversation(conv) {
     const _sheet = conv && conv.config && conv.config.sheet;
     if (_sheet && Array.isArray(_sheet.rows) && _sheet.rows.length) {
       _lastGroundedRead = { ...sheetGroundedRead(sheetCaseMeta({ filename: _sheet.filename, rows: _sheet.rows }).name, _sheet.rows), at: Date.now() };
+      try { _orchLog(`SHEET ▸ re-grounded ${_sheet.rows.length} row(s) (case reopen)`); } catch { /* */ }   // v2.74.1978 — the reopen becomes a gl line
     }
   } catch { /* grounding restore is best-effort */ }
   if (_prevConvId.startsWith('vtc_') && _prevConvId !== String(conv.id)) { try { setTimeout(() => { void _syncIncidentCases(); }, 400); } catch { /* */ } }

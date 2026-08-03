@@ -35,3 +35,28 @@ export function sheetCaseMeta({ filename = '', rows = [] } = {}) {
 export function sheetGroundedRead(name, rows) {
   return { leg: { name: String(name || 'Sheet'), domain: 'file', tool: null }, value: { rows: Array.isArray(rows) ? rows : [] }, at: 0 };
 }
+
+// Markdown neutralizers for UNTRUSTED sheet text in the brief (this renderer has no backslash-escape → lookalikes).
+const _mdSafe = (s) => String(s ?? '').replace(/\*/g, '∗').replace(/`/g, 'ˋ').replace(/\[/g, '⟦').replace(/\]/g, '⟧');
+const _codeSpan = (s) => '`' + String(s ?? '').replace(/`/g, '') + '`';
+
+/**
+ * A brief PROSE description of the sheet — what it is, not a row dump. PURE. Markdown; untrusted name/headers/values
+ * neutralized. Names the columns and size, previews the first row, and invites the next step (count / filter / each).
+ */
+export function sheetBrief({ name = 'Sheet', count = 0, headers = [], rows = [] } = {}) {
+  const cols = Array.isArray(headers) ? headers : [];
+  const shown = cols.slice(0, 12).map(_codeSpan).join(', ');
+  const more = cols.length > 12 ? `, …(+${cols.length - 12} more)` : '';
+  const out = [`**${_mdSafe(name)}** — ${count} row${count === 1 ? '' : 's'} across ${cols.length} column${cols.length === 1 ? '' : 's'}.`];
+  if (cols.length) out.push(`Columns: ${shown}${more}.`);
+  const first = Array.isArray(rows) ? rows[0] : null;
+  if (first && typeof first === 'object' && cols.length) {
+    const preview = cols.slice(0, 4)
+      .map((h) => { const v = _mdSafe(String(first[h] ?? '')); return v ? `${_mdSafe(h)}: ${v}` : null; })
+      .filter(Boolean);
+    if (preview.length) out.push(`First row — ${preview.join(' · ')}${cols.length > 4 ? ' …' : ''}.`);
+  }
+  out.push('Ask me to count, filter, or run something for each row.');
+  return out.join('\n\n');
+}
