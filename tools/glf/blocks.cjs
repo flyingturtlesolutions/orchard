@@ -23,6 +23,13 @@ const fs = require('fs');
 const FINDINGS = 'logs/run/findings.md';
 const RE_BLOCK = /^VALIDATE\[v(\d+\.\d+\.\d+)\s*[—-]\s*([^\]]*)\]:/;
 const RE_RETIRED = /^RETIRED\[v(\d+\.\d+\.\d+)\s*[—-]\s*(PASS|FAIL|SUPERSEDED|WONTFIX)\b([^\]]*)\]/;
+// A block's BUILD is captured when the block is WRITTEN — while the fix is still uncommitted. The moment that
+// fix LANDS, HEAD and the working diff both change, so the recorded fingerprint can never match again and the
+// block reads INCONCLUSIVE forever. Retiring was an explicit act and re-arming was not, which froze two
+// landed-but-unverified blocks (FR-1, SH-2) exactly the way stack-not-a-set froze three. Append-only, like
+// RETIRED — the journal is never rewritten, only added to:
+//     REARM[v2.74.1980 — c44df5a+7903a812@2.74.1988 — landed in e228dc9; fingerprint moved with the commit]
+const RE_REARM = /^REARM\[v(\d+\.\d+\.\d+)\s*[—-]\s*(\S+)([^\]]*)\]/;
 
 // ── pure ────────────────────────────────────────────────────────────────────────────────────────────────────
 /** Parse a findings document into { blocks, retired }. PURE — takes text, touches nothing. */
@@ -30,6 +37,7 @@ function parse(text) {
   const lines = String(text || '').split('\n');
   const blocks = [];
   const retired = new Map();   // version → {verdict, note}
+  const rearmed = new Map();   // version → {build, note} — a later REARM supersedes an earlier one
   for (let i = 0; i < lines.length; i++) {
     const b = RE_BLOCK.exec(lines[i]);
     if (b) {
@@ -45,16 +53,23 @@ function parse(text) {
       blocks.push({ version: b[1], claim: b[2].trim(), line: i + 1, build });
       continue;
     }
+    const m = RE_REARM.exec(lines[i]);
+    if (m) { rearmed.set(m[1], { build: m[2], note: (m[3] || '').trim().replace(/^[—-]\s*/, '') }); continue; }
     const r = RE_RETIRED.exec(lines[i]);
     if (r) retired.set(r[1], { verdict: r[2], note: (r[3] || '').trim().replace(/^[—-]\s*/, '') });
   }
   // A version may carry more than one block over time (a re-arm). The LAST one wins — it is the current wording.
   const byVersion = new Map();
   for (const b of blocks) byVersion.set(b.version, b);
+  for (const b of byVersion.values()) {
+    const r = rearmed.get(b.version);
+    if (r) { b.buildOriginal = b.build; b.build = r.build; b.rearmed = true; }
+  }
   const all = [...byVersion.values()].sort((a, b) => cmpVer(a.version, b.version));
   return {
     blocks: all,
     retired,
+    rearmed,
     open: all.filter((b) => !retired.has(b.version)),
   };
 }
@@ -68,7 +83,7 @@ function cmpVer(a, b) {
   return 0;
 }
 
-module.exports = { parse, cmpVer, RE_BLOCK, RE_RETIRED };
+module.exports = { parse, cmpVer, RE_BLOCK, RE_RETIRED, RE_REARM };
 
 // ── cli ─────────────────────────────────────────────────────────────────────────────────────────────────────
 if (require.main === module) {
@@ -79,8 +94,26 @@ if (require.main === module) {
     const { open, blocks, retired } = parse(read());
     console.log(`BLOCKS ▸ ${blocks.length} total · ${retired.size} retired · ${open.length} OPEN`);
     if (!open.length) { console.log('BLOCKS ▸ none open — the loop has no live question'); process.exit(0); }
-    for (const b of open) console.log(`  OPEN v${b.version}${b.build ? ` [${b.build}]` : ''} — ${b.claim.slice(0, 96)}  (findings.md:${b.line})`);
+    for (const b of open) console.log(`  OPEN v${b.version}${b.build ? ` [${b.build}${b.rearmed ? ' re-armed' : ''}]` : ''} — ${b.claim.slice(0, 96)}  (findings.md:${b.line})`);
     console.log('BLOCKS ▸ grade the OLDEST open block whose BUILD is live; say in one line why any other is not gradeable.');
+    process.exit(0);
+  }
+
+  // Re-arm a block whose fix has LANDED: the code is the same, the fingerprint is not. Reuses tick.cjs's
+  // fingerprint so there is exactly one definition of a build identity in the toolchain.
+  if (cmd === 'rearm') {
+    const [version, ...note] = rest;
+    const { blocks } = parse(read());
+    if (!version || !blocks.some((b) => b.version === version)) {
+      console.error(`usage: blocks.cjs rearm <version> [note…]  (no VALIDATE block at v${version || "?"})`); process.exit(2);
+    }
+    const { fingerprint } = require('./tick.cjs');
+    const { execFileSync } = require('child_process');
+    const git = (a) => { try { return execFileSync('git', a, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).replace(/\n+$/, ''); } catch { return ''; } };
+    let mv = '?'; try { mv = JSON.parse(fs.readFileSync('manifest.json', 'utf8')).version; } catch { /* */ }
+    const fp = fingerprint(git(['rev-parse', 'HEAD']), git(['diff']), mv);
+    fs.appendFileSync(FINDINGS, `\nREARM[v${version} — ${fp}${note.length ? ` — ${note.join(' ')}` : ''}]\n`);
+    console.log(`BLOCKS ▸ re-armed v${version} on ${fp}`);
     process.exit(0);
   }
 
@@ -109,6 +142,6 @@ if (require.main === module) {
     process.exit(0);
   }
 
-  console.error('usage: blocks.cjs [list] | retire <ver> <verdict> [note…] | bootstrap <ver>');
+  console.error('usage: blocks.cjs [list] | retire <ver> <verdict> [note…] | rearm <ver> [note…] | bootstrap <ver>');
   process.exit(2);
 }

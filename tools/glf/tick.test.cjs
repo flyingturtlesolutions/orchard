@@ -208,3 +208,47 @@ it('tolerates junk and an empty document', () => {
   }
   assert.deepEqual(parseBlocks('').open, []);
 });
+
+// ── blocks REARM — a landed fix must not freeze its own block (v2.74.1989) ──────────────────────────────────
+it('a REARM supersedes the block\'s original BUILD, so a landed fix stays gradeable', () => {
+  // The freeze: BUILD is captured while the fix is uncommitted. On landing, HEAD and the diff both change and
+  // the recorded fingerprint can never match again — INCONCLUSIVE forever. Two blocks sat frozen exactly here.
+  const doc = [
+    'VALIDATE[v2.74.1980 — a claim]:',
+    '  BUILD        = ac2993a+5749772c@2.74.1981',
+    '',
+    'REARM[v2.74.1980 — c44df5a+3455d32d@2.74.1988 — landed in e228dc9]',
+  ].join('\n');
+  const { open } = parseBlocks(doc);
+  assert.equal(open[0].build, 'c44df5a+3455d32d@2.74.1988');
+  assert.equal(open[0].buildOriginal, 'ac2993a+5749772c@2.74.1981', 'the original is kept, not erased');
+  assert.equal(open[0].rearmed, true);
+});
+
+it('the LATEST re-arm wins — a block may land, be re-armed, and land again', () => {
+  const doc = [
+    'VALIDATE[v2.74.1980 — a claim]:', '  BUILD = a@1', '',
+    'REARM[v2.74.1980 — b@2 — first landing]',
+    'REARM[v2.74.1980 — c@3 — second landing]',
+  ].join('\n');
+  assert.equal(parseBlocks(doc).open[0].build, 'c@3');
+});
+
+it('re-arming does NOT retire — the question stays open until answered', () => {
+  const doc = 'VALIDATE[v2.74.1980 — a claim]:\n  BUILD = a@1\n\nREARM[v2.74.1980 — b@2 — landed]';
+  const { open, retired } = parseBlocks(doc);
+  assert.equal(open.length, 1, 'still open');
+  assert.equal(retired.size, 0, 're-arm and retire are different acts');
+});
+
+it('a block with no REARM keeps its original BUILD and is not marked re-armed', () => {
+  const { open } = parseBlocks('VALIDATE[v2.74.1980 — a claim]:\n  BUILD = a@1');
+  assert.equal(open[0].build, 'a@1');
+  assert.equal(open[0].rearmed, undefined);
+});
+
+it('a REARM for an unknown version is inert, not a crash', () => {
+  const doc = 'VALIDATE[v2.74.1980 — a claim]:\n  BUILD = a@1\n\nREARM[v2.74.9999 — z@9 — stray]';
+  assert.doesNotThrow(() => parseBlocks(doc));
+  assert.equal(parseBlocks(doc).open[0].build, 'a@1');
+});

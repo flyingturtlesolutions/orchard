@@ -119,6 +119,11 @@ Then review the diff, re-check the manifest against `origin/main` and bump to cu
 moved, stage touched files **BY NAME** — never `git add -A` — commit, push, report the hash. Mark the block's
 `INCIDENT` closed.
 
+**Then re-arm every OPEN block whose code just landed:** `node tools/glf/blocks.cjs rearm <ver> "landed in <sha>"`.
+A block records its BUILD while the fix is still uncommitted; the moment it lands, HEAD and the diff both move and
+the recorded fingerprint can never match again, so the block reads INCONCLUSIVE forever. Retiring was an explicit
+act and re-arming was not — that froze two landed-but-unverified blocks the same way stack-not-a-set froze three.
+
 ---
 
 ## Still owed (audit items not yet built)
