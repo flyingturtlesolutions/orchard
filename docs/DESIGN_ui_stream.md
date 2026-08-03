@@ -1,214 +1,149 @@
-# DESIGN — the UI stream (the visual counterpart of the textual trace)
+# DESIGN — UI verification: the app narrates its own UI (self-logging) + the taste residual
 
-Status: PROPOSED (v2.74.1949). Companion to `DESIGN_cloud_logs.md` (the transport it rides) and the gl/gc log discipline.
-
----
-
-## 1. The idea
-
-The textual trace (`gl`/`gc`) is a **time-ordered stream of events** at varying signal density. The panel's visual behaviour has no counterpart, which is why every UI fix ends "live-eyeball still owed" — panel state, DOM feel, and cross-reload survival can't be confirmed headless.
-
-The UI stream is that counterpart: **a time-ordered stream of UI events**, keyed and scoped exactly like the log trace, so the panel's behaviour becomes *readable, greppable, diffable, testable, and fleet-shippable* the way reasoning already is.
-
-The correspondence is literal, and the design follows from it:
-
-| Textual trace | UI stream |
-|---|---|
-| stream of log lines | stream of UI events |
-| `gl` — full depth (every line) | `gu` — every UI event |
-| `gc` — decisions (story-carrying markers) | `guc` — UI-decisions (story-carrying transitions) |
-| `glf` — fleet scope | UI stream over the CW mailbox |
-| version-keyed; `findings.md` synthesis | version-keyed; correlates with the textual trace |
-| one marker = one event | one event, encoded at a chosen **fidelity** |
-
-The last row is the crux: a log line is always text, but a UI event can be encoded at varying fidelity (semantic → pixels). Fidelity is a **per-entry dial**, not a separate artifact — the same insight as "a UI trace is a stream, not a screenshot."
+Status: **PARTLY BUILT + LIVE-VERIFIED** (v2.74.1971). Supersedes this doc's original "UI stream" proposal (keyframes /
+deltas / `gu`/`guc` / fleet-shipped snapshots), which a critical review collapsed — see §7. Companion to
+`DESIGN_cloud_logs.md` (the transport the markers ride) and the gl/gc log discipline.
 
 ---
 
-## 2. Core model — keyframes + deltas
+## 1. The principle — report, don't photograph
 
-The stream is built like a video codec (and like the log trace, whose full state is implicit in its event sequence):
+**The gap.** The textual trace (`gl`/`gc`) records what the agent *thinks*; the panel's *visual behaviour* had no
+record, so every UI fix ended "live-eyeball still owed" — panel UI, DOM feel, and cross-reload survival could not be
+confirmed headless.
 
-- **Keyframes** — periodic full *semantic snapshots* of the panel's logical state (the view-model). Self-contained; a reader can start here.
-- **Deltas** — the individual UI events between keyframes (a pane switch, a card mount, a badge change).
+**The instinct we rejected.** "Record the screen" — a UI trace of snapshots or screenshots. A recording still has to
+be *watched* (it doesn't verify anything); screenshots are PII-heavy, non-diffable, and — decisively — the side panel
+**cannot be captured in-browser at all** (`captureVisibleTab` sees the web page, not the panel).
 
-State at any time `t` is reconstructed by taking the last keyframe ≤ `t` and replaying deltas up to `t`. This unifies the two things the earlier catalog wrongly split: **the snapshot is the keyframe, the journal is the deltas.** One stream, two entry kinds.
+**The reframe that works.** Don't photograph the UI — have the app **narrate its own UI outcomes as TEXT markers on
+the existing log stream.** The app already narrates its *thinking* (decision markers); extend that to narrate its *UI*:
+what it decided to show, and the *measured* result of showing it. This makes UI correctness a **`gl` grep** —
+greppable, diffable, PII-safe (numbers/enums, not pixels), and interleaved with the reasoning trace by timestamp.
 
-```
-KF ────Δ──Δ──Δ────KF ──Δ──Δ────KF ──Δ──►   (t →)
-▲ full view-model     ▲ pane switch, card mount, badge…
-```
-
-Keyframe cadence: session start · every major transition (pane switch, desk open, reload) · every N deltas (N≈25, bounded so replay stays cheap).
+> **Report the geometry; don't photograph the screen.** The app is a tailor measuring its own suit — the measurements
+> (rows, spacing, edges, colours) prove the fit; a mirror is needed only for "does it look *sharp*" (taste, §5).
 
 ---
 
-## 3. Event vocabulary — the `UI ▸` marker family
+## 2. The fidelity ladder (as it actually shook out)
 
-A new marker family in `Core/decisionMarkers.js` (the one manifest that backs gl/gc and generates the CloudWatch metric filters). Each entry is one line; the marker names the category, the payload is a compact delta.
+Three rungs, each an event the app emits *about itself*, deepening decision → measurement → taste. The first two are
+built and live-verified; the third is the only residual a text marker structurally cannot reach.
 
-| Marker | Fires on | Payload (delta) |
+| Rung | Emits | Answers | Fidelity | Status |
+|---|---|---|---|---|
+| **0 · DECISION** | `SHAPE ▸ answer+records \| answer-only \| …` | *did it choose the right thing to show?* | semantic | ✅ built + verified (v1964) |
+| **1 · MEASURED LAYOUT** | `LAYOUT ▸ rows=6 overflow=no chip-styled=yes …` | *did it render correctly — no overflow, right count, CSS applied?* | measured (live DOM) | ✅ built + verified (v1971) |
+| **2 · TASTE** | (a pixel + a judge) | *does it read **well**?* | subjective | ⏳ **pending** (§5) |
+
+Alongside the runtime markers sits a **test-time assertion harness** (L1): pure invariants over a PII-safe view-model
+(`Core/uiViewModel.js` + `uiInvariants.js`), run in `npm test`. Markers verify a *live* render from the log; L1 asserts
+*logical* structure headless. Different tools, same goal — retire the eyeball for correctness.
+
+---
+
+## 3. What is built (inventory)
+
+- **L1 — the logical checklist** (v1949, commit `d059a63`). `Core/uiViewModel.js` projects persisted state
+  (`buildRailTree` + pane/tab facts) into a frozen, PII-safe snapshot (ids/enums/counts/flags — titles/summaries
+  *stripped*). `Core/uiInvariants.js`: exactly-one-active, ≤1-pinned, no-desk-leak, wfCount-matches, and the
+  **`noFreeText` executable PII boundary**, plus a **cross-reload equality** test (derive → serialize round-trip →
+  re-derive → `deepEqual`) — cross-reload survival as a headless assertion.
+- **`SHAPE ▸` — the reply-shape decision** (v1964, `a349cf0`). Emitted at both `_ilRunBuiltin` twin tails after a
+  connector reply renders. Distinguishes `answer+records +showRecords` (additive fired) / `answer-only` / `records-only`
+  / `empty`. *Verified live* (trace 161904): 4× additive on non-empty reads, 1× answer-only on a status read —
+  branch-correct, not inert.
+- **`LAYOUT ▸` — the measured appearance** (v1971, `066bc94`). `Core/uiLayout.js` (pure verdict) + chat.js
+  `_measureLayout`/`_reportLayout` (the impure DOM read: `getBoundingClientRect` + `getComputedStyle`). Reports
+  `rows / chips / bold / overflow / chip-styled / list`, flags `overflow` and `chip-unstyled` (the L2 CSS gap — a
+  `<code>` chip chat.css didn't style). *Verified live* (trace 173634): `rows=6` matched the read, `overflow=no`,
+  **`chip-styled=yes`** — chat.css styles the chips, confirmed from a grep.
+- **Marker discipline.** Every marker is registered in **`Core/decisionMarkers.js`** (invariant #1, the ONE manifest),
+  so it rides `gl`/`gc` *and* the fleet metric filters — never visible in one world, invisible in the other.
+
+---
+
+## 4. Design rulings (the lessons that generalise)
+
+1. **Report, don't photograph** (§1). A text marker the app writes about itself beats an image something else has to
+   capture and interpret.
+2. **Two boundaries, cleanly split.** *Verdict logic is PURE* (`Core/uiLayout.js`, `Core/uiInvariants.js`) — unit-tested,
+   no DOM. The *impure live-DOM read* is a thin reader in chat.js that passes plain numbers to the pure verdict. Never
+   mix them.
+3. **PII = the depth dial.** Markers carry numbers / enums / ids — never free text, bodies, or pixels. `noFreeText` makes
+   "semantic = fleet-safe" an *executable* invariant, not a hope. This is what lets the markers ride the CW mailbox.
+4. **The eyeball is RETIRED for correctness.** Decision (`SHAPE ▸`) + geometry/style (`LAYOUT ▸`) + logical structure
+   (L1) cover every bug class in this app's history. Only *taste* remains a human's job.
+5. **Deterministic markers read the LIVE DOM.** `LAYOUT ▸` measures the *actual rendered reply in the actual panel*, so
+   "does it break in the real panel context" is already answered — which is why capturing the live panel (screenshots)
+   buys nothing over the marker for correctness.
+6. **Join by adjacency now, corrId later.** `SHAPE ▸` and `LAYOUT ▸` fire on the same reply and sit adjacent in the
+   trace, telling one story (decision → measured render). A formal `corrId` would make the join explicit across streams.
+
+---
+
+## 5. The taste component — PENDING direction
+
+The one residual: *does it read **well***? Subjective, holistic — no text marker can judge it. Taste splits into **two
+independent decisions: the render source × the judge.** (Full exploration + critical reviews in the build log; the
+conclusions:)
+
+### Render source — where the pixels come from
+| | What | Verdict |
 |---|---|---|
-| `UI ▸ pane` | active pane change | `from→to` (rail/thread/canvas) |
-| `UI ▸ rail` | rail render / tab switch / peek / pin | `tab`, `rows`, `pinned`, cause |
-| `UI ▸ thread` | thread render / message append | `conv`, `msgs`, `+card`/`-card` |
-| `UI ▸ card` | card mount + lifecycle state | `id`, `kind`, `state` (mounted/running/step-k/done/failed) |
-| `UI ▸ badge` | pending / count change | `target`, `pending`, `delta` |
-| `UI ▸ canvas` | canvas open / render / compose | `open`, `kind`, `rows` |
-| `UI ▸ anim` | animation start/end (the timing signal) | `name`, `target`, `phase`, `ms` |
-| `UI ▸ overlay` | HITL bar / disclosure drawer / relearn bar | `kind`, `shown`/`dismissed` |
-| `UI ▸ kf` | a keyframe (§2) | the full view-model (§4, L1) |
+| **R1** | Puppeteer/CDP render of the reply HTML + real `chat.css`, **fixture data** | ✅ **recommended** — clean, deterministic, CI-able, PII-safe, no native app |
+| **R2** | native desktop capture of the live panel | ❌ rejected — **safe ⊥ real** (fixture data guts the "in-situ" value), whole-desktop PII, no fleet, needs a native app |
+| **R3** | in-extension html2canvas | ❌ approximate render — *can lie* about the CSS it's meant to check |
+| **R4** | CDP capture of the **live** panel (remote-debugging port) | ❌ **dissolves into R1** — `captureScreenshot` is a renderer re-paint (same mechanism as R1), safe ⊥ real again, dev-only/no-fleet, and `LAYOUT ▸` already owns the live-context niche |
 
-Story-carrying vs noise (the `guc` filter, §5): `pane` · `card` · `badge` · `canvas` · `anim` · `overlay` · `kf` carry the story; a bare `thread`/`rail` re-render is noise unless it changes the roster.
+**The recurring wall:** capturing the *actual* panel (R2 or R4) always hits the same three — *safe ⊥ real*,
+*dev-only / no fleet*, and *the human is already there when it's live*. So taste uses **R1 (a clean fixture render), not
+a photograph of the live screen.**
 
----
+### Judge — who rates the pixels
+- **J1 · human glance** — the gold standard for taste, and *free/instant* for a solo dev. The baseline.
+- **J2 · golden pixel-diff** — deterministic regression ("did it change from the blessed shot?"), but only detects
+  *change*, and every intentional restyle needs re-baselining.
+- **J3 · vision model, absolute** — judges quality + articulates why, no baseline; but non-deterministic, costs tokens,
+  drifting standard → **advisory only, never a gate**.
+- **J4 · vision model vs. golden** — the **sweet spot for automation**: give the model the new shot *and* the golden,
+  ask "regression or improvement?" — grounded against a human-blessed reference, tolerant of trivial pixel churn.
 
-## 4. The fidelity ladder — encoding one entry
+### Recommended direction (parked, now unblocked)
+1. **Build R1 once** — a small "render this reply HTML with real `chat.css` → PNG" harness (Puppeteer/CDP). It is
+   **dual-use** with the paused L2/`railDom` extraction (option A) and is the foundation every judge reuses.
+2. **Start with J1 as a gallery** — render the key reply scenarios (fixture data) into one page you eyeball in ~5s.
+   Human taste, minimal infra.
+3. **Add J4 only if scale/consistency demands it** — vision-vs-golden over the same gallery; keep it advisory.
 
-Every event defaults to the cheapest encoding; deeper levels attach on keyframes, on-demand, or on-anomaly. Depth is also a **PII dial** (§9) and a **cost dial**.
+**ROI caveat:** for a solo dev the glance is hard to beat — automate taste only when scale or drift makes glancing
+impractical, and even then **ground the machine judge against a human-blessed golden** rather than judging beauty in a
+vacuum. Taste is the one place a human is still the best instrument.
 
-| Level | Encoding | Source | When | Machine-checkable | Appearance-truthful |
-|---|---|---|---|---|---|
-| **L0** | semantic delta | module state (`_railTab`, ids) | every event | ✅ | ✗ |
-| **L1** | full view-model (keyframe) | **pure model** — `buildRailTree`, `ConversationStore`, active pane | keyframes | ✅ diffable | ✗ (model-derived) |
-| **L2** | structural DOM clone (scrubbed) | `panel.cloneNode` → strip/scrub | on-demand / on-anomaly | ✅ | partial |
-| **L3** | geometry — `getBoundingClientRect` + salient `getComputedStyle` + scroll/overflow/stacking, for the changed subtree | live DOM | on layout-relevant events / on-demand | ✅ **assertable** | ✅ (it *is* the layout) |
-| **L4** | pixels — screenshot (debugger `Page.captureScreenshot`, or html2canvas) | live compositor | explicit request only | ✗ | ✅ ground truth |
-
-L0/L1 are **derivable from the pure model → capturable and assertable headless** (the whole point: UI-state *tests* in the `npm` harness). L2–L4 need the live DOM and are impure, so they sit behind explicit/anomaly gates. L3 (geometry) is the high-value middle rung the first catalog omitted: it catches overflow/z-index/spacing/vanishing-cards *without pixels* and *can't lie* (it measures what laid out).
-
-### L1 keyframe schema (the view-model)
-
-```json
-{ "t": 1730000000000, "v": "2.74.1949", "kind": "kf",
-  "pane": "thread",
-  "rail": { "tab": "automations",
-            "rows": [ {"id":"admin_desk","role":"admin","active":true,"pinned":false,"cases":2,"wfCount":1} ] },
-  "thread": { "conv":"admin_desk", "msgs":3,
-              "cards":[ {"id":"wf-run:w1","kind":"workflow-run","state":"running:step2"},
-                        {"id":"vtc_a","kind":"case"} ] },
-  "canvas": { "open": false } }
-```
-
-### L0 delta schema
-
-```json
-{ "t": 1730000000420, "v": "2.74.1949", "kind":"ui",
-  "marker":"rail", "target":"rail", "from":"conversations", "to":"automations", "cause":"tab-click" }
-```
+**Status:** parked by the user until the deterministic rungs were live-verified — they now are (§3), so taste is
+**unblocked**. Smallest real step: the R1 render harness + the glance-gallery.
 
 ---
 
-## 5. Depth projections & shorthands (the gl/gc analogue)
+## 6. Open threads / next steps
 
-Same stream, two densities, plus scope — exactly mirroring gl/gc/glf:
-
-- **`gu`** ("grab UI") — the FULL stream: keyframes + every delta at L0/L1. The `gl` twin.
-- **`guc`** ("grab UI-decisions") — keyframes + story-carrying deltas only (§3). The `gc` twin — the signal-only visual story.
-- **fleet** — the stream over the CW mailbox (`orchard-ui-*` hour-files), semantic depth only (PII-safe, §9). The `glf` twin.
-- **join** — every entry is version-keyed and millisecond-stamped through the same Logger ring, so it interleaves with the textual trace (§8).
-
-Shorthands follow the existing memory discipline (`gl`/`gc`/`gch`/`glf`): move the file from Downloads into `logs/run/`, read incrementally since the last findings boundary, no commit/bump.
-
----
-
-## 6. Capture — the seams
-
-One thin API, `uiTrace.mark(marker, delta)` / `uiTrace.keyframe()`, emitting through the **existing Logger ring** so scrub, ring-eviction, Download, and CW shipping come for free.
-
-Instrument the render/transition seams that already exist in `chat.js`:
-
-- `_switchRailTab` → `UI ▸ pane` / `UI ▸ rail`
-- `_renderActiveRailTab` / `_renderRailList` → `UI ▸ rail` (roster deltas only)
-- `_setMessageBody` / `appendMessage` → `UI ▸ thread` (+card/-card)
-- card mount + the workflow-run step highlighter → `UI ▸ card`
-- `_slideOpen` / `_slideClosed` → `UI ▸ anim` (start + end, with measured ms — the timing signal that no static capture carries)
-- pane changes, canvas open/compose, HITL/relearn bars → `UI ▸ canvas` / `UI ▸ overlay`
-
-Keyframes: `uiTrace.keyframe()` serializes the L1 view-model from `buildRailTree(...)` + the active pane + the thread roster — **pure inputs**, so the serializer is unit-testable and needs no DOM.
-
-Purity split: L0/L1 pure (testable, always on). L2–L4 touch the live DOM and are gated (on-demand / on-anomaly).
+- **`corrId`** to formally join `SHAPE ▸` ↔ `LAYOUT ▸` (and future markers) across streams (today: turn-adjacency).
+- **More surfaces**, only if a bug demands: `LAYOUT ▸`-style markers for the rail render, card mount, pane switch.
+- **The R1 render harness** (= the paused option A / L2 extraction) — the foundation for taste *and* for any pixel/
+  geometry regression tests beyond the in-app `LAYOUT ▸`.
+- **Wire L1 live?** The invariants run only in the harness today; they could run as a *settled-state* self-check in the
+  panel (emitting `UI ▸ invariant` on a violation) — but only debounced on a settled state (they false-positive
+  mid-transition, e.g. `active-not-one` during a create).
 
 ---
 
-## 7. Reconstruction — the scrubber
+## 7. Superseded — the original "UI stream"
 
-The stream is text (JSONL), so it reads/greps/diffs like gl. For appearance:
-
-- **State-at-t** — replay from the last keyframe to any event index → the L1 view-model at that moment.
-- **Pixels-at-t** — feed the reconstructed L2 structural snapshot + the real `chat.css` into the headless-Chrome replay already proven on the slide-animation bug → reconstructed pixels *on demand*, without storing images.
-- **Motion** — the `UI ▸ anim` deltas (start/end + ms) give the timing sequence a single frame can't, closing the animation/defer-under-engagement class.
-
----
-
-## 8. Correlation with the textual trace — the payoff
-
-Both streams flow through the same ring, so they **interleave by timestamp + version**:
-
-```
-14:03:12.100  ROUTE ▸ "show open tickets" → connector:LIST_TICKETS
-14:03:12.540  INVOKE_SESSION ▸ ok (12 rows)
-14:03:12.560  UI ▸ thread conv=support +card=results (12)
-14:03:12.560  UI ▸ anim slide-open thread:results 180ms
-```
-
-This is the artifact neither stream has alone: **decision → render causality.** "The router chose the read — did it actually reach the screen, in the right pane, without a phantom re-render?" is answerable from one merged view. It also catches the desync class directly (a decision with no matching `UI ▸`, or a `UI ▸ card` with no upstream decision = a phantom render).
-
----
-
-## 9. Scrub / PII — depth is the PII dial
-
-- **L0/L1 (semantic)** — ids, kinds, counts, flags. Low PII; reuse the Logger `#scrubEntry` that already runs at append. Fleet-safe.
-- **L2 (structural)** — text nodes carry data → scrub the clone before serialising. Local by default.
-- **L3 (geometry)** — numbers + style; PII-light. Local by default.
-- **L4 (pixels)** — renders real customer data, unscrubbable → **explicit request only, never fleet.**
-
-The fidelity dial and the transport gate move together: deeper = more PII = more restricted scope. Clean and enforceable.
-
----
-
-## 10. Storage / transport
-
-- **Local** — `logs/run/orchard-ui-*.jsonl`, one event per line (greppable), keyframes + deltas interleaved. Rides the existing Download button as a ride-along (the pattern `_downloadChats` already uses — one click exports logs + chats + UI stream).
-- **Fleet** — the CW mailbox (`DESIGN_cloud_logs.md` §12), semantic depth only, UTC hour-files, glf grammar. Opt-in with the existing `settings:cloudLogs` gate.
-- **Join key** — `manifest` version, same as every other stream.
-
----
-
-## 11. Invariant layer — assertions over keyframes
-
-The highest signal-per-byte isn't a capture, it's a **contract check** run over each L1 keyframe (pure → in the `npm` harness):
-
-- exactly one pinned rail row;
-- no case/card leaks across desks (parentId integrity);
-- active pane ⟺ exactly one active rail row;
-- no workflow-run card stuck `running` past a keyframe with no `anim`/`card` progress;
-- (with L3) no element overflows its container; no negative-z occlusion of an interactive control.
-
-A violation is a `UI ▸ invariant` event — a failure line in the stream, and a red test in the harness. This is where "cross-reload survival" finally becomes a headless assertion: capture a keyframe, reload, capture again, assert equality of the logical view-model.
-
----
-
-## 12. Build phases
-
-- **UI-1** — the `uiTrace` bus + `UI ▸` markers in `decisionMarkers.js`; instrument the §6 seams (L0 deltas through the Logger ring). *The stream exists.*
-- **UI-2** — L1 keyframe serializer from the pure model; unit-tested. *Snapshots exist and are testable.*
-- **UI-3** — depth projections + `gu`/`guc` shorthands + Download ride-along. *The gl/gc twins.*
-- **UI-4** — the scrubber (replay → view-model at any t).
-- **UI-5** — L2 structural + L3 geometry on-demand encodings + the puppeteer pixel-replay.
-- **UI-6** — the interleaved decision↔render view (§8).
-- **UI-7** — fleet via the CW mailbox (semantic depth).
-- **UI-8** — L4 pixels as the explicit escape hatch (debugger `Page.captureScreenshot` preferred over html2canvas for fidelity; §4/§9 gates).
-- **UI-inv** — the invariant layer (§11), folded in from UI-2 onward as keyframes land.
-
-Ordering rationale: UI-1..3 deliver the whole *stream* (the actual analogue of gl/gc) using only pure model + existing transport — cheapest, testable, fleet-safe, and already covering the logical + timing bug classes. Pixels (UI-8) come last because they're the least pipeline-friendly and most of their value is recovered by L3 geometry + L2 replay.
-
----
-
-## 13. Open questions
-
-1. **Keyframe cadence** — is every-N-deltas + major-transition enough, or do we need a keyframe on every user turn (cheap, and aligns the UI stream to the chat stream)?
-2. **Delta granularity** — does every `_setMessageBody` emit, or only roster-changing renders? (Noise vs completeness; the `guc` filter mitigates, but the full `gu` size is set here.)
-3. **Geometry scope** — L3 on the whole panel, or only the changed subtree? (Cost vs coverage.)
-4. **Replay fidelity** — the L2 clone is static; live-only state (hover/focus/mid-animation) needs either an `anim`-driven reconstruction or an L3 computed-style capture at the moment. Which?
-5. **Retention** — UI stream in the same ring as the textual trace (shared eviction budget) or its own ring? (A busy UI could evict decisions.)
+The first draft of this doc proposed a full event *stream*: keyframes + deltas (a video-codec model), `gu`/`guc` depth
+projections, a scrubber, decision↔render correlation, and fleet-shipped snapshots up to a pixel tier. The critical
+review found it **over-designed** — a large recording apparatus around a small need — and, crucially, that a *recording*
+doesn't verify anything (you still have to read it). It collapsed to what §1–§5 describe: **narrate UI outcomes as
+markers + assert structure as invariants.** Kept from the original: the marker family reusing `decisionMarkers.js`, the
+join-to-the-log idea, and fleet-via-mailbox for *text*. Dropped: keyframes/deltas, the scrubber, `gu`/`guc`, snapshot
+correlation, and any fleet-shipping of pixels.
