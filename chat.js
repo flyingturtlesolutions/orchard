@@ -5781,9 +5781,21 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
     // type-routed), but the primary rung now honors what was actually asked for.
     // v2.74.1757 — match-mode follow-up already HAS the customer; contact-type synthesis would re-find the
     // profile and drop "get the last order" (gl 133556 step 3). Always honor readAsk in that mode.
+    // MR-1 (v2.74.1975) — HONOR THE READASK ON CONTACT RUNGS TOO. This is the THIRD time this exact line has
+    // thrown the user's ask away: v1643 fixed it for non-contact rungs, v1757 for match-mode, and the remaining
+    // hole — a contact rung, non-match mode, explicit readAsk — is the one that fired live at 12:19:58Z. The map
+    // target readAsk was "get their last order in shopify for {value}"; the email rung replaced it with "find
+    // shopify customer by email {value}", so five per-row INVOKEs ran `shopify_customer_by_email` and the run
+    // reported "5 matched, 0 no-match, 0 failed". Five CUSTOMERS, for an ask about ORDERS — an honest-looking
+    // success, which is exactly what v1643's own comment warned about and fixed only halfway.
+    //
+    // The synthesis exists so the resolved leg is keyed by THIS rung's value type, and that need is real — so
+    // the readAsk is steered rather than discarded. "get their last order … (match the email {value})" resolves
+    // to an orders leg that takes an email (shopify_orders_for_customer{email} — the leg the 04:37 direct-act
+    // path already used), instead of collapsing to a customer lookup. No readAsk → synthesize exactly as before.
     const _isContactRung = (type === 'email' || type === 'phone');
-    const ask = (_priorMode === 'match' && map.target.readAsk) ? map.target.readAsk
-      : (map.target.readAsk && !_isContactRung) ? map.target.readAsk
+    const ask = map.target.readAsk
+      ? ((_isContactRung && _priorMode !== 'match') ? `${map.target.readAsk} (match the ${type} {value})` : map.target.readAsk)
       : _isContactRung ? `find ${system} customer by ${type} {value}`
       : `search ${system} customers for {value}`;
     _setMessageBody(msg, `Finding the ${escHtml(system)} ${escHtml(type)} lookup...`);
@@ -5830,7 +5842,10 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // wrong-but-plausible class. A same-ground read diverts only when it is a FIELD read; an entity read falls
   // through to the ordinary per-row map below, which was always the right machinery for it.
   if (_entityRead && !_invented) {
-    try { _orchLog(`MAP ▸ self-map ("${system}") → ENTITY read (${(_tgtLeg.tool && _tgtLeg.tool.recipeId) || _tgtLeg.key || '?'}) — per-row map, not a field read`); } catch { /* */ }
+    // v2.74.1979 — say WHICH shape. The SM-1 line hardcoded "self-map", but this branch fires for any entity
+    // read, so the 13:43:50Z grade printed `self-map ("shopify")` for a VendorSuite→Shopify CROSS-system map.
+    // A marker that misnames the case it reports corrupts the next grade that greps it.
+    try { _orchLog(`MAP ▸ ${_sameGroundAsSource(tgt0, srcLeg) ? 'self-map' : 'cross-map'} ("${system}") → ENTITY read (${(_tgtLeg.tool && _tgtLeg.tool.recipeId) || _tgtLeg.key || '?'}) — per-row map, not a field read`); } catch { /* */ }
   }
   if (_invented || (_sameGroundAsSource(tgt0, srcLeg) && !_entityRead)) {
     // v2.74.1898 — HAND OFF, don't refuse. The old sentence here diagnosed itself: *"that's a per-item field read"*
