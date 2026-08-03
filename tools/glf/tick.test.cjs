@@ -7,6 +7,10 @@ const { gapMinutes, fingerprint, contended } = require('./tick.cjs');
 const { scrub, residual } = require('./scrub.cjs');
 
 let pass = 0;
+// v2.74.1989 — the tally prints on EXIT, not from a fixed line. Twice now, appending tests below the tally left
+// it counting only what came before: the run reported "24 passed" while 29 had actually run and passed. A test
+// harness that under-reports its own coverage is the same false-signal class this toolchain exists to catch.
+process.on('exit', () => console.log(`\n${pass} passed`));
 const it = (name, fn) => { try { fn(); pass++; console.log(`ok  - ${name}`); } catch (e) { console.error(`FAIL - ${name}\n  ${e.message}`); process.exitCode = 1; } };
 
 // ── gapMinutes ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -147,8 +151,7 @@ it('returns nothing for a clean tree', () => {
   assert.deepEqual(dirtyPaths(null), []);
 });
 
-console.log(`
-${pass} passed`);
+
 
 // ── blocks — the open-assertion ledger (v2.74.1989) ─────────────────────────────────────────────────────────
 const { parse: parseBlocks, cmpVer } = require('./blocks.cjs');
