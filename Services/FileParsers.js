@@ -23,7 +23,7 @@
  *   image      → image({ base64, mime, ... })
  *   docx-text  → scalar  (Pass 2 — needs mammoth.js; stubbed for now)
  *   pdf-text   → scalar  (Pass 2 — needs pdf.js;     stubbed for now)
- *   xlsx       → list    (Pass 2 — needs SheetJS;    stubbed for now)
+ *   xlsx       → list(records)   — v2.74.1976: dependency-free (Services/xlsx.js); first sheet, first row = headers
  *
  * ─── Why dispatch on parserId, not MIME ──────────────────────────────────
  *
@@ -45,6 +45,7 @@
  */
 
 import { scalar, list, record, image } from './Scope.js';
+import { xlsxToRecords } from './xlsx.js';   // v2.74.1976 — dependency-free .xlsx → rows (Option C: DecompressionStream + minimal OOXML)
 
 // ─── dataUrl → ArrayBuffer (binary-safe) ───────────────────────────────────
 //
@@ -252,8 +253,17 @@ async function parseDocxStub() {
 async function parsePdfStub() {
   throw new Error("Parser 'pdf-text' isn't shipped yet. Use parse: 'image' to bind the file as an image, or wait for the pdf parser pass.");
 }
-async function parseXlsxStub() {
-  throw new Error("Parser 'xlsx' isn't shipped yet. Export the sheet as CSV and use parse: 'csv', or wait for the xlsx parser pass.");
+// ─── parser: xlsx ────────────────────────────────────────────────────────────
+// v2.74.1976 — dependency-free .xlsx → list(records), the SAME shape csv yields (first row = headers), so an uploaded
+// sheet grounds a case / feeds the read-answer / aggregate / fan-out engine exactly like a connector read. VALUES only
+// (a formula's cached result is read; a formula is never executed → no formula-injection). Dates arrive as serial
+// numbers (Services/xlsx.js limits). Cells are UNTRUSTED → a Scope value, never instructions.
+async function parseXlsx(fileValue) {
+  const buf = await dataUrlToArrayBuffer(fileValue.dataUrl);
+  let rows;
+  try { rows = await xlsxToRecords(buf); }
+  catch (err) { throw new Error(`Couldn't read ${fileValue.filename || 'the file'} as .xlsx: ${err.message}`); }
+  return list(rows.map((r) => record(r)));
 }
 
 // ─── Public dispatcher ────────────────────────────────────────────────────
@@ -264,7 +274,7 @@ const PARSERS = {
   'image':      parseImage,
   'docx-text':  parseDocxStub,
   'pdf-text':   parsePdfStub,
-  'xlsx':       parseXlsxStub,
+  'xlsx':       parseXlsx,
 };
 
 /**
