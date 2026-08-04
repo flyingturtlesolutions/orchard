@@ -2912,6 +2912,19 @@ function _connScopeIds() {
 // button is clicked after the user has switched away).
 const _connScopeIdsFor = (conv) => scopeIdsFor({ instanceId: conv && conv.instanceId, presetId: conv && conv.presetId, appId: conv && conv.appId });
 
+// v2.74.1998 — the CONN_SCOPE line names the WHOLE bound set, COUNT FIRST. The v1996 line sliced at 4 names, so a
+// 5th site was bound and never printed: the 13:27:41 line read "…Vendorsuite, Zendesk, Shopify, HubSpot" while the
+// book recorded five including Ups. Five loop ticks were then spent reporting "UPS was never bound" and sending the
+// user to re-bind a site that was already there. A marker that truncates silently reads as a NEGATIVE RESULT — the
+// exact failure class this toolchain exists to catch, built into the toolchain. Count leads so truncation can never
+// be silent again; the tail is capped only well above MAX_PER_SCOPE's ceiling.
+function _nameConns(list) {
+  const names = (Array.isArray(list) ? list : []).map((c) => (c && (c.label || c.origin)) || '').filter(Boolean);
+  if (!names.length) return '0: —';
+  const shown = names.slice(0, 12);
+  return `${names.length}: ${shown.join(', ')}${names.length > shown.length ? ` +${names.length - shown.length} more` : ''}`;
+}
+
 // Bind a just-connected set at desk + preset scope, so every LATER conversation of this desk/preset inherits it.
 // Best-effort: a storage failure never blocks the connect — the conversation's own config still carries the set.
 async function _bindConnScope(conns, ids = null, why = 'setup') {
@@ -2922,8 +2935,7 @@ async function _bindConnScope(conns, ids = null, why = 'setup') {
     if (next === _connScopeBook) return;                       // nothing new — no pointless write
     _connScopeBook = next;
     await chrome.storage.local.set({ [CONN_SCOPE_KEY]: next });
-    const named = (Array.isArray(conns) ? conns : []).map((c) => (c && (c.label || c.origin)) || '').filter(Boolean).slice(0, 4).join(', ');
-    _orchLog(`CONN_SCOPE ▸ bound ${named || '—'} at ${scope.join(' + ')} (${why}) — new conversations of this desk inherit it`);
+    _orchLog(`CONN_SCOPE ▸ bound ${_nameConns(conns)} at ${scope.join(' + ')} (${why}) — new conversations of this desk inherit it`);
   } catch (e) { try { console.warn('[chat] conn-scope bind failed:', e?.message); } catch { /* */ } }
 }
 // Setup's Confirm is AUTHORITATIVE for this desk: the picker's selection replaces the desk tier outright (so a
@@ -2943,8 +2955,7 @@ async function _rebindConnScopeAtSetup(chosen, ids) {
       _connScopeBook = next;
       await chrome.storage.local.set({ [CONN_SCOPE_KEY]: next });
     }
-    const named = (Array.isArray(chosen) ? chosen : []).map((c) => (c && (c.label || c.origin)) || '').filter(Boolean).slice(0, 4).join(', ');
-    _orchLog(`CONN_SCOPE ▸ bound ${named || '—'} at ${scope.join(' + ')} (setup)${excluded.length ? ` — excluded ${excluded.join(', ')}` : ''} — new conversations of this desk inherit it`);
+    _orchLog(`CONN_SCOPE ▸ bound ${_nameConns(chosen)} at ${scope.join(' + ')} (setup)${excluded.length ? ` — excluded ${excluded.length}: ${excluded.join(', ')}` : ''} — new conversations of this desk inherit it`);
   } catch (e) { try { console.warn('[chat] conn-scope setup rebind failed:', e?.message); } catch { /* */ } }
   return excluded;
 }
