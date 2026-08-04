@@ -30,6 +30,48 @@ export function pruneFields(obj, { maxKeys = 48, maxStr = 400 } = {}) {
   return n ? out : null;
 }
 
+// v2.74.2001 — a probe may name THE RECORD instead of a field. The field follow-up (`chat.js`) matches the ask
+// against field NAMES only, so `show me the details for 1Z27691W0310208693` captured the phrase
+// "details for 1z27691w0310208693", failed `/^details$/`, matched no key, and fell through to the router — which
+// RE-FETCHED the record pinned four seconds earlier (live 14:43). Under the retention model that is the most
+// obviously RELATED follow-up there is, and the test could not see it.
+//
+// The rule is self-validating: strip a trailing `for|on|of|about <ref>` ONLY when <ref> is a value this record
+// actually carries. "details for 1Z…" strips because the record holds that tracking number; "details for the
+// other package" does not, so an unrelated ask still routes normally. Bounded traversal — a record is already
+// depth/'key-capped by the pruner, and this walks the same shape.
+const _refNorm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+function _recordValues(obj, depth = 3, out = new Set(), budget = { n: 240 }) {
+  if (!obj || typeof obj !== 'object' || budget.n <= 0) return out;
+  for (const v of Object.values(obj)) {
+    if (budget.n <= 0) break;
+    if (v == null || v === '') continue;
+    if (typeof v === 'string' || typeof v === 'number') { const k = _refNorm(v); if (k.length >= 3) { out.add(k); budget.n--; } continue; }
+    if (typeof v === 'boolean' || depth <= 0) continue;
+    if (Array.isArray(v)) { for (const e of v.slice(0, 6)) { if (e && typeof e === 'object') _recordValues(e, depth - 1, out, budget); else if (typeof e === 'string' || typeof e === 'number') { const k = _refNorm(e); if (k.length >= 3) { out.add(k); budget.n--; } } } continue; }
+    _recordValues(v, depth - 1, out, budget);
+  }
+  return out;
+}
+
+/**
+ * Strip a trailing record REFERENCE from a follow-up phrase, so a probe that names the record it is asking about
+ * reduces to the field/intent word. PURE. Returns the phrase unchanged when the tail is not a value this record
+ * carries — which is what keeps an unrelated ask routing normally.
+ *   ("details for 1Z27691W0310208693", <record holding that number>) → "details"
+ *   ("details for the other package",  <same record>)                → unchanged
+ */
+export function stripRecordRef(phrase, record) {
+  const p = _str(phrase).trim();
+  const m = p.match(/^(.*\S)\s+(?:for|on|of|about)\s+(\S.*)$/i);
+  if (!m || !record || typeof record !== 'object') return p;
+  const tail = _refNorm(m[2]);
+  if (tail.length < 3) return p;
+  for (const v of _recordValues(record)) { if (v === tail || v.endsWith(tail) || tail.endsWith(v)) return m[1].trim(); }
+  return p;
+}
+
 /** The record NOUN a leg reads/writes: its name cut at qualifier clauses ("Warranty tasks by status" →
  *  "warranty tasks"). PURE. */
 export function nounFromLeg(leg) {
@@ -95,7 +137,19 @@ function _provenance(leg, params, labels) {
  *  label or any content to hold. PURE. */
 export function focusRecordEntry({ label, noun, fields, leg = null, params = null, labels = null, pinned = false, at = 0 } = {}) {
   const lbl = _str(label).slice(0, 80);
-  const f = pruneFields(fields);
+  // v2.74.2001 — a RECORD keeps its SHAPE too. RT-1 (v1991) generalised the pruner to descend precisely so a
+  // stored row stops being scalars-only, then wired `_pruneDeep` into `focusListEntry` and left this call site on
+  // `pruneFields`. So a pinned LIST held nested structure and a pinned RECORD did not — the "one of N call sites"
+  // class, fifth instance.
+  // Live 14:43: `show me the details for 1Z…` on a record pinned 4s earlier logged
+  // `FIELD_FOLLOWUP ▸ no field match — fall through to routing` and RE-FETCHED from UPS. The record had 245+
+  // fields with everything meaningful one or two levels down (`trackDetails[0].packageStatus`,
+  // `trackDetails[0].milestones[n].{date,time,location,name}`); scalars-only retention kept none of it, so there
+  // was nothing to consult and the fall-through was correct behaviour on an empty cupboard.
+  // The record's own budget is preserved — 48 keys / 400 chars, NOT `_pruneDeep`'s tighter defaults — so flat
+  // records are byte-identical to before (the 400 matters: a VendorExplanation's conclusion lives at its end).
+  // Depth 3 / arrayCap 6 then reach the milestone chain without unbounding what rides chrome.storage.
+  const f = _pruneDeep(fields, { maxKeys: 48, maxStr: 400 });
   if (!lbl || !f) return null;
   const n = _str(noun) || nounFromLeg(leg);
   return { kind: 'record', noun: n, nounTokens: _nounTokens(n), label: lbl, fields: f, provenance: _provenance(leg, params, labels), ...(pinned ? { pinned: true } : {}), at: at || 0 };

@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  FOCUS_CAP, pruneFields, nounFromLeg, focusRecordEntry, focusListEntry, pushFocus,
+  FOCUS_CAP, pruneFields, nounFromLeg, focusRecordEntry, focusListEntry, pushFocus, stripRecordRef,
   referentialAsk, bindReferent, recordFind, recordDivision, focusFromSeedRecord,
 } from './conversationFocus.js';
 
@@ -289,5 +289,72 @@ describe('RT-1 — a focus round-trip preserves everything the consumers read', 
     const hit = pickFieldPath([round().rows[0]], 'tracking number');
     assert.ok(hit && hit.path, 'a stored row must still expose its nested paths');
     assert.match(hit.path, /trackingInfo/);
+  });
+});
+
+// ── v2.74.2001 — THE ROUND-TRIP CONTRACT, ASSERTED FOR THE RECORD PATH TOO ─────────────────────────────────
+// RT-1 above generalised the pruner so "a stored row keeps its SHAPE, not just its scalars", wired `_pruneDeep`
+// into `focusListEntry`, and left `focusRecordEntry` on the scalars-only `pruneFields`. Its contract test only
+// ever exercised the LIST kind, so the asymmetry survived a test written precisely to prevent this class.
+// Live 14:43: a record pinned 4s earlier could not answer `show me the details for 1Z…` — retention had kept
+// none of the 245-field payload's nested content, so the follow-up re-fetched from UPS.
+describe('RT-1 (record) — a pinned RECORD keeps its shape, not just its scalars', () => {
+  const upsRecord = {                                   // the live UPS payload's shape, two levels deep
+    statusText: 'On the Way',
+    isMobileDevice: false,
+    trackDetails: [{
+      trackingNumber: '1ZTEST0000000000',
+      packageStatus: 'On the Way',
+      milestones: [
+        { isCurrent: false, isCompleted: true, date: '08/03/2026', time: '10:20 A.M.', location: 'United States', name: 'Label Created' },
+        { isCurrent: true, isCompleted: false, date: '08/04/2026', time: '06:12 A.M.', location: 'Carthage, NC', name: 'Out for Delivery' },
+      ],
+    }],
+  };
+  const rec = () => focusRecordEntry({ label: '1ZTEST0000000000', noun: 'track a ups package', fields: upsRecord, at: 1 });
+
+  it('the milestone CHAIN survives — every entry, not the first', () => {
+    const f = rec().fields;
+    assert.ok(Array.isArray(f.trackDetails), 'trackDetails must survive as an array');
+    assert.equal(f.trackDetails[0].packageStatus, 'On the Way');
+    assert.equal(f.trackDetails[0].milestones.length, 2);
+    assert.equal(f.trackDetails[0].milestones[1].location, 'Carthage, NC');
+    assert.equal(f.trackDetails[0].milestones[1].name, 'Out for Delivery');
+  });
+
+  it('a NESTED path is findable off a pinned record — probe without re-fetch', async () => {
+    const { pickFieldPath } = await import('./peritemMap.js');
+    const hit = pickFieldPath([rec().fields], 'package status');
+    assert.ok(hit && hit.path, 'a pinned record must expose its nested paths');
+  });
+
+  it('a FLAT record is byte-identical to before — the 48-key / 400-char budget is preserved', () => {
+    const f = focusRecordEntry({ label: 'flat', noun: 'tasks', fields: { A: 'x'.repeat(500), B: 2, C: '' }, at: 1 }).fields;
+    assert.equal(f.A.length, 400, "strings still cut at 400, not _pruneDeep's tighter 200");
+    assert.equal(f.B, 2);
+    assert.ok(!('C' in f), 'empties still dropped');
+  });
+});
+
+// ── v2.74.2001 — stripRecordRef: a probe that NAMES the record is a related follow-up ──────────────────────
+describe('stripRecordRef — naming the record must not read as a new ask', () => {
+  const ups = { statusText: 'On the Way', trackDetails: [{ trackingNumber: '1Z27691W0310208693', packageStatus: 'On the Way' }] };
+
+  it('strips the ref when the record carries that value (the live 14:43 miss)', () => {
+    assert.equal(stripRecordRef('details for 1z27691w0310208693', ups), 'details');
+    assert.equal(stripRecordRef('status of 1Z27691W0310208693', ups), 'status');
+  });
+  it('leaves an UNRELATED ref alone — that ask must still route', () => {
+    assert.equal(stripRecordRef('details for the other package', ups), 'details for the other package');
+    assert.equal(stripRecordRef('details for 1ZNOTTHISONE0000', ups), 'details for 1ZNOTTHISONE0000');
+  });
+  it('is a no-op without a trailing ref, and never returns empty', () => {
+    assert.equal(stripRecordRef('details', ups), 'details');
+    assert.equal(stripRecordRef('tracking number', ups), 'tracking number');
+    assert.equal(stripRecordRef('', ups), '');
+    assert.equal(stripRecordRef('details for 1Z27691W0310208693', null), 'details for 1Z27691W0310208693');
+  });
+  it('matches across punctuation/case (the ask is lowercased upstream)', () => {
+    assert.equal(stripRecordRef('details about 1Z-27691W-0310208693', ups), 'details');
   });
 });

@@ -41,7 +41,7 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { canBulkApprove, getPath, pendingSummary, targetUrls, renderProposalCards } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links; FL-10f (v1385) — the grouped review render
-import { focusRecordEntry, focusListEntry, focusFromSeedRecord, pushFocus, bindReferent, recordFind, recordDivision, nounFromLeg } from './Core/conversationFocus.js';
+import { focusRecordEntry, focusListEntry, focusFromSeedRecord, pushFocus, bindReferent, recordFind, recordDivision, nounFromLeg, stripRecordRef } from './Core/conversationFocus.js';   // v2.74.2001 — stripRecordRef: a probe naming THE RECORD ("details for 1Z…") is a RELATED follow-up, not a new ask
 import { selectPrior, describePick } from './Core/priorSelect.js';   // PS-1 (v2.74.1982) — WHICH prior the ask named; the noun in the sentence selects the rows, not recency   // FC (v2.74.1552, DESIGN_conversation_focus.md) — the conversation's working set of grounded entity handles + the pure referent binder
 import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
 import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown, queueStateLines } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown; v1375 — the queue-state breakdown
@@ -8880,7 +8880,12 @@ async function _fieldFollowup(text) {
   const q0 = (fieldRefOk ? fieldRef[1] : (mv ? mv[1] : bare)).trim().toLowerCase().replace(/\s+/g, ' ');
   // v2.74.1561 — PERSON-WORDS + possessives strip for MATCHING ("the homeowner's phone" → "phone" hits "Cell
   // phone"; live 202331: every natural phrasing missed and only the literal field name landed).
-  const q = q0.replace(/['’]s?\b/g, '').replace(/\b(?:homeowners?|customers?|owners?|buyers?|contacts?|their|his|her|my)\b/g, ' ').replace(/\s+/g, ' ').trim() || q0;
+  // v2.74.2001 — and strip a trailing RECORD REFERENCE, so a probe that names the record it is asking about
+  // ("details for 1Z27691W0310208693") reduces to the intent word instead of scoring no field match and falling
+  // through to the router — which then RE-FETCHED the record already in hand (live 14:43). Self-validating: the
+  // tail is only stripped when THIS record carries that value, so "details for the other package" still routes.
+  const q1 = stripRecordRef(q0, obj);
+  const q = q1.replace(/['’]s?\b/g, '').replace(/\b(?:homeowners?|customers?|owners?|buyers?|contacts?|their|his|her|my)\b/g, ' ').replace(/\s+/g, ' ').trim() || q1;
   const norm = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase().trim();
   const nice = (k) => { const s = norm(k); return s.charAt(0).toUpperCase() + s.slice(1); };
   const msgFor = (body) => { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };   // v2.74.1554 — the user echo happens at sendChatMessage ENTRY (invariant #4)
