@@ -61,11 +61,24 @@ function _candidateTokens(c) {
  * refusing to answer a follow-up that today works would be a regression — but `why` says so, and that is the
  * line a future grade reads.
  */
-export function selectPrior(ask, candidates) {
+export function selectPrior(ask, candidates, { targetSystem = '' } = {}) {
   const list = (Array.isArray(candidates) ? candidates : []).filter((c) => c && (c.kind === 'list' || c.kind === 'record'));
   if (!list.length) return { pick: null, why: 'no-candidates', matched: [], ambiguous: [] };
 
-  const toks = askTokens(ask);
+  // v2.74.2006 — THE TARGET'S NAME DOES NOT GET TO VOTE FOR THE SOURCE. A cross-system map's ask necessarily
+  // names both ends ("for each open task in Raleigh, get the homeowner's last order in SHOPIFY"), so the target
+  // system's own prior result competes with the source list on the target's own name. Live 19:10:18, with the
+  // source finally surviving eviction (v2005): both scored 2 —
+  //   shopify orders  ← order, shopify        (56s old)
+  //   warranty tasks  ← task, raleigh         (1m52s old)
+  // — tied, both lists, so recency picked Shopify and the map collapsed into a self-map that read a field named
+  // "the last order for". Dropping the target's token leaves `order` voting for Shopify (1) and `task,raleigh`
+  // for the tasks (2), and the source wins on its own merits.
+  // Deliberately NOT excluding same-system candidates outright: a genuine self-map ("get the tracking number of
+  // each order" over Shopify rows) is legitimate and must still bind to those rows. This only removes the
+  // target's NAME from the vote, never the candidate.
+  const _sysTok = new Set(askTokens(targetSystem));
+  const toks = askTokens(ask).filter((t) => !_sysTok.has(t));
   const perItem = isPerItem(ask);
 
   const scored = list.map((c, i) => {

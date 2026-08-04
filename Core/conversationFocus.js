@@ -135,7 +135,7 @@ function _provenance(leg, params, labels) {
 
 /** A RECORD focus entry (a single grounded item: a case's dossier, a drilled read). Returns null without a
  *  label or any content to hold. PURE. */
-export function focusRecordEntry({ label, noun, fields, leg = null, params = null, labels = null, pinned = false, at = 0 } = {}) {
+export function focusRecordEntry({ label, noun, fields, leg = null, params = null, labels = null, pinned = false, derived = false, at = 0 } = {}) {
   const lbl = _str(label).slice(0, 80);
   // v2.74.2001 — a RECORD keeps its SHAPE too. RT-1 (v1991) generalised the pruner to descend precisely so a
   // stored row stops being scalars-only, then wired `_pruneDeep` into `focusListEntry` and left this call site on
@@ -152,7 +152,7 @@ export function focusRecordEntry({ label, noun, fields, leg = null, params = nul
   const f = _pruneDeep(fields, { maxKeys: 48, maxStr: 400 });
   if (!lbl || !f) return null;
   const n = _str(noun) || nounFromLeg(leg);
-  return { kind: 'record', noun: n, nounTokens: _nounTokens(n), label: lbl, fields: f, provenance: _provenance(leg, params, labels), ...(pinned ? { pinned: true } : {}), at: at || 0 };
+  return { kind: 'record', noun: n, nounTokens: _nounTokens(n), label: lbl, fields: f, provenance: _provenance(leg, params, labels), ...(pinned ? { pinned: true } : {}), ...(derived ? { derived: true } : {}), at: at || 0 };
 }
 
 /** A LIST focus entry (a grounded read's row set — held for field/render follow-ups; acting on it is FC-6). PURE. */
@@ -200,12 +200,12 @@ function _pruneDeep(obj, { maxKeys = 24, maxStr = 200, depth = 3, arrayCap = 6 }
   return n ? out : null;
 }
 
-export function focusListEntry({ label, noun, rows, leg = null, params = null, labels = null, at = 0 } = {}) {
+export function focusListEntry({ label, noun, rows, leg = null, params = null, labels = null, derived = false, at = 0 } = {}) {
   const lbl = _str(label).slice(0, 80);
   const rs = (Array.isArray(rows) ? rows : []).slice(0, 6).map((r) => _pruneDeep(r)).filter(Boolean);
   if (!lbl || !rs.length) return null;
   const n = _str(noun) || nounFromLeg(leg);
-  return { kind: 'list', noun: n, nounTokens: _nounTokens(n), label: lbl, rows: rs, provenance: _provenance(leg, params, labels), at: at || 0 };
+  return { kind: 'list', noun: n, nounTokens: _nounTokens(n), label: lbl, rows: rs, provenance: _provenance(leg, params, labels), ...(derived ? { derived: true } : {}), at: at || 0 };
 }
 
 /** Push an entry onto a focus set: newest first, dedupe by kind+label+host (update-in-place moves to front),
@@ -219,8 +219,22 @@ export function pushFocus(list, entry, cap = FOCUS_CAP) {
   const merged = cur.find((e) => key(e) === k);
   const next = [{ ...entry, ...(merged && merged.pinned ? { pinned: true } : {}) }, ...rest];
   if (next.length <= cap) return next;
-  // evict from the tail, skipping pinned
-  for (let i = next.length - 1; i >= 0 && next.length > cap; i--) { if (!next[i].pinned) next.splice(i, 1); }
+  // v2.74.2005 — DERIVED entries are evicted FIRST. A per-item map pins one record per row plus its list, so a
+  // 6-row chain across three systems pushed NINE entries into a cap-5 store and evicted its own SOURCE — the
+  // warranty list went in at 18:16:31 and was gone by 18:39, pushed out by five Shopify records, the Shopify
+  // list and two UPS records, every one of them produced by asks that took the warranty tasks as INPUT. The
+  // follow-up then bound to a Shopify list 23 minutes old and collapsed into a self-map.
+  // A map's per-row results are intermediate: reachable through the list that is also pinned, and never the
+  // thing a later ask means by "each task". The source that produced them is load-bearing and must outlive them.
+  // Two passes, tail-first, pinned always exempt — so a map's own output yields before anything a user read
+  // directly, and the drill-down those records serve still works while the cap is not under pressure.
+  for (const derivedFirst of [true, false]) {
+    for (let i = next.length - 1; i >= 0 && next.length > cap; i--) {
+      if (next[i].pinned) continue;
+      if (derivedFirst && !next[i].derived) continue;
+      next.splice(i, 1);
+    }
+  }
   return next.slice(0, Math.max(cap, next.filter((e) => e.pinned).length));
 }
 

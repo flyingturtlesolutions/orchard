@@ -103,3 +103,36 @@ describe('describePick — the missing word', () => {
     assert.equal(describePick(null, 'x'), 'none');
   });
 });
+
+// ── v2.74.2006 — the TARGET's name does not get to vote for the SOURCE ─────────────────────────────────────
+// A cross-system map's ask names both ends by construction, so the target system's own prior result competes
+// with the source list on the target's own name. Live 19:10:18, with the source finally surviving eviction:
+//   PRIOR ▸ list "Shopify orders for a customer" … · AMBIGUOUS: shopify orders | warranty tasks
+// Both scored 2 (order,shopify vs task,raleigh), both lists, so recency picked the 56s-newer Shopify list and
+// the map collapsed into a self-map reading a field called "the last order for".
+describe('selectPrior — targetSystem cannot vote for the source', () => {
+  const ASK = "for each open task in Raleigh, get the homeowner's last order in shopify";
+  const CANDS = () => ([
+    { id: 's', kind: 'list', noun: 'shopify orders', label: 'Shopify orders for a customer', rows: [1, 2], at: 2 },
+    { id: 'w', kind: 'list', noun: 'warranty tasks', label: 'Raleigh', rows: [1, 2, 3, 4, 5, 6], at: 1 },
+  ]);
+
+  it('without targetSystem the newer same-system set wins — the live failure', () => {
+    assert.equal(selectPrior(ASK, CANDS()).pick.noun, 'shopify orders');
+  });
+  it('with targetSystem the SOURCE wins on its own tokens', () => {
+    assert.equal(selectPrior(ASK, CANDS(), { targetSystem: 'shopify' }).pick.noun, 'warranty tasks');
+  });
+  it('a genuine SELF-MAP still binds its own rows — the target is not excluded, only its name', () => {
+    assert.equal(selectPrior('get the tracking number of each order', CANDS(), { targetSystem: 'shopify' }).pick.noun, 'shopify orders');
+  });
+  it('an empty/absent targetSystem changes nothing', () => {
+    assert.equal(selectPrior(ASK, CANDS(), {}).pick.noun, 'shopify orders');
+    assert.equal(selectPrior(ASK, CANDS(), { targetSystem: '' }).pick.noun, 'shopify orders');
+  });
+  it('dropping every token falls back to recency, not to a crash', () => {
+    const r = selectPrior('shopify', CANDS(), { targetSystem: 'shopify' });
+    assert.ok(r.pick, 'a pick is still made');
+    assert.match(r.why, /most-recent/);
+  });
+});

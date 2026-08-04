@@ -358,3 +358,40 @@ describe('stripRecordRef — naming the record must not read as a new ask', () =
     assert.equal(stripRecordRef('details about 1Z-27691W-0310208693', ups), 'details');
   });
 });
+
+// ── v2.74.2005 — DERIVED entries yield the cap before the source that produced them ────────────────────────
+// A per-item map pins one record per row plus its list. Live 18:16-18:17 a 6-row chain across three systems
+// pushed NINE entries into a cap-5 store: the warranty list went in first and was evicted by five Shopify
+// records, the Shopify list and two UPS records — every one produced by asks that took the warranty tasks as
+// INPUT. The 18:39 follow-up then bound to a 23-minute-old Shopify list and collapsed into a self-map.
+describe('pushFocus — a map\'s own output must not evict the source it came from', () => {
+  const rec = (label, derived) => focusRecordEntry({ label, noun: 'shopify orders', fields: { id: label }, derived, at: 1 });
+  const src = () => focusListEntry({ label: 'Warranty tasks by status', noun: 'warranty tasks', rows: [{ TaskId: 1 }, { TaskId: 2 }], at: 1 });
+
+  it('the source survives nine pins into a five-slot store (the live shape)', () => {
+    let f = pushFocus([], src());
+    for (let i = 0; i < 8; i++) f = pushFocus(f, rec(`DEAKO#${i}`, true));
+    assert.ok(f.some((e) => e.label === 'Warranty tasks by status'), 'the source must outlive the results it produced');
+    assert.equal(f.length, FOCUS_CAP);
+  });
+
+  it('derived entries still evict each other newest-first, so recent drill-downs survive', () => {
+    let f = pushFocus([], src());
+    for (let i = 0; i < 8; i++) f = pushFocus(f, rec(`DEAKO#${i}`, true));
+    assert.ok(f.some((e) => e.label === 'DEAKO#7'), 'the newest derived record is still reachable');
+    assert.ok(!f.some((e) => e.label === 'DEAKO#0'), 'the oldest derived record yielded');
+  });
+
+  it('WITHOUT derived flags the old behaviour is unchanged — plain recency eviction', () => {
+    let f = pushFocus([], src());
+    for (let i = 0; i < 8; i++) f = pushFocus(f, rec(`P#${i}`, false));
+    assert.ok(!f.some((e) => e.label === 'Warranty tasks by status'), 'an unflagged flood still evicts, as before');
+    assert.equal(f.length, FOCUS_CAP);
+  });
+
+  it('pinned entries stay exempt regardless of derived', () => {
+    let f = pushFocus([], focusRecordEntry({ label: 'CASE', noun: 'case', fields: { a: 1 }, pinned: true, at: 1 }));
+    for (let i = 0; i < 10; i++) f = pushFocus(f, rec(`D#${i}`, true));
+    assert.ok(f.some((e) => e.label === 'CASE'));
+  });
+});

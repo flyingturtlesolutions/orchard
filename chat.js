@@ -31,6 +31,7 @@ import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, i
 import { declaredMismatchesResolved, isEntityRead } from './Core/selfMapGuard.js';   // SM-1 (v2.74.1974) — the self-map diversion tests: invention (declared vs RESOLVED) + entity-vs-field
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
+import { galleryWorkflows } from './Core/workflowCatalog.js';   // WFG-1 (DESIGN_workflows.md §8) — the curated workflow templates the workflow gallery lists (presets seed the authoring flow's plan gate).
 import { buildDeskLanding } from './Core/deskLanding.js';   // DL-1 (v2.74.1600) — the desk LAUNCH page (pure assembly; proven sources only)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
@@ -2062,6 +2063,91 @@ function _renderAppGallery() {
   custom.addEventListener('click', () => { _renderNewDeskChooser(container); });
   container.appendChild(custom);
   void _appendUserApps(container);   // CV-5 — async-append "Your desks" (saved + configured) below
+}
+
+// ─── WFG-1 (DESIGN_workflows.md §7) — the WORKFLOW GALLERY ────────────────────────────────────────────────────
+// Mirrors _renderAppGallery on the SAME empty-state surface: preset templates + "+ Custom workflow…" + "Your
+// workflows". WFG-1 changes NO data model — a pick binds to a VIEW (opts.scopeDesk pre-scopes it; otherwise the
+// "add to which view?" step) and then seeds the EXISTING authoring flow (a preset → the plan gate; custom → the
+// intent door). So "+ Workflow" is a gallery now, not a silent dump into whatever view happens to be open.
+let _wfGalleryGen = 0;       // WFG-1 finding-fix — render generation: a stale async _appendYourWorkflows bails if the gallery re-rendered under it
+
+function _wfSuitsLine(suits) {
+  if (!suits || typeof suits !== 'object') return '';
+  if (Array.isArray(suits.sites) && suits.sites.length) return suits.sites.map((s) => (s && (s.label || s.host)) || '').filter(Boolean).join(' · ');
+  if (Array.isArray(suits.types) && suits.types.length) return suits.types.map((t) => { const s = String(t || ''); return s.charAt(0).toUpperCase() + s.slice(1); }).join(' · ');
+  return '';
+}
+
+async function _renderWorkflowGallery(opts = {}) {
+  const scopeDesk = opts.scopeDesk || null;
+  const gen = ++_wfGalleryGen;    // this render's generation; a later re-render invalidates its pending async appends
+  try { $('messages').innerHTML = ''; $('messages').classList.add('hidden'); $('empty-state').classList.remove('hidden'); } catch { /* */ }
+  const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'Add a workflow';
+  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = `A saved multi-step task for ${(scopeDesk && scopeDesk.title) || 'this view'} — pick a template or build your own.`;
+  const container = $('suggestion-cards'); if (!container) return;
+  container.innerHTML = '';
+  for (const preset of galleryWorkflows()) {
+    const card = document.createElement('button');
+    card.className = 'suggestion-card';
+    const suits = _wfSuitsLine(preset.suits);
+    card.innerHTML = `<div class="suggestion-card-name">${escHtml(preset.name)}</div>`
+      + (preset.description ? `<div class="suggestion-card-summary">${escHtml(preset.description)}</div>` : '')
+      + (suits ? `<div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(suits)}</span></div>` : '');
+    card.addEventListener('click', () => { void _wfBindAndAuthor(scopeDesk, { preset }); });
+    container.appendChild(card);
+  }
+  const custom = document.createElement('button');
+  custom.className = 'suggestion-card suggestion-card-preset';
+  custom.innerHTML = '<div class="suggestion-card-name">+ Custom workflow…</div><div class="suggestion-card-summary">Build it step by step — add and test one action at a time.</div>';
+  custom.addEventListener('click', () => { void _wfBindAndAuthor(scopeDesk, { custom: true }); });
+  container.appendChild(custom);
+  void _appendYourWorkflows(container, gen);
+}
+
+// WFG-1 — a pick (preset | custom) binds to its view and opens the authoring flow. "+ Workflow" is always scoped to
+// the view it sits under, so the gallery needs no "which view?" step — the pick comes straight here with its desk.
+async function _wfBindAndAuthor(desk, pick) {
+  if (!pick || !desk) return;
+  try { _closeRail(); } catch { /* */ }
+  if (desk.id !== _currentConversationId) { try { await _openConvFullTimeline(desk); } catch { /* */ } }
+  if (String(_currentConversationId || '') !== String(desk.id)) return;   // the open didn't land — never author into the wrong view
+  if (pick.preset) await _startWorkflowFromPreset(pick.preset);
+  else await _startWorkflowWizard();   // "+ Custom workflow" → the step-by-step BUILDER (WW-1b: resumes an abandoned draft's proven steps)
+}
+
+// "Your workflows" — every saved (non-draft) workflow across all views, labeled with its owning view. Discovery
+// only in WFG-1: a click opens the owning view (an orphaned bank has no live view, so its card is disabled).
+async function _appendYourWorkflows(container, gen) {
+  if (!container) return;
+  let banks = [];
+  try { banks = await listAllWorkflows(); } catch { /* */ }
+  let desks = [];
+  try { const all = await ConversationStore.list(); desks = (all || []).filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev'); } catch { /* */ }
+  const rows = [];
+  for (const b of (banks || [])) {
+    if (!b || !Array.isArray(b.items) || !b.items.length) continue;
+    const owner = desks.find((c) => String(c.instanceId) === String(b.appId) || String(c.appId) === String(b.appId)) || null;
+    for (const w of b.items) {
+      if (!w || w.status === 'draft') continue;
+      rows.push({ w, owner, ownerTitle: owner ? (owner.title || 'View') : (w.orphanedFrom || 'a removed view') });
+    }
+  }
+  if (!rows.length || !container.isConnected || gen !== _wfGalleryGen) return;   // WFG-1 finding-fix — surface re-rendered while we awaited; don't paint into it
+  const hdr = document.createElement('div');
+  hdr.className = 'suggestion-section';
+  hdr.textContent = 'Your workflows';
+  container.appendChild(hdr);
+  rows.sort((a, b) => (b.w.updatedAt || 0) - (a.w.updatedAt || 0));
+  for (const { w, owner, ownerTitle } of rows) {
+    const card = document.createElement('button');
+    card.className = 'suggestion-card';
+    card.innerHTML = `<div class="suggestion-card-name">${escHtml(w.name || w.ask || 'workflow')}</div>`
+      + `<div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(ownerTitle)}</span></div>`;
+    if (owner) card.addEventListener('click', async () => { try { _closeRail(); } catch { /* */ } try { await _openConvFullTimeline(owner); } catch { /* */ } });
+    else card.disabled = true;   // an orphaned bank has no live view to open
+    container.appendChild(card);
+  }
 }
 
 // v2.74.1517 — the "+ New view…" CHOOSER: from scratch (the v1510 wizard verbatim) or EXTEND an existing desk —
@@ -6278,14 +6364,14 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       if (!t.leg) continue;   // no lookup of this type wired - skip the rung, never fail the row for it
       _setMessageBody(msg, `Looking up in ${escHtml(system)}… ${i + 1}/${use.length}${attempts.length > 1 ? ` (by ${escHtml(at.label)})` : ''}`);
       let r = null;
-      try { r = await _runConnectorLeg(t.leg, { ...t.baseParams, [t.valueParam]: at.value }, { tabId, groundId: t.groundId }); } catch (e) { r = { ok: false, error: e && e.message }; }
+      try { r = await _runConnectorLeg(t.leg, { ...t.baseParams, [t.valueParam]: at.value }, { tabId, groundId: t.groundId, derived: true }); } catch (e) { r = { ok: false, error: e && e.message }; }
       // v2.74.1637 — a rung that ERRORED is NOT a rung that missed. Live 085810: the ADDRESS rung (the most
       // reliable key) ate the session's cold-start 403, the walk read that as "no match" and descended to a NAME
       // match — a weak key the search leg itself warns about, while the strong one was never actually tried.
       // Retry a cold-start-class failure ONCE inline (the first call is what warms the session) before descending.
       if (r && !r.ok && _MAP_AUTHY.test(String(r.error || ''))) {
         _setMessageBody(msg, `Retrying ${escHtml(system)} (session warming)… ${i + 1}/${use.length}`);
-        try { r = await _runConnectorLeg(t.leg, { ...t.baseParams, [t.valueParam]: at.value }, { tabId, groundId: t.groundId }); } catch (e) { r = { ok: false, error: e && e.message }; }
+        try { r = await _runConnectorLeg(t.leg, { ...t.baseParams, [t.valueParam]: at.value }, { tabId, groundId: t.groundId, derived: true }); } catch (e) { r = { ok: false, error: e && e.message }; }
       }
       const match = (r && r.ok) ? (primaryObject(r.value) || (primaryList(r.value) || [])[0] || null) : null;
       if (r && !r.ok) _rungErrs.add(at.label);   // remember which rungs never got a real answer
@@ -6311,7 +6397,7 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       _setMessageBody(msg, `Retrying ${escHtml(system)} lookups that failed while the session warmed…`);
       let rr = null;
       const _rt = await _legFor((ladderValues(use[ri], _rungs).find((a) => a.value === results[ri].value) || {}).type || _firstType);
-      try { rr = _rt.leg ? await _runConnectorLeg(_rt.leg, { ..._rt.baseParams, [_rt.valueParam]: results[ri].value }, { tabId, groundId: _rt.groundId }) : null; } catch { rr = null; }
+      try { rr = _rt.leg ? await _runConnectorLeg(_rt.leg, { ..._rt.baseParams, [_rt.valueParam]: results[ri].value }, { tabId, groundId: _rt.groundId , derived: true }) : null; } catch { rr = null; }
       if (rr && rr.ok) {
         const _m = primaryObject(rr.value) || (primaryList(rr.value) || [])[0] || null;
         // v1642 — keep `via`: a recovered row is a real match by a real rung, so it must carry the same rung
@@ -6419,7 +6505,7 @@ function _mapMatchLabel(match, leg = null) {
 // marked params (names → ids, missing → default), honor the each-mode with a HEADLESS full fan-out (reads only,
 // same abort latch, merged group-tagged rows as ONE value — the next chain step / reduce consumes it), and turn
 // an ambiguous/unknown value into an honest structured error instead of a silent wrong-scope read.
-async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, onEach = null } = {}) {
+async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, onEach = null, derived = false } = {}) {
   if (leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve) {
     const rp = await _resolveRideParamsCore(leg, params, { tabId, groundId });
     if (rp.needs) {
@@ -6520,7 +6606,7 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, on
   // function of how many call sites I happened to notice — the blind spot that cost two passes and two
   // partially-true PASSes. Reads only: a write result is not a referent, and pinning one would let a later
   // demonstrative bind to a mutation instead of to a record.
-  try { if (!leg || !leg.tool || leg.tool.write !== true) _pinReadFocus(leg, res.value); } catch { /* focus is an assist; never fail a delivered read over it */ }
+  try { if (!leg || !leg.tool || leg.tool.write !== true) _pinReadFocus(leg, res.value, { derived }); } catch { /* focus is an assist; never fail a delivered read over it */ }
   return { ok: true, value: res.value };
 }
 
@@ -6573,7 +6659,9 @@ function _persistFocus() {
 // The module prior is pushed FIRST, and `selectPrior` falls back to candidates[0] when no noun matches — so a
 // follow-up that works today still resolves exactly as before. The behaviour only changes when the ask names a
 // noun some other set carries better, which is the case that was broken.
-function _priorForClause(ask) {
+// v2.74.2006 — `targetSystem` (the map's target.system) is passed so the target's own NAME cannot vote for the
+// source. See Core/priorSelect.selectPrior — the ask of a cross-system map names both ends by construction.
+function _priorForClause(ask, targetSystem = '') {
   const cands = [];
   if (_lastGroundedRead && _lastGroundedRead.value != null) {
     let _rows = []; try { _rows = rowsFromValue(_lastGroundedRead.value) || []; } catch { _rows = []; }
@@ -6588,7 +6676,7 @@ function _priorForClause(ask) {
     if (x.kind === 'list' && Array.isArray(x.rows) && x.rows.length) cands.push({ ...x, source: 'focus', _entry: x });
     else if (x.kind === 'record' && x.fields) cands.push({ ...x, source: 'focus', rows: [x.fields], _entry: x });
   }
-  const sel = selectPrior(ask, cands);
+  const sel = selectPrior(ask, cands, { targetSystem });
   try { _orchLog(`PRIOR ▸ ${describePick(sel.pick, sel.why)}${cands.length > 1 ? ` — of ${cands.length} set(s) in play` : ''}${sel.ambiguous.length > 1 ? ` · AMBIGUOUS: ${sel.ambiguous.map((a) => a.noun || a.label).join(' | ')}` : ''}`); } catch { /* */ }
   if (!sel.pick) return { value: null, leg: null };
   if (sel.pick.source === 'read') return { value: sel.pick._value, leg: sel.pick._leg || null };
@@ -6616,7 +6704,7 @@ function _priorForClause(ask) {
 //     that produced them rather than to whatever was read most recently.
 //   · NOT `pinned: true`. A pinned entry is exempt from eviction; a read is ordinary working state and must age
 //     out normally, or a stale record outlives its relevance and quietly wins a later binding.
-function _pinReadFocus(leg, value) {
+function _pinReadFocus(leg, value, { derived = false } = {}) {
   if (!leg || value == null) return;
   const rows = (primaryList(value) || []).filter((r) => r && typeof r === 'object');
   const noun = nounFromLeg(leg) || 'record';
@@ -6651,9 +6739,9 @@ function _pinReadFocus(leg, value) {
     // entry is worse than none, because it occupies the working set and can win a binding it cannot satisfy.
     // A LIST is different and keeps `leg.name`: "Recently tracked UPS packages" genuinely names the collection.
     const _rl = _lbl(rows[0]);
-    if (_rl) entry = focusRecordEntry({ label: _rl, noun, fields: rows[0], leg, at: Date.now() });
+    if (_rl) entry = focusRecordEntry({ label: _rl, noun, fields: rows[0], leg, derived, at: Date.now() });
   } else if (rows.length > 1) {
-    entry = focusListEntry({ label: leg.name || `${noun} results`, noun, rows, leg, at: Date.now() });
+    entry = focusListEntry({ label: leg.name || `${noun} results`, noun, rows, leg, derived, at: Date.now() });
   }
   if (!entry) return;   // zero rows, or the entry helpers refused it (no label / no fields) — stay silent
   _pushFocusEntry(entry);
@@ -7467,7 +7555,7 @@ async function _wfRebuildFromRoutine(rec, inst) {
   if (rec && rec.enabled && Number(rec.minutes) > 0) w.cadenceMinutes = Number(rec.minutes);
 }
 
-async function _startWorkflowWizard() {
+async function _startWorkflowWizard(opts = {}) {
   if (!_memoryId() || !_currentConversationId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a view first — workflows are saved per view.'); _orchFinalize(m); return; }
   if (_wfWizard) _wfAbandon();   // v1623 — a NEW wizard replaces a parked one; the outgoing one's ≥2 proven steps draft-keep
   _dismissDeskLanding();
@@ -7477,12 +7565,18 @@ async function _startWorkflowWizard() {
   // WW-1b (v2.74.1620) — RESUME the newest DRAFT: an abandoned wizard's proven steps come back instead of dying
   // with the page (the 194814 risk: two proven steps at 'banked', never named — a close lost them). Honest limit:
   // the chain PIPE does not resume (fresh st) — a foreach next-step re-reads via its self-contained branch.
+  // WFG-1 finding-fix (adversarial verify) — an INTENT / PRESET seed supplies its OWN fresh plan, so it must NOT
+  // resume a draft: a resumed draft's steps/draftId/name would leave the plan gate rendering the draft's steps as
+  // banked and _wfDoSave's if(draftId) branch overwriting that draft with a merge of two unrelated workflows. opts.
+  // fresh skips the resume; the blank "build step by step" + empty-intent doors still resume (WW-1b).
   let draft = null;
-  try {
-    const wfs = (await _loadWorkflowsMerged()) || [];
-    draft = wfs.filter((x) => x && x.status === 'draft' && Array.isArray(x.steps) && x.steps.length >= 2)
-      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
-  } catch { /* fresh start */ }
+  if (!opts.fresh) {
+    try {
+      const wfs = (await _loadWorkflowsMerged()) || [];
+      draft = wfs.filter((x) => x && x.status === 'draft' && Array.isArray(x.steps) && x.steps.length >= 2)
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
+    } catch { /* fresh start */ }
+  }
   if (String(_currentConversationId || '') !== convId) return;   // the user moved on mid-await
   _wfWizard = {
     convId, appId,
@@ -7837,7 +7931,7 @@ async function _startWorkflowFromIntent(intent) {
     return;
   }
 
-  await _startWorkflowWizard();
+  await _startWorkflowWizard({ fresh: true });   // WFG-1 finding-fix — an intent seed is a fresh authoring, never a draft resume
   const w = _wfWizard;
   if (!w) return;
   w.ask = goal;                         // the UMBRELLA intent — recall matches against this, not the name
@@ -7864,6 +7958,37 @@ async function _startWorkflowFromIntent(intent) {
     ...w.plan.map((s, i) => `${i + 1}. ${escHtml(s)}`),
     '',
     '_Check the plan above before we start. Nothing runs until you approve it, and each step still gets approved on its own after that._',
+  ].join('\n'), { markdown: true });
+  _orchFinalize(m);
+  _wfRenderPage();
+}
+
+// WFG-1 (DESIGN_workflows.md §8) — seed a PRESET template into the authoring flow. Its curated steps land on the
+// PLAN GATE directly (no DECOMPOSE_STEPS — they are already written); the user reviews the set and approves each
+// step exactly like an intent-drafted plan, so nothing banks unapproved (PP-0c). Mirrors _startWorkflowFromIntent's
+// tail (set w.plan / phase='plan' → _wfRenderPage), minus the model round-trip.
+async function _startWorkflowFromPreset(preset) {
+  if (!_memoryId() || !_currentConversationId) { const g = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(g, 'Open a view first — workflows are saved per view.'); _orchFinalize(g); return; }
+  const steps = (preset && Array.isArray(preset.subAsks) ? preset.subAsks : []).map(_str0).filter((t) => t && t !== '[object Object]').slice(0, 8);
+  if (steps.length < 2) { _promptWorkflowIntent(); return; }   // a malformed template falls back to describe-it-yourself
+  const m = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(m, `Setting up the **${escHtml(preset.name || 'workflow')}** template…`, { markdown: true });
+  await _startWorkflowWizard({ fresh: true });   // WFG-1 — a preset seed is a fresh authoring, never a draft resume
+  const w = _wfWizard;
+  if (!w) return;
+  w.ask = _str0(preset.ask) || steps[0];   // the umbrella intent — recall matches against this, not the name
+  w.plan = steps;
+  w.queue = [];
+  w.phase = 'plan';
+  w.coverage = null;
+  w.rejectedSteps = [];
+  w.editedSteps = [];
+  w.fromPreset = _str0(preset.id) || null;   // provenance (display/telemetry only)
+  _setMessageBody(m, [
+    `From the **${escHtml(preset.name || 'template')}** template — **${w.plan.length}** step${w.plan.length === 1 ? '' : 's'} to review:`,
+    ...w.plan.map((s, i) => `${i + 1}. ${escHtml(s)}`),
+    '',
+    '_Check the plan before we start. Nothing runs until you approve it, and each step still gets approved on its own after that._',
   ].join('\n'), { markdown: true });
   _orchFinalize(m);
   _wfRenderPage();
@@ -10218,11 +10343,10 @@ function _railWfAddRow(desk) {
   add.className = 'rail-item is-subtask rail-wf-add';
   add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>'
     + '<div class="rail-item-meta rail-add-desc">save a multi-step task you run often — it can run on a schedule</div>';
-  add.addEventListener('click', async (e) => {
+  add.addEventListener('click', (e) => {
     e.stopPropagation();
     _closeRail();
-    if (desk.id !== _currentConversationId) await _openConvFullTimeline(desk);
-    _promptWorkflowIntent();
+    void _renderWorkflowGallery({ scopeDesk: desk });   // WFG-1 — the per-view ＋ Workflow opens the gallery (templates + custom), pre-scoped to this view
   });
   _wireRowKeyboard(add, () => add.click(), 'New workflow in ' + String(desk.title || 'this view'));
   return add;
@@ -13743,7 +13867,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     // v2.74.1900 — the prior rides here too: this call passed NO prior at all, so a map with collection 'prior'
     // arriving at this door could never see one — the v1658 wired-only-one-door class, on the options bag instead
     // of the dispatch. Same durable source as the siblings below.
-    try { const _p = _priorForClause(goal); await _runMapClause(msg, d.map, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg }); } catch (e) { _clauseError('map', e, msg); }
+    try { const _p = _priorForClause(goal, (d.map && d.map.target && d.map.target.system) || ''); await _runMapClause(msg, d.map, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg }); } catch (e) { _clauseError('map', e, msg); }
     return true;
   }
   // PM-9 (v2.74.1658) — the per-item OWN-RECORD field read, at THIS door too.
