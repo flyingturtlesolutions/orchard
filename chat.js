@@ -69,7 +69,7 @@ import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 �
 import { stepReceiptLine, mayDeclareFilter, buildStepReceipt, renderStepReceipt } from './Core/stepReceipt.js';
 import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdict } from './Core/runLedger.js';   // OB-1 (v2.74.1831) — paired EXIT lines + the turn-level no-effect backstop   // v2.74.1828 receipt (STEP ▸); v1829 — mayDeclareFilter is a COST GATE for the branch consult, never a decider
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
 import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
@@ -6370,7 +6370,7 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       // asking about. Live verdict: "another indecipherable result". Now: what this row matched, then quietly
       // how — and on a miss, what was tried, because that is what makes a miss actionable.
       const m = j.matched
-        ? `→ ${_mapMatchLabel(j.match)}${_via && _rungs.length > 1 ? `  _(matched on ${_via})_` : ''}`
+        ? `→ ${_mapMatchLabel(j.match, _tgtLeg)}${_via && _rungs.length > 1 ? `  _(matched on ${_via})_` : ''}`
         : (val == null ? `— no ${_resolved} on this row`
           : (j.via.error ? `— ${_errWord(j.via.error)}  _(tried ${val})_` : `— no match  _(tried ${val})_`));
       return `• ${src} ${m}`;
@@ -6395,10 +6395,11 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
 }
 
 // A matched record's short label for the join line (the other system's identity). PURE-ish (uses summarizeItem).
-function _mapMatchLabel(match) {
-  if (!match || typeof match !== 'object') return 'match';
-  const it = summarizeItem(match);
-  return `${it.title || it.id || 'match'}${it.status ? ` (${it.status})` : ''}`.trim();
+// v2.74.2003 — delegates to the PURE mapMatchLabel, which projects through the target recipe's `display`.
+// v2002 fixed the record view and left this one on summarizeItem, so a map row printed the tracking NUMBER the
+// source order already carried. `leg` is the TARGET leg (tgt0.leg) whose recipe declares what matters.
+function _mapMatchLabel(match, leg = null) {
+  return mapMatchLabel(match, _legDisplay(leg));
 }
 
 // CX-4d — run a session-ride connector leg → {ok, value, error, hint}. The lean primitive shared by the chain

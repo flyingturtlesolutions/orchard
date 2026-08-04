@@ -483,6 +483,32 @@ function _chainLines(o, rows) {
   return ['', head, ...lines, ...tail];
 }
 
+/**
+ * v2.74.2003 — the per-row MATCH label for a cross-system map, projected through the target recipe's `display`.
+ * PURE.
+ *
+ * v2002 gave the record view a declared projection and left the MAP's row view on `summarizeItem`, which reduces
+ * any record to {title,id,status}. For a UPS track record that resolves to the tracking NUMBER — so
+ * `use UPS to track each order` printed back the numbers the Shopify orders already carried:
+ *     • #7719869907078 · DEAKO#71662 → 1Z27691W0310208693  (matched on fulfillments.trackingInfo.number)
+ * Every marker green (2 matched, 0 no-match) and the value absent — the same MECH-vs-VALUE split, in the one
+ * place the v2002 fix did not reach. Second instance today of "one of two render paths".
+ *
+ * With a declaration the row carries the declared HIGHLIGHTS instead: `On the Way · Arriving Thursday`. Capped at
+ * three so a table row stays a row — the full chain lives in the record view, one probe away and no re-fetch.
+ * Without one, the old label is returned unchanged.
+ */
+export function mapMatchLabel(match, display = null) {
+  if (!match || typeof match !== 'object') return 'match';
+  const d = normalizeDisplay(display);
+  if (d && d.show.length) {
+    const picked = _declaredFields(match, d.show).slice(0, 3).map(([, v]) => v);
+    if (picked.length) return picked.join(' · ');
+  }
+  const it = summarizeItem(match);
+  return `${it.title || it.id || 'match'}${it.status ? ` (${it.status})` : ''}`.trim();
+}
+
 export function renderConnectorLines(value, { name = 'Results', displayId = null, listPath = '', display = null } = {}) {
   const _disp = normalizeDisplay(display);
   const list = primaryList(value, { listPath });   // v1936 — the recipe's declared row path, when it has one

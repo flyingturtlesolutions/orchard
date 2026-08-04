@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems, normalizeDisplay } from './connectorRender.js';
+import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems, normalizeDisplay, mapMatchLabel } from './connectorRender.js';
 import { renderMarkdown } from '../markdown.js';   // v1949 — assert the RENDERED HTML, not eyeball the panel
 
 describe('primaryList — find the data array', () => {
@@ -658,5 +658,33 @@ describe('renderConnectorLines — declared display projection', () => {
     const t = renderConnectorLines(UPS, { ...base, display: { show: ['shipToAddress', 'packageStatus'] } }).join('\n');
     assert.doesNotMatch(t, /KATHRYN ALLEN/);
     assert.match(t, /On the Way/);
+  });
+});
+
+// ── v2.74.2003 — the MAP ROW label, the second render path ─────────────────────────────────────────────────
+// v2002 gave the RECORD view a declared projection and left the map's row view on summarizeItem, which reduces
+// any record to {title,id,status}. For a UPS track record that is the tracking NUMBER — so "use UPS to track each
+// order" printed back the numbers the Shopify orders already carried, with 2 matched / 0 no-match above it.
+describe('mapMatchLabel — a map row carries declared highlights, not the join key', () => {
+  const UPS_MATCH = { trackingNumber: '1Z27691W0310208693', packageStatus: 'On the Way', simplifiedText: 'Arriving Thursday', isMobileDevice: false, packageStatusType: 'I' };
+  const DISPLAY = { show: ['packageStatus', 'simplifiedText', 'deliveredDateDetail', 'receivedBy', 'leftAt', 'errorText'] };
+
+  it('projects the declared highlights instead of the id', () => {
+    assert.equal(mapMatchLabel(UPS_MATCH, DISPLAY), 'On the Way · Arriving Thursday');
+  });
+  it('caps at three so a table row stays a row', () => {
+    const wide = { a: '1', b: '2', c: '3', d: '4', e: '5' };
+    assert.equal(mapMatchLabel(wide, { show: ['a', 'b', 'c', 'd', 'e'] }), '1 · 2 · 3');
+  });
+  it('skips declared keys that are absent or non-scalar', () => {
+    assert.equal(mapMatchLabel({ packageStatus: 'Delivered', shipToAddress: { name: 'X' } }, { show: ['shipToAddress', 'packageStatus'] }), 'Delivered');
+  });
+  it('WITHOUT a declaration the old label is unchanged', () => {
+    assert.equal(mapMatchLabel(UPS_MATCH, null), '1Z27691W0310208693');
+    assert.equal(mapMatchLabel({ title: 'Widget', status: 'open' }, null), 'Widget (open)');
+  });
+  it('junk in, safe out', () => {
+    assert.equal(mapMatchLabel(null, DISPLAY), 'match');
+    assert.equal(mapMatchLabel({}, DISPLAY), 'match');
   });
 });
