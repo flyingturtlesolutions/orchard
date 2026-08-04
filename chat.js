@@ -6351,9 +6351,18 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
     ? ' (this desk’s standing join key — name a field to override)'
     : (_asked && _asked.toLowerCase() !== _resolved.toLowerCase() ? ` (for “${_asked}”)` : '');
   const _hits = [..._rungHits.entries()].map(([k, n]) => `${k} x${n}`).join(', ');
+  // v2.74.2004 — the ladder DESCRIBES ITSELF. This read `(address, then contacts)` — hardcoded, and true only of
+  // the warranty→Shopify ladder it was written for. Printed for every multi-rung ladder, so a UPS lookup
+  // contradicted its own evidence inside one sentence: `a 2-rung ladder (address, then contacts) — matched via:
+  // fulfillments.trackingInfo.number x2`. User-reported: "ups uses tracking number". A rung is `{field}` or
+  // `{contact,type}`, so the text was always derivable. Capped at 3 — on a MISS this is the only record of what
+  // was tried, so it must not vanish, and on a 7-rung ladder it must not run away.
+  const _rungWord = (r) => (r && r.field) ? String(r.field) : (r ? `${r.contact || 'primary'} ${r.type || 'field'}` : '');
+  const _ladder = (_rungs || []).map(_rungWord).filter(Boolean);
+  const _ladderWords = _ladder.length ? ` (${_ladder.slice(0, 3).join(', then ')}${_ladder.length > 3 ? `, …+${_ladder.length - 3} more` : ''})` : '';
   const _errNote = _rungErrs.size ? `  (couldn’t reach ${system} on: ${[..._rungErrs].join(', ')} — a match below those rungs is less certain)` : '';
   const _header = (_rungs.length > 1)
-    ? `Searched ${system} by a ${_rungs.length}-rung ladder (address, then contacts)${_hits ? ` — matched via: ${_hits}` : ''}.${_errNote}`
+    ? `Searched ${system} by a ${_rungs.length}-rung ladder${_ladderWords}${_hits ? ` — matched via: ${_hits}` : ''}.${_errNote}`
     : `Searched ${system} by ${_resolved}${_why}.`;
   let text;
   if (map.join === 'table') {
