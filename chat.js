@@ -51,7 +51,7 @@ import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/p
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg, missingRequiredParams, inventedIdentifierParams } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate; v1911 — the identifier-provenance gate
-import { misboundIdentifierParams } from './Core/identifierShapes.js';   // SG-1 (v2.74.1947) — the any-slot shape guard: a UPS 1Z must not bind a Shopify order slot
+import { misboundIdentifierParams, shapesForOwner } from './Core/identifierShapes.js';   // SG-1 (v2.74.1947) — the any-slot shape guard: a UPS 1Z must not bind a Shopify order slot
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
 import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, drillTargetRedirect, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
@@ -94,7 +94,7 @@ import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) �
 import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
-import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField } from './Core/peritemMap.js';
+import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -1585,6 +1585,7 @@ const _activeInvocations = new Set();
 const _invocationConvs = new Map();
 
 function _trackInvocation(invocationId) {
+  _turnUnlock();   // v2.74.1993 (New #2) — handoff to a tracked run ends the reasoning phase; new asks are allowed DURING the run.
   _activeInvocations.add(invocationId);
   if (_currentConversationId) _invocationConvs.set(invocationId, String(_currentConversationId));
   _updateRunningStatus();
@@ -1698,7 +1699,7 @@ function appendMessage({ role, body, attribution, id, skipPersist = false, convI
       .catch(err => console.warn('[chat] failed to persist user message:', err.message));
   }
   // v2.74.1224 — a thinking bubble lights the selected app's "● working…" indicator in an open drawer (no-op when closed).
-  if (role === 'thinking') { _refreshRailIfOpen().catch(() => {}); }
+  if (role === 'thinking') { _startBusyTimer(msg); _refreshRailIfOpen().catch(() => {}); }   // v2.74.1993 — elapsed/stall timer for glyph-less (legacy) thinking bubbles too
 
   return msg;
 }
@@ -1809,6 +1810,8 @@ function _reportLayout(msg, ctx) {
  * @param {{ body: string, markdown?: boolean, html?: boolean, attribution?: string|null, invocationId?: string }} fields
  */
 async function _finalizeAssistantBubble(msgEl, fields) {
+  _turnUnlock();   // v2.74.1993 (New #2) — release the in-flight guard on the routed / error terminal too.
+  _stopBusyTimer(msgEl);   // v2.74.1993 — stop the elapsed/stall timer on the routed / error terminal
   msgEl.classList.remove('thinking');
   await _persistMessageUpdate(msgEl, {
     role: 'assistant',
@@ -1819,6 +1822,7 @@ async function _finalizeAssistantBubble(msgEl, fields) {
     invocationId: undefined,
     ...fields,
   });
+  try { _announceFinal(msgEl); } catch { /* */ }   // v2.74.1993 (New #1) — announce a plain-text routed answer to SR
 }
 
 function _addCancelButton(msg, invocationId) {
@@ -1826,6 +1830,7 @@ function _addCancelButton(msg, invocationId) {
   const btn = document.createElement('button');
   btn.className = 'message-cancel';
   btn.title = 'Cancel';
+  btn.setAttribute('aria-label', 'Cancel');   // v2.74.1993 — the visible '×' textContent would otherwise win the accessible-name algorithm (SR reads 'times button'); aria-label makes it announce 'Cancel'.
   btn.textContent = '×';
   btn.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -3355,7 +3360,7 @@ async function _executeTask(cap, paramValues) {
   const invocationId = crypto.randomUUID();
   const msg = appendMessage({
     role: 'thinking',
-    body: 'Starting…',
+    body: BUSY_COPY.working,
     attribution: cap.name,
     id: `msg-${invocationId}`,
   });
@@ -3557,6 +3562,7 @@ function _ilBusy(msg, on) {
   try {
     const av = msg && msg.querySelector ? msg.querySelector('.message-avatar') : null;
     if (av) av.classList.toggle('il-busy', !!on);
+    if (on) _startBusyTimer(msg); else _stopBusyTimer(msg);   // v2.74.1993 — the elapsed/stall timer follows the busy glyph
   } catch { /* */ }
 }
 // v2.74.1512 — the reply REVEAL: a settled reply reads in LINE BY LINE (a typing-effect rhythm), never as one
@@ -3608,7 +3614,107 @@ function _revealLines(msg) {
     }
   } catch { _revealHold = false; /* the reveal is cosmetic — never break finalize */ }
 }
+// v2.74.1993 (New #2) — TURN-IN-FLIGHT GUARD. A guard FLAG (never the Send button — its documented stuck-disabled
+// history, see the `finally` re-enable in the routed flow, is exactly why we don't gate on `disabled`) blocks a SECOND
+// reasoning turn while the first is still reasoning (invariant #4). Armed only on the DEFAULT interpret door; the
+// `tool:`/routed door already holds Send disabled end-to-end. It can NEVER stick: a stale lock past the ceiling is
+// ignored, and it releases the instant a turn finalizes (_orchFinalize / _finalizeAssistantBubble) or hands to a
+// tracked run (_trackInvocation) — so new asks are still allowed DURING a background capability run, as before.
+let _turnInFlight = false;
+let _turnLockAt = 0;
+const _TURN_LOCK_CEILING_MS = 30000;
+function _turnLock() { _turnInFlight = true; _turnLockAt = Date.now(); }
+function _turnUnlock() { _turnInFlight = false; _turnLockAt = 0; }
+function _turnLocked() { return _turnInFlight && (Date.now() - _turnLockAt) < _TURN_LOCK_CEILING_MS; }
+
+// v2.74.1993 (a11y New #1) — SR ANSWER ANNOUNCER. #messages is aria-live=polite aria-relevant="additions": a MARKDOWN
+// answer renders as element nodes and is announced natively, but a PLAIN-TEXT answer is a textContent swap on the
+// existing thinking bubble and is SWALLOWED (the SR user hears "Thinking…" then silence). Mirror ONLY the plain-text
+// case into the #a11y-announcer live region; element-bearing (markdown) bodies are skipped → no double-speak.
+function _announce(text) {
+  try {
+    const el = document.getElementById('a11y-announcer');
+    if (!el) return;
+    const s = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, 400);
+    if (!s) return;
+    el.textContent = '';                                       // clear first so an identical string still re-announces
+    requestAnimationFrame(() => { try { el.textContent = s; } catch { /* */ } });
+  } catch { /* */ }
+}
+function _announceFinal(msgEl) {
+  try {
+    const b = msgEl && msgEl.querySelector && msgEl.querySelector('.message-body');
+    if (!b || b.children.length > 0) return;                   // element children ⇒ markdown ⇒ already announced by the log
+    _announce(b.textContent);
+  } catch { /* */ }
+}
+
+// v2.74.1993 — BUSY VOCABULARY. ONE controlled set of phase words (was ~13 per-site synonyms — interpreting… /
+// thinking… / One moment… / Working on it… / composing… / Starting… / Reading your request…). New busy state → pick a
+// phase HERE, never a fresh string. Counted-progress + scope strings ("Searching… 3/12", "Looking across your sites…")
+// stay as-is — they carry real information scent and OVERRIDE these generics.
+const BUSY_COPY = {
+  thinking: 'Thinking…',            // reasoning about the ask (comprehend / route / interpret)
+  planning: 'Planning the steps…',  // a real decompose step
+  working:  'Working…',             // executing / generating the reply
+};
+
+// v2.74.1993 — HONEST ELAPSED + STALL. A per-thinking-bubble timer: past ~5s it appends a muted "· Ns"; if the bubble's
+// text hasn't changed for ~12s (a genuine stall, NOT active counted progress) it escalates to "· Ns · taking longer
+// than usual" — the honest signal that separates a normal 2s round from a hang. SELF-TERMINATING: stops the instant the
+// bubble is no longer busy (glyph off / 'thinking' removed) or leaves the DOM, so it can't leak. The span is aria-hidden
+// (decorative; a per-second tick must never spam a screen reader).
+const _busyTimers = new Map();
+const _BUSY_SHOW_AT = 5000;
+const _BUSY_STALL_AT = 12000;
+function _startBusyTimer(msg) {
+  try {
+    if (!msg || _busyTimers.has(msg)) return;
+    const start = Date.now();
+    let lastText = '';
+    let lastChange = start;
+    const tick = () => {
+      try {
+        if (!document.body.contains(msg)) { _stopBusyTimer(msg); return; }
+        const av = msg.querySelector('.message-avatar');
+        const busy = (av && av.classList.contains('il-busy')) || msg.classList.contains('thinking');
+        if (!busy) { _stopBusyTimer(msg); return; }
+        const bodyEl = msg.querySelector('.message-body');
+        // v2.74.1993 — the change signal must watch BOTH surfaces a run updates: .message-body (in-body counted
+        // progress like "Looking up… 3/N") AND the separate .message-progress node (tracked-invocation step progress,
+        // "Step 3/5: …"). Watching only .message-body froze lastChange on a healthy multi-step Task/Strategy — whose
+        // .message-body stays a static "Working…" — so it falsely escalated to "taking longer than usual" while its
+        // progress bar was visibly advancing. (verify pass, Finding 1)
+        const cur = (bodyEl ? bodyEl.textContent : '') + (msg.querySelector('.message-progress')?.textContent || '');
+        if (cur !== lastText) { lastText = cur; lastChange = Date.now(); }
+        const elapsed = Date.now() - start;
+        if (elapsed < _BUSY_SHOW_AT) return;
+        const secs = Math.round(elapsed / 1000);
+        const stalled = (Date.now() - lastChange) >= _BUSY_STALL_AT;
+        let span = msg.querySelector('.message-elapsed');
+        if (!span) {
+          span = document.createElement('span');
+          span.className = 'message-elapsed';
+          span.setAttribute('aria-hidden', 'true');
+          (msg.querySelector('.message-content') || msg).appendChild(span);
+        }
+        span.textContent = stalled ? `· ${secs}s · taking longer than usual` : `· ${secs}s`;
+      } catch { /* */ }
+    };
+    _busyTimers.set(msg, setInterval(tick, 1000));
+  } catch { /* */ }
+}
+function _stopBusyTimer(msg) {
+  try {
+    const id = _busyTimers.get(msg);
+    if (id) { clearInterval(id); _busyTimers.delete(msg); }
+    const span = msg && msg.querySelector ? msg.querySelector('.message-elapsed') : null;
+    if (span) span.remove();
+  } catch { /* */ }
+}
+
 function _orchFinalize(msg, { outcome = null } = {}) {
+  _turnUnlock();   // v2.74.1993 (New #2) — a finalized reply ends the reasoning turn; release the in-flight guard.
   _ilBusy(msg, false);   // v1505 — the glyph settles the moment the run ends (even when nothing persists)
   try {
     if (!msg || !msg.dataset || !msg.dataset.messageId) return;
@@ -3622,6 +3728,7 @@ function _orchFinalize(msg, { outcome = null } = {}) {
       .catch(() => { /* persistence must never break the flow */ });
   } catch { /* */ }
   _revealLines(msg);   // v1512 — AFTER the body extraction above (the line re-wrap can never touch what persists)
+  _announceFinal(msg);   // v2.74.1993 (New #1) — mirror a plain-text answer to the SR live region (markdown self-announces)
 }
 
 // ── ORCH-FB — corrective feedback ───────────────────────────────────────────────────────────────────────────
@@ -5813,7 +5920,26 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // the user NAMED is simply a one-rung ladder (explicit still wins). Each rung's TYPE picks its own target read;
   // legs resolve lazily + cached, so a run costs one interpret per type ACTUALLY used, never one per row.
   const _declaredRungs = normalizeRungs(_declared);
-  const _rungs = (fp.matchedBy === 'named' || !_declaredRungs.length) ? [{ field: fp.path }] : _declaredRungs;
+  const _baseRungs = (fp.matchedBy === 'named' || !_declaredRungs.length) ? [{ field: fp.path }] : _declaredRungs;
+  // JK-2 (v2.74.1994) — THE TARGET'S OWN KEY OUTRANKS THE SOURCE'S. `joinKey` describes the relationship the
+  // rows were READ through, so for a THIRD-system hop it is the wrong identifier: `shopify_orders_for_customer`
+  // declares `customer.email`, which is right for "this customer's orders" and meaningless for "track this
+  // shipment". Live 23:25 and 00:26, `use UPS to track each order` steered every per-item ask with
+  // `(match the email …)`, `ups_track` was never invoked, and the fieldRead landed one step away — naming
+  // `fulfillments.trackingInfo.number` as "nearest" while refusing.
+  // So if the TARGET system owns an identifier shape and a row carries a value of that shape, that path leads the
+  // ladder. Matched by VALUE, never by name: `trackingInfo.number`, `TrackingNo` and `awb` are one thing to a
+  // `1Z…` regex and three to a keyword list. Null when the rows carry nothing the target owns, so every existing
+  // ladder is byte-identical — this only ADDS a rung where there was previously no correct one at all.
+  let _rungs = _baseRungs;
+  try {
+    const _tShapes = shapesForOwner(system);
+    const _tRung = _tShapes.length ? targetKeyRung(rows, _tShapes) : null;
+    if (_tRung) {
+      _rungs = [_tRung, ..._baseRungs];
+      try { _orchLog(`MAP ▸ target key — "${_tRung.field}" is ${_tRung.ownedBy || 'owned by'} ${system}; leads the ladder ahead of the source joinKey`); } catch { /* */ }
+    }
+  } catch { /* a missing shape table must never break a map that worked without one */ }
   const _legCache = new Map();
   const _legFor = async (type) => {
     if (_legCache.has(type)) return _legCache.get(type);
@@ -5942,7 +6068,7 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       if (_walkAbortFlag.requested) break;
       const t = await _legFor(at.type);
       if (!t.leg) continue;   // no lookup of this type wired - skip the rung, never fail the row for it
-      _setMessageBody(msg, `Looking up in ${escHtml(system)}... ${i + 1}/${use.length}${attempts.length > 1 ? ` (by ${escHtml(at.label)})` : ''}`);
+      _setMessageBody(msg, `Looking up in ${escHtml(system)}… ${i + 1}/${use.length}${attempts.length > 1 ? ` (by ${escHtml(at.label)})` : ''}`);
       let r = null;
       try { r = await _runConnectorLeg(t.leg, { ...t.baseParams, [t.valueParam]: at.value }, { tabId, groundId: t.groundId }); } catch (e) { r = { ok: false, error: e && e.message }; }
       // v2.74.1637 — a rung that ERRORED is NOT a rung that missed. Live 085810: the ADDRESS rung (the most
@@ -7436,7 +7562,7 @@ async function _startWorkflowFromIntent(intent) {
   const w0 = _wfWizard;   // a re-roll carries the prior round's rejections/edits forward (stage 11)
   if (!goal) { await _startWorkflowWizard(); return; }
   const m = appendMessage({ role: 'assistant', body: '' });
-  _setMessageBody(m, 'Working out the steps…');
+  _setMessageBody(m, BUSY_COPY.planning);
 
   // v2.74.1669 — MODEL FIRST, via a DEDICATED prompt. This reverses v1667's inversion, and the reason the
   // inversion happened is worth keeping: I measured a BROKEN llm call (a router asked a decomposer's question,
@@ -10821,7 +10947,7 @@ async function _tryGroundedTurn(text) {
   // recorded capabilities; if it decomposes into >1 step, confirm + chain. 0–1 steps → fall through to the
   // single matcher (so simple asks pay no extra LLM call — the looksComplex gate guards it).
   if (looksComplex(text) || isForeachAsk(text) || isConditionalAsk(text)) {
-    const probe = appendMessage({ role: 'thinking', body: 'Working out the steps…' });
+    const probe = appendMessage({ role: 'thinking', body: BUSY_COPY.planning });
     const plan = await _orchReq('ORCH_PLAN', { tabId: tab.id, ask: text });
     const pSteps = (plan && plan.success && Array.isArray(plan.steps)) ? plan.steps : [];
     const pGaps = (plan && Array.isArray(plan.gaps)) ? plan.gaps : [];
@@ -13271,7 +13397,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
                  memoryId: _memoryId(),
                  connections: Array.isArray(connectionsOverride) ? connectionsOverride : _boundConnections(),
                  target: (targetOverride && targetOverride.origin) ? targetOverride : _boundTarget() };
-  const msg = appendMessage({ role: 'assistant', body: 'interpreting…', convId: turn.convId });
+  const msg = appendMessage({ role: 'assistant', body: BUSY_COPY.thinking, convId: turn.convId });
   _ilBusy(msg, true);   // v1505 — the glyph thinks while the interpret runs
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
@@ -13440,7 +13566,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   // leg is only in `retrieved` when THIS app defines a presentation layer (sg.js gates on it), so no re-check here.
   if (d.intent === 'act' && d.capabilityId === 'COMPOSE' && retrieved.some((l) => l && l.domain === 'self' && l.key === 'COMPOSE')) {
     const appId = turn.appId;   // v1338 (review B) — the TURN's app, not whichever is current after the awaits
-    _setMessageBody(msg, 'composing…');
+    _setMessageBody(msg, BUSY_COPY.working);
     let r = null;
     try { r = await _orchReq('COMPOSE_CANVAS', { ask: goal, appId, seed: turn.seed, anchor: { appId, conversationId: null } }); } catch { /* */ }
     const ok = !!(r && r.success !== false);
@@ -13464,7 +13590,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   if (d.intent === 'act' && (d.capabilityId === 'OPEN_CASE' || d.capabilityId === 'LIST_CASES' || d.capabilityId === 'CLOSE_CASE' || d.capabilityId === 'REVIEW_QUEUE' || d.capabilityId === 'SHOW_ITEM_SOURCES' || d.capabilityId === 'SHOW_WORK' || d.capabilityId === 'CLEAR_CHAT')
       && retrieved.some((l) => l && l.domain === 'self' && l.key === d.capabilityId)) {
     if (d.capabilityId === 'CLEAR_CHAT') {   // v1354 — "clear chat" / "start over" (used to fall through to the teach offer)
-      _setMessageBody(msg, 'One moment…');
+      _setMessageBody(msg, BUSY_COPY.thinking);
       _orchFinalize(msg);
       await _clearCurrentChat();
       return true;
@@ -13562,7 +13688,7 @@ async function _tryIlCommand(text) {
   const ask = String(text).replace(/^il:\s*/i, '').trim();
   const msg = appendMessage({ role: 'assistant', body: '' });
   if (!ask) { _setMessageBody(msg, 'usage: `il: <ask>` — Orchard judges the matcher and runs the best-fit capability.'); return true; }
-  _setMessageBody(msg, 'thinking…');
+  _setMessageBody(msg, BUSY_COPY.thinking);
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
 
@@ -13895,6 +14021,15 @@ async function sendChatMessage() {
       return;
     }
     _lastSendStamp = { key: k, at: now };
+  }
+  // v2.74.1993 (New #2) — TURN-IN-FLIGHT GUARD: block a SECOND reasoning turn while the first is still reasoning
+  // (invariant #4 — interleaved reasoning corrupts each other's DOM waits; the DEFAULT interpret door re-enables Send
+  // immediately, so `disabled` alone doesn't hold). Guard FLAG only (never the stuck-prone Send button). Placed BEFORE
+  // the composer clear so a blocked ask keeps the user's text to resend, and it auto-heals past the ceiling.
+  if (_turnLocked()) {
+    try { toast('Still working on your last message — one moment.'); } catch { /* */ }
+    try { _orchLog('ROUTE ▸ send held — a turn is still in flight'); } catch { /* */ }
+    return;
   }
   // v2.74.1554 — THE TURN CLAIMS AT ENTRY (invariant #4): ONE composer clear + ONE user echo for EVERY turn,
   // BEFORE any intercept runs. The old shape — each branch clearing/echoing at ITS claim — meant decide-by-doing
@@ -14664,7 +14799,7 @@ async function sendChatMessage() {
     let pres = null; try { pres = appId ? (builtinApp(appId)?.presentation || null) : null; } catch { /* */ }
     if (!pres) { _setMessageBody(m, 'This view has no canvas to compose into — it works in the panel. (The Financial monitor does.)'); _orchFinalize(m); return; }
     const ask = text.replace(/^canvas:\s*/i, '').trim();
-    _setMessageBody(m, 'composing…');
+    _setMessageBody(m, BUSY_COPY.working);
     try {
       const r = await _orchReq('COMPOSE_CANVAS', { ask, appId, seed: _currentConversationSeed, anchor: { appId, conversationId: null } });
       const deg = (r && r.success !== false && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';   // GD-7a — §8.3 named downgrade
@@ -14792,6 +14927,7 @@ async function sendChatMessage() {
   // `tool: <ask>` strips the prefix and falls through to the former-default deterministic flow unchanged.
   if (!/^tool:/i.test(text)) {
     $('btn-chat-send').disabled = false;
+    _turnLock();   // v2.74.1993 (New #2) — arm the in-flight guard for the DEFAULT reasoning door (released on finalize / track / ceiling).
     const ask = text.replace(/^il:\s*/i, '').trim();
     // v2.74.1543 — DETERMINISTIC FAN-OUT GATE before the LLM front door: an ask the regex is CERTAIN is a
     // quantified fan-out ("foreach division, open new warranty tasks in a new case") must never depend on the
@@ -14929,8 +15065,9 @@ async function sendChatMessage() {
 
   // Routed flow — semantic match then invoke
   const status = $('input-status');
-  status.textContent = 'Routing…';
-  status.className = 'input-status routing';
+  // v2.74.1993 — dropped the per-turn 'Routing…' here: it was a SECOND busy indicator for one moment of work
+  // (the thinking bubble below already owns per-turn status). #input-status is reserved for GLOBAL fleet state
+  // ('N running…'); `status` is still read below to clear any lingering fleet text on this turn's terminal paths.
 
   const thinkingMsg = appendMessage({ role: 'thinking', body: 'Thinking…' });
 
@@ -14966,7 +15103,7 @@ async function sendChatMessage() {
   attr.className = 'message-attribution';
   attr.textContent = `${best.name} · ${Math.round(best.confidence * 100)}% match`;
   thinkingMsg.querySelector('.message-content').prepend(attr);
-  _setMessageBody(thinkingMsg, 'Working on it…');
+  _setMessageBody(thinkingMsg, BUSY_COPY.working);
 
   status.textContent = '';
   status.className = 'input-status';
@@ -14978,7 +15115,7 @@ async function sendChatMessage() {
     const cap = await ChatAPI.getCapability(best.capabilityId);
     const declaredParams = cap?.parameters ? Object.keys(cap.parameters) : [];
     if (declaredParams.length > 0) {
-      _setMessageBody(thinkingMsg, 'Reading your request…');
+      _setMessageBody(thinkingMsg, BUSY_COPY.working);
       const extracted = await ChatAPI.extractStrategyParams(best.capabilityId, text);
       paramValues = { ...extracted.params };
       if (extracted.missing.length > 0) {
@@ -14993,7 +15130,7 @@ async function sendChatMessage() {
         }
         paramValues = { ...paramValues, ...collected };
       }
-      _setMessageBody(thinkingMsg, 'Working on it…');
+      _setMessageBody(thinkingMsg, BUSY_COPY.working);
     }
   } catch (err) {
     console.warn('[chat] param extraction failed:', err);
@@ -15094,6 +15231,7 @@ async function _invokeAssistant(cap, question) {
 function _finalizeMessage(invocationId, msg) {
   _untrackInvocation(invocationId);
   _removeCancelButton(msg);
+  _stopBusyTimer(msg);   // v2.74.1993 — tear the elapsed/stall span down synchronously with the terminal render (was left to the next self-terminate tick, ~1s later, beside the finished answer). Matches _finalizeAssistantBubble. (verify pass, Finding 2)
   msg.classList.remove('thinking');
   // v2.74.106 — Conditional scroll: a strategy completing while the user is
   // scrolled up reading history shouldn't yank them down. They'll see the
@@ -16075,7 +16213,7 @@ async function _resumeRunningInvocations() {
       // invocation terminates.
       msg = appendMessage({
         role        : 'thinking',
-        body        : 'Working on it…',
+        body        : BUSY_COPY.working,
         attribution : inv.capabilityName ?? '',
         id          : `msg-${inv.invocationId}`,
       });
@@ -16084,7 +16222,7 @@ async function _resumeRunningInvocations() {
       if (inv.capabilityId) msg.dataset.capabilityId = inv.capabilityId;
     }
     msg.classList.add('thinking');
-    _setMessageBody(msg, 'Working on it…');
+    _setMessageBody(msg, BUSY_COPY.working);
     _trackInvocation(inv.invocationId);
     _addCancelButton(msg, inv.invocationId);
   }

@@ -920,8 +920,18 @@ textarea {
 }
 
 .message.thinking .message-body {
-  color: var(--c-text-subtle);
+  color: var(--c-text-muted);   /* v2.74.1993 — was --c-text-subtle (#80796d on #1f1d1b ≈ 3.9:1, below AA). This is the ONE line a waiting user reads; --c-text-muted (#b5ad9d ≈ 7.5:1) clears AA and is still a dim aside. */
   font-style: italic;
+}
+
+/* v2.74.1993 — the honest elapsed/stall readout on an in-flight thinking bubble ("· 12s" / "· 12s · taking longer
+   than usual"). Muted + tabular so the ticking digit doesn't jitter the layout. Purely informational — no motion. */
+.message-elapsed {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--c-text-subtle);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Cancel button on in-flight messages */
@@ -1033,7 +1043,7 @@ textarea {
 
 .input-status {
   font-size: 11px;
-  color: var(--c-text-subtle);
+  color: var(--c-text-muted);   /* v2.74.1993 — AA contrast for the composer status line (was --c-text-subtle ≈ 3.9:1) */
   min-height: 14px;
   font-weight: 500;
 }
@@ -1119,6 +1129,17 @@ textarea {
   background: var(--c-bg-subtle);
   color: var(--c-text-subtle);
   cursor: not-allowed;
+}
+
+/* v2.74.1983 — the composer's right-side action stack: send on top, the upload (attach) button directly
+   UNDER it, vertically aligned. The row keeps align-items:flex-end so the stack sits at the composer's
+   bottom-right and travels with the textarea's bottom edge as it grows. */
+.input-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
 }
 
 .input-meta {
@@ -3183,6 +3204,32 @@ textarea {
   .message.thinking .message-avatar.il-busy,
   .message.assistant .message-avatar.il-busy::before,
   .message.thinking .message-avatar.il-busy::before { animation: none; opacity: 0.7; }
+}
+
+/* v2.74.1993 — reduced-motion: close the gap the il-busy avatar already honors. Every OTHER infinite busy pulse
+   (running-pulse — which even scales, the vestibular trigger — plus the run-status / needs-you pulses) and the
+   one-shot message entrance now degrade to static TOGETHER, so a user who asked the OS to stop looping motion
+   isn't left with 1-4 pulsing dots during every in-flight turn. Dots stay solid/colored so "busy" still reads. */
+@media (prefers-reduced-motion: reduce) {
+  .running-pulse-dot,
+  .running-dot,
+  .rail-item-meta.run-status.awaiting,
+  .rail-item-meta.run-status.working,
+  #btn-rail.needs-action::after,
+  .message { animation: none; }
+}
+
+/* v2.74.1993 (a11y New #1) — visually-hidden but screen-reader-available; carries the #a11y-announcer live region. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ── v2.74.1509 — delete a saved custom desk from the gallery ("Your desks") ──────────────────────────────────── */

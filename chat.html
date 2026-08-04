@@ -139,8 +139,11 @@
     <div class="empty-state" id="empty-state">
       <div class="empty-state-content">
         <h1 class="empty-state-greeting" id="empty-state-greeting">How can I help you today?</h1>
+        <!-- v2.74.1993 — was "Loading available capabilities…" — the highest-attention line under the greeting must
+             not be a spinner phrase (on a slow/cold capability load it became the panel's welcome). An invitation
+             is the honest default; renderSuggestionCards swaps in the desk-specific subtitle once it resolves. -->
         <p class="empty-state-subtitle" id="empty-state-subtitle">
-          Loading available capabilities…
+          Tell me what you need, or type / to browse capabilities.
         </p>
         <div class="suggestion-cards" id="suggestion-cards"></div>
       </div>
@@ -177,24 +180,28 @@
 
       <span class="input-status" id="input-status"></span>
       <div class="input-row">
-        <!-- v2.74.1977 — the 2nd input type: attach a spreadsheet (.xlsx / .csv). Upload opens a new case grounded on the rows. -->
+        <!-- v2.74.1977 — the 2nd input type (.xlsx / .csv); opens a new case grounded on the rows. v2.74.1983 — the
+             trigger is relabelled "Upload file" and MOVED into .input-actions, stacked UNDER the send button (right
+             side, vertically aligned) instead of sitting to the left of the composer. The hidden <input> is layout-inert. -->
         <input type="file" id="attach-file-input" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden />
-        <button class="attach-btn" id="btn-attach-file" type="button" title="Attach a spreadsheet (.xlsx, .csv) — opens a new case">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-          </svg>
-        </button>
         <textarea
           id="chat-input"
           class="chat-input"
           rows="1"
-          placeholder="Message Orchard…  (type / for capabilities, or 📎 to attach a sheet)"></textarea>
-        <button class="send-btn" id="btn-chat-send" disabled title="Send message">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="12" y1="19" x2="12" y2="5"/>
-            <polyline points="5 12 12 5 19 12"/>
-          </svg>
-        </button>
+          placeholder="Message Orchard…  (type / for capabilities, or 📎 to upload a file)"></textarea>
+        <div class="input-actions">
+          <button class="send-btn" id="btn-chat-send" disabled title="Send message">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5"/>
+              <polyline points="5 12 12 5 19 12"/>
+            </svg>
+          </button>
+          <button class="attach-btn" id="btn-attach-file" type="button" title="Upload file (.xlsx, .csv)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="input-meta">
         <span class="input-hint">Enter to send · Shift+Enter for newline · / for capabilities</span>
@@ -221,6 +228,12 @@
 
   <!-- Toast notifications -->
   <div class="toast hidden" id="toast"></div>
+
+  <!-- v2.74.1993 (a11y New #1) — SR-only live region. A plain-text assistant answer is a textContent swap on the
+       existing thinking bubble, which the #messages log (aria-relevant="additions") does NOT announce; _orchFinalize
+       mirrors the plain-text answer here so screen-reader users hear it. Markdown answers announce natively and are
+       skipped (no double-speak). -->
+  <div id="a11y-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
   <script type="module" src="chat.js"></script>
 </body>
