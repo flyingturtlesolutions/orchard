@@ -41,7 +41,34 @@ ok(D.scrubLight('route to YouTube then read the title').includes('YouTube'), 'sc
 // ---- 2. parse ------------------------------------------------------------------------------
 const entries = D.parseFindings(FIXTURE);
 ok(entries.length === 2, `parseFindings finds 2 entries (got ${entries.length})`);
-ok(entries[0].stamp === '2026-06-13 09:10', 'first entry stamp parsed');
+ok(entries[0].stamp === '2026-06-13 09:10#001', 'first entry stamp parsed (with the ordinal tie-break)');
+
+// The journal's KIND-first header shapes (the 2026-07-24 convention change). The date+time-only pattern these
+// replaced matched 138 of 1012 real headers — all older than 2026-07-24 — so the digest silently summarized an
+// eleven-day-stale world while reporting `passes_since_last: 0`.
+const SHAPES = D.parseFindings([
+  '## build 2026-08-04 (v2.74.1996) — a kind-first entry with no time',
+  '## The wrapped title line of that same entry — no date, so it is BODY',
+  'body text',
+  '## glf 2026-08-03 18:15Z (v2.74.1986 live) — kind + a Z-suffixed time',
+  '## review 2026-08-03 — kind, no time',
+  '## 2026-08-02 — bare date, no kind, no time',
+  '## 2026-07-24 13:35 · the OLD date+time shape still parses',
+].join('\n'));
+ok(SHAPES.length === 5, `all five header shapes parse, wrapped title stays body (got ${SHAPES.length} entries)`);
+ok(SHAPES[0].kind === 'build' && SHAPES[0].time === '00:00', 'kind-first, timeless → kind captured, time defaults');
+ok(/no date, so it is BODY/.test(SHAPES[0].body), 'a wrapped `## ` title line without a date stays BODY');
+ok(SHAPES[1].time === '18:15', '`18:15Z` parses (no trailing \\b — there is no boundary between 5 and Z)');
+ok(SHAPES[2].kind === 'review' && SHAPES[2].time === '00:00', 'kind, no time');
+ok(SHAPES[3].kind === '' && SHAPES[3].date === '2026-08-02', 'a bare date with no kind still parses');
+ok(SHAPES[4].time === '13:35', 'the pre-2026-07-24 date+time shape is unbroken');
+// Two timeless entries on the SAME day must not collide, or the second is never > lastEntryStamp.
+const TIE = D.parseFindings('## build 2026-08-04 — first\n## bcp 2026-08-04 — second');
+ok(TIE[0].stamp < TIE[1].stamp, 'same-day timeless entries get a deterministic order (the tie-break)');
+// State written before the tie-break existed must not re-count the entry it was written from.
+const LEGACY = D.buildDigest({ findingsText: FIXTURE, manifestVersion: '2.74.1018',
+  state: { lastEntryStamp: '2026-06-14 18:53', lastManifestVersion: '2.74.1018' }, now: 'x' });   // the stamp of the LAST fixture entry, as an older build would have persisted it
+ok(LEGACY.activity.passes_since_last === 0, `legacy suffix-less state does not re-count (got ${LEGACY.activity.passes_since_last})`);
 
 // ---- 3. build + render, first-run (no state) ----------------------------------------------
 const dg = D.buildDigest({ findingsText: FIXTURE, manifestVersion: '2.74.1018', state: {}, now: '2026-06-14T19:00:00.000Z' });

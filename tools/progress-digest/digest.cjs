@@ -134,14 +134,33 @@ function dedupe(arr) {
 // ---------------------------------------------------------------------------
 // findings.md parsing
 // ---------------------------------------------------------------------------
+// The journal's entry header changed shape around 2026-07-24 — from `## <date> <time> · …` to a KIND-first form
+// (`## build 2026-08-04 (v…) — …`, `## glf 2026-08-03 18:15Z …`, `## review 2026-08-03 — …`), and many entries
+// carry a date with no time at all. The date+time-only pattern this replaces matched 138 of 1012 headers, ALL of
+// them older than 2026-07-24 — so every digest published since summarized an eleven-day-stale world while
+// reporting `passes_since_last: 0`, i.e. it looked idle rather than broken. Kind is optional and leading; time is
+// optional. No trailing \b: `18:15Z` is a real stamp in this journal and a boundary between `5` and `Z` does not
+// exist. A wrapped title line (`## The union is the part…`) carries no date, so it stays BODY — which is what
+// makes accepting a leading kind word safe.
+const RE_ENTRY = /^##\s+(?:([A-Za-z][\w-]*)\s+)?(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?(.*)$/;
+
 function parseFindings(text) {
   const entries = [];
+  const seen = new Map();   // `date time` → how many entries have shared it (the stamp tie-break)
   let cur = null;
   for (const line of String(text).split(/\r?\n/)) {
-    const h = /^##\s+(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})\b(.*)$/.exec(line);
+    const h = RE_ENTRY.exec(line);
     if (h) {
       if (cur) entries.push(cur);
-      cur = { date: h[1], time: h[2], stamp: `${h[1]} ${h[2]}`, header: (h[3] || '').trim(), body: '' };
+      const date = h[2];
+      const time = h[3] || '00:00';
+      // Same date+time (every KIND-first entry defaults to 00:00) needs a deterministic tie-break, or the second
+      // entry of a day is never `> lastEntryStamp` and `passes_since_last` under-counts forever. findings.md is
+      // append-only, so an entry's ordinal within its stamp is stable. 3 digits so lexical order survives 100+.
+      const n = (seen.get(`${date} ${time}`) || 0) + 1;
+      seen.set(`${date} ${time}`, n);
+      cur = { date, time, kind: (h[1] || '').toLowerCase(), stamp: `${date} ${time}#${String(n).padStart(3, '0')}`,
+              header: (h[4] || '').trim(), body: '' };
     } else if (cur) {
       cur.body += line + '\n';
     }
@@ -189,7 +208,11 @@ function buildDigest({ findingsText, manifestVersion, state, now }) {
   const entries = parseFindings(findingsText);
   const st = state || {};
   const lastStamp = st.lastEntryStamp || '';
-  const windowEntries = entries.filter((e) => e.stamp > lastStamp);
+  // A stamp persisted BEFORE the ordinal tie-break existed carries no `#NNN`. Compare it as the LAST entry of its
+  // stamp (#999), or the entry it was written from would sort after it and be re-counted on the first publish
+  // after this upgrade — an inflated `passes_since_last` that reads exactly like real activity.
+  const lastStampCmp = (lastStamp && !lastStamp.includes('#')) ? `${lastStamp}#999` : lastStamp;
+  const windowEntries = entries.filter((e) => e.stamp > lastStampCmp);
   const latest = entries.length ? entries[entries.length - 1] : null;
 
   // activity
