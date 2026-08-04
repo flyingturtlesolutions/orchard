@@ -81,3 +81,21 @@ describe('identifierShapes — shape and tolerance', () => {
     assert.equal(identifierShape({}), null);
   });
 });
+
+describe('probeTemplate — PS-2 (v2.74.1995): every declared template satisfies its own shape', () => {
+  it('each shape that declares a probeTemplate produces a shape-valid, sentinel-carrying value', async () => {
+    // A catalog-wide invariant rather than a per-shape test: whoever adds the NEXT shape gets this check free,
+    // and a template edited out of spec fails here instead of shipping a probe the router cannot read.
+    const { probeValue } = await import('./peritemMap.js');
+    const { shapesForOwner } = await import('./identifierShapes.js');
+    for (const owner of ['ups', 'shopify']) {
+      for (const sh of shapesForOwner(owner)) {
+        if (typeof sh.probeTemplate !== 'string') continue;
+        const v = probeValue([sh], 'MAPQ7VALUEZ');
+        assert.ok(v, `${sh.id}: probeTemplate must yield a value`);
+        assert.ok(sh.re.test(v), `${sh.id}: "${v}" must match its own shape`);
+        assert.ok(v.includes('MAPQ7VALUEZ'), `${sh.id}: "${v}" must stay findable`);
+      }
+    }
+  });
+});

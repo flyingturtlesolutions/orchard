@@ -459,3 +459,67 @@ export function tallyResults(results) {
   }
   return { total: res.length, matched, noField, noMatch, failed };
 }
+
+/**
+ * JK-2 (v2.74.1994) — the rung the TARGET owns, found by VALUE not by name.
+ *
+ * The ladder's rungs come from `srcLeg.tool.joinKey`, which describes the relationship the SOURCE rows were read
+ * through. For a third-system hop that key is the wrong identifier entirely: live 23:25 and 00:26, `use UPS to
+ * track each order` steered the per-item ask with `(match the email …)` because the order rows declare
+ * `joinKey: ['customer.email']`, so nothing could key on a tracking number and `ups_track` was never invoked —
+ * while the row carried `fulfillments.trackingInfo.number` and the fieldRead even named it as "nearest".
+ *
+ * So: scan the rows for a value whose SHAPE the target system owns, and offer that path as the first rung.
+ * Shape-matched, never name-matched — `trackingInfo.number` and `TrackingNo` and `awb` are all the same thing to
+ * a regex over `1Z…` and none of them to a keyword list. Returns null when the rows carry nothing the target
+ * owns, so the contact ladder behind it is untouched. PURE — shapes are injected.
+ *
+ * @param {Array<Object>} rows
+ * @param {Array<{re:RegExp, id?:string}>} shapes  identifierShapes.shapesForOwner(targetSystem)
+ * @returns {{field:string, ownedBy?:string}|null}
+ */
+export function targetKeyRung(rows, shapes) {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === 'object').slice(0, 5);
+  const shp = (Array.isArray(shapes) ? shapes : []).filter((s) => s && s.re instanceof RegExp);
+  if (!list.length || !shp.length) return null;
+  for (const row of list) {
+    for (const c of _candidatePaths(row)) {
+      if (c.val == null || typeof c.val === 'object') continue;
+      const v = String(c.val).trim();
+      if (!v) continue;
+      const hit = shp.find((s) => s.re.test(v));
+      if (hit) return { field: c.path, ownedBy: hit.id || '' };
+    }
+  }
+  return null;
+}
+
+/**
+ * PS-2 (v2.74.1995) — a probe value that keeps the TARGET's identifier shape while staying findable.
+ *
+ * `_mapResolveTarget` asks the router a probe with the row value swapped for a sentinel, then finds which param
+ * took it by scanning for that sentinel. A shapeless sentinel satisfies the second need and destroys the first:
+ * the router sees `track UPS package MAPQ7VALUEZ`, nothing resembles a tracking number, and it answers NAVIGATE.
+ * Eleven successful UPS routes on record all carried a literal `1Z…` — shape is what routes an identifier ask.
+ *
+ * So: if the target owns a shape that declares a `probeTemplate`, build the sentinel INTO a value of that shape.
+ * Returns null when no shape declares one, and the caller falls back to the plain sentinel — every ask that
+ * routes today is unaffected. PURE.
+ *
+ * @param {Array<{re:RegExp, probeTemplate?:string}>} shapes  identifierShapes.shapesForOwner(targetSystem)
+ * @param {string} sentinel                                   the findable token the caller scans for
+ * @returns {string|null}
+ */
+export function probeValue(shapes, sentinel) {
+  const s = _str(sentinel);
+  if (!s) return null;
+  for (const sh of (Array.isArray(shapes) ? shapes : [])) {
+    const t = sh && typeof sh.probeTemplate === 'string' ? sh.probeTemplate : '';
+    if (!t || !t.includes('{s}')) continue;
+    const v = t.replace('{s}', s);
+    // Both invariants, checked at USE — a template that stops satisfying its own shape must not silently ship a
+    // value the router cannot read.
+    if (sh.re instanceof RegExp && sh.re.test(v) && v.includes(s)) return v;
+  }
+  return null;
+}

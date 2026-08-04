@@ -125,3 +125,31 @@ describe('isCapabilityMetaAsk — TR-1 meta vs act (v2.74.1761)', () => {
     assert.equal(isCapabilityMetaAsk('what can you do on shopify and then open the order'), false);
   });
 });
+
+describe('siteRefTokens — TR-1b (v2.74.1993): a named ground is explicit whatever word precedes it', () => {
+  it('finds UPS in "use UPS to track each order" — the live 23:07 miss', () => {
+    // `using` was added at v1965 for "track order using ups". `use` was not, so twelve hours later the same
+    // symptom returned: TR-1 saw no site token, TR-2 fell through to Shopify on the word "order", and the ask
+    // was answered by the wrong system. Enumerating prepositions guarantees a next gap; matching against KNOWN
+    // grounds does not, because `_groundForToken` already ignores anything that is not a real ground.
+    assert.ok(siteRefTokens('use UPS to track each order').includes('ups'));
+  });
+
+  it('keeps every preposition form working', () => {
+    for (const q of ['track order using ups', 'search in shopify', 'look on vendorsuite', 'send via slack']) {
+      assert.ok(siteRefTokens(q).length >= 1, q);
+    }
+  });
+
+
+  it('still drops pronouns and articles', () => {
+    for (const t of ['it', 'the', 'them', 'me']) {
+      assert.ok(!siteRefTokens(`send to ${t}`).includes(t));
+    }
+  });
+
+
+  it('tolerates junk without throwing', () => {
+    for (const junk of [null, undefined, '', 42, {}]) assert.doesNotThrow(() => siteRefTokens(junk));
+  });
+});

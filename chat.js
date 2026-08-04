@@ -94,7 +94,7 @@ import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) �
 import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
-import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung } from './Core/peritemMap.js';
+import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -4531,8 +4531,13 @@ const _MAP_AUTHY = /^(http-40[13]|session-expired|not-logged-in|timeout|network)
 // Interpret the target read ONCE → { leg, valueParam, baseParams, groundId } or { leg:null, why }. The `{value}`
 // placeholder (PM-1 templates it) becomes a sentinel so we learn which param carries the piped field; no `{value}`
 // → the sentinel is appended and the value-param falls back to the first string param the leg bound.
-async function _mapResolveTarget(readAsk, tabId) {
-  const probe = /\{value\}/i.test(readAsk) ? readAsk.replace(/\{value\}/gi, _MAP_SENTINEL) : `${readAsk} ${_MAP_SENTINEL}`;
+// PS-2 (v2.74.1995) — `sentinel` may be a SHAPE-PRESERVING variant (`1ZMAPQ7VALUEZ00000`) when the target owns
+// an identifier shape. It still CONTAINS `_MAP_SENTINEL`, so the value-param scan below is unchanged; what
+// changes is that the router now sees something that looks like the identifier it is being asked about. Live
+// 00:45: `track UPS package MAPQ7VALUEZ` → NAVIGATE, and `ups_track` — armed, present — was never asked, while
+// all 11 successful UPS routes on record carried a literal `1Z…`.
+async function _mapResolveTarget(readAsk, tabId, sentinel = _MAP_SENTINEL) {
+  const probe = /\{value\}/i.test(readAsk) ? readAsk.replace(/\{value\}/gi, sentinel) : `${readAsk} ${sentinel}`;
   let raw = null; let retrieved = []; let groundId = null; let unconnected = null;   // UC-1 (v2.74.1957)
   try {
     const r = await _orchReq('INTERPRET_ASK', { ask: probe, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
@@ -5968,7 +5973,17 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       : _isContactRung ? `find ${system} customer by ${type} {value}`
       : `search ${system} customers for {value}`;
     _setMessageBody(msg, `Finding the ${escHtml(system)} ${escHtml(type)} lookup...`);
-    const t = await _mapResolveTarget(ask, tabId);
+    // PS-2 (v2.74.1995) — probe with the TARGET's own identifier shape when it owns one, so the router classifies
+    // the ask by the same signal a human ask carries. Null → the plain sentinel, i.e. today's behaviour exactly.
+    let _probeSentinel = _MAP_SENTINEL;
+    try {
+      const _pv = probeValue(shapesForOwner(system), _MAP_SENTINEL);
+      if (_pv) {
+        _probeSentinel = _pv;
+        try { _orchLog(`MAP ▸ shaped probe — ${system} owns an identifier shape; probing with a shape-valid value so intent routes on shape, not on wording`); } catch { /* */ }
+      }
+    } catch { /* a missing shape table must never break a probe that worked without one */ }
+    const t = await _mapResolveTarget(ask, tabId, _probeSentinel);
     _legCache.set(type, t);
     return t;
   };

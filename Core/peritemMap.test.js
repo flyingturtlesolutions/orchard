@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import {
   normalizeMapVerdict, pickFieldPath, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, resolveJoinField, normalizeRungs, ladderValues,
   isMapJoinEnvelope, unwrapMapPrior, resolveIdentityField,
+  targetKeyRung,
+  probeValue,
 } from './peritemMap.js';
 
 describe('peritemMap — normalizeMapVerdict (the clause contract, §1)', () => {
@@ -395,5 +397,83 @@ describe('pickFieldPath — FR-1 (v2.74.1980): a lone winner on the type token a
     const r = pickFieldPath(rows, 'po number');
     assert.ok(r && r.ambiguous);
     assert.ok(r.candidates.length > 1, 'a real tie still reports both candidates');
+  });
+});
+
+describe('targetKeyRung — JK-2 (v2.74.1994): the TARGET names its own key, by value not by name', () => {
+  const UPS = [{ id: 'ups-tracking', re: /^1Z[0-9A-Z]{16}$/i }];
+  const orderRow = {
+    name: 'DEAKO#70978', customer: { email: 'a@example.com' },
+    fulfillments: [{ trackingInfo: { number: '1Z27691W0311465887', company: 'UPS' } }],
+  };
+
+  it('finds the nested tracking path the live run could not key on', () => {
+    // `use UPS to track each order` steered every per-item ask with `(match the email …)` because the order rows
+    // declare joinKey:['customer.email']. ups_track was never invoked, while the row carried this exact path and
+    // the fieldRead named it as "nearest" while refusing.
+    assert.deepEqual(targetKeyRung([orderRow], UPS), { field: 'fulfillments.trackingInfo.number', ownedBy: 'ups-tracking' });
+  });
+
+  it('matches by VALUE, so the column name is irrelevant', () => {
+    for (const key of ['TrackingNo', 'awb', 'carrier_ref', 'x']) {
+      const r = targetKeyRung([{ [key]: '1Z27691W0311465887' }], UPS);
+      assert.equal(r && r.field, key, `${key} must be found on shape alone`);
+    }
+  });
+
+  it('returns null when the rows carry nothing the target owns — the contact ladder stays untouched', () => {
+    assert.equal(targetKeyRung([{ name: 'x', email: 'a@b.com', phone: '555-0100' }], UPS), null);
+  });
+
+  it('returns null with no shapes, no rows, or junk — never throws on the map hot path', () => {
+    assert.equal(targetKeyRung([orderRow], []), null);
+    assert.equal(targetKeyRung([], UPS), null);
+    for (const junk of [null, undefined, 'nope', [null, 3]]) {
+      assert.doesNotThrow(() => targetKeyRung(junk, UPS));
+      assert.equal(targetKeyRung(junk, UPS), null);
+    }
+  });
+
+  it('ignores a near-miss value — the anchors mean a 1Z-ish string is not a tracking number', () => {
+    assert.equal(targetKeyRung([{ ref: 'X1Z27691W0311465887' }], UPS), null, 'leading char breaks the anchor');
+    assert.equal(targetKeyRung([{ ref: '1Z2769' }], UPS), null, 'too short');
+  });
+
+  it('samples several rows — the first row may be the one missing a fulfillment', () => {
+    const unshipped = { name: 'DEAKO#1', fulfillments: [] };
+    assert.equal(targetKeyRung([unshipped, orderRow], UPS).field, 'fulfillments.trackingInfo.number');
+  });
+});
+
+describe('probeValue — PS-2 (v2.74.1995): the probe keeps the shape AND stays findable', () => {
+  const UPS = [{ id: 'ups-tracking', re: /^1Z[0-9A-Z]{16}$/i, probeTemplate: '1Z{s}00000' }];
+
+  it('builds a value that satisfies the shape and still contains the sentinel', () => {
+    // Both halves are load-bearing: the shape is what routes the ask (11 live UPS successes all carried a
+    // literal 1Z…), and the sentinel is how _mapResolveTarget finds which param took the value.
+    const v = probeValue(UPS, 'MAPQ7VALUEZ');
+    assert.equal(v, '1ZMAPQ7VALUEZ00000');
+    assert.ok(UPS[0].re.test(v), 'must look like a real tracking number to the router');
+    assert.ok(v.includes('MAPQ7VALUEZ'), 'must remain findable by the value-param scan');
+  });
+
+  it('returns null when no shape declares a template — the caller falls back to today', () => {
+    assert.equal(probeValue([{ id: 'x', re: /^\d+$/ }], 'MAPQ7VALUEZ'), null);
+    assert.equal(probeValue([], 'MAPQ7VALUEZ'), null);
+  });
+
+  it('REFUSES a template that no longer satisfies its own shape', () => {
+    // The invariant is checked at use, not just at authoring: a template edited out of spec must not ship a
+    // value the router cannot read.
+    assert.equal(probeValue([{ re: /^1Z[0-9A-Z]{16}$/i, probeTemplate: 'TRACK-{s}' }], 'MAPQ7VALUEZ'), null);
+  });
+
+  it('refuses a template that drops the sentinel', () => {
+    assert.equal(probeValue([{ re: /^.+$/, probeTemplate: 'no-placeholder-here' }], 'MAPQ7VALUEZ'), null);
+  });
+
+  it('tolerates junk without throwing on the map hot path', () => {
+    for (const junk of [null, undefined, 'nope', [null, 3, {}]]) assert.doesNotThrow(() => probeValue(junk, 'X'));
+    assert.equal(probeValue(UPS, ''), null, 'no sentinel, no probe');
   });
 });

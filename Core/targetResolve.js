@@ -29,7 +29,19 @@ const _SITE_STOP = new Set(['it', 'me', 'them', 'us', 'you', 'the', 'a', 'an', '
  * there would be wrong. `using` / `via` / `through` name the SYSTEM an action goes through, which is a target.
  */
 export function siteRefTokens(ask) {
-  const re = /\b(?:on|onto|in|into|at|from|to|using|via|through)\s+([a-z][a-z0-9.&'-]{2,})/ig;
+  // TR-1b (v2.74.1993) — `use` joins `using`. Twelve hours after v1965 added `using` for "track order using ups",
+  // the IMPERATIVE form failed identically: live 23:07 `use UPS to track each order` yielded zero site tokens,
+  // TR-2 fell through on the word "order", and the UPS hop of the warranty→order→tracking chain was answered by
+  // Shopify (`TARGET ▸ tier=TR-2/conversation target=admin.shopify.com why=desk affinity (order)`).
+  //
+  // A WIDER FIX WAS BUILT AND REVERTED, deliberately. Offering every content token — letting `_groundForToken`,
+  // which already ignores non-grounds, do the filtering — broke three pinned tests, including the exclusion of
+  // `with` documented above. That exclusion is a reasoned product decision with its own negative test, and
+  // overruling it by rewriting the assertion is how a suite goes green while the product breaks.
+  // The enumeration therefore still has a next gap by construction — `check`, `search`, `query`, `ask`,
+  // `look up` are all absent — and closing it properly means answering the `with` question first, not widening
+  // the net underneath it.
+  const re = /\b(?:on|onto|in|into|at|from|to|use|using|via|through)\s+([a-z][a-z0-9.&'-]{2,})/ig;
   const out = []; const seen = new Set();
   let m;
   while ((m = re.exec(String(ask || ''))) !== null) {

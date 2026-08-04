@@ -31,6 +31,14 @@ const SHAPES = Object.freeze([
     ownerHost: /(^|\.)ups\.com$/i,
     re: /^1Z[0-9A-Z]{16}$/i,           // observed: 1Z27691W0233595715 (2 + 16)
     slotRe: /track/,                   // a `trackingNumber` slot holds one on ANY site — see slotExpects below
+    // PS-2 (v2.74.1995) — THE PROBE MUST KEEP THE SHAPE. The map resolves its per-item leg by asking the router
+    // a probe with the row value replaced by a findable sentinel. `MAPQ7VALUEZ` is findable and shapeless, so
+    // the router classified `track UPS package MAPQ7VALUEZ` as NAVIGATE — reasonably, since nothing in it looks
+    // like a tracking number. Every one of the 11 successful UPS routes on record carried a literal `1Z…`:
+    // the SHAPE is what routes an identifier ask, and the probe was erasing it at exactly the moment intent is
+    // decided. `{s}` is the sentinel; the template must satisfy BOTH this shape's `re` and remain findable by
+    // an `.includes(sentinel)` scan — pinned by a test over every shape that declares one.
+    probeTemplate: '1Z{s}00000',
   }),
   Object.freeze({
     id: 'shopify-gid',
@@ -103,4 +111,22 @@ export function misboundIdentifierParams(legOrRecipe, params = {}) {
     }
   }
   return out;
+}
+
+/**
+ * JK-2 (v2.74.1994) — the shapes a SYSTEM legitimately owns, by its name or its host.
+ *
+ * A row's join key is declared once on its SOURCE leg (`joinKey`), which encodes the relationship the row was
+ * READ through — `shopify_orders_for_customer` declares `customer.email`, correct for "find this customer's
+ * orders" and meaningless for "track this shipment". When the map's target is a THIRD system the source key is
+ * simply the wrong identifier, and the ladder had no other way to know. Ownership is already declared here, so
+ * the target can name its own key instead of inheriting the source's.
+ *
+ * Matches the OWNER name ("ups") or a host ("www.ups.com") — the map carries the system as a bare word and the
+ * resolved leg carries a host, and both must find the same shapes. PURE.
+ */
+export function shapesForOwner(nameOrHost) {
+  const s = String(nameOrHost || '').toLowerCase().trim();
+  if (!s) return [];
+  return SHAPES.filter((sh) => sh.ownerHost.test(s) || String(sh.owner || '').toLowerCase() === s);
 }
