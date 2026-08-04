@@ -83,6 +83,7 @@ import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, 
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { capableSitesCatalog, seedDeskCatalog } from './Core/capableSites.js';   // AS-5 — the "sites with defined capabilities" catalog the setup multi-select lists (pure merge); DK-6 — seedDeskCatalog pre-picks a preconfigured desk's builtin sites
 import { originFromText } from './Core/setupSpec.js';   // AS-4 / review P1-6 — the host-shape floor: a real public host has a dot (TLD); rejects bare words like "gmail" before they bank a poisoned target
+import { SCOPE_KEY as CONN_SCOPE_KEY, scopeIdsFor, resolveConnections, inheritedConnections, excludedOrigins, connKey, mergeConnections, bindScope, bindScopes, setScope } from './Core/connectionScope.js';   // CS-1 (v2.74.1996) — a connection binds at DESK + PRESET scope and is INHERITED by new conversations (findings 2026-08-04: per-thread scope silently dropped the legs of a ground the user had bound)
 import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retireActFail } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view; v1523 — retireActFail consumes the "re-teach" lesson at re-teach
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
@@ -2648,7 +2649,10 @@ async function _childReadItem(conns, task, tabId) {
 async function _runChildTask(child, task) {
   const cid = child && child.id; if (!cid) return 'needs-you';
   const cfg = (child.config && typeof child.config === 'object') ? child.config : {};
-  const childConns = Array.isArray(cfg.connections) ? cfg.connections.filter((c) => c && c.origin).map((c) => ({ origin: String(c.origin), label: String(c.label || c.origin) })) : [];
+  // CS-1 (v2.74.1996) — resolve the CHILD's own scope ladder (own ∪ desk ∪ preset − excluded), not just the
+  // snapshot `subTaskFromApp` copied at fan-out: a ground bound AFTER the case was born is reachable inside it too.
+  // A case has no presetId but carries its desk's appId, which reaches the desk's preset tier (scopeIdsFor).
+  const childConns = resolveConnections(cfg.connections, _connScopeBook, _connScopeIdsFor(child), cfg.connectionsExcluded);
   // issue #1 — the child inherits the app's connections (subTaskFromApp); fall back to the PARENT app's (the active
   // conversation's) connections for children created BEFORE that fix, so existing sub-tasks aren't left ignorant.
   const conns = childConns.length ? childConns : _boundConnections();
@@ -2812,6 +2816,74 @@ function _adoptSetupStash() {
   if (_setupStash.convId === _currentConversationId) { _setupState = { convId: _setupStash.convId, spec: _setupStash.spec, phase: _setupStash.phase || null, freshCustom: !!_setupStash.freshCustom, cfg: _setupStash.cfg || null, extend: _setupStash.extend || null }; }
 }
 
+// ─── CS-1 (v2.74.1996): CONNECTION SCOPE — a connection binds to the DESK + PRESET, not to the thread ────────
+// findings 2026-08-04, INCIDENT[class=connection-scoped-per-conversation-silently-drops-legs] (FOURTH occurrence):
+// `conv.config.connections` was a binding's only home, so a ground the user spent multiple turns connecting was
+// absent from the next thread — 2 armed www.ups.com legs missing from a 120-leg palette, and the router answered
+// `track 1Z…` with a Shopify order lookup. Six prior attempts fixed the WARNING; this fixes the SCOPE.
+//
+// The book (Core/connectionScope.js) lives in chrome.storage.local — a binding must survive a browser restart — and
+// is MIRRORED in memory because `_boundConnections()` is synchronous and sits on the hot turn path (~10 callers).
+// The mirror re-reads on any cross-context write (the SW's own scope writes, a second panel), so the union never
+// goes stale mid-session.
+let _connScopeBook = {};
+async function _loadConnScope() {
+  try { const got = await chrome.storage.local.get(CONN_SCOPE_KEY); _connScopeBook = (got && got[CONN_SCOPE_KEY]) || {}; }
+  catch { _connScopeBook = {}; }
+}
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes || !(CONN_SCOPE_KEY in changes)) return;
+    _connScopeBook = changes[CONN_SCOPE_KEY].newValue || {};
+  });
+} catch { /* the boot load still gives this panel a correct book */ }
+
+// The CURRENT surface's scope ids (desk → preset). The Front desk carries neither → own connections only (the
+// TRT-5 membrane stays intact: inheritance is desk/preset-wide, never global).
+function _connScopeIds() {
+  return scopeIdsFor({ instanceId: _currentConversationInstanceId, presetId: _currentConversationPresetId, appId: _currentConversationAppId });
+}
+// Scope ids for an arbitrary conversation RECORD (a bind that lands off the current surface, e.g. an adopt whose
+// button is clicked after the user has switched away).
+const _connScopeIdsFor = (conv) => scopeIdsFor({ instanceId: conv && conv.instanceId, presetId: conv && conv.presetId, appId: conv && conv.appId });
+
+// Bind a just-connected set at desk + preset scope, so every LATER conversation of this desk/preset inherits it.
+// Best-effort: a storage failure never blocks the connect — the conversation's own config still carries the set.
+async function _bindConnScope(conns, ids = null, why = 'setup') {
+  try {
+    const scope = Array.isArray(ids) ? ids : _connScopeIds();
+    if (!scope.length) return;
+    const next = bindScopes(_connScopeBook, scope, conns, Date.now());
+    if (next === _connScopeBook) return;                       // nothing new — no pointless write
+    _connScopeBook = next;
+    await chrome.storage.local.set({ [CONN_SCOPE_KEY]: next });
+    const named = (Array.isArray(conns) ? conns : []).map((c) => (c && (c.label || c.origin)) || '').filter(Boolean).slice(0, 4).join(', ');
+    _orchLog(`CONN_SCOPE ▸ bound ${named || '—'} at ${scope.join(' + ')} (${why}) — new conversations of this desk inherit it`);
+  } catch (e) { try { console.warn('[chat] conn-scope bind failed:', e?.message); } catch { /* */ } }
+}
+// Setup's Confirm is AUTHORITATIVE for this desk: the picker's selection replaces the desk tier outright (so a
+// de-selected site is really gone from it), while the preset tier only accretes — it is a shared pool and one
+// desk's de-selection must not strip a sibling. What the preset tier would still hand back is suppressed by the
+// desk's own exclusion list (returned here for `config.connectionsExcluded`), which is what keeps inheritance a
+// DEFAULT and not a lock. One storage write for both tiers.
+async function _rebindConnScopeAtSetup(chosen, ids) {
+  const scope = (Array.isArray(ids) ? ids : []).filter(Boolean);
+  const excluded = excludedOrigins(inheritedConnections(_connScopeBook, scope), chosen);
+  try {
+    if (!scope.length) return excluded;
+    const at = Date.now();
+    let next = _connScopeBook;
+    for (const id of scope) next = id.startsWith('desk:') ? setScope(next, id, chosen, at) : bindScope(next, id, chosen, at);
+    if (next !== _connScopeBook) {
+      _connScopeBook = next;
+      await chrome.storage.local.set({ [CONN_SCOPE_KEY]: next });
+    }
+    const named = (Array.isArray(chosen) ? chosen : []).map((c) => (c && (c.label || c.origin)) || '').filter(Boolean).slice(0, 4).join(', ');
+    _orchLog(`CONN_SCOPE ▸ bound ${named || '—'} at ${scope.join(' + ')} (setup)${excluded.length ? ` — excluded ${excluded.join(', ')}` : ''} — new conversations of this desk inherit it`);
+  } catch (e) { try { console.warn('[chat] conn-scope setup rebind failed:', e?.message); } catch { /* */ } }
+  return excluded;
+}
+
 // v2.74.1340 (review J-setup) — command-shaped input mid-setup FALLS THROUGH to the normal cascade instead of being
 // consumed as a site answer (`link: google` → "I need a site…" was the trap). Prefix commands + the bare command verbs.
 const _SETUP_COMMAND_RE = /^\s*(?:(?:il|i|teach|seed|remember|link|unlink|tool|canvas|subtasks|dev)\s*:|save\s+as\s+app\s*:|workflows?\b|memory\b|distill\b|sources?\b|gl\b|help\b)/i;
@@ -2932,6 +3004,12 @@ async function _capableSitesCatalog() {
     for (const d of (_userCatalog || [])) {
       const cs = (d && d.setup && Array.isArray(d.setup.connections)) ? d.setup.connections : [];
       for (const c of cs) { if (c && c.origin && !seen.has(c.origin)) { seen.add(c.origin); connections.push({ origin: c.origin, label: c.label }); } }
+    }
+    // CS-1 (v2.74.1996) — plus every ground bound at ANY desk/preset scope. This is the PICKER's candidate pool,
+    // not reach: a ground the user adopted mid-conversation is offerable when setting the next desk up, instead of
+    // being retypeable-only (the catalog previously saw only what a saved def had banked at setup time).
+    for (const c of inheritedConnections(_connScopeBook, Object.keys(_connScopeBook || {}))) {
+      if (!seen.has(c.origin)) { seen.add(c.origin); connections.push({ origin: c.origin, label: c.label }); }
     }
   } catch { /* */ }
   try { return capableSitesCatalog({ grounds: sites, linkedProviders, connections }); } catch { return []; }
@@ -3072,7 +3150,16 @@ async function _bankSetup(step) {
   let conv = null;
   try { conv = await ConversationStore.load(state.convId); } catch { /* */ }
   const base = (conv && conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };
-  const merged = { ...base, connections: cfg.connections, target: cfg.target, focus: cfg.focus, allowedOrigins: cfg.allowedOrigins, shape: cfg.shape, setupComplete: true };
+  // CS-1 (v2.74.1996) — the picks ALSO land at desk + preset scope, so the next thread of this desk (and a new
+  // instance of its preset) inherits the reach instead of starting blind. Confirm IS the HITL gate: these are sites
+  // the user just picked and the flow verified. It is authoritative too — whatever the tiers would grant but the
+  // user did NOT pick comes back as the exclusion list, so a de-selected site stays de-selected instead of being
+  // handed straight back by the preset tier on the next turn. The record is the id source; the live globals are the
+  // fallback for the (rare) load failure on the current surface.
+  const _fromRecord = _connScopeIdsFor(conv);
+  const _bankScopeIds = _fromRecord.length ? _fromRecord : (state.convId === _currentConversationId ? _connScopeIds() : []);
+  const _excluded = await _rebindConnScopeAtSetup(cfg.connections, _bankScopeIds);
+  const merged = { ...base, connections: cfg.connections, target: cfg.target, focus: cfg.focus, allowedOrigins: cfg.allowedOrigins, shape: cfg.shape, connectionsExcluded: _excluded, setupComplete: true };
   // AP-1 (v2.74.1211) — a CONFIGURED app PINS itself to the top of the drawer (so you return to it, not re-create it).
   try { await ConversationStore.patchMeta(state.convId, { config: merged, pinned: true }); }
   catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
@@ -3081,7 +3168,7 @@ async function _bankSetup(step) {
   // The AP-4 def mint, the ready message, and seed-directive arming DEFER to _finishCustomSetup — the configured
   // def's id derives from name+site, so minting at "Custom" would duplicate under the real name.
   if (state.freshCustom) {
-    _setupState = { convId: state.convId, phase: 'seed', freshCustom: true, cfg: { connections: cfg.connections, target: cfg.target, shape: cfg.shape }, extend: state.extend || null };
+    _setupState = { convId: state.convId, phase: 'seed', freshCustom: true, cfg: { connections: cfg.connections, target: cfg.target, shape: cfg.shape, connectionsExcluded: _excluded }, extend: state.extend || null };
     _persistSetupState();
     const _where = (cfg.connections && cfg.connections.length) ? cfg.connections.map((c) => `\`${c.label}\``).join(', ') : 'your site';
     // v2.74.1517 — the EXTEND flow's seed step IS the differentiation question (the base role carries over).
@@ -3101,7 +3188,11 @@ async function _bankSetup(step) {
       name: (conv && conv.title) || (typeDef && typeDef.name) || 'My app',
       seed: (conv && conv.seed) || _currentConversationSeed,
       type: typeDef && typeDef.type, objectModel: typeDef && typeDef.objectModel, icon: (conv && conv.icon) || (typeDef && typeDef.icon),
-      config: merged, setup: { target: cfg.target, connections: cfg.connections, shape: cfg.shape }, presetId,
+      // CS-1 (v2.74.1996, bcp) — `connectionsExcluded` rides the AP-4 setup block. `_createAppConversation` spreads
+      // `def.setup` into the re-created conversation's config, so without it a re-select from the gallery would
+      // drop the exclusion list while the shared preset tier still granted the de-selected site — handing back a
+      // connection the user had explicitly removed.
+      config: merged, setup: { target: cfg.target, connections: cfg.connections, shape: cfg.shape, connectionsExcluded: _excluded }, presetId,
       instanceId: (conv && conv.instanceId) || _currentConversationInstanceId,
     });
     if (def) { await _loadUserCatalog(); _userCatalog = addUserDef(_userCatalog, def); await _saveUserCatalog(); }
@@ -3172,7 +3263,7 @@ async function _finishCustomSetup(state, name) {
       name: (conv && conv.title) || name || 'Custom',
       seed: (conv && conv.seed) || _currentConversationSeed,
       type: typeDef && typeDef.type, objectModel: typeDef && typeDef.objectModel, icon: (conv && conv.icon) || (typeDef && typeDef.icon),
-      config: (conv && conv.config) || null, setup: { target: cfg.target, connections: cfg.connections, shape: cfg.shape }, presetId,
+      config: (conv && conv.config) || null, setup: { target: cfg.target, connections: cfg.connections, shape: cfg.shape, connectionsExcluded: cfg.connectionsExcluded || [] }, presetId,   // CS-1 (v2.74.1996, bcp) — the exclusion list rides the re-creatable def (see _bankSetup)
       instanceId: (conv && conv.instanceId) || _currentConversationInstanceId,
     });
     if (def) { await _loadUserCatalog(); _userCatalog = addUserDef(_userCatalog, def); await _saveUserCatalog(); }
@@ -6756,12 +6847,25 @@ async function _visitorTick({ origin, convId }) {
   bar.appendChild(_mkBtn(`Adopt ${origin}`, async () => {
     bar.remove();
     try {
-      const existing = (_currentConversationConfig && Array.isArray(_currentConversationConfig.connections)) ? _currentConversationConfig.connections : [];
-      if (!existing.some((c) => c && c.origin === origin)) {
-        const merged = { ..._currentConversationConfig, connections: [...existing, { origin, label: origin }] };
+      // v2.74.1996 (bcp) — read the TARGET conversation's own record, not the live globals. The offer can sit on
+      // screen across a surface switch, and the old code merged `_currentConversationConfig` (by then some OTHER
+      // desk's config) and wrote it onto `convId` — silently transplanting one desk's connections/writePolicy onto
+      // another. `convId` is the only conversation this click is about.
+      const _conv = await ConversationStore.load(convId).catch(() => null);
+      const _cfg = (_conv && _conv.config && typeof _conv.config === 'object') ? _conv.config : { writePolicy: 'gated' };
+      const existing = Array.isArray(_cfg.connections) ? _cfg.connections : [];
+      // CS-1 (v2.74.1996) — adopting also CLEARS any standing exclusion for this origin: the user just said yes to
+      // the very ground a past re-setup de-selected, and a stale deny entry would silently swallow the consent.
+      const _kept = Array.isArray(_cfg.connectionsExcluded) ? _cfg.connectionsExcluded.filter((k) => connKey(k) !== connKey(origin)) : [];
+      if (!existing.some((c) => c && connKey(c.origin) === connKey(origin)) || _kept.length !== (_cfg.connectionsExcluded || []).length) {
+        const merged = { ..._cfg, connections: mergeConnections(existing, [{ origin, label: origin }]), connectionsExcluded: _kept };
         await ConversationStore.patchMeta(convId, { config: merged });
         if (convId === _currentConversationId) _currentConversationConfig = merged;
       }
+      // CS-1 (v2.74.1996) — adopt is the OTHER hand-bind door, and the one the UPS incident came through: it wrote
+      // only this conversation's config, so the ground the user consented to was gone by the next thread. The
+      // Adopt click IS the HITL gate — bank it at desk + preset scope too.
+      await _bindConnScope([{ origin, label: origin }], _connScopeIdsFor(_conv), 'adopt');
       _setMessageBody(m, `Adopted ${origin} — it’s now part of this view’s scope.`);
     } catch (e) { _setMessageBody(m, `Couldn’t adopt ${origin}${e && e.message ? ` — ${e.message}` : ''}.`); }
     _orchFinalize(m);
@@ -13323,11 +13427,13 @@ function _boundTarget() {
 
 // AS-4 — the app's full connected SET (its setup), threaded into the IL so it knows what it's actually connected to
 // (and says so when an ask needs a site that isn't — e.g. "get my emails" with no mail site connected).
+// CS-1 (v2.74.1996) — the set is the conversation's OWN config UNION what its desk + preset have bound
+// (Core/connectionScope.js). A union, not a fallback: the live failure had a non-empty own set (73 ride legs from
+// two grounds) that was merely missing the third, so "inherit only when empty" would still have dropped the UPS
+// legs. Own entries lead — an explicit bind is never overwritten by an inherited one.
 function _boundConnections() {
-  const c = _currentConversationConfig && _currentConversationConfig.connections;
-  return (Array.isArray(c) ? c : [])
-    .map((x) => (x && typeof x === 'object' && x.origin) ? { origin: String(x.origin), label: String(x.label || x.origin) } : null)
-    .filter(Boolean);
+  const c = _currentConversationConfig || null;
+  return resolveConnections(c && c.connections, _connScopeBook, _connScopeIds(), c && c.connectionsExcluded);
 }
 // CV-4-reduce — THIS app's OWN sub-task conversations + each one's latest-result peek (the drawer's index summary —
 // no body load), for the IL to reason over ("how many of my sub-tasks are billing?", "summarize what each found").
@@ -16109,6 +16215,7 @@ _wireAttach();
 
   await _loadDevMode();   // v2.74.1160 — gate dev/design surfaces before any restore
   await _loadSetupStash();   // v2.74.1340 (review J-setup) — reload-survivor: an in-progress setup flow re-adopts on the next message in its conversation
+  await _loadConnScope();    // CS-1 (v2.74.1996) — the desk/preset connection book, mirrored in memory before the first turn (_boundConnections is synchronous)
   // Attempt to restore the most recent conversation. If none exists, the
   // empty state remains and we show suggestion cards.
   try {

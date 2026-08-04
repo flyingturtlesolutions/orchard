@@ -216,12 +216,21 @@ export function subTaskFromApp(app, subSeed) {
   // sites the app operates on (a fanned-out "research this ticket" child then asks "which ticketing platform?").
   const cfg = normalizeConfig(a.config);
   const conns = (a.config && Array.isArray(a.config.connections)) ? a.config.connections : null;
+  // CS-1 (v2.74.1996) — the desk's EXCLUSIONS ride down with its connections. A case resolves the same desk/preset
+  // scope ladder its parent does (Core/connectionScope.scopeIdsFor reaches the preset tier through `appId`), so
+  // without this a ground the desk explicitly de-selected would come back on every case it fans out.
+  const denied = (a.config && Array.isArray(a.config.connectionsExcluded) && a.config.connectionsExcluded.length)
+    ? a.config.connectionsExcluded.map(_str).filter(Boolean) : null;
   return {
     kind: 'app',
     parentId: _str(a.id),
     appId: _str(a.appId) || _str(a.id),
     title: _str(subSeed).slice(0, 60) || 'sub-task',
-    config: (conns && conns.length) ? { ...cfg, connections: conns } : cfg,
+    config: {
+      ...cfg,
+      ...((conns && conns.length) ? { connections: conns } : {}),
+      ...(denied ? { connectionsExcluded: denied } : {}),
+    },
     seed: composeSeed(a.seed, subSeed),
   };
 }

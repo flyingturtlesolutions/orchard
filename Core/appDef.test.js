@@ -179,6 +179,19 @@ describe('appDef — seed composition + sub-task shape', () => {
     assert.equal(subTaskFromApp(app, 'x').config.connections, undefined);   // no parent connections → none added
   });
 
+  it('CS-1 — a sub-task inherits the desk\'s connection EXCLUSIONS with its connections', () => {
+    // A case resolves the same desk/preset scope ladder its parent does (it reaches the preset tier through
+    // `appId`), so without the exclusions a ground the desk explicitly de-selected returns on every case.
+    const conns = [{ origin: 'https://deako.zendesk.com', label: 'deako.zendesk.com' }];
+    const desk = { ...app, config: { writePolicy: 'gated', connections: conns, connectionsExcluded: ['www.ups.com'] } };
+    const s = subTaskFromApp(desk, 'ticket #1');
+    assert.deepEqual(s.config.connectionsExcluded, ['www.ups.com']);
+    assert.deepEqual(s.config.connections, conns);
+    assert.equal(subTaskFromApp(app, 'x').config.connectionsExcluded, undefined);            // nothing excluded → no key
+    const empty = { ...app, config: { writePolicy: 'gated', connectionsExcluded: [] } };
+    assert.equal(subTaskFromApp(empty, 'x').config.connectionsExcluded, undefined);          // an EMPTY list is not a constraint
+  });
+
   it('ONE-LEVEL cap — refuses a sub-task or the Overview as a parent (no sub-sub-tasks)', () => {
     const sub = { id: 'c2', kind: 'app', parentId: 'c1', seed: 'sub' };
     assert.equal(subTaskFromApp(sub, 'deeper'), null);              // parent is a sub-task → refused

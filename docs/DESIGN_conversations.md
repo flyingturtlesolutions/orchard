@@ -136,6 +136,12 @@ origin are the same thing** — binding "my tickets" to `deako.zendesk.com` says
 session it rides*. "Which Zendesk" is never parsed from the ask. `allowedOrigins` (deferred config) is a **scope
 limiter** (tighten-only security), distinct from target *discovery*.
 
+**CS-1 (v2.74.1996) — where a bound connection LIVES.** Binding is per-**desk**, not per-thread: the set a
+conversation reaches is its own `config.connections` **UNION** what its desk (`desk:<instanceId>`) and preset
+(`preset:<presetId>`) have bound, minus its own `config.connectionsExcluded`. So a ground connected in one thread
+is reachable from the next one, and from a new instance of the same preset. Spec + the four-occurrence incident it
+closes: `DESIGN_desks.md` §12; math in `Core/connectionScope.js` (pure).
+
 ### 6A.4 Tooling = the lattice, including session-ride (reads prefer it)
 
 The app's tooling is the full `page · browser · connector · self` lattice, all **global**. The **connector** domain

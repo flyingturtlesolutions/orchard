@@ -20,6 +20,7 @@ import { ledgerEntry } from '../../Core/actionLedger.js';
 import { sweepAlarmName, instanceFromAlarmName, describeEvery, rollDailyCounts, spikeVerdict, localDay, queueStateLines, priorRunVerdict, routineAlarmName, instanceFromRoutineAlarm } from '../../Core/fleetSchedule.js';   // DK-8 (v1491) — + the routine alarm identity
 import { listRows, pickDrillCandidates, extractTicketEvidence, solveVerdict, stubCloseVerdict, clusterTickets, mergeAdvice, renderTicketEvidence, deriveMe, updateSeen, toBankEntry, bankEvidence } from '../../Core/ticketEvidence.js';
 import { builtinApp } from '../../Core/appCatalog.js';
+import { SCOPE_KEY as CONN_SCOPE_KEY, scopeIdsFor, resolveConnections } from '../../Core/connectionScope.js';   // CS-1 (v2.74.1996) — a headless sweep must reach what the desk/preset has BOUND, not only what its record happens to carry
 import { loadProposals, addProposals, decideProposal } from '../../Services/Storage/ProposalStore.js';
 import { appendLedger } from '../../Services/Storage/ActionLedgerStore.js';
 import { ConversationStore } from '../../Services/ConversationStore.js';
@@ -215,7 +216,16 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
       try { await chrome.storage.local.remove(_SCHED_KEY(instanceId)); } catch { /* */ }
       return;
     }
-    const connections = (conv.config && Array.isArray(conv.config.connections)) ? conv.config.connections : [];
+    // CS-1 (v2.74.1996) — resolve the SCOPE LADDER, not just the record: the clock-fired sweep gets the same
+    // own ∪ desk ∪ preset reach the panel's palette gets, so a ground bound in another thread of this desk is not
+    // invisible here (the per-thread scope the 2026-08-04 incident closed). Read fresh — no SW-lived cache to go stale.
+    const connections = await (async () => {
+      const own = (conv.config && Array.isArray(conv.config.connections)) ? conv.config.connections : [];
+      try {
+        const got = await chrome.storage.local.get(CONN_SCOPE_KEY);
+        return resolveConnections(own, (got && got[CONN_SCOPE_KEY]) || {}, scopeIdsFor(conv), conv.config && conv.config.connectionsExcluded);
+      } catch { return own; }
+    })();
     if (!connections.length) { await _step('plan', 'clock', false, 'no connections'); await _fail('this app has no connections (run setup)'); return; }
     await _step('plan', 'clock', true, `scheduled sweep (every ${describeEvery(sched.minutes)})`);
     const base = { connections, appId: conv.appId || null, memoryId: instanceId, seed: conv.seed || '' };

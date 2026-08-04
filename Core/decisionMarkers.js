@@ -103,6 +103,10 @@ export const DECISION_MARKERS = [
   { key: 'routine', src: "ROUTINE ▸" },
   { key: 'case-brief', src: "CASE_BRIEF ▸" },
   { key: 'conn', src: "CONN ▸" },
+  // CS-1 (v2.74.1996) — WHERE a connection bound (desk + preset scope) is a routing decision: it is the line that
+  // says whether the next thread can reach a ground the user connected. Four occurrences of
+  // INCIDENT[class=connection-scoped-per-conversation-silently-drops-legs] were diagnosed without it (invariant #1).
+  { key: 'conn-scope', src: "CONN_SCOPE ▸" },
   { key: 'section-nav', src: "SECTION_NAV ▸" },
   { key: 'drive', src: "DRIVE ▸" },
   { key: 'drive-hydrate', src: "DRIVE_HYDRATE ▸" },

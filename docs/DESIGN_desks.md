@@ -174,3 +174,52 @@ HITL distill (§10) as the existing containment layers RF completes.
 
 **Order:** RF-1 → RF-4 → RF-2 → RF-3 (ship the signal + telemetry first; quarantine once precision is proven —
 a quarantine driven by an unproven classifier would corrupt learning in the opposite direction).
+
+## §12 — CONNECTION SCOPE: a connection binds to the desk, not the thread (CS-1, BUILT v2.74.1996)
+
+**Problem (four occurrences).** `INCIDENT[class=connection-scoped-per-conversation-silently-drops-legs]`, opened
+v1941 and "closed" twice. `conv.config.connections` was a binding's ONLY home, so a ground the user spent multiple
+turns connecting was invisible to the next thread. Live 2026-08-04 11:45:16 — the palette carried 120 legs
+(`ride[conn:73]`, two grounds' worth) while `www.ups.com`'s 2 armed legs were absent, and the router answered
+`track 1Z…` with a Shopify order lookup. The prior closures added `PALETTE ▸ UNCONNECTED` and
+`ROUTE ▸ navigate WITHHELD`: they removed the word *silently* from the incident's name and left the legs dropped.
+**An incident closed on the visibility of its symptom is still open.**
+
+**The ruling (user directive).** Connections bind at the **desk** and **preset** level and are **inherited by new
+conversations**. Three tiers, resolved as a **UNION**, most specific first (`Core/connectionScope.js`, PURE):
+
+| tier | key | who writes it | semantics |
+|---|---|---|---|
+| own | `conv.config.connections` | setup · adopt | the conversation's explicit set; always leads |
+| desk | `desk:<instanceId>` | setup (**authoritative** — replaces) · adopt | survives new threads, `clear chat`, re-creation (AP-0 restores the id) |
+| preset | `preset:<presetId>` | setup · adopt (**accretes only**) | a shared pool; a sibling or brand-new instance starts with the preset's reach |
+
+**Why a union and not a create-time seed.** The findings spec first read "seed `cfg.connections` when the new
+conversation declares none." The live trace refutes it: the failing conversation had a **non-empty** own set that
+was merely missing the third ground. A create-time fallback would have skipped it and produced the seventh
+adjacent miss. Read-time union also means one book, no stale copies — the panel (`_boundConnections`) and the
+headless clock sweep (`background/handlers/fleet.js`) resolve the same ladder from the same
+`chrome.storage.local['conn:scope']`.
+
+**Inheritance is a DEFAULT, not a lock.** Setup's Confirm is authoritative for its own desk: the picker's selection
+**replaces** the desk tier, and whatever the tiers would still grant but the user did *not* pick is recorded as
+`config.connectionsExcluded` (connKeys) — so the shared preset tier cannot hand a de-selected site straight back on
+the next turn. A sibling desk keeps it (the exclusion is per-desk); an `Adopt` click clears it (the user just said
+yes); a case inherits its desk's exclusions with its connections (`subTaskFromApp`).
+
+**Scope boundary — NOT global, deliberately.** The TRT-5 membrane (`DESIGN_target_routing.md` §5 — visitor fence +
+adopt-on-2nd) scopes a desk's role on purpose; one global connection pool would dissolve it. The Front desk carries
+neither `instanceId` nor `appId`, so it inherits nothing and keeps own-only reach. A **case** carries no `presetId`
+of its own but does carry its desk's `appId` — which IS the preset id for every conversation
+`_createAppConversation` mints — so it reaches its desk's tier with no parent lookup.
+
+**Not `Core/presetMemory.js`.** It does seed instances from a preset, but its unit is a learned memory ITEM
+(`isPromotableToPreset` / `distillCandidates`), not a connection. Bending it would be the wrong reuse.
+
+**Marker.** `CONN_SCOPE ▸` (`Core/decisionMarkers.js`, Invariant #1) — WHERE a connection bound, and what a
+Confirm excluded. Four occurrences were diagnosed without it.
+
+**Verification owed (live).** Headless proves the ladder math (`Core/connectionScope.test.js`) and that both
+readers call it. The OUTCOME check is the one the prior closures skipped — not "does the marker fire" but: bind a
+ground in one thread, open a **new** thread of the same desk, and confirm its legs are in the palette and the ask
+completes.
