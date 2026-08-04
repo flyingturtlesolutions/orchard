@@ -1,4 +1,4 @@
-# DESIGN — Ground Vitals (VT): proactive belief maintenance + the Admin desk
+# DESIGN — Ground Vitals (VT): proactive belief maintenance + the Connect tab
 
 **Status: spec v1.1 (2026-07-17); VT-0..VT-4 BUILT same day (v2.74.1569-1572 — the transport-general funnel
 `reportLegOutcome` + `Core/vitals.js`, the `vitals:tick` scheduler absorbing `conn:heartbeat`, the Admin desk
@@ -171,9 +171,75 @@ toggle.
   never from page content, never from model output. The sha channel must not become a write-path injection
   surface.
 
-## 8. The surface — the Admin desk
+## 8. The surface — the Connect tab
 
-A **permanent desk**; role = Orchard-operator, queue = incidents, scope = all grounds. The desk model fits
+**Supersede (Connect, 2026-08): the operator surface is a RAIL TAB, not a desk.** The original §8 "Admin desk"
+was a category error — system STATE wearing a conversation costume so it could live in the Conversations tab
+(its own seed had to open with *"you are NOT a website desk"*). It graduates to the third Rail tab, completing
+the trifecta:
+
+| Tab | Concern | Unit |
+|---|---|---|
+| **Chat** (was "Conversations") | the views you work in | desks / presets |
+| **Automate** (was "Automations") | what runs unattended | scheduled + parked runs |
+| **Connect** (new) | the connections both ride on | status cards |
+
+Chat and Automate are the two ways you USE Orchard; both ride on your connections, so Connect is the substrate
+under the other two — not a tacked-on "errors" tab.
+
+### 8.1 One incident model, two renderers — the design law
+
+**DESIGN LAW — dev-maximalist / user-subset:** a feature is specced MAXIMALLY for the developer/debug mode,
+then a deliberate, smaller USER-FACING subset is exposed in V1. Vitals is the archetype: the whole VT arc
+(presence, drift, reachability, request-shape, op-bank, broker) is **Orchard's instrument panel**, not user
+product — the Admin desk's mistake was showing the whole panel to everyone. Connect stays ONE incident model
+(the §4 funnel + the §8.3 store, untouched) with a `_devModeEnabled` fork in the RENDERER — never two health
+systems.
+
+- **User render (V1)** — the user is responsible for exactly ONE thing: keeping connections signed in. Connect
+  shows a card ONLY when the user must act, and the only act is sign-in (or "contact your admin"). Drift,
+  reachability, request-shape, the vitals bars — all invisible; Orchard auto-heals and shows its work only in
+  dev.
+- **Dev render (later)** — the maximalist console of §8.3 (vitals bars, drift/HEAL + relearn diffs,
+  reachability, reasoning-service, never-checked, the operator NL asks) renders in the SAME tab.
+
+### 8.2 The Connect tab — minimal V1 (the user render)
+
+**Two states.** Healthy → one quiet line, "All connections active" (no bars, no "all checks passed" digest —
+that trains ignoring). Attention → one status card per affected connection.
+
+**The status card — two variants, nothing more:**
+1. **Signed out** — `{App} — signed out` · **[Sign in]** (opens the site to authenticate).
+2. **Needs reconnecting** — `{App} needs reconnecting — contact your system administrator.` No self-serve
+   action (a V1 user can't relearn); this is the fold-in for an un-auto-healable drift / unreachable.
+
+Fields: app name · one-line state · optional "since" · the action. NO bars, diffs, or canary detail — dev only.
+
+**Lifecycle (honest, still simple).**
+- **Opens** when the funnel (`reportLegOutcome`) logs an `auth` failure → signed-out; or a `miss`/drift Orchard
+  could NOT auto-heal → needs-reconnecting.
+- **Verifying** — after sign-in, a brief `Checking {App}…` while the canary (the outcome test) runs.
+- **Clears** on the OUTCOME TEST passing (CS-1, `connection_scope_desk_preset.md`), never the raw sign-in EVENT
+  (the false-clear CS-1 exists to prevent); on failure it stays — `Still can't reach {App}`.
+- **One card per connection** (desk+preset scope, CS-1) — never per conversation or per leg.
+
+**Badge.** Connect badges with the count of connections needing attention; quiet otherwise. It absorbs the
+`btn-rail` needs-action dot FOR CONNECTION ISSUES only — Automate keeps its own for parked runs (two
+independent attention sources, not one global dot).
+
+**Desks (in Chat).** Unchanged from the §8.3 chip rule — a desk chips when ITS connection is down; the chip now
+opens Connect (was: the Admin desk).
+
+**Migration.** The Admin desk (`ADMIN_ID` + its seed variants) retires as a USER surface; incident cases
+(`vtc_`) migrate to the Connect card store; the Connections card + "show dashboard" / operator richness move to
+the dev render. The §4 vitals engine (funnel, `vitals:tick`, canary, incident store, CS-1 outcome-to-close) is
+UNCHANGED — only the presentation moves.
+
+### 8.3 The dev render (the maximalist console — retained from the original §8)
+
+*Below is the original §8, now scoped to the DEV-mode Connect view (not a user desk). Throughout 8.3, "the
+Admin desk" = the dev-mode Connect view, and "Front chip → Admin desk" now reads "→ Connect".* A **permanent
+operator surface**; role = Orchard-operator, queue = incidents, scope = all grounds. The case model fits
 because **an incident IS a case** (the FC machinery, reused whole):
 
 | Vitals event | Desk machinery |
@@ -200,7 +266,31 @@ Rules:
   its value is that when it speaks, it's real.
 - v1 scope: vitals incidents + the moved card + chips. Natural accretions (NOT launch): pending harvest
   reviews ("banked 9 reads — accept the GETs?"), duplicate-ground merge proposals, sync status.
-- Naming: "Admin desk" (or "Back office" — the real-world pair of a front desk; decide at build).
+- Naming: RESOLVED (Connect supersede) — the surface is the **Connect** tab (Chat · Automate · Connect);
+  "Admin desk" survives only as this dev render's internal name.
+
+### 8.4 Function inventory — what the retired Admin desk did (the dev-render rebuild checklist)
+
+Captured at removal (**CN-2**) so the §8.3 dev render can be rebuilt with **nothing lost**. Every function's DATA
+comes from the UNCHANGED vitals handlers (`background/handlers/vitals.js` + `connections.js`); only the Admin-desk
+PRESENTATION was retired. The former chat.js sites are named so the rebuild has anchors.
+
+- **F1 — the Vitals card** (`_maybeRenderAdminDesk`, driven by `VITALS_STATUS` → `{registry, grounds, incidents, now}`):
+  - *Presence rows* — `renderConnectionsCard(registry)`: which apps are signed in (per-origin presence · shape · op-bank).
+  - *Ride-shape rollup* — per ground `{host, armed, lastOkAt, driftSuspects, proposals}` → "• host — N reads, last ok Xh ago · ⚠ drift / shape ok".
+  - *Open-incident pointer* — "⚠ N open incidents — see the cases" (silence when zero).
+  - *Recently auto-resolved* — `recentlyResolved(incidents, {cls:'presence'})`: the presence audit trail (subject · how · when).
+  - *Cloud-logs line* — a standing "cloud logs: on (level)" while shipping is enabled.
+  - *Actions* — **Sign in {origin}** (×≤4, `CONN_FOCUS {origin}`) · **Check now** (`VITALS_CHECK_NOW`, manual canary) · **Keep-alive…** (`_showKeepAlive`, the per-connection opt-in picker).
+- **F2 — incident cases** (`_syncIncidentCases` → `vtc_<id>` sub-conversations, one per OPEN incident): the incident timeline; heal bars reused verbatim (sign-in for presence, the RH-1b relearn/diff bar for drift); auto-close on verification with one quiet closing line; the "+" mints a by-hand Ops case.
+- **F3 — the connections chip** (`_maybeRenderConnCard`, Front/Overview): the one-line "N need attention" signal (`VITALS_BADGE`) pointing at the console. *(CN-2: re-pointed to the Connect tab; CN-1 also badges the Connect tab itself.)*
+- **F4 — the context dashboard** (`VITALS_DASHBOARD` via "show dashboard" on the desk): the full vitals dashboard CanvasSpec (`Core/vitalsDashboard.js`).
+- **F5 — the operator persona** (`_ADMIN_SEED`): NL "what's signed in / relearn X / what's down" answered in the operator role. *(CN-2: retired for users; the Connect card ACTIONS replace the conversational asks — §8.2.)*
+
+**User subset (§8.2, shipped CN-1):** F1's presence/sign-in + F3's attention count only. Everything else — ride-shape,
+drift, Check-now, Keep-alive, the F2 cases, F4 dashboard, F5 persona — is **dev-only**, the §8.3 render behind
+`_devModeEnabled`. **CN-2 retires the Admin desk as a user surface** (dev-gated + user pointers re-pointed to Connect);
+the full code delete lands when the §8.3 dev render absorbs F1–F5 into the Connect tab.
 
 ## 9. Hard lines (consolidated)
 
@@ -214,6 +304,13 @@ is metadata-only); heal machinery stays owned by its substrate — vitals schedu
 re-implements a heal.
 
 ## 10. Build ladder
+
+**Connect supersede (2026-08):** the SURFACE work is re-homed and re-ordered — ship the **user render first**.
+**CN-1** — the Connect Rail tab (Chat · Automate · Connect) + the two V1 status-card variants (§8.2): the
+funnel's `auth` / un-auto-healable `miss` outcomes as the ONLY user-visible cards, the sign-in / contact-admin
+actions, the outcome-test clear (CS-1), the tab badge, and the desk-chip re-point to Connect. The original
+**VT-2 "Admin desk"** below becomes the **dev render** (§8.3), gated behind `_devModeEnabled`; VT-3..7 accrue
+into it. Engine layers (VT-0/VT-1) are unchanged and precede both.
 
 - **VT-0** — the outcome funnel: `reportRideOutcome(evt)` folds `reportAuthSignal` + `rideOutcomeSignal` +
   `_healTick`; presence-gates-drift ordering (fixes the 404-on-anon false-drift bug). Pure ordering + tests.

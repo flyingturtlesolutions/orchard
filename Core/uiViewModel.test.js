@@ -48,10 +48,11 @@ describe('uiInvariants — the checklist HOLDS on a correct panel', () => {
     assert.deepEqual(noFreeText(vm), []);
   });
 
-  it('the Admin home is the sole active row when nothing is selected (activeId null)', () => {
+  it('CN-2 — nothing selected (activeId null) is the launch-page home: NO active row, and a VALID state', () => {
     const vm = uiViewModel({ summaries: SUMMARIES(), activeId: null, pane: 'thread' });
-    assert.deepEqual(checkUiInvariants(vm), []);
-    assert.equal(vm.rail.rows.find((r) => r.active).id, ADMIN_ID);
+    assert.deepEqual(checkUiInvariants(vm), [], 'the home state passes every invariant');
+    assert.equal(vm.rail.rows.some((r) => r.active), false, 'launch page home → no active row');
+    assert.equal(vm.thread.convId, null);
   });
 });
 
@@ -64,8 +65,12 @@ describe('uiInvariants — the checklist FIRES on each real bug class', () => {
   });
 
   it('two rail sections pinned-open → pinned-gt-one (the "only one pinned" rule)', () => {
-    const vm = base();
-    vm.rail.rows.filter((r) => r.role === 'app' || r.role === 'admin').forEach((r) => { r.expanded = true; });
+    // CN-2 — the Admin fixture is gone, so use two APP rows to create the >1 pinned condition.
+    const vm = uiViewModel({ summaries: [
+      { id: 'app1', title: 'A', kind: 'agent', appId: 'a', updatedAt: 100 },
+      { id: 'app2', title: 'B', kind: 'agent', appId: 'b', updatedAt: 90 },
+    ], activeId: 'app1', pane: 'thread', railTab: 'conversations' });
+    vm.rail.rows.filter((r) => r.role === 'app').forEach((r) => { r.expanded = true; });
     assert.ok(checkUiInvariants(vm).some((f) => f.code === 'pinned-gt-one'));
   });
 

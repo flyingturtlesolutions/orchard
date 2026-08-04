@@ -75,10 +75,10 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
 
   const rows = [];
 
-  // 1) v2.74.1942 (user directive) — the FRONT DESK is removed; the ADMIN view inherits its home role. No
-  // top pin is emitted here anymore; the Admin fixture (below, at the BOTTOM) is now the home — active when
-  // nothing else is selected (see its `active` field). A stored OVERVIEW_ID conversation is retired: excluded
-  // from `top` above and no longer pinned, so it is invisible (history retained, not deleted).
+  // 1) CN-2 (DESIGN_vitals.md §8.4) — the FRONT DESK and (now) the ADMIN desk are both removed as Rail fixtures.
+  // No top pin is emitted; HOME is the launch page — when activeId == null no row is active, so the empty state /
+  // gallery shows. Stored OVERVIEW_ID and ADMIN_ID conversations are excluded from `top` above (invisible; history
+  // retained, not deleted).
 
   // 2) Apps + plain conversations, by recency. An expanded app is immediately followed by its sub-task rows.
   for (const c of top) {
@@ -123,33 +123,11 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
     }
   }
 
-  // 3) Admin desk — the reserved vitals fixture (VT-2, DESIGN_vitals.md §8): PERMANENT in the Rail whether or
-  // not its conversation exists yet (the click get-or-creates it; "silence when green" governs its CONTENT,
-  // never its presence). v2.74.1582 — pinned as the LAST conversation (user directive: bottom of the rail —
-  // the operator console sits under the work, not above it), just above the New-app constructor entry.
-  // Excluded from the regular rows above so it never renders twice.
-  const adminConv = visible.find((c) => c.id === ADMIN_ID) || null;
-  // VT-2b (v2.74.1587) — incident CASES (children of the Admin desk) ride under the fixture. v2.74.1589 —
-  // APP-ROW PARITY (user directive): the fixture collapses/expands its cases via the SAME expanded-set the app
-  // rows use (chevron + count); silence-when-green = no children at all.
-  const adminSubs = subsByParent.get(ADMIN_ID) || [];
-  const adminOpen = expandedSet.has(ADMIN_ID);
-  rows.push({
-    id: ADMIN_ID, role: 'admin', title: 'Admin desk', icon: 'vitals', depth: 0,
-    // v2.74.1942 — Admin inherits the Front desk's home role: active when nothing else is selected.
-    hasChildren: adminSubs.length > 0, expanded: adminOpen, active: activeId == null || activeId === ADMIN_ID,
-    count: adminSubs.length, kind: 'agent',
-    summary: (adminConv && adminConv.summary) ? adminConv.summary : null,
-  });
-  // v2.74.1774 — same always-emit rule as app sub-tasks (`adminOpen` above = pinned).
-  for (const s of adminSubs) {
-    rows.push({
-      id: s.id, role: 'subtask', title: s.title, icon: s.icon || null, depth: 1,
-      hasChildren: false, expanded: false, active: activeId === s.id, count: 0,
-      kind: s.kind || 'agent', parentId: ADMIN_ID,
-      summary: s.summary || null,
-    });
-  }
+  // 3) CN-2 (DESIGN_vitals.md §8.4) — the Admin desk fixture is REMOVED. It was the Rail's home (v1942); home is
+  // now the launch page (activeId == null falls through to no active row → the empty state / gallery). Its incident
+  // CASES (subs parented to ADMIN_ID) are already excluded from `top` above, so with the fixture gone they no longer
+  // render — deferred to the §8.3 dev-mode Connect render. A stored admin_desk conversation stays excluded from
+  // `top`, so it is invisible (retained, not deleted). Nothing is pushed here.
 
   // 4) New app — always last.
   rows.push({

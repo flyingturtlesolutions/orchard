@@ -9,43 +9,33 @@ import { OVERVIEW_ID, ADMIN_ID } from './appDef.js';
 const roles = (rows) => rows.map((r) => r.role);
 
 describe('railTree — buildRailTree', () => {
-  it('v2.74.1942 — NO Front/overview pin (removed; Admin inherits home); Admin is the LAST conversation, New-app last', () => {
+  it('CN-2 — no Front/overview pin and no Admin fixture; home is the launch page; New-app is the only fixture', () => {
     const rows = buildRailTree([]);
-    assert.equal(rows.some((r) => r.role === 'overview'), false, 'the Front desk pin is gone — Admin is the home now');
-    assert.equal(rows[rows.length - 2].role, 'admin', 'VT-2 (v2.74.1582) — the vitals fixture is PERMANENT and sits at the BOTTOM; v1942 it is also the home');
-    assert.equal(rows[rows.length - 2].id, ADMIN_ID);
-    assert.equal(rows[rows.length - 1].role, 'new-app');
-    assert.equal(rows[rows.length - 1].id, null);
+    assert.equal(rows.some((r) => r.role === 'overview'), false, 'no Front desk pin');
+    assert.equal(rows.some((r) => r.role === 'admin'), false, 'the Admin fixture is removed (CN-2) — home is the launch page');
+    assert.equal(rows.length, 1, 'empty input → only the New-app entry');
+    assert.equal(rows[0].role, 'new-app');
+    assert.equal(rows[0].id, null);
   });
 
-  it('an existing Admin-desk conversation feeds the fixture (summary, no double row) instead of rendering plain', () => {
+  it('CN-2 — a stored admin_desk conversation is excluded from the Rail (invisible; retained, not rendered)', () => {
     const rows = buildRailTree([{ id: ADMIN_ID, title: 'Admin desk', kind: 'agent', updatedAt: 99, summary: '2 open incidents' }]);
-    const admin = rows.filter((r) => r.id === ADMIN_ID);
-    assert.equal(admin.length, 1, 'the fixture absorbs the conversation — never a second plain row');
-    assert.equal(admin[0].role, 'admin');
-    assert.equal(admin[0].summary, '2 open incidents');
+    assert.equal(rows.filter((r) => r.id === ADMIN_ID).length, 0, 'no admin fixture + excluded from top → renders nowhere');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].role, 'new-app');
   });
 
-  it('VT-2b/1589 — incident CASES (Admin children) collapse/expand under the fixture like an app\'s, never plain', () => {
+  it('CN-2 — incident cases (vtc_, admin_desk children) render NOWHERE now the fixture is gone; other convs unaffected', () => {
     const summaries = [
-      { id: 'vtc_a', title: 'vendorsuite looks signed out', kind: 'agent', parentId: ADMIN_ID, updatedAt: 90, summary: 'fresh → signed-out' },
+      { id: 'vtc_a', title: 'vendorsuite looks signed out', kind: 'agent', parentId: ADMIN_ID, updatedAt: 90 },
       { id: 'vtc_b', title: 'Read X may have drifted', kind: 'agent', parentId: ADMIN_ID, updatedAt: 95 },
       { id: 'chat', title: 'Free chat', kind: 'agent', updatedAt: 99 },
     ];
-    const collapsed = buildRailTree(summaries);
-    const fix = collapsed.find((r) => r.role === 'admin');
-    assert.equal(fix.count, 2, 'the fixture carries the case count');
-    assert.equal(fix.hasChildren, true);
-    assert.equal(fix.expanded, false, 'not pinned by default — the cases button is the door (app-row parity)');
-    // v2.74.1774 (peek/pin) — cases ALWAYS emit (the renderer hides them; hover-peek must not rebuild the DOM)
-    const fixIdx = collapsed.findIndex((r) => r.role === 'admin');
-    assert.deepEqual([collapsed[fixIdx + 1].id, collapsed[fixIdx + 2].id], ['vtc_b', 'vtc_a'], 'cases sit under the fixture, newest first, even unpinned');
-    assert.equal(collapsed[fixIdx + 1].role, 'subtask');
-    const open = buildRailTree(summaries, { expanded: [ADMIN_ID] });
-    const adminIdx = open.findIndex((r) => r.role === 'admin');
-    assert.equal(open[adminIdx].expanded, true, 'expanded now means PINNED-open');
-    assert.equal(open[open.length - 1].role, 'new-app', 'the constructor entry stays last');
-    assert.equal(open.filter((r) => r.role === 'plain' && String(r.id).startsWith('vtc_')).length, 0, 'a case never leaks as a plain row');
+    const rows = buildRailTree(summaries);
+    assert.equal(rows.some((r) => r.role === 'admin'), false, 'no admin fixture');
+    assert.equal(rows.some((r) => String(r.id).startsWith('vtc_')), false, 'admin_desk-parented cases are excluded from top — never leak as rows');
+    assert.equal(rows.some((r) => r.id === 'chat' && r.role === 'plain'), true, 'ordinary conversations still render');
+    assert.equal(rows[rows.length - 1].role, 'new-app', 'the constructor entry stays last');
   });
 
   it('an app row carries count + pin state; sub-tasks ALWAYS emit right after it (v1774 peek/pin)', () => {
@@ -114,25 +104,23 @@ describe('railTree — buildRailTree', () => {
     assert.equal(row.role, 'plain');
   });
 
-  it('active flags the right row: a real id marks that row, null marks the ADMIN home (v1942, was Overview)', () => {
+  it('CN-2 — active flags the selected row; null (launch-page home) leaves NO row active', () => {
     const summaries = [{ id: 'app1', title: 'Inbox', kind: 'agent', appId: 'inbox', updatedAt: 100 }];
 
     const appActive = buildRailTree(summaries, { activeId: 'app1' });
     assert.equal(appActive.find((r) => r.id === 'app1').active, true);
-    assert.equal(appActive.find((r) => r.role === 'admin').active, false);
 
     const homeActive = buildRailTree(summaries, { activeId: null });
-    assert.equal(homeActive.find((r) => r.role === 'admin').active, true, 'null = the Admin home is active');
-    assert.equal(homeActive.find((r) => r.id === 'app1').active, false);
+    assert.equal(homeActive.some((r) => r.active), false, 'null = launch page home → no active row');
   });
 
-  it('apps + plain conversations order by updatedAt desc between the pins', () => {
+  it('CN-2 — apps + plain conversations order by updatedAt desc; only New-app trails', () => {
     const rows = buildRailTree([
       { id: 'old', title: 'Old', kind: 'agent', updatedAt: 10 },
       { id: 'new', title: 'New', kind: 'agent', appId: 'x', updatedAt: 99 },
     ]);
-    // v1942 — no leading Overview pin anymore; drop only the trailing fixtures (Admin + New-app); recency-ordered
-    const middle = rows.slice(0, -2).map((r) => r.id);
+    // CN-2 — no leading Overview pin, no trailing Admin fixture; only New-app trails
+    const middle = rows.slice(0, -1).map((r) => r.id);
     assert.deepEqual(middle, ['new', 'old']);
   });
 });

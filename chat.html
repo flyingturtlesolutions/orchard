@@ -79,8 +79,10 @@
     <div class="rail-inner">
     <div class="rail-header">
       <div class="rail-tabs" role="tablist" aria-label="Rail sections">
-        <button class="rail-tab active" id="rail-tab-conversations" data-tab="conversations" role="tab" aria-selected="true" type="button">Conversations</button>
-        <button class="rail-tab" id="rail-tab-automations" data-tab="automations" role="tab" aria-selected="false" type="button">Automations</button>
+        <button class="rail-tab active" id="rail-tab-conversations" data-tab="conversations" role="tab" aria-selected="true" type="button">Chat</button>
+        <button class="rail-tab" id="rail-tab-automations" data-tab="automations" role="tab" aria-selected="false" type="button">Automate</button>
+        <!-- CN-1 (DESIGN_vitals.md §8) — the Connect tab: login/connection status, the trifecta's third seat (Chat · Automate · Connect). -->
+        <button class="rail-tab" id="rail-tab-connect" data-tab="connect" role="tab" aria-selected="false" type="button">Connect</button>
       </div>
       <button class="icon-btn" id="btn-delete-all-conversations" title="Delete all conversations">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -120,6 +122,8 @@
     <!-- v2.74.1933 — the AUTOMATIONS tab: a cross-desk list of what runs on its own (scheduled workflows +
          parked runs). Hidden until its tab is selected; rendered by _renderRailAutomations. -->
     <div class="rail-list rail-automations" id="rail-automations" role="tabpanel" aria-labelledby="rail-tab-automations" hidden></div>
+    <!-- CN-1 (DESIGN_vitals.md §8.2) — the Connect tab panel: the login-only status board (user render). -->
+    <div class="rail-list rail-connect" id="rail-connect" role="tabpanel" aria-labelledby="rail-tab-connect" hidden></div>
     <div class="rail-list" id="rail-list" role="tabpanel" aria-labelledby="rail-tab-conversations">
       <div class="rail-empty">No conversations yet.</div>
     </div>

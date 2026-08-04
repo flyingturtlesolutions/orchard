@@ -196,26 +196,23 @@ async function _ensureAdminConversation() {
 // Front-desk pin's open shape (v2.74.1515): a NON-EMPTY conversation rehydrates; an EMPTY one pins the current
 // pointer without rehydrating (rehydrate assumes messages) — _maybeRenderAdminDesk then draws the vitals card.
 async function _openAdminDesk() {
-  if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
-  const conv = await _ensureAdminConversation();
-  if ((conv.messages || []).length) {
-    if (conv.id !== _currentConversationId) { await _rehydrateConversation(conv); await _resumeRunningInvocations(); }
-  } else if (conv.id !== _currentConversationId) {
-    _clearCurrentConversation();          // agent defaults…
-    _currentConversationId = conv.id;     // …pinned to the Admin thread so the cards (and any chat) append to it
-    _currentConversationSeed = conv.seed || _ADMIN_SEED;   // v2.74.1574 — the operator persona survives the clear (the empty-open path)
-    _resetConversation();
-    void _renderDeskLanding(conv);        // DL-1 (v2.74.1600) — the EMPTY first open bypasses _rehydrateConversation (the landing's normal hook), and it IS the launch moment
-  }
-  void _maybeRenderAdminDesk();
-  try { await _renderRailList(); } catch { /* */ }
+  // CN-2 (DESIGN_vitals.md §8.4) — the Admin desk is RETIRED (its Rail home fixture removed; home is the launch page).
+  // Its user-facing role is the Connect tab, so any remaining caller (a stale chip / pointer) lands on Connect —
+  // it never re-creates the operator conversation. The dev §8.3 operator console (F1–F5) is deferred to Connect.
+  try { await _revealRail(); } catch { /* */ }
+  try { _switchRailTab('connect'); } catch { /* */ }
 }
 
 async function _ensureConversation() {
   if (_currentConversationId) return _currentConversationId;
   if (_ensureConversationPromise) return _ensureConversationPromise;
   _ensureConversationPromise = (async () => {
-    const conv = await _ensureAdminConversation();   // v2.74.1942 — the ADMIN view inherited the Front desk's home role: a raw chat with no active conversation lands in the Admin thread (the general-assistant home)
+    // CN-2 (DESIGN_vitals.md §8.4) — a from-HOME chat (no active conversation) mints a fresh PLAIN conversation, NOT
+    // the retired Admin thread. The v1942 wiring pointed home at ADMIN_ID because the Admin FIXTURE rendered +
+    // boot-restored it; CN-2 removed both, so routing a home chat into ADMIN_ID would leave it invisible in the Rail,
+    // lost on the next reload, and voiced by the operator persona (verify-caught critical — the whole reason CN-2's
+    // home is the launch page).
+    const conv = await ConversationStore.create({ title: 'New conversation', kind: 'agent' });
     _currentConversationId = conv.id;
     _refreshRailIfOpen().catch(() => {});   // v2.74.1042 — show the just-minted conversation in an open drawer
     return conv.id;
@@ -667,25 +664,93 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
 let _railTab = 'conversations';
 async function _renderActiveRailTab(opts = {}) {
   if (_railTab === 'automations') return _renderRailAutomations();
+  if (_railTab === 'connect') return _renderConnect();   // CN-1 — the Connect tab (login/connection status)
   return _renderRailList(opts);
 }
 function _switchRailTab(tab) {
-  if (tab !== 'conversations' && tab !== 'automations') return;
+  if (tab !== 'conversations' && tab !== 'automations' && tab !== 'connect') return;   // CN-1 — + connect
   _railTab = tab;
-  const isConv = tab === 'conversations';
   try {
     document.querySelectorAll('.rail-tab').forEach((t) => {
       const on = t.dataset.tab === tab;
       t.classList.toggle('active', on);
       t.setAttribute('aria-selected', String(on));
     });
-    $('rail-list').hidden = !isConv;
-    $('rail-automations').hidden = isConv;
-    $('btn-delete-all-conversations').style.display = isConv ? '' : 'none';   // delete-all is conversations-only
+    $('rail-list').hidden = tab !== 'conversations';
+    $('rail-automations').hidden = tab !== 'automations';
+    const _cx = $('rail-connect'); if (_cx) _cx.hidden = tab !== 'connect';   // CN-1 — the Connect panel
+    $('btn-delete-all-conversations').style.display = tab === 'conversations' ? '' : 'none';   // delete-all is conversations-only
   } catch { /* */ }
   void _renderActiveRailTab({ force: true });
 }
 try { document.querySelectorAll('.rail-tab').forEach((t) => t.addEventListener('click', () => _switchRailTab(t.dataset.tab))); } catch { /* */ }
+
+// ── CN-1 (DESIGN_vitals.md §8.2) — the CONNECT tab: the login-only status board (user render) ──────────────────────
+// The user is responsible for ONE thing: keeping connections signed in. Connect shows a card ONLY when the user must
+// act — sign in, or (un-auto-healable drift) contact an admin. Same VITALS_STATUS source as the dev Admin view;
+// drift / reachability / vitals bars stay INVISIBLE here (they are the §8.3 dev render). Badge = VITALS_BADGE open.
+async function _updateConnectBadge() {
+  try {
+    const btn = $('rail-tab-connect'); if (!btn) return;
+    let n = 0;
+    try { const r = await _orchReq('VITALS_BADGE', {}); n = (r && r.success !== false && Number(r.open)) || 0; } catch { /* */ }
+    let badge = btn.querySelector('.rail-tab-badge');
+    if (n > 0) { if (!badge) { badge = document.createElement('span'); badge.className = 'rail-tab-badge'; btn.appendChild(badge); } badge.textContent = String(n); }
+    else if (badge) badge.remove();
+  } catch { /* */ }
+}
+function _connectCard(kind, subject) {
+  const card = document.createElement('div');
+  card.className = `connect-card connect-card-${kind}`;
+  const head = document.createElement('div'); head.className = 'connect-card-head';
+  if (kind === 'reconnect') {
+    head.textContent = `${subject} needs reconnecting`;   // §8.2 — the un-auto-healable edge; no self-serve action in V1
+    const sub = document.createElement('div'); sub.className = 'connect-card-sub';
+    sub.textContent = 'Contact your system administrator.';
+    card.appendChild(head); card.appendChild(sub);
+    return card;
+  }
+  head.textContent = `${subject} — signed out`;
+  const acts = document.createElement('div'); acts.className = 'connect-card-actions';
+  acts.appendChild(_mkBtn('Sign in', async () => { try { await _orchReq('CONN_FOCUS', { origin: subject }); } catch { /* */ } }));   // opens the site to authenticate
+  card.appendChild(head); card.appendChild(acts);
+  return card;
+}
+async function _renderConnect() {
+  const panel = $('rail-connect'); if (!panel) return;
+  void _updateConnectBadge();
+  let r = null;
+  try { r = await _orchReq('VITALS_STATUS', {}); } catch { /* */ }
+  panel.innerHTML = '';
+  if (!r || r.success === false) {
+    const el = document.createElement('div'); el.className = 'connect-empty';
+    el.textContent = 'Connection status is unavailable right now.'; panel.appendChild(el); return;
+  }
+  const registry = r.registry || {};
+  const attention = attentionOrigins(registry, Object.keys(registry)) || [];   // origins the user must sign in to
+  const reconnect = (Array.isArray(r.incidents) ? r.incidents : []).filter((x) => x && x.status === 'open' && x.cls !== 'presence');
+  let n = 0;
+  for (const a of attention) { panel.appendChild(_connectCard('signedout', String((a && a.origin) || 'A connection'))); n++; }
+  for (const inc of reconnect) { panel.appendChild(_connectCard('reconnect', String((inc && inc.subject) || 'A connection').slice(0, 60))); n++; }
+  if (!n) {
+    const el = document.createElement('div'); el.className = 'connect-empty ok'; el.textContent = 'All connections active.'; panel.appendChild(el);
+  } else {
+    // CS-1 outcome test: after the user signs in, re-check — the card clears on a PASS, never on the sign-in event.
+    const recheck = _mkBtn('Recheck', async () => {
+      panel.querySelectorAll('.connect-checking').forEach((e) => e.remove());
+      const note = document.createElement('div'); note.className = 'connect-empty connect-checking'; note.textContent = 'Checking…'; panel.prepend(note);
+      try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
+      void _renderConnect();
+    });
+    recheck.classList.add('connect-recheck');
+    panel.appendChild(recheck);
+  }
+  if (_devModeEnabled) {   // CN-2 — the Admin desk is retired; the full §8.3 operator console (F1–F5) is not yet on Connect
+    const note = document.createElement('div'); note.className = 'connect-empty connect-dev-link';
+    note.textContent = 'Dev: the full operator console (vitals, ride-shape, drift, incidents) is not yet on Connect — pending §8.3 (see DESIGN_vitals.md §8.4).';
+    panel.appendChild(note);
+  }
+}
 
 async function _openRail() {
   await _renderActiveRailTab({ force: true });   // v1816/1933 — opening the rail is a user action; render the active tab now
@@ -16219,7 +16284,8 @@ _wireAttach();
   // Attempt to restore the most recent conversation. If none exists, the
   // empty state remains and we show suggestion cards.
   try {
-    const recent = await ConversationStore.mostRecent();
+    let recent = await ConversationStore.mostRecent();
+    if (recent && String(recent.id) === ADMIN_ID) recent = null;   // CN-2 — the retired Admin desk is never restored; fall through to the launch page (home)
     if (recent) {
       const conv = await ConversationStore.load(recent.id);
       // v2.74.1160 — with dev mode off, don't auto-restore a dev/design conversation as the active surface.
@@ -16883,7 +16949,7 @@ async function _maybeRenderConnCard() {
   const open = (r && r.success !== false && Number(r.open)) || 0;
   const existing = document.querySelector('#messages .message[data-vt-chip]');
   if (!open) { try { if (existing) existing.remove(); } catch { /* */ } return; }
-  const body = `⚠ ${open} thing${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention (sign-ins / drifted reads) — see the Admin desk.`;
+  const body = `⚠ ${open} thing${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention (sign-ins) — see Connect.`;   // CN-2 — re-pointed from the Admin desk to the Connect tab (drifted-reads wording dropped — that's dev-only now)
   if (existing) { _setMessageBody(existing, body); return; }
   // DL-1 (v2.74.1607, user directive) — the LAUNCH PAGE carries no attention chip: while the empty state is
   // showing (Front page / gallery / dev hint), the chip WAITS — the Rail's Admin ⚠ badge is the ambient signal.
@@ -16895,7 +16961,7 @@ async function _maybeRenderConnCard() {
   try { delete msg.dataset.messageId; } catch { /* */ }   // ephemeral — the incident store is the durable record
   msg.dataset.vtChip = '1';
   const bar = _orchActionBar(msg);
-  bar.appendChild(_mkBtn('Open Admin view', () => { void _openAdminDesk(); }));
+  bar.appendChild(_mkBtn('Open Connect', () => { void _openAdminDesk(); }));   // CN-2 — _openAdminDesk now opens the Connect tab
 }
 
 // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — the ADMIN DESK render: the vitals card (presence rows + per-ground
@@ -16903,6 +16969,12 @@ async function _maybeRenderConnCard() {
 // incident STORE is the durable record; closed incidents are history, not attention). Incident heal bars reuse
 // the existing point-of-need bars verbatim: sign-in (presence) and the RH-1b relearn bar (drift).
 async function _maybeRenderAdminDesk() {
+  // CN-2 (DESIGN_vitals.md §8.4 F1) — RETIRED. The Admin desk is no longer a user surface; the vitals card (F1) is
+  // deferred to the §8.3 dev-mode Connect render. UNCONDITIONALLY inert via the early-return below — NOT merely the
+  // ADMIN_ID guard: a stray ADMIN_ID-current path (e.g. a vitals event) could otherwise re-render the operator card
+  // and re-seed _ADMIN_SEED into a user chat (verify-caught). The dead body + guard delete when §8.3 absorbs F1.
+  return;
+  // eslint-disable-next-line no-unreachable
   if (_currentConversationId !== ADMIN_ID) return;
   // v2.74.1575 — the persona heal must cover EVERY door into the desk (live: the panel BOOT-RESTORED the Admin
   // desk as the current conversation — a path that never passes _openAdminDesk, so the ensure-time patchMeta
@@ -17001,6 +17073,7 @@ function _incidentCardBody(inc) {
 // Closed incidents that never had a case (pre-VT-2b history) are left alone — no retro-minting.
 let _vtSyncChain = Promise.resolve();
 function _syncIncidentCases(status = null) {
+  try { void _updateConnectBadge(); } catch { /* CN-1 — keep the Connect tab badge live on every incident sync */ }
   const step = _vtSyncChain.then(async () => {
     let r = status;
     if (!r) { try { r = await _orchReq('VITALS_STATUS', {}); } catch { return; } }

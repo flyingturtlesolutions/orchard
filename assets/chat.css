@@ -1740,6 +1740,37 @@ textarea {
 .rail-tab:hover { color: var(--c-text-muted); }
 .rail-tab.active { color: var(--c-text); border-bottom-color: var(--c-accent, #378ADD); }
 .rail-tab:focus-visible { outline: 2px solid var(--c-accent, #378ADD); outline-offset: 2px; border-radius: 2px; }
+
+/* CN-1 (DESIGN_vitals.md §8.2) — the Connect tab: login-only status cards + the attention badge on the tab. */
+.rail-tab-badge {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 16px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  color: #fff;
+  background: var(--c-x-dev-strong, #e0902a);
+  border-radius: var(--r-full, 999px);
+}
+.rail-connect { padding: var(--sp-2); gap: var(--sp-2); }
+.connect-card {
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  background: var(--c-bg-elevated);
+}
+.connect-card-signedout { border-left: 3px solid var(--c-x-dev-strong, #e0902a); }
+.connect-card-reconnect { border-left: 3px solid var(--c-error, #c0392b); }
+.connect-card-head { font-size: 13px; font-weight: 600; color: var(--c-text); }
+.connect-card-sub { margin-top: 4px; font-size: 12px; color: var(--c-text-muted); }
+.connect-card-actions { margin-top: var(--sp-2); }
+.connect-empty { padding: var(--sp-3); font-size: 12px; color: var(--c-text-muted); }
+.connect-empty.ok { color: var(--c-success, #2e7d32); }
+.connect-recheck, .connect-dev-link { margin-top: var(--sp-2); }
+.connect-dev-link { font-size: 11px; opacity: 0.8; }
 /* the automations panel shares the list layout; a hidden tabpanel takes no space */
 /* v2.74.1941 — a hidden tabpanel must actually hide: .rail-list sets display:flex, which OVERRODE the UA
    [hidden]{display:none} by specificity, so the Conversations panel (#rail-list) stayed visible on the

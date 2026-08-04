@@ -27,11 +27,17 @@ export function checkUiInvariants(vm) {
   const push = (code, msg) => v.push({ code, msg });
   const rows = (vm && vm.rail && Array.isArray(vm.rail.rows)) ? vm.rail.rows : [];
 
-  // 1) EXACTLY ONE active rail row. The Admin fixture is the home (active when nothing else is), and activeId matches
-  //    at most one row — so a settled panel always has exactly one. Zero = a dangling active pointer (a deleted/missing
-  //    conversation left nothing highlighted); >1 = a double-select. Both are real, previously eyeball-only, bugs.
+  // 1) ACTIVE-ROW RULE (CN-2, DESIGN_vitals.md §8.4). Home is now the LAUNCH PAGE, not the Admin fixture. When NO
+  //    conversation is selected (thread.convId == null) zero rail rows are active — that is the home state, not a bug.
+  //    When a conversation IS selected, exactly one row is active: zero = a dangling active pointer (a deleted/missing
+  //    conversation left nothing highlighted), >1 = a double-select — both real, previously eyeball-only, bugs.
   const active = rows.filter((r) => r.active);
-  if (active.length !== 1) push('active-not-one', `expected exactly 1 active row, got ${active.length}`);
+  const hasSelection = !!(vm && vm.thread && vm.thread.convId != null);
+  if (hasSelection) {
+    if (active.length !== 1) push('active-not-one', `a conversation is selected but ${active.length} rows are active`);
+  } else if (active.length !== 0) {
+    push('active-when-home', `nothing is selected (launch-page home) but ${active.length} rows are active`);
+  }
 
   // 2) AT MOST ONE rail section pinned-open (`expanded`). The "only a single card can be pinned" rule (user directive):
   //    a second pin must unpin the first. >1 expanded = the rule regressed.
@@ -58,8 +64,8 @@ export function checkUiInvariants(vm) {
     if ((rows[i].wfCount | 0) !== n) push('wfcount-mismatch', `app ${rows[i].id} wfCount=${rows[i].wfCount} but ${n} workflow rows follow`);
   }
 
-  // 5) THE FIXTURES: exactly one Admin row, exactly one New-app entry, and New-app is LAST.
-  if (rows.filter((r) => r.role === 'admin').length !== 1) push('admin-not-one', 'expected exactly one admin fixture');
+  // 5) THE FIXTURES (CN-2, DESIGN_vitals.md §8.4): the Admin fixture is REMOVED (home is the launch page). Exactly
+  //    one New-app entry, and it is LAST.
   const newApps = rows.filter((r) => r.role === 'new-app');
   if (newApps.length !== 1) push('newapp-not-one', 'expected exactly one new-app entry');
   else if (rows.length && rows[rows.length - 1].role !== 'new-app') push('newapp-not-last', 'new-app must be the last row');

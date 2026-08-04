@@ -20,7 +20,7 @@ import { buildRailTree } from './railTree.js';
 
 /** The frozen enums the view-model is allowed to name. Exported so uiInvariants.js validates against the same source. */
 export const PANES = Object.freeze(new Set(['rail', 'thread', 'canvas']));
-export const RAIL_TABS = Object.freeze(new Set(['conversations', 'automations']));
+export const RAIL_TABS = Object.freeze(new Set(['conversations', 'automations', 'connect']));   // CN-1 — the Connect tab (login/connection status)
 export const RAIL_ROLES = Object.freeze(new Set(['app', 'subtask', 'workflow', 'plain', 'admin', 'new-app', 'overview']));
 
 /**
