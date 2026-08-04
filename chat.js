@@ -229,7 +229,11 @@ async function _ensureConversation() {
 function _clearCurrentConversation() {
   // v2.74.1623 — a surface change PARKS the wizard (state intact; it revives on its desk's reopen). The one thing
   // that must not survive the park is the v1622 composer LOCK — the surface now belongs elsewhere.
-  try { if (_wfWizard) releaseComposer('wizard'); } catch { /* */ }   // PS-5 — the park restores via the claim (chip included)
+  // WFG-1 transition-fix (workflow review) — PARK the wizard: release its PAGE slot (drops the .wf-page node +
+  // un-hides the front-page skeleton) AND its composer, keeping _wfWizard alive to revive on its desk's reopen. Was
+  // composer-only — the builder page then leaked onto Home / a re-shown empty-state (the reported bug). The v1623
+  // "the next page-show restores via the claim" assumption failed: non-wizard shows toggle .hidden, never claim 'page'.
+  try { if (_wfWizard) releaseSurface('wizard'); } catch { /* */ }
   _currentConversationId = null;
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
@@ -2022,6 +2026,7 @@ function focusForAssistant(cap) {
 // type/archetype persist internally as loop-shape fields on defs, never as a user choice. A preconfigured desk's
 // seed stays editable per-instance (`seed` to view, `seed: <instructions>` to change — syncs the durable def).
 function _renderAppGallery() {
+  if (_wfWizard) releaseSurface('wizard');   // WFG-1 transition-fix — a page-show path must EVICT a parked/live wizard's page slot (only _wfEnterPage claims 'page', so no other show does); keeps _wfWizard alive to revive on its desk's reopen
   $('messages').innerHTML = '';
   $('messages').classList.add('hidden');
   $('empty-state').classList.remove('hidden');
@@ -2080,6 +2085,7 @@ function _wfSuitsLine(suits) {
 }
 
 async function _renderWorkflowGallery(opts = {}) {
+  if (_wfWizard) releaseSurface('wizard');   // WFG-1 transition-fix — evict a parked/live wizard's page slot before showing the gallery (same class as _renderAppGallery; only _wfEnterPage claims 'page')
   const scopeDesk = opts.scopeDesk || null;
   const gen = ++_wfGalleryGen;    // this render's generation; a later re-render invalidates its pending async appends
   try { $('messages').innerHTML = ''; $('messages').classList.add('hidden'); $('empty-state').classList.remove('hidden'); } catch { /* */ }
@@ -16770,7 +16776,7 @@ async function _rehydrateConversation(conv) {
   // case to REVIEW the open-case step — inspecting the result IS the review). Opening another conversation PARKS
   // the wizard (unlock the composer — the surface belongs to the conv being opened); opening the wizard's OWN
   // desk revives it at the end of this rehydrate (the page re-asserts + the phase lock re-applies).
-  try { if (_wfWizard && _wfWizard.convId !== String(conv.id)) releaseComposer('wizard'); } catch { /* */ }   // PS-5
+  try { if (_wfWizard && _wfWizard.convId !== String(conv.id)) releaseSurface('wizard'); } catch { /* */ }   // WFG-1 transition-fix — foreign switch parks the wizard: PAGE slot + composer released, _wfWizard kept alive (revives at the same-conv guard below). Was composer-only → latent .wf-page + surface-ownership leak.
   // v2.74.1737 (live report: resolved presence case still in the Rail hours later) — LEAVING a vtc_ case completes
   // its deferred dismissal. The v1703 guard rightly never yanks the case being VIEWED, but its "it clears next
   // sync" assumed syncs are frequent — they are EVENT-driven, so with no later vitals event the resolved case sat

@@ -1,8 +1,13 @@
 # DESIGN — Workflows as first-class entities + the workflow gallery (WFG)
 
-**Status:** spec v0.1 (2026-08-04) — **DESIGN-FIRST, nothing built.** Prompted by the direction *"'+ Workflow'
-should function like '+ View': a gallery page of presets + custom, not a dump into the open view."* Two explorer
-maps ground it (the app-gallery pattern; the workflow model + a presets verdict). The load-bearing decision here is
+**Status:** spec v0.1 (2026-08-04); **WFG-1 BUILT** (`Core/workflowCatalog.js` + the gallery in `chat.js`). AS-BUILT
+DEVIATION (user direction): the per-view **"＋ Workflow" IS the single entry**, opening the gallery pre-scoped to
+that view — a workflow is always added under a specific view. The unscoped top-level "＋ New workflow" entry AND the
+"add to which view?" picker (§7) were built, then **removed** (§10-A resolved: scoped, not standalone), so the
+picker / top-level / one-shot-handoff bullets in §7 are **superseded**; WFG-2/3 remain deferred. Live eyeball still
+owed (gallery render · preset→plan-gate · scoped bind). Prompted by the direction *"'+ Workflow' should function
+like '+ View': a gallery page of presets + custom, not a dump into the open view."* Two explorer maps ground it (the
+app-gallery pattern; the workflow model + a presets verdict). The load-bearing decision here is
 **architectural** — whether a workflow becomes a first-class independent entity — not a UI reskin. Recommendation:
 **first-class in identity + presentation, scope-bound in execution** (the middle path, §5), delivered in three
 phases (§6) so nothing is over-built ahead of the design (the canvas lesson). Companions:
@@ -178,8 +183,9 @@ Mirror `_renderAppGallery` exactly — same surface, same card idiom (the explor
   1. **Preset cards** — `<button class="suggestion-card">` per `galleryWorkflows()` (§8): name / description /
      a `suggestion-card-meta`>`suggestion-card-kind` "suits" line. Click → the "add to which view?" step, then seed
      the intent + steps into the plan gate.
-  2. **`+ Custom workflow…`** — `<button class="suggestion-card suggestion-card-preset">` → "add to which view?" →
-     `_promptWorkflowIntent()` in that view.
+  2. **`+ Custom workflow…`** — `<button class="suggestion-card suggestion-card-preset">` → the step-by-step
+     **builder** (`_startWorkflowWizard()`, WW-1b) in that view. (As-built: scoped, no picker; user direction — the
+     builder, not the describe-it `_promptWorkflowIntent` intent door.)
   3. **`Your workflows`** — a `suggestion-section` divider, then one card per `listAllWorkflows()` item, each labeled
      with its owning view (resolve `appId`→desk title); click opens/runs. `<div role="button" tabindex="0">` + a
      nested delete button (the "Your views" a11y pattern), else `<button>`.
@@ -230,8 +236,9 @@ Mirror `Core/appCatalog.js` with a new pure module `Core/workflowCatalog.js`:
 
 ## 10. Open decisions
 
-- **A — binding model for WFG-1.** Recommended: **standalone gallery ending in "add to which view?"** (truest
-  `+ View` mirror; directly fixes "defaults to the open view"). Alt: pick the target view first, then browse.
+- **A — binding model for WFG-1. RESOLVED (user direction): SCOPED.** The per-view "＋ Workflow" is the single
+  entry and opens the gallery pre-scoped to its view; no unscoped top-level entry, no "add to which view?" picker (a
+  workflow is always added under a specific view). The standalone-gallery + picker option was built then removed.
 - **B — the preset set.** Recommended: I curate the §8 starter set (generic, editable). Alt: ship WFG-1 shell (custom
   + yours) first, add presets once the exact set is agreed. If specific templates are wanted, name them and they seed
   §8 instead of the generic guesses.
