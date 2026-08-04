@@ -356,6 +356,10 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       // x-csrf-token at the executor, so every existing recipe is byte-identical.
       apiHost: _str(r.apiHost) || null,
       listPath: _str(r.listPath) || null,   // v1936 — where this response's ROWS live, when heuristics can't reach them (a status envelope)
+      // v2.74.2002 (Invariant #3 hop 3) — the DISPLAY projection: which of this record's fields are worth showing,
+      // and which nested array renders as a chain. Carried whole, like `drill` — hand-picking a subset of a
+      // structured marker is what created the `also`/`joinKey`/`matchOn` incidents.
+      display: (r.display && typeof r.display === 'object' && !Array.isArray(r.display)) ? { ...r.display } : null,
       csrfHeader: _str(r.csrfHeader) || null,
       // v2.74.1955 — CSRF FROM THE COOKIE. Proven live 2026-08-02 18:41: `X-XSRF-TOKEN-ST` is readable from
       // document.cookie, a request carrying it returns 200, and the identical request with NO token returns 401 —

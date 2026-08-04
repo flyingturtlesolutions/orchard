@@ -54,7 +54,7 @@ const ENTRY_FIELD_MAP = new Set([
   // identity + presence probes (→ tool)
   'verifyIdentity', 'identityProbe', 'probeAccept', 'identityGql', 'capClass', 'autoRequires',
   // human-page + digest + join markers (→ tool)
-  'itemUrl', 'listUrl', 'displayId', 'joinKey', 'writeMap', 'pulse', 'drill', 'resolve',
+  'itemUrl', 'listUrl', 'displayId', 'joinKey', 'writeMap', 'pulse', 'drill', 'resolve', 'display',
   // consumed upstream of the leg, by name:
   'console',           // signInLandingPath (connectorRecipes.js:926) — the human sign-in landing path (v1704 ZD `/agent`); a connections-flow field, never a leg field
   // v2.74.1877 — `coverage` is read by `coverageOf()` (Core/synthEntity.js) from the CATALOG, keyed by recipe id,

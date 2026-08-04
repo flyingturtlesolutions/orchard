@@ -2711,7 +2711,7 @@ async function _childReadItem(conns, task, tabId) {
     if (!cleg) return '';
     const run = await _runConnectorLeg(cleg, coerceParams(d.params || {}, cleg.paramSchema), { tabId });
     if (!run || !run.ok) return '';
-    const lines = renderConnectorLines(run.value, { name: cleg.name || 'Record', displayId: _legDisplayId(cleg) });
+    const lines = renderConnectorLines(run.value, { name: cleg.name || 'Record', displayId: _legDisplayId(cleg), display: _legDisplay(cleg) });
     return lines ? lines.join('\n') : '';
   } catch { return ''; }
 }
@@ -2747,7 +2747,7 @@ async function _runChildTask(child, task) {
   if (cleg) {
     // a session-ride READ — safe to run unattended.
     const run = await _runConnectorLeg(cleg, coerceParams(d.params || {}, cleg.paramSchema), { tabId });
-    if (run.ok) { const lines = renderConnectorLines(run.value, { name: cleg.name || 'Results', displayId: _legDisplayId(cleg) }); body = lines ? lines.join('\n') : 'Done.'; status = 'done'; }
+    if (run.ok) { const lines = renderConnectorLines(run.value, { name: cleg.name || 'Results', displayId: _legDisplayId(cleg), display: _legDisplay(cleg) }); body = lines ? lines.join('\n') : 'Done.'; status = 'done'; }
     else { body = `Needs you — couldn’t ${_legFailName(cleg, 'run that')}${run.error ? ` — ${_errWord(run.error)}` : ''}.${run.hint ? `  ${run.hint}.` : ''}`; }
   } else if (d && d.intent === 'act' && d.capabilityId) {
     // a page action / write capability — NOT run unattended (the safety pause).
@@ -6798,6 +6798,9 @@ function _sidecarFields(value, alsoLeg, spec = null) {
 // CX-9k (v2.74.1617) — the leg's recipe-declared HUMAN display-id keys (normalized to an array at recipeToLeg),
 // forwarded into renderConnectorLines so a row's "#id" shows the number users recognize, not the first …Number field.
 const _legDisplayId = (leg) => (leg && leg.tool && Array.isArray(leg.tool.displayId)) ? leg.tool.displayId : null;
+// v2.74.2002 (Invariant #3) — the leg's DISPLAY projection, the twin of _legDisplayId. Six renderConnectorLines
+// call sites read it; a new one that forgets is the 'one of N call sites' class this codebase has hit five times.
+const _legDisplay = (leg) => (leg && leg.tool && leg.tool.display && typeof leg.tool.display === 'object') ? leg.tool.display : null;
 
 function _legFailName(leg, fallback = 'do that') {
   // v2.74.1591 — read as a SENTENCE after "couldn’t": catalog names are third-person ("Returns the warranty
@@ -8891,7 +8894,7 @@ async function _fieldFollowup(text) {
   const msgFor = (body) => { const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };   // v2.74.1554 — the user echo happens at sendChatMessage ENTRY (invariant #4)
   // "details / everything / all fields / full record" → the full deterministic record render
   if (/^(details|everything|all(\s+fields)?|full\s+record)$/.test(q)) {
-    const lines = renderConnectorLines(obj, { name: (g.leg && g.leg.name) || 'Record', displayId: _legDisplayId(g.leg) });
+    const lines = renderConnectorLines(obj, { name: (g.leg && g.leg.name) || 'Record', displayId: _legDisplayId(g.leg), display: _legDisplay(g.leg) });
     if (!lines) return false;
     msgFor(lines.join('\n'));
     try { _orchLog(`FIELD_FOLLOWUP ▸ "details" → full record (${(g.leg && (g.leg.tool && g.leg.tool.recipeId)) || ''})`); } catch { /* */ }
@@ -9541,7 +9544,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           continue;
         }
         if (cr && cr.ok) {
-          const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results', displayId: _legDisplayId(cr.leg) });
+          const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results', displayId: _legDisplayId(cr.leg), display: _legDisplay(cr.leg) });
           st.lastValue = cr.value; _ledgerRead(cr.value);
           st.lastLeg = cr.leg;   // DK-8f — the SOURCE leg rides along (its `drill` marker lets a following fan-out pull each item's FULL record)
           st.readouts.push(lines ? lines.join('\n') : `Ran “${clause.text}”.`);
@@ -12064,7 +12067,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   // group's full read would resurface the very rows the filter excluded.
   for (const it of nonEmpty) secs.push(headNote
     ? [`${it.label}:`, ...it.rows.slice(0, 6).map((h) => `- ${(dj.label || []).map((f) => h[f]).filter((v) => v != null && v !== '').join(' · ')}`)].join('\n')
-    : (renderConnectorLines(it.value, { name: it.label, displayId: _legDisplayId(leg) }) || [`${it.label} (0).`]).join('\n'));
+    : (renderConnectorLines(it.value, { name: it.label, displayId: _legDisplayId(leg), display: _legDisplay(leg) }) || [`${it.label} (0).`]).join('\n'));
   // v2.74.1524 — the RESULT is the message; a wall of empty group names isn't (live: "0 across all 121 divisions"
   // followed by every one of the 121 names — the user asked for "only the result"). Name empties only while the
   // list stays readable; past that, the COUNT carries all the information.
@@ -12607,7 +12610,7 @@ async function _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, val
       return true;
     }
     // STOPPED EARLY, so we cannot say how many exist — only that here is one and where it came from.
-    const lines = renderConnectorLines({ results: [hit.row] }, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
+    const lines = renderConnectorLines({ results: [hit.row] }, { name: leg.name || 'Record', displayId: _legDisplayId(leg), display: _legDisplay(leg) });
     _setMessageBody(msg, `Here's one, from **${escHtml(String(hit.label))}**${hit.more > 0 ? ` (that ${noun} has ${hit.more} more)` : ''} — I stopped looking after the first, so there may be others in the remaining ${cells.length - scanned} ${noun}s.\n\n${lines ? lines.join('\n') : ''}`, { markdown: true });
     _lastGroundedRead = { leg, params: { ...rp.params, [axis]: hit.value }, labels: { [axis]: String(hit.label) }, at: Date.now(), itemId: primaryItemId(hit.row), value: { results: [hit.row] } };
     // v2.74.1886 — `_currentConversationId`, NOT `_askConvId`. The latter is a LOCAL in `_rideEachFanOut` and in the
@@ -13279,7 +13282,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // SINGLE record → the FULL FORMATTED RECORD, deterministically (live: the clause rode along as words and the shaper
     // digested anyway — but "details" means the fields, not a summary). Lists still digest (N records can't full-render).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
-      const flines = renderConnectorLines(rr.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
+      const flines = renderConnectorLines(rr.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg), display: _legDisplay(leg) });
       if (flines) { _setMessageBody(msg, flines.join('\n'), { markdown: true }); return true; }   // v1949 — markdown record render
     }
     _refreshResolveCacheFrom(leg, rr.value);   // v1880 — a live read of a via-target teaches the resolver's cache
@@ -13299,7 +13302,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // answer (a miss / a dropped count claim). Ends the nondeterministic prose-XOR-list lottery the review flagged.
     {
       const answer = (shaped && shaped.answer) ? ensureScopeNamed(shaped.answer, Object.values(_resolvedLabels || {})) : '';
-      const rlines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(rr.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) }) : null;
+      const rlines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(rr.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg), display: _legDisplay(leg) }) : null;
       const listBody = (rlines && rlines.length) ? rlines.join('\n') : '';
       const body = (answer && listBody) ? `${answer}\n\n${listBody}` : (answer || listBody);
       // v2.74.1964 — validate Fix A (additive) is RUNNING from gl, not by eye: record which branch fired + whether the
@@ -13427,7 +13430,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     const facts = readShapeFacts(res.value, { displayId: _legDisplayId(leg), ask });   // v1887 — the twin call: the declared human id rides into the facts
     // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
     if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
-      const flines = renderConnectorLines(res.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg) });
+      const flines = renderConnectorLines(res.value, { name: leg.name || 'Record', displayId: _legDisplayId(leg), display: _legDisplay(leg) });
       if (flines) { _setMessageBody(msg, flines.join('\n'), { markdown: true }); return true; }   // v1949 — markdown record render
     }
     _refreshResolveCacheFrom(leg, res.value);   // v1880 — the twin call
@@ -13443,7 +13446,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // stays in the user's own panel) renders BENEATH it when showRecords, or ALONE on a miss / a dropped count claim.
     {
       const answer = (shaped && shaped.answer) ? ensureScopeNamed(shaped.answer, Object.values(_resolvedLabels || {})) : '';
-      const lines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(res.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg) }) : null;
+      const lines = (!answer || (shaped && shaped.showRecords)) ? renderConnectorLines(res.value, { name: leg.name || 'Results', displayId: _legDisplayId(leg), display: _legDisplay(leg) }) : null;
       const listBody = (lines && lines.length) ? lines.join('\n') : '';
       const body = (answer && listBody) ? `${answer}\n\n${listBody}` : (answer || listBody);
       // v2.74.1964 — validate Fix A (additive) is RUNNING from gl, not by eye: record which branch fired + whether the

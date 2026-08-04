@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
+import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems, normalizeDisplay } from './connectorRender.js';
 import { renderMarkdown } from '../markdown.js';   // v1949 — assert the RENDERED HTML, not eyeball the panel
 
 describe('primaryList — find the data array', () => {
@@ -591,5 +591,72 @@ describe('primaryList — the Shopify order TIMELINE shape (v1921, pinned on the
     assert.match(text, /created this order for/);
     assert.doesNotMatch(text, /StaffMember|83662733446/);
     assert.doesNotMatch(text, /`#/);                        // v1949 — no code-span # sigil on a prose row
+  });
+});
+
+// ── v2.74.2002 — THE DECLARED DISPLAY PROJECTION ───────────────────────────────────────────────────────────
+// The generic walk flattens nested values positionally: an array-of-objects becomes the FIRST element's scalars
+// in declaration order + "(+N more)", and a plain object becomes a comma-join. Live, that rendered UPS's own site
+// plumbing and a homeowner's street address as record content, and collapsed a 5-stop scan history to four
+// booleans. No heuristic separates `milestones[].location` from `sendUpdatesOptions.url` — both are strings on
+// nested objects — so the recipe declares what matters.
+describe('renderConnectorLines — declared display projection', () => {
+  const UPS = { trackDetails: [{
+    trackingNumber: '1ZTEST', packageStatus: 'On the Way', packageStatusType: 'I', progressBarType: 'inTransit',
+    simplifiedText: 'Arriving Thursday', isMobileDevice: false, promo: { a: false, b: false },
+    sendUpdatesOptions: { page: 'MyChoiceBridgePage', url: '/ppc/ppc.html/preferencePage/mychoicePref' },
+    shipToAddress: { line: '994 OCEAN CT', city: 'CARTHAGE', name: 'KATHRYN ALLEN' },
+    milestones: [
+      { isCurrent: false, isCompleted: true, date: '08/03/2026', time: '10:20 A.M.', location: 'United States', name: 'Label Created', nameKey: 'cms.stapp.x' },
+      { isCurrent: true, isCompleted: false, date: '08/04/2026', time: '06:12 A.M.', location: 'Carthage, NC', name: 'Out for Delivery', nameKey: 'cms.stapp.y' },
+    ] }] };
+  const DISPLAY = { show: ['packageStatus', 'simplifiedText'], rows: { path: 'milestones', pick: ['date', 'time', 'location', 'name'], label: 'Scan history' } };
+  const base = { name: 'Track a UPS package', displayId: ['trackingNumber'], listPath: 'trackDetails' };
+  const declared = () => renderConnectorLines(UPS, { ...base, display: DISPLAY }).join('\n');
+
+  it('the scan history renders as a CHAIN — every stop, no booleans, no cms keys', () => {
+    const t = declared();
+    assert.match(t, /\*\*Scan history\*\*/);
+    assert.match(t, /- 08\/03\/2026 · 10:20 A\.M\. · United States · Label Created/);
+    assert.match(t, /- 08\/04\/2026 · 06:12 A\.M\. · Carthage, NC · Out for Delivery/);
+    assert.doesNotMatch(t, /false/);
+    assert.doesNotMatch(t, /cms\.stapp/);
+    assert.doesNotMatch(t, /\(\+1 more\)/);
+  });
+
+  it('undeclared fields are OMITTED — site plumbing and PII stop being record content', () => {
+    const t = declared();
+    assert.doesNotMatch(t, /MyChoiceBridgePage/);
+    assert.doesNotMatch(t, /mychoicePref/);
+    assert.doesNotMatch(t, /KATHRYN ALLEN/);
+    assert.doesNotMatch(t, /994 OCEAN CT/);
+    assert.doesNotMatch(t, /Progress bar type/);
+  });
+
+  it('declared fields render, in declared order', () => {
+    const t = declared();
+    assert.ok(t.indexOf('Package status') < t.indexOf('Simplified text'));
+    assert.match(t, /\*\*Package status:\*\* On the Way/);
+  });
+
+  it('WITHOUT a declaration the generic path is byte-identical to before', () => {
+    const t = renderConnectorLines(UPS, base).join('\n');
+    assert.match(t, /MyChoiceBridgePage/);                 // the old behaviour, unchanged
+    assert.match(t, /\(\+1 more\)/);
+  });
+
+  it('normalizeDisplay rejects junk and caps', () => {
+    assert.equal(normalizeDisplay(null), null);
+    assert.equal(normalizeDisplay({}), null);
+    assert.equal(normalizeDisplay({ rows: {} }), null);     // a rows without a path is nothing
+    assert.deepEqual(normalizeDisplay({ show: ['a', '', 'b'] }).show, ['a', 'b']);
+    assert.equal(normalizeDisplay({ show: Array.from({ length: 40 }, (_, i) => `k${i}`) }).show.length, 16);
+    assert.equal(normalizeDisplay({ rows: { path: 'm', max: 999 } }).rows.max, 24);
+  });
+
+  it('a declared key naming an OBJECT is skipped — structure goes through `rows`', () => {
+    const t = renderConnectorLines(UPS, { ...base, display: { show: ['shipToAddress', 'packageStatus'] } }).join('\n');
+    assert.doesNotMatch(t, /KATHRYN ALLEN/);
+    assert.match(t, /On the Way/);
   });
 });

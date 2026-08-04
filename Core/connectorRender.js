@@ -412,7 +412,79 @@ export function recordDetails(o) {
  * cannot inject emphasis / a code span / a link (§9). Lines are joined with `\n`; blank-line entries ('') separate the
  * header/body/field blocks so the renderer sees real list + paragraph boundaries.
  */
-export function renderConnectorLines(value, { name = 'Results', displayId = null, listPath = '' } = {}) {
+// ── DISPLAY PROJECTION (v2.74.2002) — the recipe declares WHAT MATTERS about its record ────────────────────
+// `_extraFields` flattens any nested value positionally: an array-of-objects becomes the FIRST element's scalars
+// in declaration order plus `(+N more)`, and a plain object becomes a comma-join of its scalars. Against the live
+// UPS record that produced:
+//   Milestones: false, true, false, false, 08/03/2026, 10:20 A.M., United States, Label Created… (+4 more)
+//   Send updates options: MyChoiceBridgePage, /ppc/ppc.html/preferencePage/mychoicePr…
+//   Ship to address: 994 OCEAN CT, …, KATHRYN ALLEN, false…
+// Three failures in one rule: the four fields worth reading sit behind four booleans; four of five milestones are
+// dropped by the cap; and UPS's own site plumbing (a MyChoice preferences URL) renders as record content — as does
+// a homeowner's name and street address, for an ask that only wanted a package location.
+//
+// No heuristic separates `milestones[].location` from `sendUpdatesOptions.url` — both are strings on nested
+// objects. Only a declaration can. So a recipe may carry:
+//   display: { show: ['packageStatus', …], rows: { path: 'milestones', pick: ['date','time','location','name'] } }
+// `show` is an ORDERED ALLOW-LIST (present keys only, in that order) — it fixes noise and ordering together, and
+// makes omission the default, which is the privacy-safe direction. `rows` renders ONE nested array as a line list
+// instead of collapsing it. Absent → the generic path is untouched, so every other recipe behaves as before.
+// The full record is still RETAINED (Core/conversationFocus) — this governs display only, so anything hidden here
+// is still probeable without a re-fetch.
+export function normalizeDisplay(d) {
+  const m = (d && typeof d === 'object' && !Array.isArray(d)) ? d : null;
+  if (!m) return null;
+  const show = (Array.isArray(m.show) ? m.show : []).map((k) => String(k || '').trim()).filter(Boolean).slice(0, 16);
+  const r = (m.rows && typeof m.rows === 'object') ? m.rows : null;
+  const path = String((r && r.path) || '').trim();
+  const rows = path ? {
+    path,
+    pick: (Array.isArray(r.pick) ? r.pick : []).map((k) => String(k || '').trim()).filter(Boolean).slice(0, 8),
+    label: String(r.label || '').trim() || null,
+    max: Number.isFinite(r.max) && r.max > 0 ? Math.min(r.max, 24) : 12,
+  } : null;
+  return (show.length || rows) ? { show, rows } : null;
+}
+
+// The declared fields, in declared order, scalars formatted like the generic path. PURE.
+function _declaredFields(o, show, used = new Set()) {
+  const src = (o && typeof o === 'object') ? o : {};
+  const byLower = new Map(Object.keys(src).map((k) => [k.toLowerCase(), k]));
+  const out = [];
+  for (const want of show) {
+    const key = (want in src) ? want : byLower.get(want.toLowerCase());
+    if (!key) continue;
+    const v = src[key];
+    if (v == null || v === '' || typeof v === 'object') continue;   // a declared key must name a scalar; use `rows` for structure
+    const display = _trunc(String(v), (typeof v === 'string' && /\s/.test(v.trim())) ? 400 : 60);
+    if (display && !used.has(display)) out.push([key, display]);
+  }
+  return out;
+}
+
+// One nested array rendered as a LINE LIST — the whole chain, newest-declared-order, never collapsed to its head.
+function _chainLines(o, rows) {
+  const src = (o && typeof o === 'object') ? o : {};
+  const key = (rows.path in src) ? rows.path : Object.keys(src).find((k) => k.toLowerCase() === rows.path.toLowerCase());
+  const arr = key ? src[key] : null;
+  if (!Array.isArray(arr) || !arr.length) return [];
+  const lines = [];
+  for (const el of arr.slice(0, rows.max)) {
+    if (!el || typeof el !== 'object') continue;
+    const picked = (rows.pick.length ? rows.pick : Object.keys(el))
+      .map((p) => { const k = (p in el) ? p : Object.keys(el).find((x) => x.toLowerCase() === p.toLowerCase()); return k ? el[k] : null; })
+      .filter((x) => x != null && x !== '' && typeof x !== 'object' && typeof x !== 'boolean')
+      .map((x) => _trunc(String(x), 60));
+    if (picked.length) lines.push(`- ${_escMd(picked.join(' · '))}`);
+  }
+  if (!lines.length) return [];
+  const head = rows.label ? `**${_escMd(rows.label)}**` : `**${_escMd(_label(key))}**`;
+  const tail = arr.length > rows.max ? [`_+${arr.length - rows.max} more_`] : [];
+  return ['', head, ...lines, ...tail];
+}
+
+export function renderConnectorLines(value, { name = 'Results', displayId = null, listPath = '', display = null } = {}) {
+  const _disp = normalizeDisplay(display);
   const list = primaryList(value, { listPath });   // v1936 — the recipe's declared row path, when it has one
   if (list && list.length > 1) {
     const rows = list.slice(0, MAX_ROWS).map((o) => {
@@ -440,8 +512,10 @@ export function renderConnectorLines(value, { name = 'Results', displayId = null
     const out = [head || '_(no details)_'];
     if (it.body) out.push('', _escMd(String(it.body)));
     const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));   // don't repeat the title/status/id as an extra
-    const fields = _extraFields(obj, used, { max: 12 });   // CX-9g — the single-record budget
+    // v2.74.2002 — a DECLARED projection replaces the generic walk for this record; absent, nothing changes.
+    const fields = (_disp && _disp.show.length) ? _declaredFields(obj, _disp.show, used) : _extraFields(obj, used, { max: 12 });   // CX-9g — the single-record budget
     if (fields.length) { out.push(''); for (const [k, v] of fields) out.push(`- **${_escMd(_label(k))}:** ${_escMd(String(v))}`); }
+    if (_disp && _disp.rows) out.push(..._chainLines(obj, _disp.rows));
     if (it.url) out.push('', _escMd(String(it.url)));
     return out;
   }

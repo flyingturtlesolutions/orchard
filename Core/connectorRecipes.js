@@ -972,6 +972,16 @@ export const CONNECTOR_RECIPES = [
     retention: { days: 120, approximate: true, source: 'UPS published policy: standard tracking stays online ~120 days' },   // HZ-1 — an empty result past this is "aged out", not "no such package"
     contentType: 'application/json', verifyIdentity: false, write: false,   // a plain-JSON POST that READS (v1936: the catalog's first — see rideRecipe hop 1)
     id: 'ups_track', name: 'Track a UPS package', displayId: ['trackingNumber'], listPath: 'trackDetails', itemUrl: '/track?tracknum={tracking}&loc=en_US',
+    // v2.74.2002 — WHAT MATTERS about a tracked package. `listPath` lands the render on trackDetails[0], whose
+    // 40+ siblings include UPS's own site plumbing (sendUpdatesOptions → a MyChoice preferences URL,
+    // deliveryOptions, promo, progressBar*, cms.stapp.* i18n keys) and the consignee's name + street address.
+    // The generic walk showed all of it and collapsed `milestones` to its first element's booleans. `show` is an
+    // ordered allow-list, so everything not named here is omitted from DISPLAY — still retained and probeable.
+    // shipToAddress is deliberately NOT shown: "where is my package" does not need a homeowner's home address.
+    display: {
+      show: ['packageStatus', 'simplifiedText', 'deliveredDateDetail', 'receivedBy', 'leftAt', 'errorText'],
+      rows: { path: 'milestones', pick: ['date', 'time', 'location', 'name'], label: 'Scan history' },
+    },
     does: 'TRACK a UPS package by its tracking number (1Z…): current status, delivery date/time, who signed for it, where it was left, and the full scan history city by city. Use for "where is / did it arrive / what happened to" a shipment — the tracking number comes from the order or shipment record. COVERS ABOUT THE LAST 120 DAYS: UPS drops standard tracking after roughly 4 months, so an older shipment returns nothing even though the number is valid',
     endpoint: '/track/api/Track/GetStatus?loc=en_US',
     // v2.74.1954 — CORRECTION: this said "verbatim from the capture (entry 1673)". It is not. Entry 1673 carries a
