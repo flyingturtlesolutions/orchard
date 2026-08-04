@@ -46,7 +46,7 @@ import { selectPrior, describePick } from './Core/priorSelect.js';   // PS-1 (v2
 import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
 import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown, queueStateLines } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown; v1375 — the queue-state breakdown
 import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half); FL-1e (v1352) — the "show work" run trace
-import { loadProposals, addProposals, decideProposal, pendingCounts } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue; FL-6c — batched counts for the Rail chip
+import { loadProposals, addProposals as _addProposalsRaw, decideProposal as _decideProposalRaw, pendingCounts } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue; FL-6c — batched counts for the Rail chip
 import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick; v1381 — pendings survive sweeps
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
@@ -623,46 +623,15 @@ $('btn-rail').addEventListener('pointerleave', () => {
 $('btn-close-rail').addEventListener('click', _closeRail);
 // v2.74.1030 — the dark click-to-close overlay is gone (the drawer pushes the chat instead of covering it).
 
-// Delete ALL conversations from the history menu (confirm first; this can't be undone). Wipes the active
-// conversation too, then resets to the empty state — mirrors the per-item delete's active-conversation path.
-$('btn-delete-all-conversations').addEventListener('click', async () => {
-  const list = await ConversationStore.list();
-  if (!list.length) return;
-  if (!confirm(`Delete all ${list.length} conversation${list.length === 1 ? '' : 's'}? This can't be undone.`)) return;
-  try { _getDevBridge()?.cancelAllRuns?.(); } catch { /* */ }   // v2.74.1095 — stop any live dev runs first so they don't orphan (hold host slots)
-  // v2.74.1691 (DESIGN_cadence.md §2.3) — the per-row delete stamps a desk's saved workflows with its NAME before
-  // the record dies (chat.js:1006) so they stay findable in Studio; deleteAll skipped it, stranding every desk's
-  // workflows unnamed. A bulk wipe takes ALL desks, so unlike the per-row path there is no live SIBLING to protect
-  // — stamp each distinct workflow key once, best-effort, never blocking the wipe.
-  try {
-    const _seen = new Set();
-    for (const c of list) {
-      for (const k of [c && c.instanceId, c && c.appId].filter(Boolean)) {
-        if (_seen.has(k)) continue;
-        _seen.add(k);
-        await markWorkflowsOrphaned(k, c && c.title);
-        // CD-1 / §10.1 (v2.74.1713) — every desk dies here, so every fleet clock goes with it (the per-row
-        // delete's orphaned-alarm fix, bulk edition). Best-effort, never blocks the wipe.
-        _orchReq('FLEET_SCHEDULE', { instanceId: k, off: true }).catch(() => {});
-        _orchReq('FLEET_ROUTINE', { instanceId: k, off: true }).catch(() => {});
-      }
-    }
-  } catch { /* a stamp must never block the wipe */ }
-  // v2.74.1719 — every desk dies here, so any live wizard / pending intent prompt dies with them (see the per-row
-  // delete's rationale: a wizard parked for a desk that will never reopen is a zombie holding the composer lock).
-  if (_wfWizard) _wfAbandon();
-  if (_wfIntentPending) { _wfIntentPending = null; releaseComposer('workflow-intent'); }   // PS-5
-  await ConversationStore.deleteAll();
-  _clearCurrentConversation();
-  _resetConversation();
-  await renderSuggestionCards();
-  await _renderRailList();
-});
+// v2.74.1999 — the "delete all conversations" header icon + handler were REMOVED (a one-click destructive bulk
+// wipe didn't belong in the rail header). The per-row delete + Studio remain the ways to remove conversations;
+// ConversationStore.deleteAll() is retained (unused here) for any future re-home behind a safer affordance.
 
 // v2.74.1933 — the rail has two TABS: Conversations (the accordion) and Automations (scheduled workflows +
 // parked runs, cross-desk). _railTab tracks which is showing; the open/refresh paths render the active one.
 let _railTab = 'conversations';
 async function _renderActiveRailTab(opts = {}) {
+  void _updateTabDots();   // CN-1.1 — refresh the unified tab attention dots on any rail render
   if (_railTab === 'automations') return _renderRailAutomations();
   if (_railTab === 'connect') return _renderConnect();   // CN-1 — the Connect tab (login/connection status)
   return _renderRailList(opts);
@@ -679,7 +648,6 @@ function _switchRailTab(tab) {
     $('rail-list').hidden = tab !== 'conversations';
     $('rail-automations').hidden = tab !== 'automations';
     const _cx = $('rail-connect'); if (_cx) _cx.hidden = tab !== 'connect';   // CN-1 — the Connect panel
-    $('btn-delete-all-conversations').style.display = tab === 'conversations' ? '' : 'none';   // delete-all is conversations-only
   } catch { /* */ }
   void _renderActiveRailTab({ force: true });
 }
@@ -689,16 +657,57 @@ try { document.querySelectorAll('.rail-tab').forEach((t) => t.addEventListener('
 // The user is responsible for ONE thing: keeping connections signed in. Connect shows a card ONLY when the user must
 // act — sign in, or (un-auto-healable drift) contact an admin. Same VITALS_STATUS source as the dev Admin view;
 // drift / reachability / vitals bars stay INVISIBLE here (they are the §8.3 dev render). Badge = VITALS_BADGE open.
-async function _updateConnectBadge() {
+// CN-1.1 (user directive) — UNIFIED TAB ATTENTION DOTS: one treatment for all three tabs. Each tab shows a small
+// NEUTRAL dot when it has actionable items — Chat: views with pending proposals · Automate: parked runs · Connect:
+// connections needing sign-in. The COUNT lives INSIDE the tab (the panel / rows), not on the label; silence when
+// zero. The ☰ rail-toggle dot is the ROLL-UP (same visual language) via _tabAttention. One fetch of the three
+// sources, called on every active-tab render + vitals events + boot (never the per-second status tick).
+let _tabAttention = false;
+function _setTabDot(tabId, n, ariaLabel) {
   try {
-    const btn = $('rail-tab-connect'); if (!btn) return;
-    let n = 0;
-    try { const r = await _orchReq('VITALS_BADGE', {}); n = (r && r.success !== false && Number(r.open)) || 0; } catch { /* */ }
-    let badge = btn.querySelector('.rail-tab-badge');
-    if (n > 0) { if (!badge) { badge = document.createElement('span'); badge.className = 'rail-tab-badge'; btn.appendChild(badge); } badge.textContent = String(n); }
-    else if (badge) badge.remove();
+    const btn = $(tabId); if (!btn) return;
+    let dot = btn.querySelector('.rail-tab-dot');
+    if (n > 0) {
+      if (!dot) { dot = document.createElement('span'); dot.className = 'rail-tab-dot'; dot.setAttribute('aria-hidden', 'true'); btn.appendChild(dot); }
+      btn.setAttribute('aria-label', ariaLabel);   // the count a screen reader can't get from the decorative dot
+    } else {
+      if (dot) dot.remove();
+      btn.removeAttribute('aria-label');   // fall back to the visible label text ("Chat" / "Automate" / "Connect")
+    }
   } catch { /* */ }
 }
+async function _updateTabDots() {
+  try {
+    let signIns = 0, parked = 0, pending = 0;
+    try { const r = await _orchReq('VITALS_BADGE', {}); signIns = (r && r.success !== false && Number(r.open)) || 0; } catch { /* */ }
+    try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked.length : 0; } catch { /* */ }
+    try {
+      const all = await ConversationStore.list();
+      const insts = (all || []).filter((c) => c && c.kind !== 'dev' && c.instanceId).map((c) => c.instanceId);
+      const counts = insts.length ? await pendingCounts(insts) : {};
+      pending = Object.values(counts || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+    } catch { /* */ }
+    _setTabDot('rail-tab-conversations', pending, `Chat — ${pending} pending review${pending === 1 ? '' : 's'}`);
+    _setTabDot('rail-tab-automations', parked, `Automate — ${parked} parked run${parked === 1 ? '' : 's'} awaiting a decision`);
+    _setTabDot('rail-tab-connect', signIns, `Connect — ${signIns} connection${signIns === 1 ? '' : 's'} to sign in`);
+    _tabAttention = (pending + parked + signIns) > 0;
+    _updateRailActionDot();   // refresh the ☰ roll-up now that _tabAttention changed
+  } catch { /* */ }
+}
+// CN-1.1 finding-fix (adversarial verify) — the pending-proposal count feeds the Chat tab dot + the ☰ roll-up, but
+// (unlike parked/sign-in changes, which fire their own vitals events into _updateTabDots) proposal changes had NO
+// trigger — so a scheduled sweep that minted proposals while the rail was CLOSED left the dot dark until an unrelated
+// render. addProposals (mint) and decideProposal (approve/reject/stale/executed) are the TWO ProposalStore funnels;
+// wrap each to ping AFTER the write persists (a ping BEFORE persist would read the stale count and stick the dot).
+// Coalesced (150ms) so a bulk approve / stale-sweep loop recomputes once, not per item — the three sources are
+// read-only + idempotent, and _updateTabDots reads fresh state at fire time (never a captured snapshot).
+let _tabDotsTimer = null;
+function _pingTabDots() {
+  if (_tabDotsTimer) return;
+  _tabDotsTimer = setTimeout(() => { _tabDotsTimer = null; void _updateTabDots(); }, 150);
+}
+async function addProposals(...a) { try { return await _addProposalsRaw(...a); } finally { _pingTabDots(); } }
+async function decideProposal(...a) { try { return await _decideProposalRaw(...a); } finally { _pingTabDots(); } }
 function _connectCard(kind, subject) {
   const card = document.createElement('div');
   card.className = `connect-card connect-card-${kind}`;
@@ -718,7 +727,7 @@ function _connectCard(kind, subject) {
 }
 async function _renderConnect() {
   const panel = $('rail-connect'); if (!panel) return;
-  void _updateConnectBadge();
+  void _updateTabDots();
   let r = null;
   try { r = await _orchReq('VITALS_STATUS', {}); } catch { /* */ }
   panel.innerHTML = '';
@@ -848,7 +857,7 @@ function _updateRailActionDot() {
   if (!btn) return;
   let awaiting = false;
   try { awaiting = !!_getDevBridge()?.anyAwaiting?.(); } catch { /* */ }
-  btn.classList.toggle('needs-action', awaiting);
+  btn.classList.toggle('needs-action', _tabAttention || awaiting);   // CN-1.1 — the ☰ dot is the roll-up of the tab attention dots + a dev run awaiting input
 }
 let _railStatusTimer = null;
 function _startRailStatusTimer() {
@@ -10184,6 +10193,23 @@ function _railParkedRow(p) {
 // each as the same _railWorkflowRow the Conversations tab uses (run-in-card / schedule / history / delete all
 // work standalone; the pin/section logic no-ops without a section parent). Cross-desk, so a workflow shows
 // its owning desk name via the parentConv passed to the row.
+// CN-1.2 (user directive) — the "＋ Workflow" add row, per VIEW. Extracted so BOTH a desk-group AND the EMPTY
+// Automate tab can offer it (creation is per-view: a workflow lives in a desk). Opens the view, then prompts intent.
+function _railWfAddRow(desk) {
+  const add = document.createElement('div');
+  add.className = 'rail-item is-subtask rail-wf-add';
+  add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>'
+    + '<div class="rail-item-meta rail-add-desc">save a multi-step task you run often — it can run on a schedule</div>';
+  add.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    _closeRail();
+    if (desk.id !== _currentConversationId) await _openConvFullTimeline(desk);
+    _promptWorkflowIntent();
+  });
+  _wireRowKeyboard(add, () => add.click(), 'New workflow in ' + String(desk.title || 'this view'));
+  return add;
+}
+
 async function _renderRailAutomations() {
   const live = $('rail-automations'); if (!live) return;
   // WFC-2 parity (v2.74.1934) — a live card RUN is an absolute fence: re-rendering would destroy the running
@@ -10218,10 +10244,16 @@ async function _renderRailAutomations() {
 
   const groups = [...wfByDesk.values()].filter((g) => g.wfs.length);
   if (!parked.length && !groups.length) {
+    // CN-1.2 (user directive) — the EMPTY Automate tab keeps a REACHABLE ＋ Workflow (it was text-only, pointing
+    // elsewhere). Creation is per-view, so offer a ＋ Workflow row for each existing view (recency-ordered); with no
+    // views yet, point to creating one in Chat first (a workflow has to live in a view).
     const empty = document.createElement('div');
     empty.className = 'rail-automations-empty';
-    empty.textContent = 'No workflows yet. Open a view and use its ＋ Workflow to save a multi-step task — it appears here, and can run on a schedule.';
+    empty.textContent = desks.length
+      ? 'No workflows yet — save a multi-step task you run often (it can run on a schedule). Add one to a view:'
+      : 'No workflows yet. A workflow lives in a view — create a view in Chat first, then add one here.';
     container.appendChild(empty);
+    for (const desk of desks.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) container.appendChild(_railWfAddRow(desk));
     live.replaceChildren(...container.childNodes);
     return;
   }
@@ -10242,19 +10274,8 @@ async function _renderRailAutomations() {
       return ad - bd;
     });
     for (const wf of g.wfs) container.appendChild(_railWorkflowRow({ wf, wfKey: wf.appId }, g.desk));
-    // ＋ Workflow — creation stays reachable per desk (the desk-row ＋ Workflow row is gone from Conversations)
-    const add = document.createElement('div');
-    add.className = 'rail-item is-subtask rail-wf-add';
-    add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>'
-      + '<div class="rail-item-meta rail-add-desc">save a multi-step task you run often — it can run on a schedule</div>';
-    add.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      _closeRail();
-      if (g.desk.id !== _currentConversationId) await _openConvFullTimeline(g.desk);
-      _promptWorkflowIntent();
-    });
-    _wireRowKeyboard(add, () => add.click(), 'New workflow in ' + String(g.desk.title || 'this view'));
-    container.appendChild(add);
+    // ＋ Workflow — creation stays reachable per view (the desk-row ＋ Workflow row is gone from Conversations)
+    container.appendChild(_railWfAddRow(g.desk));
   }
   if (!live.isConnected) return;
   live.replaceChildren(...container.childNodes);
@@ -17101,7 +17122,7 @@ function _incidentCardBody(inc) {
 // Closed incidents that never had a case (pre-VT-2b history) are left alone — no retro-minting.
 let _vtSyncChain = Promise.resolve();
 function _syncIncidentCases(status = null) {
-  try { void _updateConnectBadge(); } catch { /* CN-1 — keep the Connect tab badge live on every incident sync */ }
+  try { void _updateTabDots(); } catch { /* CN-1 — keep the Connect tab badge live on every incident sync */ }
   const step = _vtSyncChain.then(async () => {
     let r = status;
     if (!r) { try { r = await _orchReq('VITALS_STATUS', {}); } catch { return; } }

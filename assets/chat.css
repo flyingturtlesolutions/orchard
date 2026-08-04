@@ -1742,18 +1742,17 @@ textarea {
 .rail-tab:focus-visible { outline: 2px solid var(--c-accent, #378ADD); outline-offset: 2px; border-radius: 2px; }
 
 /* CN-1 (DESIGN_vitals.md §8.2) — the Connect tab: login-only status cards + the attention badge on the tab. */
-.rail-tab-badge {
+/* CN-1.1 (user directive) — the UNIFIED tab attention dot: one small neutral "needs-you" mark on any tab (Chat /
+   Automate / Connect) with actionable items. Neutral accent, NOT amber (amber over-alarms for the Chat/Automate
+   nudges); the count lives inside the tab. Swap --c-accent for a dedicated --c-attention token to retune. */
+.rail-tab-dot {
   display: inline-block;
-  margin-left: 6px;
-  min-width: 16px;
-  padding: 0 5px;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 16px;
-  text-align: center;
-  color: #fff;
-  background: var(--c-x-dev-strong, #e0902a);
-  border-radius: var(--r-full, 999px);
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: var(--c-accent, #378ADD);
 }
 .rail-connect { padding: var(--sp-2); gap: var(--sp-2); }
 .connect-card {
