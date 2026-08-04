@@ -3033,7 +3033,24 @@ async function _startSetupFlow({ auto = false } = {}) {
   // DK-6 (v2.74.1486) — a PRECONFIGURED desk ships its sites: resolve them against the catalog (seedDeskCatalog —
   // an existing instance beats its class; a deep host synthesizes its card; a tenant class with no instance stays
   // unresolved). A custom desk (no sites) → seeded = null, the plain picker.
-  const seeded = (def && Array.isArray(def.sites) && def.sites.length) ? seedDeskCatalog(_setupCatalog, def.sites)
+  // v2.74.1999 — the ADJUST re-run pre-picks what the desk ACTUALLY HAS, not only what its definition shipped.
+  // `def.sites` is the preset's builtin list; a site the user added later (typed at setup, or adopted) never joins
+  // it, so a `setup` re-run rendered that site UNTICKED — and since CS-1 made Confirm AUTHORITATIVE for the desk
+  // tier, a Confirm-without-adjusting silently REMOVED it. That is the whole story behind the three
+  // `excluded www.ups.com` lines: the user re-ran setup, UPS came up unselected, Confirm dropped it, and the
+  // exclusion list then suppressed the preset tier's copy too. Live-confirmed 14:2x — the picker listed "Ups"
+  // and Confirm read (4).
+  // The desk's LIVE set is the truth for an adjust; the definition is only the seed for a desk that has none yet
+  // (a first/auto setup has no connections, so the union collapses to `def.sites` and that path is unchanged).
+  const _sitesFromConns = (list) => (Array.isArray(list) ? list : [])
+    .map((c) => { const host = String((c && c.origin) || '').replace(/^https?:\/\//i, '').replace(/[/?#].*$/, '').toLowerCase(); return host ? { host, label: (c && c.label) || host } : null; })
+    .filter(Boolean);
+  const _liveSites = _sitesFromConns(resolveConnections(
+    (conv.config && conv.config.connections) || null, _connScopeBook, _connScopeIdsFor(conv),
+    conv.config && conv.config.connectionsExcluded));
+  const _seedSites = [...((def && Array.isArray(def.sites)) ? def.sites : []), ..._liveSites]
+    .filter((s, i, a) => s && s.host && a.findIndex((x) => x.host === s.host) === i);   // def first, live appended, dedup by host
+  const seeded = _seedSites.length ? seedDeskCatalog(_setupCatalog, _seedSites)
     : (_setupState.extend && Array.isArray(_setupState.extend.sites) && _setupState.extend.sites.length ? seedDeskCatalog(_setupCatalog, _setupState.extend.sites) : null);   // v1517 — an EXTEND from a custom base pre-picks the base's connections
   // DK-6b (v2.74.1487) — FIRST setup of a preconfigured desk AUTO-CONNECTS: its sites ARE the definition, so the
   // picker is redundant — bank the resolvable picks directly (the same advanceSetup→done→_bankSetup path Confirm
