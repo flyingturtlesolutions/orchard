@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey, missingRequiredParams, identifierClassParam, inventedIdentifierParams } from './connectorLeg.js';   // v1911 — the identifier-provenance gate
+import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey, missingRequiredParams, legParamDefs, identifierClassParam, inventedIdentifierParams } from './connectorLeg.js';   // v1911 — the identifier-provenance gate; v2021 — legParamDefs
 import { recipeLegs } from './connectorRecipes.js';   // v2.74.1864 — real projected legs for the leg-shape assertions
 import { toOfferedLeg } from './palette.js';
 import { CONNECTOR_RECIPES } from './connectorRecipes.js';   // v2.74.1854 — the pre-flight gate proves itself against the REAL catalog
@@ -196,6 +196,26 @@ describe('PM (v2.74.1633) — joinKey threads recipe → leg.tool (Invariant #3 
     assert.deepEqual(recipeToLeg({ ...BASE, joinKey: ['AddressLine1', '', 'ContactEmail'] }).tool.joinKey, ['AddressLine1', 'ContactEmail']);
     assert.deepEqual(recipeToLeg({ ...BASE, joinKey: 'AddressLine1' }).tool.joinKey, ['AddressLine1']);
     assert.equal(recipeToLeg({ ...BASE }).tool.joinKey, null);
+  });
+});
+
+describe('v2.74.2021 — legParamDefs: recipe OR projected-leg shape', () => {
+  it('a projected create leg (no tool.params) still yields first_name/last_name required', () => {
+    const leg = recipeToLeg({
+      id: 'shopify_create_customer', name: 'Create', write: true, method: 'POST',
+      app: 'shopify', origin: 'admin.shopify.com', endpoint: '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}',
+      params: [
+        { name: 'first_name', required: true }, { name: 'last_name', required: true },
+        { name: 'email', required: false },
+      ],
+      body: { operationName: 'CustomerCreate', variables: { customerInput: { firstName: '{first_name}' } } },
+    }, { trusted: true });
+    assert.ok(leg && leg.tool);
+    assert.equal(leg.tool.params, undefined);
+    const defs = legParamDefs(leg);
+    assert.deepEqual(defs.map((d) => d.name), ['first_name', 'last_name', 'email']);
+    assert.equal(defs.find((d) => d.name === 'first_name').required, true);
+    assert.equal(defs.find((d) => d.name === 'email').required, false);
   });
 });
 

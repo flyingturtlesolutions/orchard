@@ -51,7 +51,7 @@ import { loadProposals, addProposals as _addProposalsRaw, decideProposal as _dec
 import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick; v1381 — pendings survive sweeps
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
-import { recipeToLeg, missingRequiredParams, inventedIdentifierParams } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate; v1911 — the identifier-provenance gate
+import { recipeToLeg, missingRequiredParams, inventedIdentifierParams, legParamDefs } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate; v1911 — the identifier-provenance gate; v2021 — legParamDefs for write fill
 import { misboundIdentifierParams, shapesForOwner } from './Core/identifierShapes.js';   // SG-1 (v2.74.1947) — the any-slot shape guard: a UPS 1Z must not bind a Shopify order slot
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
 import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, drillTargetRedirect, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
@@ -93,7 +93,7 @@ import { isCsrfColdFailure } from './Core/connection.js';   // v2.74.1759 — CS
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
-import { describeRun } from './Core/runHistory.js';   // CD-6 (v2.74.1694) — the RUN-level history row renderer (pure)
+import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun, explainPartialWhy, normalizeHistoryTrace, formatTraceLines } from './Core/runHistory.js';   // CD-6; v2027 items; v2029 partial why; v2030 banked trace
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
@@ -103,7 +103,7 @@ import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // 
 import { classifyArms, identityValues, makeClassifyEvaluator, classifyTally } from './Core/branchClassify.js';   // PP-5 (v2.74.1662) — batched free-text arm classification (§1.1b: predicate kind follows FIELD kind)
 import { redact, restore, newRedactionMap } from './Core/redact.js';   // R-1 (v2.74.1662) — pseudonymize identity before the instruction text ever leaves (DESIGN_llm_privacy.md §5)
 import { openRun, recordStage, closeItem, closeRun, markAlreadyOpen, runStartLine, runEndLine, trialTag } from './Core/pipelineRun.js';
-import { resolveWriteValue, buildWriteProposals } from './Core/writeMap.js';
+import { resolveWriteValue, buildWriteProposals, prepareShopifyCustomerCreateParams } from './Core/writeMap.js';
 import { writeTally, writePreflight } from './Core/writeClause.js';
 import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
 import { emptyPriorStop } from './Core/priorScope.js';
@@ -1236,8 +1236,26 @@ function _railTogglePin(rowEl, secCls, store, key, btn) {
 // v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
 // stays open as a live multi-conversation surface (its row highlights `active`, the input now routes here, and a reply
 // refreshes its peek). No-op when it's already the selected target.
+// WFG transition-fix (workflow-builder review, 2nd pass) — DISMISS the builder to reveal its OWN desk. The prior fix
+// parked the builder on switching to a DIFFERENT desk, but selecting the desk the builder sits ON hit the same-id
+// no-op below and left the .wf-page covering it. Here: draft-keep ≥2 proven steps (WW-1b → resume via ＋ Workflow),
+// drop the page + unlock the composer (releaseSurface via _wfAbandon), then repaint this desk's thread/landing (the
+// _wfExitPage tail). NOT the v1623 revival — that fires on RETURNING to the desk from a DIFFERENT conversation.
+async function _dismissWizardToDesk() {
+  _wfAbandon();
+  try {
+    if (_currentConversationId) {
+      if ($('messages').childElementCount > 0) { $('empty-state').classList.add('hidden'); $('messages').classList.remove('hidden'); }
+      const c = await ConversationStore.load(_currentConversationId);
+      if (c) void _renderDeskLanding(c);
+    } else { void renderSuggestionCards(); }
+  } catch { /* */ }
+}
+
 async function _selectConvForInput(conv) {
-  if (!conv || conv.id === _currentConversationId) return;
+  if (!conv) return;
+  if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); return; }   // the builder covers the current desk → selecting it reveals the desk
+  if (conv.id === _currentConversationId) return;
   if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch the input target anyway?')) return;
   const full = await ConversationStore.load(conv.id);
   if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
@@ -1247,6 +1265,7 @@ async function _selectConvForInput(conv) {
 // v2.74.1223 — DOUBLE-click: open a conversation's FULL timeline — load it (if not already selected) + CLOSE the drawer.
 async function _openConvFullTimeline(conv) {
   if (!conv) return;
+  if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); _closeRail(); return; }   // the builder covers the current desk → selecting it reveals the desk
   if (conv.id !== _currentConversationId) {
     if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
     const full = await ConversationStore.load(conv.id);
@@ -2089,11 +2108,12 @@ async function _renderWorkflowGallery(opts = {}) {
   const scopeDesk = opts.scopeDesk || null;
   const gen = ++_wfGalleryGen;    // this render's generation; a later re-render invalidates its pending async appends
   try { $('messages').innerHTML = ''; $('messages').classList.add('hidden'); $('empty-state').classList.remove('hidden'); } catch { /* */ }
+  const presets = galleryWorkflows();   // v2.74.2009 — the curated set is empty by direction, so the copy below must not promise templates that aren't there
   const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'Add a workflow';
-  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = `A saved multi-step task for ${(scopeDesk && scopeDesk.title) || 'this view'} — pick a template or build your own.`;
+  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = `A saved multi-step task for ${(scopeDesk && scopeDesk.title) || 'this view'} — ${presets.length ? 'pick a template or build your own' : 'build it step by step'}.`;
   const container = $('suggestion-cards'); if (!container) return;
   container.innerHTML = '';
-  for (const preset of galleryWorkflows()) {
+  for (const preset of presets) {
     const card = document.createElement('button');
     card.className = 'suggestion-card';
     const suits = _wfSuitsLine(preset.suits);
@@ -2111,15 +2131,20 @@ async function _renderWorkflowGallery(opts = {}) {
   void _appendYourWorkflows(container, gen);
 }
 
-// WFG-1 — a pick (preset | custom) binds to its view and opens the authoring flow. "+ Workflow" is always scoped to
-// the view it sits under, so the gallery needs no "which view?" step — the pick comes straight here with its desk.
+// WFG-1 — a pick (preset | custom) binds to its view. "+ Workflow" is always scoped to the view it sits under,
+// so the gallery needs no "which view?" step — the pick comes straight here with its desk.
+// WFG-2b (v2.74.2025, user direction) — the TWO paths land on DIFFERENT surfaces, on purpose:
+//   · a TEMPLATE pick never opens the view (live: the add worked but the click dumped the user into the desk's
+//     thread — "opens the current visible view"). The add is desk-KEYED, not desk-OPENED, and lands on the
+//     rail's Automate tab with the new row visible — the chat-tab pattern ("+ View" lands you on what you added).
+//   · "+ Custom workflow…" still opens the view first: the wizard RUNS steps in it by design.
 async function _wfBindAndAuthor(desk, pick) {
   if (!pick || !desk) return;
+  if (pick.preset) { await _addWorkflowFromPreset(pick.preset, desk); return; }
   try { _closeRail(); } catch { /* */ }
   if (desk.id !== _currentConversationId) { try { await _openConvFullTimeline(desk); } catch { /* */ } }
   if (String(_currentConversationId || '') !== String(desk.id)) return;   // the open didn't land — never author into the wrong view
-  if (pick.preset) await _startWorkflowFromPreset(pick.preset);
-  else await _startWorkflowWizard();   // "+ Custom workflow" → the step-by-step BUILDER (WW-1b: resumes an abandoned draft's proven steps)
+  await _startWorkflowWizard();   // "+ Custom workflow" → the step-by-step BUILDER (WW-1b: resumes an abandoned draft's proven steps)
 }
 
 // "Your workflows" — every saved (non-draft) workflow across all views, labeled with its owning view. Discovery
@@ -3730,7 +3755,26 @@ try { setInterval(() => { try { chrome.runtime.sendMessage({ type: 'PANEL_PING',
 
 // v2.74.818 — write a decision line (e.g. the ROUTE a turn took + its cues) into the background's PERSISTED ring
 // buffer, so a chat-side routing decision shows in the downloaded trace (the sidepanel's own console isn't logged).
-const _orchLog = (line) => { try { _orchReq('ORCH_LOG', { line: String(line) }); } catch { /* never let a log break a turn */ } };
+// v2.74.2030 — while a panel workflow run is active, also buffer lines onto the history entry (the Logger INFO
+// ring rotates under load; Trace was left with only sidecar HTTP 500s like GET /workspaces).
+let _wfTraceBuf = null;   // { runId, lines: [{t,m}] } | null
+const _orchLog = (line) => {
+  try {
+    const s = String(line);
+    if (_wfTraceBuf && Array.isArray(_wfTraceBuf.lines) && _wfTraceBuf.lines.length < 80) {
+      _wfTraceBuf.lines.push({ t: new Date().toISOString(), m: s.slice(0, 240) });
+    }
+    _orchReq('ORCH_LOG', { line: s });
+  } catch { /* never let a log break a turn */ }
+};
+function _wfTraceBegin(runId) {
+  _wfTraceBuf = { runId: String(runId || ''), lines: [] };
+}
+function _wfTraceTake() {
+  const buf = _wfTraceBuf;
+  _wfTraceBuf = null;
+  return buf && Array.isArray(buf.lines) ? buf.lines : [];
+}
 
 // PERF ▸ (v2.74.1981) — TEMPORARY side-panel startup instrumentation for the "3-4s after reload" investigation.
 // Marks are BUFFERED in memory and flushed as ONE _orchLog line at the END of init(), so the probe never adds its
@@ -5697,9 +5741,21 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
   try { _orchLog(`WRITE ▸ start misses=${misses.length} src=${(srcLeg && srcLeg.tool && srcLeg.tool.recipeId) || '—'}`); } catch { /* */ }
 
   if (!misses.length) {
-    _setMessageBody(msg, 'Nothing to create — every row from the last step already matched. (If you meant something else, say which records to create and where.)', { markdown: true });
+    // PP-2b (v2.74.2010) — say WHICH empty this is. "Every row matched" is only claimable when a lookup actually
+    // ran and reported zero misses; with no lookup in hand the old text asserted knowledge it didn't have (live:
+    // the interpret door dropped 1 real miss and this line called it a full match).
+    const _mapRan = !!(st.lastMapRan || st.lastMapLookup || st.lastMapSystem);
+    _setMessageBody(msg, _mapRan
+      ? 'Nothing to create — every row from the last lookup already matched. (If you meant something else, say which records to create and where.)'
+      : 'I don’t have a lookup’s unmatched rows in hand — run the match step first (“for each …, find its … in …”), then ask me to create the ones with no match.', { markdown: true });
     _orchFinalize(msg);
-    try { _orchLog('WRITE ▸ no candidates — the prior step reported no misses'); } catch { /* */ }
+    try { _orchLog(`WRITE ▸ no candidates — ${_mapRan ? 'the lookup reported no misses' : 'no lookup outcome in hand'}`); } catch { /* */ }
+    // v2.74.2029 — a lookup that found zero misses IS a finished create step (nothing to do), not a chain
+    // failure. Returning ok:false made history say bare "→ partial" (live warranty▶: 20 matched, 0 no-match).
+    st.lastStopWhy = _mapRan
+      ? 'nothing to create — every row matched'
+      : 'create step had no unmatched rows from a lookup';
+    if (_mapRan) return { ok: true, noop: true, created: [], queued: [], blocked: [], unfillable: [] };
     return { ok: false, gap: true };
   }
 
@@ -5722,11 +5778,20 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
     try { _orchLog(`WRITE ▸ ${_pf.reason} — wanted "${_scrubHead(goal, 40)}", declared [${(_pf.targets || []).join(', ')}]`); } catch { /* */ }
     return { ok: false, gap: true };
   }
-  const createLeg = await _rideDrillLeg(srcLeg, targetId, (srcLeg.tool && srcLeg.tool.groundId) || null);
+  // PP-2c (v2.74.2012) — resolve the create on the ground that RUNS it. The declared target is the TARGET
+  // system's write, but this projected it through the SOURCE leg — GET_RIDE_RECIPES on the VendorSuite ground
+  // holds no Shopify recipe, so the write died "not available on this ground" (live 01:35Z, one hop after the
+  // PP-2b fix); and had it resolved there, the source parent would have stamped the SOURCE's sessionHost onto
+  // the target's transport. The map's lookup context carries the target system's own leg + ground — ride THAT
+  // (the create shares the lookup's transport by construction); the source leg stays the fallback for a
+  // same-system writeMap or a lookup-less state.
+  const _wparent = (lookup && lookup.leg && lookup.leg.tool) ? lookup.leg : srcLeg;
+  const createLeg = await _rideDrillLeg(_wparent, targetId, (lookup && lookup.groundId) || (_wparent.tool && _wparent.tool.groundId) || null);
   if (!createLeg) {
-    _setMessageBody(msg, `The declared target (**${escHtml(targetId)}**) isn’t available on this ground — connect it, or enable that recipe in Studio.`, { markdown: true });
+    const _tgtName = (_wparent.tool && (_wparent.tool.app || _wparent.tool.origin)) || 'the target system';
+    _setMessageBody(msg, `The declared target (**${escHtml(targetId)}**) isn’t available on ${escHtml(String(_tgtName))} — connect it, or enable that recipe in Studio.`, { markdown: true });
     _orchFinalize(msg);
-    try { _orchLog(`WRITE ▸ target leg unavailable [${targetId}]`); } catch { /* */ }
+    try { _orchLog(`WRITE ▸ target leg unavailable [${targetId}] on ${(_wparent.tool && _wparent.tool.groundId) || (lookup && lookup.groundId) || '—'}`); } catch { /* */ }
     return { ok: false, gap: true };
   }
 
@@ -5750,11 +5815,10 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
   // 3) Per row. Fill by DECLARATION; a required param that does not resolve makes the row UNPROPOSABLE and is
   // reported — never invented (writeMap's first stated property).
   const created = []; const queued = []; const blocked = []; const unfillable = [];
-  // v2.74.1682 — read `tool.params` (the OBJECTS carrying `.required`), which is exactly what
-  // `buildWriteProposals` reads. Using `leg.params` (names) + `paramSchema.required` here was a SECOND source
-  // for the same question, and the two halves of this clause — the auto path and the queued path — would then
-  // disagree about which rows are fillable.
-  const _paramDefs = (createLeg.tool && Array.isArray(createLeg.tool.params)) ? createLeg.tool.params : [];
+  // v2.74.2021 — legParamDefs (recipe OR projected-leg shape). v1682 read `tool.params` only; recipeToLeg never
+  // puts that array on the leg (names → leg.params, required → paramSchema), so the fill loop was a no-op and
+  // Shopify got `{operationName}` with a null customerInput (live 14:22/14:32). Same helper as buildWriteProposals.
+  const _paramDefs = legParamDefs(createLeg);
 
   for (let i = 0; i < use.length; i++) {
     if (_walkAbortFlag.requested) break;
@@ -5813,9 +5877,16 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
         // being passed to runUpsert and dropped here, which is the same as not having it.
         const _tag = (ctx && ctx.trialTag) || '';
         const _noteable = _paramDefs.some((pd) => ((pd && pd.name) || pd) === 'note');
-        const body = (_tag && _noteable && !filled.note) ? { ...filled, note: _tag } : filled;
-        const r = await _rideExecOnce(createLeg, body, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null });
-        if (!r || !r.ok) throw new Error((r && r.error) || 'create failed');
+        let body = (_tag && _noteable && !filled.note) ? { ...filled, note: _tag } : { ...filled };
+        // v2.74.2020 — live 14:05:30Z: CustomerInput rejected incomplete addresses + non-E.164 phones at
+        // variable coercion. Same prep the proposal path uses so auto and queued sends match.
+        const _cid = (createLeg.tool && (createLeg.tool.recipeId || createLeg.tool.id)) || '';
+        if (_cid === 'shopify_create_customer') body = prepareShopifyCustomerCreateParams(body);
+        // v2.74.2013 — the pipeline gate already returned auto for this leg; the ride handler's confirmed:true
+        // belt is a SEPARATE fail-close that this path never cleared (live 01:45:52Z: GATE ▸ auto → INVOKE ▸
+        // blocked write-needs-confirm → 1 blocked). confirmed here means "the gate cleared it", not "skip HITL".
+        const r = await _rideExecOnce(createLeg, body, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null, confirmed: true });
+        if (!r || !r.ok) throw new Error((r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'create failed');   // v2.74.2016 — surface the reason, not just the code
         return r.value ?? {};
       },
       trialTag: trialTag(run),
@@ -6492,7 +6563,14 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
   // SAME lookup that decided "no match"; without this it would have to guess a `basedOn.path`, and a wrong path
   // makes the staleness CAS read `undefined` and fail OPEN (the v1639 finding).
   const _lookup = tgt0 && tgt0.leg ? { leg: tgt0.leg, baseParams: tgt0.baseParams || {}, valueParam: tgt0.valueParam, groundId: tgt0.groundId || null } : null;
-  return { ok: true, joined, text, misses: _misses, srcLeg, system, lookup: _lookup };
+  // PP-2b (v2.74.2010) — the outcome survives the turn (see _lastMapRun). Live 2026-08-04: a 2-task lookup left
+  // 1 miss, and "create a Shopify customer for each one with no match" sent as the NEXT message reported
+  // "Nothing to create — every row already matched" — the interpret door's fresh state dropped the miss.
+  _lastMapRun = { convId: _currentConversationId, misses: _misses, srcLeg, lookup: _lookup, system, matched: counts.matched, total: counts.total, at: Date.now() };
+  // v2.74.2026 — `counts` rides the return so a workflow run can bank the map tally in its history row
+  // (matched / no-match / failed). Without it, history only saw lastValue's row count — "20 rows → complete"
+  // with no outcome (user report 2026-08-05 on the warranty→Shopify preset).
+  return { ok: true, joined, text, misses: _misses, srcLeg, system, lookup: _lookup, counts };
 }
 
 // A matched record's short label for the join line (the other system's identity). PURE-ish (uses summarizeItem).
@@ -6628,6 +6706,13 @@ let _sweepBatchIndex = [];   // render-order number → proposalId (what `approv
 // my_open_tickets). "Show me" resolves HERE first when the read is more recent than the last proposal batch —
 // a claim's ground truth is the read that produced it, never a random item.
 let _lastGroundedRead = null;   // { leg, params, at }
+// PP-2b (v2.74.2010) — the last per-item MAP's outcome, conv-tagged: misses + the lookup context a later write
+// needs. The chain door hands these over in st.lastMisses, but that state dies with the turn — a "create the
+// ones with no match" arriving as its OWN message dispatches at the interpret door, which had lastMisses
+// hardcoded []. Same class as _lastGroundedRead: the durable copy of what the chain state forgets. Module-var
+// lifetime (a panel reload clears it — rerun the lookup); consuming it late is duplicate-safe because the
+// write's inline re-check re-runs this very lookup per row immediately before creating.
+let _lastMapRun = null;   // { convId, misses, srcLeg, lookup, system, matched, total, at }
 // FC (v2.74.1552, DESIGN_conversation_focus.md) — the CONVERSATION's durable working set. `_lastGroundedRead`
 // above is the fast in-panel cache of the last read; focus is its per-conversation, persisted generalization —
 // a case is BORN with its record pinned here; grounded reads accrete entries (FC-3). Working state, not memory:
@@ -6667,7 +6752,10 @@ function _persistFocus() {
 // noun some other set carries better, which is the case that was broken.
 // v2.74.2006 — `targetSystem` (the map's target.system) is passed so the target's own NAME cannot vote for the
 // source. See Core/priorSelect.selectPrior — the ask of a cross-system map names both ends by construction.
-function _priorForClause(ask, targetSystem = '') {
+// v2.74.2015 — `targetPhrase` (the map's target.readAsk) rides too: the v2006 ban covered only the system name,
+// so the target's ENTITY word still voted — live 13:02Z "for each task, find the homeowner's Shopify customer
+// account" bound to an 11h-old Shopify customer list on `find,customer` over the warranty tasks read 60s earlier.
+function _priorForClause(ask, targetSystem = '', targetPhrase = '') {
   const cands = [];
   if (_lastGroundedRead && _lastGroundedRead.value != null) {
     let _rows = []; try { _rows = rowsFromValue(_lastGroundedRead.value) || []; } catch { _rows = []; }
@@ -6682,7 +6770,7 @@ function _priorForClause(ask, targetSystem = '') {
     if (x.kind === 'list' && Array.isArray(x.rows) && x.rows.length) cands.push({ ...x, source: 'focus', _entry: x });
     else if (x.kind === 'record' && x.fields) cands.push({ ...x, source: 'focus', rows: [x.fields], _entry: x });
   }
-  const sel = selectPrior(ask, cands, { targetSystem });
+  const sel = selectPrior(ask, cands, { targetSystem, targetPhrase });
   try { _orchLog(`PRIOR ▸ ${describePick(sel.pick, sel.why)}${cands.length > 1 ? ` — of ${cands.length} set(s) in play` : ''}${sel.ambiguous.length > 1 ? ` · AMBIGUOUS: ${sel.ambiguous.map((a) => a.noun || a.label).join(' | ')}` : ''}`); } catch { /* */ }
   if (!sel.pick) return { value: null, leg: null };
   if (sel.pick.source === 'read') return { value: sel.pick._value, leg: sel.pick._leg || null };
@@ -7599,7 +7687,7 @@ async function _startWorkflowWizard(opts = {}) {
 // The page renderer — one surface, re-rendered per phase. The message input carries all free text (§ user rule 3).
 function _wfRenderPage() {
   const w = _wfWizard; if (!w) return;
-  if (_wfForeign()) return;   // v1623 — a foreign render attempt just SKIPS (parked; the revive re-renders on the desk's reopen)
+  if (_wfForeign()) { try { _wfReleasePageSlot(); } catch { /* */ } return; }   // v1623 — a foreign render SKIPS (parked); WFG belt — and drops any stray .wf-page so a parked builder can't linger on another desk's surface
   // v2.74.1622 (user directive) — the composer belongs to the wizard's TYPING phases only: while a step runs /
   // awaits review / sits banked, the input LOCKS (a message typed there fell through to the organic door, ran as
   // a desk ask, flipped the surface, and stranded the wizard). The buttons are the only doors; every exit path
@@ -7846,7 +7934,8 @@ function _wfRenderPage() {
     // honest label §7.3 (runs vs due) is computed from the tier when the card renders — here we only pick the rate.
     const _picked = Number(w.cadenceMinutes) || 0;
     status.innerHTML = `<div class="wf-page-sub">Run this on a schedule? It’ll fire by itself at this rate. You can change or remove it later from the workflow’s edit icon.${_picked ? `<br><strong>Selected: every ${escHtml(_cadenceLabel(_picked))}</strong>` : ''}</div>`;
-    for (const [label, mins] of [['Every hour', 60], ['Every 4 hours', 240], ['Every day', 1440]]) {
+    // v2.74.2033 — 5m / 30m join the picker (MIN_MINUTES is already 5 in Core/trigger.js).
+    for (const [label, mins] of [['Every 5 minutes', 5], ['Every 30 minutes', 30], ['Every hour', 60], ['Every 4 hours', 240], ['Every day', 1440]]) {
       mkPageBtn(`${_picked === mins ? '● ' : ''}${label}`, () => { w.cadenceMinutes = (w.cadenceMinutes === mins ? 0 : mins); _wfRenderPage(); });
     }
     mkPageBtn(_picked ? `✓ Save — runs every ${_cadenceLabel(_picked)}` : 'Save — no schedule', () => _wfDoSave(), true);
@@ -7969,35 +8058,39 @@ async function _startWorkflowFromIntent(intent) {
   _wfRenderPage();
 }
 
-// WFG-1 (DESIGN_workflows.md §8) — seed a PRESET template into the authoring flow. Its curated steps land on the
-// PLAN GATE directly (no DECOMPOSE_STEPS — they are already written); the user reviews the set and approves each
-// step exactly like an intent-drafted plan, so nothing banks unapproved (PP-0c). Mirrors _startWorkflowFromIntent's
-// tail (set w.plan / phase='plan' → _wfRenderPage), minus the model round-trip.
-async function _startWorkflowFromPreset(preset) {
-  if (!_memoryId() || !_currentConversationId) { const g = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(g, 'Open a view first — workflows are saved per view.'); _orchFinalize(g); return; }
+// WFG-2 (v2.74.2024, user direction) — a preset click ADDS the workflow; it does not open the wizard. The
+// "+ View" pattern applied to templates: click the card → the record exists → it shows in the Automate tab
+// (and "Your workflows"), runnable from there. The wizard's per-step approval gate is the proof machinery for
+// HAND-written plans; a shipped template's proof is its landing rule (every subAsk verbatim from a passing
+// live trace — workflowCatalog.js), so it banks 'ready' with preset provenance and NO pinned clauses: each run
+// re-resolves through the router exactly like the proving runs did, and a write step still meets the run-time
+// GATE. "+ Custom workflow…" keeps the wizard.
+async function _addWorkflowFromPreset(preset, desk) {
+  // WFG-2b (v2.74.2025) — desk-KEYED, never desk-OPENED: the save writes to the picked view's bank without
+  // flipping the visible surface (the pre-2025 flow opened the view's thread just to read _memoryId() off it).
+  const appId = String((desk && (desk.instanceId || desk.appId)) || _memoryId() || '');
+  const _fail = (t) => { try { const sub = $('empty-state-subtitle'); if (sub) sub.textContent = t; } catch { /* */ } };
+  if (!appId) { _fail('Couldn’t add the template — open the view once, then try again.'); return; }
   const steps = (preset && Array.isArray(preset.subAsks) ? preset.subAsks : []).map(_str0).filter((t) => t && t !== '[object Object]').slice(0, 8);
-  if (steps.length < 2) { _promptWorkflowIntent(); return; }   // a malformed template falls back to describe-it-yourself
-  const m = appendMessage({ role: 'assistant', body: '' });
-  _setMessageBody(m, `Setting up the **${escHtml(preset.name || 'workflow')}** template…`, { markdown: true });
-  await _startWorkflowWizard({ fresh: true });   // WFG-1 — a preset seed is a fresh authoring, never a draft resume
-  const w = _wfWizard;
-  if (!w) return;
-  w.ask = _str0(preset.ask) || steps[0];   // the umbrella intent — recall matches against this, not the name
-  w.plan = steps;
-  w.queue = [];
-  w.phase = 'plan';
-  w.coverage = null;
-  w.rejectedSteps = [];
-  w.editedSteps = [];
-  w.fromPreset = _str0(preset.id) || null;   // provenance (display/telemetry only)
-  _setMessageBody(m, [
-    `From the **${escHtml(preset.name || 'template')}** template — **${w.plan.length}** step${w.plan.length === 1 ? '' : 's'} to review:`,
-    ...w.plan.map((s, i) => `${i + 1}. ${escHtml(s)}`),
-    '',
-    '_Check the plan before we start. Nothing runs until you approve it, and each step still gets approved on its own after that._',
-  ].join('\n'), { markdown: true });
-  _orchFinalize(m);
-  _wfRenderPage();
+  if (steps.length < 2) { _fail('That template is malformed — it needs at least 2 steps.'); return; }   // unreachable from the gallery (normalizeWorkflowPreset floors at 2)
+  const now = Date.now();
+  const payload = buildWorkflowSave({
+    ask: _str0(preset.ask) || steps[0],   // the umbrella intent — recall matches against this, not the name
+    name: _str0(preset.name) || null,
+    steps: steps.map((t) => ({ text: t, approved: true, provenance: { text: t, via: { kind: 'preset', host: null, name: _str0(preset.id) || null }, bankedAt: now } })),
+  }, now);
+  if (!payload) { _fail('That template is malformed — it needs at least 2 steps.'); return; }
+  let existed = false;   // saveWorkflow dedups by content id, so a second click lands on the SAME row, never a twin
+  try { const cur = await loadWorkflows(appId); existed = (cur || []).some((x) => x && x.contentId === workflowId(payload.ask, payload.subAsks)); } catch { /* */ }
+  let ok = false;
+  try { const list = await saveWorkflow(appId, payload); ok = Array.isArray(list) && list.some((x) => x && x.contentId === workflowId(payload.ask, payload.subAsks)); } catch { /* */ }
+  // v2.74.2023 — the pick is a routing decision a trace must show (WF_PRESET is in decisionMarkers); v2024 the
+  // verb changed seeded→added and carries the outcome, so a decisions download distinguishes add / dedup / fail.
+  try { _orchLog(`WF_PRESET ▸ added "${_str0(preset.id) || '?'}" — ${payload.subAsks.length} step(s) → ${existed ? 'already-present' : (ok ? 'saved' : 'save-failed')}`); } catch { /* */ }
+  if (!ok) { _fail('Couldn’t add the template — try again.'); return; }
+  // WFG-2b — the landing surface IS the confirmation: return to the Automate tab showing what was added (the
+  // chat-tab pattern), instead of a thread sentence in a view the user never asked to open.
+  try { _switchRailTab('automations'); $('rail').classList.add('open'); } catch { /* */ }
 }
 
 // Run the current step through the NORMAL front door, sharing the chain st; re-parent the result into the page.
@@ -8757,6 +8850,30 @@ async function _maybeFireDueRoutine() {
     const r = await _orchReq('FLEET_ROUTINE', { instanceId: inst });
     const rec = r && r.routine;
     if (rec && rec.enabled && rec.due) await _fireRoutine(rec);
+  } catch { /* */ }
+}
+
+// v2.74.2035 — desk-open half of panel-tier workflow cadence (sibling of _maybeFireDueRoutine). Surfaces Automate
+// so _renderRailAutomations → _maybeAutoRunDueWorkflowCard can fulfill a stuck "due now" without a manual ▶.
+async function _maybeFireDuePanelWorkflows() {
+  try {
+    if (_railRunBusy > 0) return;
+    const banks = await listAllWorkflows();
+    const now = Date.now();
+    let due = false;
+    for (const b of (Array.isArray(banks) ? banks : [])) {
+      for (const raw of (b && Array.isArray(b.items) ? b.items : [])) {
+        const t = raw && raw.trigger;
+        if (!t || t.enabled !== true || !(t.nextDue > 0) || t.nextDue > now) continue;
+        if (workflowTier(raw) === 'sw') continue;   // SW scanner owns those
+        due = true; break;
+      }
+      if (due) break;
+    }
+    if (!due) return;
+    try { if (!$('rail')?.classList.contains('open')) await _openRail(); } catch { /* */ }
+    if (_railTab !== 'automations') _switchRailTab('automations');
+    else void _renderRailAutomations();
   } catch { /* */ }
 }
 
@@ -9608,9 +9725,34 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           continue;
         }
         if (cr && cr.write) {   // PP-2 (v1681) — door A′. Passes `state`: the candidates are st.lastMisses, not st.lastValue.
+          // PP-2b (v2.74.2010) — the twin-door half (the v1658 rule, applied at write time rather than re-learned):
+          // a write step whose OWN chain ran no map (a wizard step, a lone decomposed clause) hydrates from the
+          // durable map outcome — same conversation only, and never over a real same-chain result (an array
+          // lastMisses, even empty, means a map ran HERE and its verdict stands).
+          if (!Array.isArray(st.lastMisses) && _lastMapRun && _lastMapRun.convId === _currentConversationId) {
+            st.lastMisses = _lastMapRun.misses; st.lastMapLeg = st.lastMapLeg || _lastMapRun.srcLeg;
+            st.lastMapLookup = st.lastMapLookup || _lastMapRun.lookup; st.lastMapSystem = st.lastMapSystem || _lastMapRun.system; st.lastMapRan = true;
+          }
           const wrr = await _runWriteClause(msg, cr.write, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, state: st });
           if (!wrr || !wrr.ok) return;
           if (wrr.text) { st.readouts.push(wrr.text); st.lastReadoutIdx = st.readouts.length - 1; }
+          // v2.74.2026 — the write tally is the history row's payload for a create step (created/queued/blocked);
+          // lastValue is intentionally unchanged, so without this stash history had nothing to say about creates.
+          st.lastWriteCounts = {
+            created: Array.isArray(wrr.created) ? wrr.created.length : 0,
+            queued: Array.isArray(wrr.queued) ? wrr.queued.length : 0,
+            blocked: Array.isArray(wrr.blocked) ? wrr.blocked.length : 0,
+            unfillable: Array.isArray(wrr.unfillable) ? wrr.unfillable.length : 0,
+          };
+          // v2.74.2027 — compact body-blind labels for history drill-down (created / blocked / …).
+          {
+            const _wi = [];
+            for (const c of (wrr.created || [])) _wi.push({ kind: 'created', label: c.label, id: c.ref || '' });
+            for (const q of (wrr.queued || [])) _wi.push({ kind: 'queued', label: q.label });
+            for (const b of (wrr.blocked || [])) _wi.push({ kind: 'blocked', label: b.label, note: b.why || '' });
+            for (const u of (wrr.unfillable || [])) _wi.push({ kind: 'unfillable', label: u.label, note: Array.isArray(u.missing) ? `missing ${u.missing.join(', ')}` : '' });
+            st.lastHistoryItems = normalizeHistoryItems([...(Array.isArray(st.lastHistoryItems) ? st.lastHistoryItems : []), ..._wi]);
+          }
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'write', clause: clause.text, intent: clause.text });
           continue;   // st.lastValue unchanged: a write CREATES records, it does not replace the working set
         }
@@ -9680,6 +9822,16 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           st.lastMapLeg = mr.srcLeg || st.lastLeg || null;
           st.lastMapLookup = mr.lookup || null;   // v1681 — the write's re-check re-runs THIS, not a guessed path
           st.lastMapSystem = mr.system || '';
+          // v2.74.2026 — bank the map tally for the run-history row (see `_wfRecordPanelRun`).
+          if (mr.counts && typeof mr.counts === 'object') st.lastMapCounts = { ...mr.counts };
+          st.lastMapRan = true;   // v2.74.2029 — write's "every row matched" no-op needs this (or lastMapLookup)
+          // v2.74.2027 — bank no-match labels so history can expand "the 2 no-matches" without a gl join.
+          if (Array.isArray(mr.misses) && mr.misses.length) {
+            st.lastHistoryItems = normalizeHistoryItems([
+              ...(Array.isArray(st.lastHistoryItems) ? st.lastHistoryItems : []),
+              ...mr.misses.map((m) => ({ kind: 'no-match', label: (m && m.label) || 'row' })),
+            ]);
+          }
           if (mr.text) { st.readouts.push(mr.text); st.lastReadoutIdx = st.readouts.length - 1; }
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'map', clause: clause.text, intent: clause.text });
           continue;
@@ -9981,6 +10133,9 @@ function _offerWorkflowReplay(goal, wf) {
     const _plan = _wfReplayPlan(wf);
     if (!_plan.runnable) { _wfReplayStopped(m, wf, _plan); return; }
     const _stR = _wfFreshChainState(); const _tR = Date.now();   // §6.5 (v1746) — recall replays write history too
+    _stR.wfRunId = mintRunId({ now: _tR, rand: Math.random() });
+    _wfTraceBegin(_stR.wfRunId);
+    try { _orchLog(`WORKFLOW ▸ run=${_stR.wfRunId} start`); } catch { /* */ }
     _walkAbortFlag.requested = false;
     const _pbR = _progressBubble(m);   // PS-9 — the elapsed ticker rides the run bubble
     _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask, state: _stR }).then(() => _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR)).catch(() => { /* */ }).finally(() => _pbR.done());   // replay via the same chain runner, PINNED where banked (PP-0c)
@@ -10053,14 +10208,35 @@ async function _renderWorkflows() {
 }
 
 // PS-2/TL-1 — the inline schedule picker for a rail workflow row (the message-row bar died with the launch cards).
+// v2.74.2034 — in-flow wrap strip under meta (never swaps the absolute icon cluster — 6 text chips overflowed there).
 function _wfScheduleInline(row, wf, wfKey, rerender) {
-  const old = row.querySelector('.wf-ov-actions'); if (!old) return;
+  const existing = row.querySelector('.wf-sched-pick');
+  if (existing) { existing.remove(); return; }
   const cur = (wf.trigger && wf.trigger.minutes && wf.trigger.enabled) ? wf.trigger.minutes : 0;
-  const pick = document.createElement('div'); pick.className = 'wf-ov-actions';
+  const pick = document.createElement('div');
+  pick.className = 'wf-sched-pick';
+  pick.setAttribute('role', 'group');
+  pick.setAttribute('aria-label', 'Schedule interval');
   const set = (minutes) => { void _wfSetSchedule(wf, wfKey, minutes).then(rerender); };
-  for (const [label, mins] of [['Hourly', 60], ['4h', 240], ['Daily', 1440]]) pick.appendChild(_mkBtn((cur === mins ? '● ' : '') + label, () => set(mins)));
-  pick.appendChild(_mkBtn(cur ? 'Off' : 'None', () => set(0)));
-  old.replaceWith(pick);
+  for (const [label, mins] of [['5m', 5], ['30m', 30], ['1h', 60], ['4h', 240], ['1d', 1440]]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'wf-sched-chip' + (cur === mins ? ' is-on' : '');
+    b.textContent = label;
+    b.setAttribute('aria-pressed', cur === mins ? 'true' : 'false');
+    b.addEventListener('click', (e) => { e.stopPropagation(); set(mins); });
+    pick.appendChild(b);
+  }
+  const off = document.createElement('button');
+  off.type = 'button';
+  off.className = 'wf-sched-chip' + (!cur ? ' is-on' : '');
+  off.textContent = cur ? 'Off' : 'None';
+  off.setAttribute('aria-pressed', !cur ? 'true' : 'false');
+  off.addEventListener('click', (e) => { e.stopPropagation(); set(0); });
+  pick.appendChild(off);
+  const meta = row.querySelector('.rail-item-meta');
+  if (meta) meta.after(pick);
+  else row.prepend(pick);
 }
 
 // v2.74.1777 ("one class") — a WORKFLOW row: the same silhouette as a case row (leaf glyph · badge · title ·
@@ -10075,7 +10251,12 @@ function _railWorkflowRow(row, parentConv) {
   item.className = 'rail-item is-subtask is-workflow';
   const _sched = _wfScheduleLabel(wf);
   const _t = workflowTier(wf);
+  // v2.74.2032 — card background encodes schedule state (armed / paused / none); the clock chip alone was too quiet.
+  const _hasCadence = !!(wf.trigger && wf.trigger.minutes);
+  const _schedArmed = !!( _hasCadence && wf.trigger.enabled);
+  item.dataset.sched = _schedArmed ? 'armed' : (_hasCadence ? 'paused' : 'none');
   const _due = _t !== 'sw' && wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0 && wf.trigger.nextDue <= Date.now();
+  if (_due) item.dataset.due = '1';   // v2.74.2035 — due-on-open auto-run finds the card via this stamp
   const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
   const _from = (wf.orphanedFrom && wf.orphanedFrom.deskName) ? ' · from “' + String(wf.orphanedFrom.deskName).slice(0, 40) + '”' : '';   // TL-1 — provenance shows only OFF-class (an orphan; on-class it is stale post-1780)
   const meta = steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '') + _from;
@@ -10089,7 +10270,7 @@ function _railWorkflowRow(row, parentConv) {
     + '<div class="rail-item-meta">' + escHtml(meta) + '</div>'
     + '<div class="wf-row-detail"><div class="wf-row-detail-inner"><ol class="wf-row-steps">' + stepsList + '</ol><div class="wf-row-sched">' + escHtml(schedLine) + '</div></div></div>';
   const acts = document.createElement('div');
-  acts.className = 'rail-item-actions wf-ov-actions';   // wf-ov-actions → _wfScheduleInline swaps it for the picker
+  acts.className = 'rail-item-actions wf-ov-actions';   // schedule picker is in-flow (.wf-sched-pick); this cluster stays the icon chips
   acts.dataset.rowAction = '';
   const rerender = () => { void _renderActiveRailTab({ force: true }); };   // v1816/1934 — action renders land now, on whichever tab the card is shown
   acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async (btn) => {
@@ -10184,6 +10365,10 @@ function _railWorkflowRow(row, parentConv) {
         return;
       }
       const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
+      _st2.wfRunId = mintRunId({ now: _t2, rand: Math.random() });
+      if (item.dataset.autoDueFire === '1') { _st2.wfTrigger = 'auto'; delete item.dataset.autoDueFire; }
+      _wfTraceBegin(_st2.wfRunId);
+      try { _orchLog(`WORKFLOW ▸ run=${_st2.wfRunId} start`); } catch { /* */ }
       _walkAbortFlag.requested = false;
       const _pb2 = _progressBubble(host);   // PS-9 — step/tick/elapsed ride the card
       _pbRef = _pb2;   // v1824 — the observer streams the chain's live text into the tick region
@@ -10236,7 +10421,19 @@ function _railWorkflowRow(row, parentConv) {
       ? (v === 'parked' ? '⚠ Stopped at a write — the ✋ row in the Rail approves it.' : 'Ran headless → ' + (v === 'complete' ? 'completed' : (v || 'finished')) + '. Its run shows in the workflow’s history.')
       : 'Couldn’t run headless — ' + _errWord(res && res.error) + '.', { markdown: true });
   }, { once: true }));
-  acts.appendChild(_mkIconBtn('schedule', (wf.trigger && wf.trigger.enabled) ? 'Change or remove the schedule' : 'Run this on a schedule', () => _wfScheduleInline(item, wf, wfKey, rerender)));
+  // v2.74.2031 — option A: a time trigger keeps the clock chip always visible (like ▶), not hover-only.
+  // Armed vs paused are distinct; unscheduled stays hover-revealed so the row doesn't grow chrome for every card.
+  {
+    const _schedTitle = _schedArmed
+      ? (`Scheduled — ${_sched || 'on a cadence'}${nextDue ? ` · next ${nextDue}` : ''} (click to change or remove)`)
+      : (_hasCadence
+        ? (`Schedule paused — ${_sched || 'paused'} (click to change or re-arm)`)
+        : 'Run this on a schedule');
+    const _schedBtn = _mkIconBtn('schedule', _schedTitle, () => _wfScheduleInline(item, wf, wfKey, rerender));
+    if (_schedArmed) _schedBtn.dataset.sched = 'armed';
+    else if (_hasCadence) _schedBtn.dataset.sched = 'paused';
+    acts.appendChild(_schedBtn);
+  }
   acts.appendChild(_mkIconBtn('history', 'Run history', () => { _closeRail(); void _renderWorkflowRuns(wf); }));   // the rail (z20) would cover the overlay (z18)
   acts.appendChild(_mkIconBtn('trash', 'Delete this workflow', async () => {
     if (!confirm('Delete “' + (wf.name || wf.ask) + '”? This can’t be undone.')) return;   // §5 — confirmation required
@@ -10427,6 +10624,26 @@ async function _renderRailAutomations() {
   }
   if (!live.isConnected) return;
   live.replaceChildren(...container.childNodes);
+  // v2.74.2035 — CD-1a due-on-open: after the Automate cards land, fulfill ONE due panel-tier schedule.
+  void _maybeAutoRunDueWorkflowCard();
+}
+
+// v2.74.2035 — panel-tier cadence (DESIGN_cadence.md §11.3 "due-on-open"): the SW leaves nextDue past-due and
+// never _fire's; this is the missing half — click ▶ on the first due Automate card (same path as a human Run,
+// including WORKFLOW_MARK_RAN). One at a time (_railRunBusy); a standing due waits for the next render/wake.
+let _duePanelAutoAt = 0;
+function _maybeAutoRunDueWorkflowCard() {
+  if (_railRunBusy > 0) return;
+  if (Date.now() - _duePanelAutoAt < 4000) return;   // debounce render storms / WORKFLOW_DUE_CHANGED bursts
+  const card = document.querySelector('#rail-automations .rail-item.is-workflow[data-due="1"]');
+  if (!card) return;
+  const runBtn = card.querySelector('.wf-card-act[data-icon="run"]');
+  if (!runBtn || runBtn.disabled) return;
+  const title = (card.querySelector('.rail-item-title')?.textContent || 'workflow').replace(/^\s*•\s*workflow\s*/i, '').trim();
+  _duePanelAutoAt = Date.now();
+  card.dataset.autoDueFire = '1';   // history trigger:'auto' (vs a human ▶ of a due card)
+  try { _orchLog(`CADENCE ▸ panel due-on-open — auto-running "${String(title).slice(0, 60)}"`); } catch { /* */ }
+  try { runBtn.click(); } catch { /* */ }
 }
 
 // CD-6 (DESIGN_cadence.md §6) — the RUN HISTORY view. History is its OWN store (wfruns:<workflowId>), never the
@@ -10443,6 +10660,7 @@ function _histClock(at) {
 async function _renderWorkflowRuns(wf) {
   // PS-1 (v1756) — retrofit onto the ONE overlay constructor: singleton/claim/Escape/focus arrive from the
   // helper; this function only supplies title + body.
+  // v2.74.2027 — expandable rows: compact items (no-match/created) + Trace (runId → GET_LOGS window).
   const sched = _wfScheduleLabel(wf);
   const ov = openPanelOverlay({
     id: 'wf-history',
@@ -10460,9 +10678,106 @@ async function _renderWorkflowRuns(wf) {
     list.textContent = `No runs yet.${sched ? ` It ${sched}.` : ' Give it a schedule (⏱) or run it (▶) and its history shows here.'}`;
     return;
   }
-  // newest first; RUN-level rows (§6.3) — time · auto/manual · counts · verdict; both stamps when due ≠ ran (§7.3).
-  list.innerHTML = items.slice().reverse().map((e) => `<div class="wf-history-row">${escHtml(describeRun(e, _histClock(e.ranAt || e.at), e.ranAt ? _histClock(e.at) : '', { currentContentId: wf.contentId || '' }))}</div>`).join('')
-    + (runs.notice ? `<div class="wf-history-notice">${escHtml(runs.notice)}</div>` : '');
+  list.replaceChildren();
+  const _kindLabel = { 'no-match': 'no match', created: 'created', queued: 'queued', blocked: 'blocked', unfillable: 'can’t fill' };
+  for (const e of items.slice().reverse()) {
+    const row = document.createElement('div');
+    row.className = 'wf-history-row';
+    const summary = document.createElement('div');
+    summary.className = 'wf-history-summary';
+    summary.textContent = describeRun(e, _histClock(e.ranAt || e.at), e.ranAt ? _histClock(e.at) : '', { currentContentId: wf.contentId || '' });
+    row.appendChild(summary);
+    // v2.74.2027 — Show items = named no-match/created labels. Trace = session logs for this runId.
+    // v2.74.2028 — drop bare "Details": with no banked items it only toggled an empty panel (live report).
+    const drillItems = Array.isArray(e.items) ? e.items : [];
+    if (drillItems.length || e.runId) {
+      const actions = document.createElement('div');
+      actions.className = 'wf-history-actions';
+      const detail = document.createElement('div');
+      detail.className = 'wf-history-detail';
+      detail.hidden = true;
+      let itemHost = null;
+      let traceBox = null;
+      const _syncDetail = () => {
+        const itemsOpen = !!(itemHost && !itemHost.hidden);
+        const traceOpen = !!(traceBox && !traceBox.hidden);
+        detail.hidden = !(itemsOpen || traceOpen);
+      };
+      if (drillItems.length) {
+        itemHost = document.createElement('div');
+        itemHost.className = 'wf-history-item-host';
+        itemHost.hidden = true;
+        const groups = groupHistoryItems(drillItems);
+        for (const kind of Object.keys(groups)) {
+          const g = groups[kind];
+          if (!g.length) continue;
+          const h = document.createElement('div');
+          h.className = 'wf-history-kind';
+          h.textContent = `${_kindLabel[kind] || kind} — ${g.length}`;
+          itemHost.appendChild(h);
+          const ul = document.createElement('ul');
+          ul.className = 'wf-history-items';
+          for (const it of g) {
+            const li = document.createElement('li');
+            li.textContent = it.label + (it.id ? ` (${it.id})` : '') + (it.note ? ` — ${it.note}` : '');
+            ul.appendChild(li);
+          }
+          itemHost.appendChild(ul);
+        }
+        detail.appendChild(itemHost);
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'wf-history-link';
+        toggle.textContent = `Show ${drillItems.length} item${drillItems.length === 1 ? '' : 's'}`;
+        toggle.addEventListener('click', () => {
+          itemHost.hidden = !itemHost.hidden;
+          toggle.textContent = itemHost.hidden
+            ? `Show ${drillItems.length} item${drillItems.length === 1 ? '' : 's'}`
+            : 'Hide items';
+          _syncDetail();
+        });
+        actions.appendChild(toggle);
+      }
+      if (e.runId) {
+        const traceBtn = document.createElement('button');
+        traceBtn.type = 'button';
+        traceBtn.className = 'wf-history-link';
+        traceBtn.textContent = 'Trace';
+        traceBox = document.createElement('pre');
+        traceBox.className = 'wf-history-trace';
+        traceBox.hidden = true;
+        detail.appendChild(traceBox);
+        traceBtn.addEventListener('click', async () => {
+          if (!traceBox.hidden) { traceBox.hidden = true; _syncDetail(); return; }
+          traceBox.hidden = false;
+          _syncDetail();
+          // v2.74.2030 — prefer the banked per-run digest (survives Logger ring rotation); GET_LOGS is fallback.
+          const banked = formatTraceLines(e.trace);
+          if (banked) { traceBox.textContent = banked; return; }
+          traceBox.textContent = 'Loading…';
+          let res = null;
+          try { res = await _orchReq('GET_LOGS'); } catch { /* */ }
+          const logs = (res && Array.isArray(res.entries)) ? res.entries : [];
+          const hit = filterLogsForRun(logs, { at: e.at || e.ranAt || 0, ms: e.ms || 0, runId: e.runId || '' });
+          if (!hit.length) {
+            traceBox.textContent = `No workflow lines left in the session log for ${e.runId || 'this run'} (the INFO ring rotates; HTTP errors in the sidecar are not the run). ▶ again on v2.74.2030+ banks a durable Trace on the history row.`;
+            return;
+          }
+          traceBox.textContent = formatTraceLines(hit.map((l) => ({ t: l.timestamp, m: l.message })));
+        });
+        actions.appendChild(traceBtn);
+      }
+      row.appendChild(actions);
+      row.appendChild(detail);
+    }
+    list.appendChild(row);
+  }
+  if (runs.notice) {
+    const n = document.createElement('div');
+    n.className = 'wf-history-notice';
+    n.textContent = runs.notice;
+    list.appendChild(n);
+  }
 }
 
 // §6.5 (v2.74.1746) — EVERY run writes exactly one history entry, whichever host ran it (finding 2: panel runs
@@ -10481,12 +10796,44 @@ async function _wfRecordPanelRun(wf, t0, total, st) {
     const verdict = runVerdict(_lastRunSnapshot, { done, total });
     const lv = st && st.lastValue;
     const rows = Array.isArray(lv) ? lv.length : (lv && typeof lv === 'object' && Array.isArray(lv.rows) ? lv.rows.length : 0);
+    // v2.74.2026 — outcome tallies from the chain (map match / write create). A warranty→Shopify run that only
+    // banked `{steps, rows}` rendered "3 steps · 20 rows → complete" with no matched/no-match/created — the
+    // history was RUN-level in shape but empty of the VALUE the user ran it to see (DESIGN_cadence §6.3's
+    // "22 items · 6 matched · 2 parked" example). Prefer the map's `total` as `items` when present; fall back
+    // to lastValue's row count for reads that never mapped.
+    const mc = (st && st.lastMapCounts && typeof st.lastMapCounts === 'object') ? st.lastMapCounts : null;
+    const wc = (st && st.lastWriteCounts && typeof st.lastWriteCounts === 'object') ? st.lastWriteCounts : null;
+    const counts = {
+      steps: done, total, done,
+      ...(mc && Number.isFinite(mc.total) && mc.total > 0 ? { items: mc.total }
+        : (rows ? { rows } : {})),
+      ...(mc && mc.matched ? { matched: mc.matched } : {}),
+      ...(mc && mc.noMatch ? { noMatch: mc.noMatch } : {}),
+      ...(mc && mc.noField ? { noField: mc.noField } : {}),
+      ...(mc && mc.failed ? { failed: mc.failed } : {}),
+      ...(wc && wc.created ? { created: wc.created } : {}),
+      ...(wc && wc.queued ? { queued: wc.queued } : {}),
+      ...(wc && wc.blocked ? { blocked: wc.blocked } : {}),
+      ...(wc && wc.unfillable ? { unfillable: wc.unfillable } : {}),
+    };
+    // v2.74.2027 — reuse the start-stamped runId (gl join) + bank compact item labels for expand.
+    const runId = (st && st.wfRunId) || mintRunId({ now: t0, rand: Math.random() });
+    const items = normalizeHistoryItems(st && st.lastHistoryItems);
+    // v2.74.2029 — partial without a why reads like a failure (live: "20 matched → partial" after a clean
+    // all-matched create no-op). Bank an explicit explanation on the entry.
+    const snapErr = (_lastRunSnapshot && Number.isFinite(_lastRunSnapshot.errors)) ? _lastRunSnapshot.errors : 0;
+    const why = verdict === 'partial'
+      ? explainPartialWhy({ done, total, errors: snapErr, stopWhy: (st && st.lastStopWhy) || '' })
+      : ((st && st.lastStopWhy && verdict === 'complete') ? String(st.lastStopWhy).slice(0, 160) : '');
+    try { _orchLog(`WORKFLOW ▸ run=${runId} end verdict=${verdict}${why ? ` why=${why}` : ''}`); } catch { /* */ }
+    // v2.74.2030 — take the buffered orch lines BEFORE clearing; bank on the entry so Trace survives ring rotation.
+    const trace = normalizeHistoryTrace(_wfTraceTake());
     await appendRunEntry(wf.id, {
-      at: t0, ranAt: t0, trigger: 'manual', verdict,
-      ms: Date.now() - t0, runId: mintRunId({ now: t0, rand: Math.random() }), contentId: wf.contentId || '',
-      counts: { steps: done, total, done, ...(rows ? { rows } : {}) },
+      at: t0, ranAt: t0, trigger: (st && st.wfTrigger === 'auto') ? 'auto' : 'manual', verdict,
+      ms: Date.now() - t0, runId, contentId: wf.contentId || '',
+      counts, items, ...(why ? { why } : {}), ...(trace.length ? { trace } : {}),
     });
-  } catch { /* history must never block a run */ }
+  } catch { /* history must never block a run */ try { _wfTraceBuf = null; } catch { /* */ } }
 }
 
 // CD-1a/CD-4 — the honest schedule label for a saved workflow (§7.3): "runs every 4h" (tier-'sw', fires headless)
@@ -11997,8 +12344,11 @@ async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
 const _rideRowCache = makeRideCache();
 const _RIDE_CACHE_MS = 120000;   // the find scan's window: long enough to make a repeat free, short enough that a division's list has not turned over
 
-async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = false, maxAgeMs = 0 } = {}) {
+async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = false, maxAgeMs = 0, confirmed = false } = {}) {
   // Reads only. A write must never be served from cache and must never fill it — and it INVALIDATES instead (below).
+  // `confirmed` (v2.74.2013) — the ride handlers fail-close every write without confirmed:true. Callers that have
+  // already cleared their OWN gate (pipeline gate auto, or an explicit HITL) must pass it; omitting it is how the
+  // PP-2 auto path died as write-needs-confirm after GATE ▸ auto (live 01:45:52Z).
   const _cacheable = !!(leg && leg.tool && leg.tool.write !== true);
   const _ck = _cacheable ? rideCacheKey(leg, p) : '';
   if (_ck) {
@@ -12010,13 +12360,19 @@ async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = fa
     if (leg.tool.replay === 'headers') {
       const _gqlRead = leg.tool.write !== true && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object' && isReadOnlyGql(String(leg.tool.body.query || ''));
       const _rb = _gqlRead ? _filledConnectorWrite(leg, p) : null;
-      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, readOnly: leg.mode === 'ask', apiHost: leg.tool.apiHost || null, csrfHeader: leg.tool.csrfHeader || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
+      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, readOnly: leg.mode === 'ask', apiHost: leg.tool.apiHost || null, csrfHeader: leg.tool.csrfHeader || null, ...(confirmed ? { confirmed: true } : {}), ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
     } else {
       const plan = planExec(leg, p, { tabId, groundId });
-      if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, quiet ? { ...plan.payload, quiet: true } : plan.payload);
+      if (plan && plan.ok && plan.channel) {
+        const payload = { ...plan.payload, ...(quiet ? { quiet: true } : {}), ...(confirmed ? { confirmed: true } : {}) };
+        r = await _orchReq(plan.channel, payload);
+      }
     }
   } catch { r = null; }
-  if (!r || r.success === false) return { ok: false, error: r && r.error, hint: r && r.hint };
+  // v2.74.2016 — `detail` rides the failure out. The connector handler extracts the first GraphQL/userError
+  // message into it (connector.js graphql-error rewrite), but this return dropped it — so 11 live creates all
+  // died as bare `graphql-error` with the actionable reason ("Phone is invalid"-class) already in hand.
+  if (!r || r.success === false) return { ok: false, error: r && r.error, detail: r && r.detail, hint: r && r.hint };
   if (_ck && r.value != null) _rideRowCache.set(_ck, r.value);   // POPULATE regardless of whether this caller may SERVE
   return { ok: true, value: r.value };
 }
@@ -13873,7 +14229,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
     // v2.74.1900 — the prior rides here too: this call passed NO prior at all, so a map with collection 'prior'
     // arriving at this door could never see one — the v1658 wired-only-one-door class, on the options bag instead
     // of the dispatch. Same durable source as the siblings below.
-    try { const _p = _priorForClause(goal, (d.map && d.map.target && d.map.target.system) || ''); await _runMapClause(msg, d.map, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg }); } catch (e) { _clauseError('map', e, msg); }
+    try { const _p = _priorForClause(goal, (d.map && d.map.target && d.map.target.system) || '', (d.map && d.map.target && d.map.target.readAsk) || ''); await _runMapClause(msg, d.map, { tabId, goal, priorValue: _p.value, priorLeg: _p.leg }); } catch (e) { _clauseError('map', e, msg); }
     return true;
   }
   // PM-9 (v2.74.1658) — the per-item OWN-RECORD field read, at THIS door too.
@@ -13901,11 +14257,16 @@ async function _tryInterpret(ask, { suggestWorkflows = true, targetOverride = nu
   // The rule above is written from the v1658 count (5 of 17), so it is followed here rather than re-learned: both
   // doors, both supplying a prior, in one change. `_lastGroundedRead` is this door's chain-state equivalent.
   if (d.intent === 'write' && d.write) {
-    // PP-2 (v1681) — this door has NO chain state, so a write arriving here has no misses to act on. Say that
-    // rather than opening an empty run: the candidates come from a prior lookup IN THE SAME CHAIN.
+    // PP-2 (v1681) — this door has no CHAIN state. PP-2b (v2.74.2010) — it now has the durable map outcome
+    // instead: `_lastMapRun` carries the misses + the exact lookup, so "create the ones with no match" works as
+    // its OWN turn, not only inside the chain that ran the lookup (live: 1 miss of 2 dropped, then a false
+    // "every row already matched"). Conv-tagged; a stale entry is duplicate-safe (per-row re-check before create).
     try { _orchLog('DISPATCH ▸ write → _runWriteClause @interpret-door'); } catch { /* */ }
     try {
-      await _runWriteClause(msg, d.write, { tabId, goal, state: { lastMisses: [], lastMapLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null } });
+      const _mr = (_lastMapRun && _lastMapRun.convId === _currentConversationId) ? _lastMapRun : null;
+      await _runWriteClause(msg, d.write, { tabId, goal, state: _mr
+        ? { lastMisses: _mr.misses, lastMapLeg: _mr.srcLeg, lastMapLookup: _mr.lookup, lastMapSystem: _mr.system, lastMapRan: true }
+        : { lastMisses: [], lastMapLeg: (_lastGroundedRead && _lastGroundedRead.leg) || null } });
     } catch (e) { _clauseError('write', e, msg); }
     return true;
   }
@@ -16880,6 +17241,8 @@ async function _rehydrateConversation(conv) {
   // DK-8 (v2.74.1491) — opening a desk fires its DUE routine (the v1 fire model: the alarm marked due in the SW;
   // the ask runs here where the full pipeline lives). Non-blocking; a non-desk conversation no-ops inside.
   void _maybeFireDueRoutine();
+  // v2.74.2035 — same due-on-open contract for panel-tier workflow schedules (SW defers; panel must run).
+  void _maybeFireDuePanelWorkflows();
   // DL-1 (v2.74.1601) — the desk LAUNCH page on the reopen-while-fresh path (a desk not yet asked anything;
   // Admin after first launch / history delete). Appended at the BOTTOM — where the open lands — with the Admin
   // vitals card moved below it (the required "vitals after the workflows").
@@ -16917,6 +17280,11 @@ async function _renderDeskLanding(conv) {
   try {
     const isAdmin = !!conv && conv.id === ADMIN_ID;
     if (!conv || conv.kind === 'dev') return;
+    // WFG belt (workflow-builder review, 3rd pass) — a desk landing must never paint UNDER a stray builder page.
+    // If no wizard legitimately owns THIS desk's surface (gone, or pinned to a DIFFERENT desk), drop any leftover
+    // .wf-page + un-hide the skeleton first. Guarded so a LEGIT same-desk wizard (the yield just below) is untouched.
+    // Catch-all for any transition that reached a desk render without tearing the builder down.
+    try { if (!_wfWizard || String(_wfWizard.convId) !== String(conv.id)) _wfReleasePageSlot(); } catch { /* */ }
     // v2.74.1623 — the WIZARD owns its desk's surface while it lives: the landing YIELDS (its async render would
     // otherwise _enterConversation() and steal the page right after a revive). The exit paths re-render it.
     if (_wfWizard && _wfWizard.convId === String(conv.id)) return;
@@ -17365,6 +17733,13 @@ try {
   chrome.runtime.onMessage.addListener((m) => {
     if (!m || m.type !== 'WORKFLOW_PARKED_CHANGED') return;
     void _renderActiveRailTab();
+  });
+} catch { /* */ }
+// v2.74.2035 — SW cadence tick found a due panel-tier workflow; wake Automate so due-on-open can ▶ it.
+try {
+  chrome.runtime.onMessage.addListener((m) => {
+    if (!m || m.type !== 'WORKFLOW_DUE_CHANGED') return;
+    void _maybeFireDuePanelWorkflows();
   });
 } catch { /* */ }
 // EX-1 (v2.74.1946) — THE PROGRAMMATIC ASK. The exerciser's panel half: prefill the composer and call

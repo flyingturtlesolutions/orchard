@@ -10,57 +10,34 @@
 
 const _str = (v) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
 
-// The starter set (WFG-1, DESIGN_workflows.md §8, open decision B): generic, editable templates. The `ask` is the
-// UMBRELLA intent (recall matches against this); `subAsks` are the curated steps that land on the plan gate. Every
-// entry MUST carry ≥2 subAsks — the WF-1 workflow floor (a 1-step "workflow" is just an action).
+// The shipped set (WFG-1, DESIGN_workflows.md §8, decision B). EMPTY BY DIRECTION (v2.74.2009): the four generic
+// starters ("Daily digest of new items", "Triage & tag incoming", "Weekly summary", "Follow up on stalled items")
+// were guesses at what a template should be; they are removed so each one can be built and proven individually.
+// The gallery drops its template section while this is empty and offers only "+ Custom workflow…" + "Your workflows".
+//
+// To add one, append an entry here — that is the whole edit (membership is presence, `galleryWorkflows`):
+//   { id: 'kebab-id', name: 'Shown on the card', description: 'One line under the name',
+//     ask: 'the UMBRELLA intent — recall matches against THIS, not the name',
+//     subAsks: ['first curated step', 'second curated step'],   // ≥2: the WF-1 workflow floor
+//     suits: { types: ['inbox'] },                              // ADVISORY only, or omit
+//     schema: 1 }
 export const WORKFLOW_PRESETS = [
+  // v2.74.2023 — the FIRST hand-built template, landed only after every step verified LIVE (2026-08-05): the
+  // read at conf 1 (13:00Z), the per-task map binding its own collection and matching 16/2/0 (14:05Z), and the
+  // create landing `1 created, 0 blocked` with the new customer matching on re-lookup (14:45–14:49Z). The
+  // spec's "get homeowner contacts" step is NOT a separate subAsk — contact enrichment rides the map's
+  // drill+sidecar (v1899), proven in the same traces. Phrasings below are the PROVEN ones from the live runs;
+  // reword only against a new trace, never for style.
   {
-    id: 'daily-digest',
-    name: 'Daily digest of new items',
-    description: 'Pull what came in since yesterday and summarize it.',
-    ask: 'list the items created or updated since yesterday and summarize each one',
+    id: 'warranty-shopify-customers',
+    name: 'Warranty → Shopify customers',
+    description: 'Find each new warranty task\'s homeowner in Shopify; create customers for the ones missing.',
+    ask: 'sync new warranty homeowners into Shopify customers',
     subAsks: [
-      'get the items created or updated since yesterday',
-      'summarize each one in a sentence',
+      'get all new warranty tasks across every division',
+      'for each task, find the homeowner\'s Shopify customer account',
+      'create a Shopify customer for each one with no match, using the homeowner\'s name, phone, email and property address',
     ],
-    suits: { types: ['inbox', 'watcher'] },
-    schema: 1,
-  },
-  {
-    id: 'triage-incoming',
-    name: 'Triage & tag incoming',
-    description: 'Go through untriaged items and set a priority on each.',
-    ask: 'go through the items that have not been triaged yet and tag each by priority',
-    subAsks: [
-      'get the items that have not been triaged yet',
-      'for each item, decide a priority and apply the matching tag',
-    ],
-    suits: { types: ['inbox'] },
-    schema: 1,
-  },
-  {
-    id: 'weekly-summary',
-    name: 'Weekly summary',
-    description: 'What closed this week, what is still open, in one short brief.',
-    ask: 'summarize what closed in the last 7 days and what is still open',
-    subAsks: [
-      'get the items closed in the last 7 days',
-      'get the items still open',
-      'write a short summary of both',
-    ],
-    suits: { types: ['inbox', 'watcher'] },
-    schema: 1,
-  },
-  {
-    id: 'follow-up-stalled',
-    name: 'Follow up on stalled items',
-    description: 'Find items with no recent activity and draft a nudge for each.',
-    ask: 'find the open items with no activity in 3 days and draft a follow-up for each',
-    subAsks: [
-      'get the open items with no update in the last 3 days',
-      'draft a follow-up message for each one',
-    ],
-    suits: { types: ['inbox'] },
     schema: 1,
   },
 ];

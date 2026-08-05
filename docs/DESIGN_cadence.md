@@ -265,8 +265,11 @@ One entry per run:
   item-shaped, so literally calling `runVerdict` was never possible; "reuse the vocabulary, not the function".)*
 - `parkedRunId` points at the case (§8) when a run stopped for a human.
 
-**Row granularity is RUN-level** (`09:00 · auto · 22 items · 6 matched · 2 parked`). Per-item detail already lives
-in `pipelineRun` records and parked cases; a row points at them rather than inlining them.
+**Row granularity is RUN-level** (`09:00 · auto · 22 items · 6 matched · 2 parked`). Deep per-item state still
+lives in `pipelineRun` records and parked cases. **As-built (v2.74.2027):** a history entry MAY also carry a
+capped, body-blind `items[]` (`{ kind: 'no-match'|'created'|…, label, id?, note? }`, cap 40) so the overlay can
+expand "the 2 no-matches" / created rows without mining a gl. That is a COMPACT label list — never row bodies
+(§11) — and complements `runId` → persisted-log join (`WORKFLOW ▸ run=<id> start|end` + time window).
 
 ### 6.4 Retention — bounded per workflow, and never silently
 
@@ -310,6 +313,11 @@ text, short error words, schema names; never captured values):
   wording; `error` the short code (`field-gone`, `not-armed`). One failing step per entry (the chain stops or
   continues past soft fails — the FIRST failure is the story).
 - `counts` gains `rows` — the final lastValue's row count when countable. Scale makes `complete` mean something;
+- **`counts` gains map/write outcomes (as-built v2.74.2026).** A panel ▶ that runs a map and/or write now banks
+  `items` (map total), `matched` / `noMatch` / `noField` / `failed` (lookup tally), and `created` / `queued` /
+  `blocked` / `unfillable` (write tally) on the history entry — so a warranty→Shopify row can read
+  `20 items · 3 steps · 16 matched · 2 no-match · 1 created · 1m41s → complete` instead of bare scale
+  (`3 steps · 20 rows`). `describeRunCounts` prefers `items` over `rows` when both are present.
   deeper scale stays in traces.
 - `runId` on EVERY entry (today only parked ones) — the join key to gl traces and parked cases.
 - `contentId` — the workflow's content hash at run time (already minted as the edit-detector). The renderer
@@ -318,9 +326,13 @@ text, short error words, schema names; never captured values):
   logic), never a hash shown to the user.
 - `resumedFrom` — the parked runId this run continues, so park → approve → complete reads as one story.
 
-**Stays OUT** (restating the standing rules): per-item detail (pipelineRun records + cases; rows POINT via
-runId, §6.3), captured values of any kind (§11), and model/token telemetry (the routing scoreboard's domain —
-see DESIGN_hardening_ladder.md).
+**Stays OUT** (restating the standing rules): deep per-item state (pipelineRun records + cases; rows still POINT
+via `runId`), captured values of any kind (§11), and model/token telemetry (the routing scoreboard's domain —
+see DESIGN_hardening_ladder.md). The v2027 `items[]` exception is labels-only and capped — not a second pipeline
+store.
+- **`items[]` + Trace (as-built v2.74.2027).** Panel ▶ mints `runId` at start (`WORKFLOW ▸ run=<id> start`), banks
+  map misses + write dispositions as compact items, and the history overlay expands them + filters `GET_LOGS`
+  by `runId` / `[at, at+ms]` (`filterLogsForRun`).
 
 **Render examples** (the contract for `describeRun`):
 ```

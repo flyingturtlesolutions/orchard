@@ -136,3 +136,39 @@ describe('selectPrior — targetSystem cannot vote for the source', () => {
     assert.match(r.why, /most-recent/);
   });
 });
+
+// ── v2.74.2015 — the v2006 rule, completed: the whole TARGET DESCRIPTION sits out, and verbs never vote ────
+// Live 13:02:44Z: "for each task, find the homeowner's Shopify customer account" bound to an 11h-old 3-row
+// Shopify list labelled "Find a Shopify customer by email" — `find` (a verb the label shares because focus
+// labels are leg names) and `customer` (the target's ENTITY word, which v2006's system-name ban did not cover)
+// outvoted `task` 2–1, the map collapsed into a self-map, and the fieldRead clarified about a field named
+// "the Shopify customer by email". The freshly-read 19 open warranty tasks sat one candidate up the whole time.
+describe('selectPrior — the target PHRASE cannot vote, and verbs never could', () => {
+  const ASK = "for each task, find the homeowner's Shopify customer account";
+  const READ_ASK = 'find the Shopify customer by email {value}';
+  const CANDS = () => ([
+    { id: 'w', kind: 'list', noun: 'warranty task', label: 'Open warranty tasks', rows: new Array(19).fill({}), at: 2000 },
+    { id: 's', kind: 'list', noun: 'find a shopify customer', label: 'Find a Shopify customer by email', rows: [1, 2, 3], at: 1 },
+  ]);
+
+  it('the live regression — target entity + phrase excluded, the SOURCE wins on "task"', () => {
+    const r = selectPrior(ASK, CANDS(), { targetSystem: 'shopify', targetPhrase: READ_ASK });
+    assert.equal(r.pick.id, 'w');
+    assert.match(r.why, /task/);
+  });
+  it('"find" is a stopword — a leg-name label cannot score on its verb even without a targetPhrase', () => {
+    const r = selectPrior(ASK, CANDS(), { targetSystem: 'shopify' });
+    assert.equal(r.pick.id, 'w', 'customer(1) no longer beats task(1) + list-stability: the fresher source leads');
+  });
+  it('a genuine self-map still binds its own rows — the phrase mutes the vote, never the candidate', () => {
+    const r = selectPrior('get the tags on each shopify customer', CANDS(), { targetSystem: 'shopify', targetPhrase: '' });
+    assert.equal(r.pick.id, 's');
+  });
+  it('an empty/absent targetPhrase changes nothing about the v2006 behaviour', () => {
+    const r = selectPrior("for each open task in Raleigh, get the homeowner's last order in shopify",
+      [{ id: 's', kind: 'list', noun: 'shopify orders', label: 'Shopify orders for a customer', rows: [1, 2], at: 2 },
+        { id: 'w', kind: 'list', noun: 'warranty tasks', label: 'Raleigh', rows: [1, 2, 3], at: 1 }],
+      { targetSystem: 'shopify', targetPhrase: undefined });
+    assert.equal(r.pick.noun, 'warranty tasks');
+  });
+});

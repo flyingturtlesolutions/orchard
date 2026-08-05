@@ -148,7 +148,14 @@ async function _tick() {
         // the due signal — the panel surfaces "due now" and runs it, then advances via WORKFLOW_MARK_RAN.
         // Advancing HERE (the pre-1696 bug) pushed nextDue into the future, so the panel never saw it as due and
         // the workflow advanced its clock every tick but NEVER ran. Don't touch it; just count it for the summary.
+        // v2.74.2035 — wake an OPEN panel (due-on-open was documented but unwired; panel-tier sat "due now" forever).
         deferred++;
+        try {
+          chrome.runtime.sendMessage(
+            { type: 'WORKFLOW_DUE_CHANGED', workflowId: wf.id, appId, name: wf.name || wf.ask || wf.id },
+            () => { void chrome.runtime.lastError; },
+          );
+        } catch { /* panel closed — next Automate render / desk-open still picks it up */ }
         continue;
       }
 

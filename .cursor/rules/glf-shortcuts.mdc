@@ -1,0 +1,16 @@
+---
+description: Expand the short glf session paste phrases (run glf grader / run glf builder)
+alwaysApply: true
+---
+
+# glf session shortcuts
+
+When the user's message is (or begins with) one of these phrases, treat it as a session boot — read `tools/glf/SHORTCUTS.md` and follow that phrase's expansion immediately. Do not ask the user to paste a longer prompt.
+
+| Phrase | Meaning |
+|---|---|
+| `run glf grader` | Arm the 5-minute loop on `tools/glf/CRON_PROMPT.md`; mint/reuse a lane; run one tick now (grader if lease claimed). |
+| `run glf builder` | Same loop, but mint a **fresh** lane (never reuse another chat's); expect lease refused → STEP 0b inbox. |
+| `run auto glf` | Deprecated alias for `run glf grader`. |
+
+Point the recurring job at the **file** `tools/glf/CRON_PROMPT.md`, never a copied prompt body.

@@ -6,11 +6,13 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { WORKFLOW_PRESETS, normalizeWorkflowPreset, galleryWorkflows, workflowPreset } from './workflowCatalog.js';
 
-describe('workflowCatalog — the starter templates', () => {
-  it('ships at least the four WFG-1 starters, all valid', () => {
-    const gal = galleryWorkflows();
-    assert.ok(gal.length >= 4, `expected ≥4 gallery templates, got ${gal.length}`);
-    assert.equal(gal.length, WORKFLOW_PRESETS.length, 'every shipped preset is gallery-valid (none silently dropped)');
+// The shipped set is EMPTY by direction (v2.74.2009) and grows back one hand-built template at a time, so these
+// assertions are written to hold at zero AND at N: they never assert a COUNT, only that whatever ships is valid.
+// Adding a preset therefore needs no test edit — it is covered by the floor, the id uniqueness and the lookup on
+// arrival. The shape/rejection rules below run on fixtures, so they keep their teeth with the catalog empty.
+describe('workflowCatalog — the shipped templates', () => {
+  it('drops nothing silently: every shipped preset is gallery-valid', () => {
+    assert.equal(galleryWorkflows().length, WORKFLOW_PRESETS.length, 'a shipped preset failed normalization and vanished from the gallery');
   });
 
   it('every template obeys the ≥2-step workflow floor and carries an umbrella ask + name', () => {
@@ -54,9 +56,8 @@ describe('workflowCatalog — normalizeWorkflowPreset', () => {
 });
 
 describe('workflowCatalog — workflowPreset(id)', () => {
-  it('resolves a shipped id and returns null for the unknown/empty', () => {
-    const first = galleryWorkflows()[0];
-    assert.equal(workflowPreset(first.id).name, first.name);
+  it('resolves every shipped id and returns null for the unknown/empty', () => {
+    for (const p of galleryWorkflows()) assert.equal(workflowPreset(p.id).name, p.name, `shipped id must resolve: ${p.id}`);
     assert.equal(workflowPreset('nope-not-a-template'), null);
     assert.equal(workflowPreset(''), null);
     assert.equal(workflowPreset(null), null);

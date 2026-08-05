@@ -1134,12 +1134,20 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (reply && reply.success && (payload && (payload.gql === true || payload.persistedOp)) && reply.value && typeof reply.value === 'object') {
             const v = reply.value;
             let msg = Array.isArray(v.errors) && v.errors.length ? String(v.errors[0].message || 'GraphQL error') : '';
+            // v2.74.2020 — coercion failures ("Variable $customerInput … invalid value") hide the PATH in
+            // extensions.problems; without it the next fix guesses. Prefer the first problem's path+explanation.
+            if (msg && v.errors[0] && v.errors[0].extensions && Array.isArray(v.errors[0].extensions.problems) && v.errors[0].extensions.problems.length) {
+              const p0 = v.errors[0].extensions.problems[0];
+              const path = Array.isArray(p0.path) ? p0.path.join('.') : '';
+              const expl = String(p0.explanation || p0.message || '').trim();
+              if (path || expl) msg = `${msg}${path ? ` @ ${path}` : ''}${expl ? ` (${expl})` : ''}`;
+            }
             if (!msg && v.data && typeof v.data === 'object') {
               for (const node of Object.values(v.data)) {
                 if (node && typeof node === 'object' && Array.isArray(node.userErrors) && node.userErrors.length) { msg = String(node.userErrors[0].message || 'validation error'); break; }
               }
             }
-            if (msg) reply = { success: false, error: 'graphql-error', detail: msg.slice(0, 200), origin };
+            if (msg) reply = { success: false, error: 'graphql-error', detail: msg.slice(0, 280), origin };
           }
           // v2.74.1927 — THE SEARCH-FIELD TRAP, sibling of the 200-is-not-ok trap above and strictly nastier: a
           // search backend that does not recognize a filter DROPS it and returns the UNFILTERED set. Proven live

@@ -722,6 +722,10 @@ export const CONNECTOR_RECIPES = [
         email: { contact: 'primary', type: 'email' },
         phone: { contact: 'primary', type: 'phone' },
         address1: 'AddressLine1',          // the join key itself — proven live (v1638 trace)
+        // v2.74.2020 — CityStateZip parts so MailingAddressInput is complete (address1+country alone was rejected)
+        city: { cityStateZip: 'CityStateZip', part: 'city' },
+        province: { cityStateZip: 'CityStateZip', part: 'province' },
+        zip: { cityStateZip: 'CityStateZip', part: 'zip' },
         country: { literal: 'US' },        // VendorSuite is a US homebuilder feed; the code, not the name
       },
     },
@@ -770,6 +774,10 @@ export const CONNECTOR_RECIPES = [
         email: { contact: 'primary', type: 'email' },
         phone: { contact: 'primary', type: 'phone' },
         address1: 'AddressLine1',          // the join key itself — proven live (v1638 trace)
+        // v2.74.2020 — CityStateZip parts so MailingAddressInput is complete (address1+country alone was rejected)
+        city: { cityStateZip: 'CityStateZip', part: 'city' },
+        province: { cityStateZip: 'CityStateZip', part: 'province' },
+        zip: { cityStateZip: 'CityStateZip', part: 'zip' },
         country: { literal: 'US' },        // VendorSuite is a US homebuilder feed; the code, not the name
       },
     },

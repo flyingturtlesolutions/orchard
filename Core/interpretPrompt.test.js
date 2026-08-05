@@ -187,6 +187,24 @@ describe('interpretPrompt — buildInterpretMessages', () => {
   });
 });
 
+// v2.74.2011 — the v1642 decline rule predated the write door (PP-2 v1681) and was never rescoped, so the SYSTEM
+// prompt simultaneously taught "choose write for creates over prior results" and "decline every write over prior
+// results" — and live the model obeyed the older rule. These pin the resolution: creates route, changes decline.
+describe('interpretPrompt — the write-across-prior-results rule is rescoped, not self-contradictory (v2.74.2011)', () => {
+  const { system } = buildInterpretMessages('x', {});
+  it('a CREATE across prior results is taught as the "write" intent, never a decline', () => {
+    assert.match(system, /A CREATE across PRIOR RESULTS/);
+    assert.match(system, /QUEUES FOR APPROVAL/);
+  });
+  it('UPDATE/DELETE across prior results keep the decline — that half of v1642 is still true', () => {
+    assert.match(system, /An UPDATE or DELETE applied across PRIOR RESULTS/);
+    assert.match(system, /DECLINED BY DESIGN/);
+  });
+  it('no rule declines a generic WRITE across prior results anymore (the contradiction itself)', () => {
+    assert.doesNotMatch(system, /A WRITE applied across PRIOR RESULTS/);
+  });
+});
+
 describe('interpretPrompt — parseInterpretOutput', () => {
   it('extracts a JSON object even wrapped in prose; clamps confidence', () => {
     const o = parseInterpretOutput('Sure! {"intent":"navigate","params":{"url":"https://x.com"},"confidence":3} done');
@@ -204,6 +222,39 @@ describe('interpretPrompt — parseInterpretOutput', () => {
   it('unparseable → clarify (fail safe)', () => {
     assert.equal(parseInterpretOutput('not json').intent, 'clarify');
     assert.equal(parseInterpretOutput(null).intent, 'clarify');
+  });
+
+  // v2.74.2009 — the greedy `/\{[\s\S]*\}/` spanned the first `{` to the LAST `}` in the reply, so a SECOND
+  // brace-bearing span made the slice invalid JSON and lost the whole turn to clarify/unparseable.
+  it('a trailing note after the decision no longer swallows it', () => {
+    const o = parseInterpretOutput('{"intent":"write","confidence":0.9}\n\nNote: I used the shape {field: value}.');
+    assert.equal(o.intent, 'write');
+    assert.equal(o.confidence, 0.9);
+  });
+
+  it('an echoed schema example does not outrank the real decision', () => {
+    const o = parseInterpretOutput('Format: {"intent":"<one of act|write>","params":{}}\n```json\n{"intent":"act","capabilityId":"cap-x","confidence":0.8}\n```');
+    assert.equal(o.intent, 'act');
+    assert.equal(o.capabilityId, 'cap-x');
+  });
+
+  it('a brace inside a string value does not shift the depth', () => {
+    const o = parseInterpretOutput('{"intent":"write","why":"create a user for {homeowner}","confidence":0.7}');
+    assert.equal(o.intent, 'write');
+    assert.equal(o.why, 'create a user for {homeowner}');
+  });
+
+  // The recovery has to be legible in a trace: a route that needed it and one that never did look identical.
+  it('carries the brace-span count so INTERPRET_RAW shows when the recovery earned the turn', () => {
+    assert.equal(parseInterpretOutput('{"intent":"act","confidence":0.9}').parse.spans, 1);
+    assert.equal(parseInterpretOutput('Format: {"intent":"<kind>"}\n{"intent":"act","confidence":0.9}').parse.spans, 2);
+    assert.equal(parseInterpretOutput('no json here').parse.spans, 0);
+  });
+
+  it('a TRUNCATED object is still unparseable — the fail-safe is not widened into a guess', () => {
+    const o = parseInterpretOutput('{"intent":"act","capabilityId":"cap-x"');
+    assert.equal(o.intent, 'clarify');
+    assert.equal(o.why, 'unparseable');
   });
 
   it('composes with normalizeInterpretDecision: parsed act on an offered cap survives', () => {

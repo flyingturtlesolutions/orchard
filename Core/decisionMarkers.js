@@ -94,6 +94,9 @@ export const DECISION_MARKERS = [
   { key: 'connector-tools', src: "CONNECTOR_TOOLS ▸" },
   { key: 'source', src: "SOURCE ▸" },
   { key: 'workflow', src: "WORKFLOW ▸" },
+  // v2.74.2023 — the gallery template seed: which preset, how many steps. Without it a preset-seeded wizard is
+  // indistinguishable from a hand-typed plan in a decisions download (invariant #1, registered WITH the marker).
+  { key: 'wf-preset', src: "WF_PRESET ▸" },
   { key: 'cadence', src: "CADENCE ▸", metric: true, metricPattern: ['CADENCE ▸ fired', 'CADENCE ▸ auto-disarmed'] },
   { key: 'trigger', src: "TRIGGER ▸" },
   { key: 'ride-write', src: "RIDE_WRITE ▸" },

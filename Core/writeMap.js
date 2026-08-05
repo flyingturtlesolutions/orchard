@@ -24,6 +24,7 @@
  */
 
 import { ladderValues, normalizeRungs, pickFieldPath, extractValue } from './peritemMap.js';
+import { legParamDefs } from './connectorLeg.js';
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v === 0 || v === false ? String(v) : (v == null ? '' : String(v).trim())));
 
@@ -62,10 +63,63 @@ const _MONEY_RE = /(refund|charge|payment|pay_|_pay\b|capture|void|invoice|payou
  * under a contact role, and no amount of name-matching recovers that. Name-matching is the fallback for the
  * ordinary case where the row simply has a field called what the param is called.
  */
+/**
+ * VendorSuite's `CityStateZip` is one string ("Cumming, GA 30040" / "ABERDEEN, NC 28315"). Shopify's
+ * MailingAddressInput wants the parts. PURE — returns {} when unparseable (caller omits those fields).
+ */
+export function parseCityStateZip(raw) {
+  const s = _str(raw);
+  if (!s) return {};
+  let m = s.match(/^(.+?),\s*([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+  if (!m) m = s.match(/^(.+?)\s+([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+  if (!m) return {};
+  return { city: m[1].trim(), province: m[2].toUpperCase(), zip: m[3] };
+}
+
+/**
+ * Shopify Admin rejects a non-E.164 phone at GraphQL variable coercion ("Variable $customerInput of type
+ * CustomerInput! was provided invalid value") — not as a userError. US 10-digit (and 11-digit leading 1)
+ * numbers normalize to +1…; anything else is dropped (omit > send garbage). PURE.
+ */
+export function normalizeShopifyPhone(raw) {
+  const s = _str(raw);
+  if (!s) return '';
+  if (/^\+[1-9]\d{7,14}$/.test(s.replace(/[\s()-]/g, ''))) return s.replace(/[\s()-]/g, '');
+  const digits = s.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return '';
+}
+
+/**
+ * Finish a shopify_create_customer param bag before fillBody. PURE.
+ * Live 14:05:30Z: writeMap always stamped country:'US' + address1, never city/zip → addresses:[{address1,countryCode}]
+ * which CustomerInput rejected as a whole. Incomplete addresses are dropped (contact-only create still works);
+ * phones are normalized or omitted.
+ */
+export function prepareShopifyCustomerCreateParams(filled) {
+  const out = { ...(filled && typeof filled === 'object' ? filled : {}) };
+  if (out.phone != null) {
+    const p = normalizeShopifyPhone(out.phone);
+    if (p) out.phone = p; else delete out.phone;
+  }
+  const hasStreet = !!_str(out.address1);
+  const hasLocality = !!(_str(out.city) || _str(out.zip));
+  if (!hasStreet || !hasLocality) {
+    for (const k of ['address1', 'address2', 'city', 'province', 'country', 'zip', 'company']) delete out[k];
+  }
+  return out;
+}
+
 export function resolveWriteValue(row, paramName, declared) {
   if (!row || typeof row !== 'object') return '';
   const decl = declared && Object.prototype.hasOwnProperty.call(declared, paramName) ? declared[paramName] : undefined;
   if (decl && typeof decl === 'object' && decl.literal !== undefined) return _str(decl.literal);   // a declared constant (e.g. country 'US')
+  // v2.74.2020 — CityStateZip → city / province / zip for Shopify MailingAddressInput.
+  if (decl && typeof decl === 'object' && decl.cityStateZip && decl.part) {
+    const parts = parseCityStateZip(extractValue(row, decl.cityStateZip));
+    return _str(parts[decl.part]);
+  }
   if (decl && typeof decl === 'object') {                          // a contact rung — same vocabulary as joinKey
     // normalizeRungs FIRST: ladderValues matches the type against lower-cased keys and does NOT normalize its
     // input, so a declaration written the natural way ({type:'FirstName'}) resolves to nothing silently. A
@@ -99,7 +153,8 @@ export function buildWriteProposals(missRows, {
 } = {}) {
   const rows = (Array.isArray(missRows) ? missRows : []).filter((r) => r && typeof r === 'object');
   const tool = (leg && leg.tool) || {};
-  const params = Array.isArray(tool.params) ? tool.params : [];
+  // v2.74.2021 — legParamDefs: projected legs have NO tool.params (recipeToLeg → leg.params + paramSchema).
+  const params = legParamDefs(leg);
   const use = rows.slice(0, Math.max(0, cap));
   const proposals = [];
   const unproposable = [];
@@ -116,11 +171,15 @@ export function buildWriteProposals(missRows, {
       else if (p && p.required) missing.push(name);
     }
     if (missing.length) { unproposable.push({ label, missing }); continue; }
+    // v2.74.2020 — shopify_create_customer: normalize phone + drop incomplete addresses before the proposal
+    // freezes the params the human will approve (the preview IS the truth).
+    const send = (tool.id === 'shopify_create_customer' || tool.recipeId === 'shopify_create_customer')
+      ? prepareShopifyCustomerCreateParams(filled) : filled;
     const prop = {
       name: _str(tool.name) || 'Create record',
       targets: [label],
       leg,
-      params: filled,
+      params: send,
       safety: leg.safety || 'confirm',
       why: _str(why) || `no match found for ${label}`,
     };

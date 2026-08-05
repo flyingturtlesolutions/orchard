@@ -21,7 +21,13 @@
 
 const _STOP = new Set(['the', 'a', 'an', 'of', 'for', 'on', 'in', 'to', 'each', 'every', 'all', 'their', 'them',
   'its', 'this', 'that', 'these', 'those', 'my', 'our', 'get', 'read', 'show', 'list', 'give', 'me', 'and',
-  'what', 'whats', 'is', 'are', 'from', 'by', 'with', 'last', 'first', 'recent', 'full', 'details', 'detail']);
+  'what', 'whats', 'is', 'are', 'from', 'by', 'with', 'last', 'first', 'recent', 'full', 'details', 'detail',
+  // v2.74.2015 — ask-VERBS don't vote. Focus labels are often leg names ("FIND a Shopify customer by email"),
+  // so a verb the ask shares with a label scored as if it were a noun: live 13:02:44Z, "for each task, FIND the
+  // homeowner's Shopify customer account" bound to an 11h-old 3-row Shopify list on `find,customer` (2) over the
+  // 19 open warranty tasks read 60s earlier on `task` (1). Only unambiguous verbs join the list — 'open' (open
+  // tasks), 'check' (payments) and 'pull' stay voters because this domain uses them as nouns/adjectives.
+  'find', 'search', 'look', 'lookup', 'fetch']);
 
 const _norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -61,7 +67,7 @@ function _candidateTokens(c) {
  * refusing to answer a follow-up that today works would be a regression — but `why` says so, and that is the
  * line a future grade reads.
  */
-export function selectPrior(ask, candidates, { targetSystem = '' } = {}) {
+export function selectPrior(ask, candidates, { targetSystem = '', targetPhrase = '' } = {}) {
   const list = (Array.isArray(candidates) ? candidates : []).filter((c) => c && (c.kind === 'list' || c.kind === 'record'));
   if (!list.length) return { pick: null, why: 'no-candidates', matched: [], ambiguous: [] };
 
@@ -77,7 +83,12 @@ export function selectPrior(ask, candidates, { targetSystem = '' } = {}) {
   // Deliberately NOT excluding same-system candidates outright: a genuine self-map ("get the tracking number of
   // each order" over Shopify rows) is legitimate and must still bind to those rows. This only removes the
   // target's NAME from the vote, never the candidate.
-  const _sysTok = new Set(askTokens(targetSystem));
+  // v2.74.2015 — the v2006 rule, completed: the WHOLE target description sits out, not just the system name.
+  // `targetPhrase` is the map's readAsk ("find the Shopify customer by email {value}") — every word of it
+  // describes the TARGET read, so none of it may vote for a SOURCE. Live 13:02:44Z the target's ENTITY word
+  // ("customer") did exactly what its system name was banned from doing at v2006: it elected the target's own
+  // stale prior as the source, and the map collapsed into a self-map/fieldRead on rows the user never meant.
+  const _sysTok = new Set([...askTokens(targetSystem), ...askTokens(targetPhrase)]);
   const toks = askTokens(ask).filter((t) => !_sysTok.has(t));
   const perItem = isPerItem(ask);
 

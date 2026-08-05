@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   writeMapPreflight, resolveWriteValue, buildWriteProposals, requireStalenessGuard, writeBatchSummary, WRITE_BATCH_CAP,
+  parseCityStateZip, normalizeShopifyPhone, prepareShopifyCustomerCreateParams,
 } from './writeMap.js';
 
 const createLeg = {
@@ -16,6 +17,13 @@ const createLeg = {
       { name: 'email' }, { name: 'phone' }, { name: 'address1' }, { name: 'city' }, { name: 'country' },
     ],
   },
+};
+// v2.74.2021 — the LIVE shape: recipeToLeg puts names on leg.params + required on paramSchema, NOT tool.params.
+const projectedCreateLeg = {
+  safety: 'confirm',
+  params: ['first_name', 'last_name', 'email', 'phone', 'address1', 'city', 'country'],
+  paramSchema: { type: 'object', properties: {}, required: ['first_name', 'last_name'] },
+  tool: { id: 'shopify_create_customer', recipeId: 'shopify_create_customer', name: 'Create a Shopify customer', write: true },
 };
 const searchLeg = { safety: 'auto', tool: { id: 'shopify_customer_search', params: [{ name: 'query' }] } };
 
@@ -165,5 +173,100 @@ describe('writeMap — writeBatchSummary (honest counts)', () => {
   });
   it('a clean batch says only what happened', () => {
     assert.equal(writeBatchSummary({ proposals: [1], system: 'Shopify' }), '1 to create in Shopify');
+  });
+});
+
+// v2.74.2020 — live CustomerInput coercion wall: incomplete MailingAddressInput + non-E.164 phone.
+describe('writeMap — CityStateZip + Shopify create prep (v2020)', () => {
+  it('parseCityStateZip splits "City, ST ZIP"', () => {
+    assert.deepEqual(parseCityStateZip('Cumming, GA 30040'), { city: 'Cumming', province: 'GA', zip: '30040' });
+    assert.deepEqual(parseCityStateZip('ABERDEEN, NC 28315'), { city: 'ABERDEEN', province: 'NC', zip: '28315' });
+    assert.deepEqual(parseCityStateZip('Somewhere NC 28315'), { city: 'Somewhere', province: 'NC', zip: '28315' });
+    assert.deepEqual(parseCityStateZip(''), {});
+    assert.deepEqual(parseCityStateZip('no zip here'), {});
+  });
+  it('cityStateZip declaration resolves city / province / zip parts', () => {
+    const r = { CityStateZip: 'Cumming, GA 30040', AddressLine1: '1 Main' };
+    const decl = {
+      city: { cityStateZip: 'CityStateZip', part: 'city' },
+      province: { cityStateZip: 'CityStateZip', part: 'province' },
+      zip: { cityStateZip: 'CityStateZip', part: 'zip' },
+    };
+    assert.equal(resolveWriteValue(r, 'city', decl), 'Cumming');
+    assert.equal(resolveWriteValue(r, 'province', decl), 'GA');
+    assert.equal(resolveWriteValue(r, 'zip', decl), '30040');
+  });
+  it('normalizeShopifyPhone → E.164 for US 10/11-digit; drops junk', () => {
+    assert.equal(normalizeShopifyPhone('(704) 555-1212'), '+17045551212');
+    assert.equal(normalizeShopifyPhone('1-704-555-1212'), '+17045551212');
+    assert.equal(normalizeShopifyPhone('+17045551212'), '+17045551212');
+    assert.equal(normalizeShopifyPhone('555'), '');
+    assert.equal(normalizeShopifyPhone(''), '');
+  });
+  it('prepareShopifyCustomerCreateParams drops address1+country alone (the live fail shape)', () => {
+    const out = prepareShopifyCustomerCreateParams({
+      first_name: 'A', last_name: 'B', email: 'a@b.c',
+      address1: '1 Main', country: 'US', phone: '704-555-1212',
+    });
+    assert.equal(out.phone, '+17045551212');
+    assert.equal('address1' in out, false);
+    assert.equal('country' in out, false);
+    assert.equal(out.first_name, 'A');
+  });
+  it('prepare keeps a complete address and normalizes phone', () => {
+    const out = prepareShopifyCustomerCreateParams({
+      first_name: 'A', last_name: 'B', phone: '7045551212',
+      address1: '1 Main', city: 'Cumming', province: 'GA', zip: '30040', country: 'US',
+    });
+    assert.equal(out.phone, '+17045551212');
+    assert.equal(out.city, 'Cumming');
+    assert.equal(out.province, 'GA');
+    assert.equal(out.zip, '30040');
+  });
+  it('a projected leg (no tool.params) still fills proposals — the live create shape (v2021)', () => {
+    const { proposals, unproposable } = buildWriteProposals(
+      [{ row, label: '#01', value: '1008 Harb Drive' }],
+      { leg: projectedCreateLeg, declared, why: 'no match' },
+    );
+    assert.equal(unproposable.length, 0);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].params.first_name, 'Dana');
+    assert.equal(proposals[0].params.last_name, 'Reyes');
+    assert.equal(proposals[0].params.email, 'dana@example.com');
+    assert.equal(proposals[0].params.address1, '1008 Harb Drive');
+  });
+
+  it('buildWriteProposals runs prepare on shopify_create_customer (incomplete address omitted from preview)', () => {
+    const bareAddr = {
+      AddressLine1: '1 Main', CityStateZip: 'garbage',
+      __contacts: [{ IsPrimary: true, FirstName: 'A', LastName: 'B', Email: 'a@b.c', Phone: '704-555-1212' }],
+    };
+    const decl = {
+      first_name: { contact: 'primary', type: 'first' },
+      last_name: { contact: 'primary', type: 'last' },
+      email: { contact: 'primary', type: 'email' },
+      phone: { contact: 'primary', type: 'phone' },
+      address1: 'AddressLine1',
+      city: { cityStateZip: 'CityStateZip', part: 'city' },
+      province: { cityStateZip: 'CityStateZip', part: 'province' },
+      zip: { cityStateZip: 'CityStateZip', part: 'zip' },
+      country: { literal: 'US' },
+    };
+    const leg = {
+      safety: 'confirm',
+      tool: {
+        id: 'shopify_create_customer', name: 'Create', write: true,
+        params: [
+          { name: 'first_name', required: true }, { name: 'last_name', required: true },
+          { name: 'email' }, { name: 'phone' }, { name: 'address1' }, { name: 'city' },
+          { name: 'province' }, { name: 'zip' }, { name: 'country' },
+        ],
+      },
+    };
+    const { proposals } = buildWriteProposals([{ row: bareAddr, label: '#1', value: '1 Main' }], { leg, declared: decl });
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].params.phone, '+17045551212');
+    assert.equal('address1' in proposals[0].params, false);
+    assert.equal('country' in proposals[0].params, false);
   });
 });

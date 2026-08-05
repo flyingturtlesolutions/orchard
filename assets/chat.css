@@ -725,6 +725,43 @@ textarea {
 .wf-history-list { flex: 1; overflow-y: auto; padding: var(--sp-3) var(--sp-4); }
 .wf-history-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--c-border-soft); }
 .wf-history-row:last-of-type { border-bottom: none; }
+.wf-history-summary { font-size: var(--fs-sm, 13px); line-height: 1.4; }
+.wf-history-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 4px; }
+.wf-history-link {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--c-accent, #378ADD);
+  font: inherit;
+  font-size: var(--fs-xs, 12px);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.wf-history-link:hover { opacity: 0.85; }
+.wf-history-detail { margin-top: 6px; padding: 6px 0 2px; }
+.wf-history-kind { font-size: var(--fs-xs, 12px); font-weight: 600; margin-top: 6px; opacity: 0.85; }
+.wf-history-kind:first-child { margin-top: 0; }
+.wf-history-items {
+  margin: 2px 0 0;
+  padding-left: 1.1em;
+  font-size: var(--fs-xs, 12px);
+  line-height: 1.35;
+}
+.wf-history-trace {
+  margin: 8px 0 0;
+  padding: var(--sp-2);
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--c-bg-subtle, rgba(0,0,0,0.04));
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--r-md, 6px);
+}
 .wf-history-notice { padding-top: var(--sp-2); opacity: 0.7; font-style: italic; }
 /* PS-2 (v2.74.1765, DESIGN_panel_surfaces.md §2.2) — the workflows OVERLAY: list rows + needs-action banners. */
 .wf-ov-row {
@@ -2087,6 +2124,78 @@ textarea {
 .rail-item.is-workflow:hover .wf-card-act[data-icon="runHeadless"],
 .rail-item.is-workflow .wf-card-act[data-icon="run"]:hover,
 .rail-item.is-workflow .wf-card-act[data-icon="run"]:focus-visible { opacity: 1; }
+/* v2.74.2031 — a TIME TRIGGER is also primary chrome: armed/paused schedule chips stay visible (option A).
+   Unscheduled cards keep the hover-only clock so the list doesn't fill with inert affordances. */
+.rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched="armed"],
+.rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched="paused"] { opacity: 0.62; }
+.rail-item.is-workflow:hover .wf-card-act[data-icon="schedule"][data-sched],
+.rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched]:hover,
+.rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched]:focus-visible { opacity: 1; }
+.rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched="armed"] {
+  color: var(--c-accent, #378ADD);
+}
+.rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched="paused"] {
+  opacity: 0.4;
+  color: var(--c-text-subtle);
+}
+/* v2.74.2034 — schedule state: plain idle · armed = accent-bg + solid left rail · paused = muted + dashed rail.
+   (v2032 full-card color-mix washes read muddy on the warm elevated surface and made every idle card dirty.) */
+.rail-item.is-workflow[data-sched="none"] {
+  background: transparent;
+}
+.rail-item.is-workflow[data-sched="armed"] {
+  background: var(--c-accent-bg);
+  border-left: 2px solid var(--c-accent);
+  padding-left: calc(var(--sp-3) - 2px);
+}
+.rail-item.is-workflow[data-sched="armed"]:hover,
+.rail-item.is-workflow[data-sched="armed"].detail-pinned {
+  background: color-mix(in srgb, var(--c-accent) 16%, var(--c-bg-elevated));
+}
+.rail-item.is-workflow[data-sched="paused"] {
+  background: color-mix(in srgb, var(--c-text-subtle) 8%, transparent);
+  border-left: 2px dashed var(--c-text-subtle);
+  padding-left: calc(var(--sp-3) - 2px);
+}
+.rail-item.is-workflow[data-sched="paused"]:hover,
+.rail-item.is-workflow[data-sched="paused"].detail-pinned {
+  background: color-mix(in srgb, var(--c-text-subtle) 14%, transparent);
+}
+/* v2.74.2034 — schedule interval strip: full-width wrap under meta (not the absolute icon cluster). */
+.wf-sched-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  margin-top: 4px;
+  padding-right: 4px;
+  box-sizing: border-box;
+}
+.wf-sched-chip {
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-bg-elevated);
+  color: var(--c-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+.wf-sched-chip:hover {
+  color: var(--c-text);
+  border-color: var(--c-border);
+  background: var(--c-bg-subtle);
+}
+.wf-sched-chip.is-on {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+  background: var(--c-accent-bg);
+}
+
 
 /* WFC-3 (UI review #3) — each run outcome carries a distinct NON-COLOUR glyph, overriding the plain done ✓,
    so the state survives greyscale, touch, and screen readers (the ring is reinforcement, not the sole channel). */

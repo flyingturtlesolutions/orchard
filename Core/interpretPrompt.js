@@ -153,11 +153,20 @@ const SYSTEM = [
   '  assume THAT site — "navigate" there (params.url = its origin) or "act" there, and prefer its capabilities.',
   '  Do NOT "clarify" which site; the user already chose it for this app.',
   '',
-  '- A WRITE applied across PRIOR RESULTS ("if no profile found, create one", "update each of them",',
-  '  "delete the ones that matched") is a recognized shape that is DECLINED BY DESIGN, not misunderstood.',
-  '  Return "clarify" and say so plainly in "question": bulk lookups run unattended, but records are only',
-  '  created or changed one at a time with the user watching. Name what CAN be done instead — show the',
-  '  unmatched rows, or do the single write for one named row. Never present this as confusion about the ask.',
+  // v2.74.2011 — RESCOPED. The v1642 version of this rule declined EVERY write across prior results, because it
+  // predates the "write" intent (PP-2, v1681): when it was written there was no safe door for the shape. PP-2 then
+  // built exactly that door — creates for unmatched rows, filled only from the site's writeMap declaration, queued
+  // for approval — but this rule was never rescoped, so the prompt taught the model to both CHOOSE "write" (the
+  // intent bullet above) and DECLINE it (here), and live 2026-08-05T01:26Z it obeyed this older rule verbatim.
+  // Creates now route; updates/deletes keep the decline — no declaration covers changing existing records in bulk.
+  '- A CREATE across PRIOR RESULTS ("if no profile found, create one", "create a customer for each one with no',
+  '  match") is the "write" intent above — choose it, do NOT decline it as an unattended bulk write: every proposed',
+  '  record is filled from the site\'s own declaration and QUEUES FOR APPROVAL, so nothing is created unwatched.',
+  '- An UPDATE or DELETE applied across PRIOR RESULTS ("update each of them", "delete the ones that matched") is a',
+  '  recognized shape that is DECLINED BY DESIGN, not misunderstood — no declaration covers bulk changes to existing',
+  '  records. Return "clarify" and say so plainly in "question"; name what CAN be done instead — show the rows,',
+  '  create records for the unmatched ones, or do the single change for one named row. Never present this as',
+  '  confusion about the ask.',
   '- CONNECTED SITES: <CONNECTED_SITES> lists the ONLY sites this app is connected to. Operate on those. If the ask',
   '  needs a site or service NOT among them (e.g. "emails" with no mail site connected), do NOT navigate to it or',
   '  invent it — "answer" that it is not connected and name the sites that ARE, or "clarify" which connected site.',
@@ -321,6 +330,56 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
 
 const _clamp01 = (n) => { const x = Number(n); return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0; };
 
+/** The index of the `}` closing the object opened at `start`, or -1. String-aware, so a brace inside a value
+ *  ("create a user for {name}") does not shift the depth. PURE. */
+function _balancedEnd(s, start) {
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/**
+ * v2.74.2009 — extract the DECISION object from a reply that may also carry prose, a fenced block, or an echoed
+ * schema example. Was a single greedy `/\{[\s\S]*\}/`, which spans the FIRST `{` to the LAST `}` in the whole
+ * reply: any second brace-bearing span (prose, a ```json example, a trailing note) made that slice invalid JSON and
+ * collapsed the turn to `clarify confidence:0 why:'unparseable'` — the whole ask lost. Live 2026-08-05T00:56:50Z:
+ * a `create …` ask drew a 1660-char reply (the same session's routed turns were 276-369) and died there, while the
+ * seven other Core prompt parsers had long since moved to a balanced scan.
+ *
+ * Each `{` is walked to its balanced close and parsed independently. The LAST object carrying a string `intent`
+ * wins: a model that echoes the schema before answering ("Format: {"intent":"<one of act|write>"} … {"intent":
+ * "act",…}") puts its example FIRST and its decision LAST, and the example is shaped exactly like a decision, so
+ * key-presence alone cannot separate them. Anything with no `intent` at all (a trailing note object) is never
+ * preferred. Single-object replies — every well-formed one — are unaffected. PURE.
+ * @param {string} text
+ * @returns {object|null}
+ */
+function _decisionJson(text) {
+  const s = String(text ?? '');
+  let first = null, lastWithIntent = null, spans = 0;
+  let start = s.indexOf('{');
+  while (start >= 0) {
+    const end = _balancedEnd(s, start);
+    let obj = null;
+    if (end > start) { try { obj = JSON.parse(s.slice(start, end + 1)); } catch { obj = null; } }
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      spans++;
+      if (!first) first = obj;
+      if (typeof obj.intent === 'string') lastWithIntent = obj;
+      start = s.indexOf('{', end + 1);
+    } else {
+      start = s.indexOf('{', start + 1);   // not a parseable span — the next `{` may open the real one
+    }
+  }
+  return { obj: lastWithIntent || first, spans };
+}
+
 /**
  * Parse the interpret LLM's raw output into the shape Core/interpret.normalizeInterpretDecision consumes. PURE,
  * tolerant JSON extraction. Does NOT validate the palette / intent semantics — interpret.js owns that. An
@@ -329,10 +388,15 @@ const _clamp01 = (n) => { const x = Number(n); return Number.isFinite(x) ? Math.
  */
 export function parseInterpretOutput(raw) {
   let obj = null;
+  let spans = 0;
+  // v2.74.2009 — balanced scan, not one greedy span (see _decisionJson). `spans` rides into the INTERPRET_RAW
+  // harvest line so a trace can tell "the reply was clean" from "the recovery earned the turn" — without it the
+  // fix is unobservable and its block ungradeable, since a recovered route looks identical to one never at risk.
   if (raw && typeof raw === 'object') obj = raw;
-  else { const m = String(raw ?? '').match(/\{[\s\S]*\}/); if (m) { try { obj = JSON.parse(m[0]); } catch { obj = null; } } }
-  if (!obj || typeof obj !== 'object') return { intent: 'clarify', params: {}, subAsks: [], question: '', confidence: 0, why: 'unparseable' };
+  else ({ obj, spans } = _decisionJson(raw));
+  if (!obj || typeof obj !== 'object') return { intent: 'clarify', params: {}, subAsks: [], question: '', confidence: 0, why: 'unparseable', parse: { spans } };
   return {
+    parse: { spans },
     intent: typeof obj.intent === 'string' ? obj.intent.trim().toLowerCase() : 'clarify',
     capabilityId: typeof obj.capabilityId === 'string' ? obj.capabilityId.trim() : (typeof obj.tool === 'string' ? obj.tool.trim() : ''),
     op: typeof obj.op === 'string' ? obj.op.trim() : '',

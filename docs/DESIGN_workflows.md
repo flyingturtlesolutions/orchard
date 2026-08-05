@@ -211,8 +211,17 @@ Mirror `Core/appCatalog.js` with a new pure module `Core/workflowCatalog.js`:
   is advisory only (pre-selects a matching view in the "add to which view?" step).
 - **Gallery membership = one field**, exactly as `preconfiguredDesks() = builtinPresets().filter(p=>p.sites?.length)`
   (`appCatalog.js:247`): `galleryWorkflows()` filters the catalog. Promoting a template is one data edit.
-- **Starter set (proposed, generic, editable):** "Daily digest of new items," "Triage & tag incoming," "Weekly
-  summary," "Follow up on stalled items." Replace with real templates once agreed (open decision B, §10).
+- **Shipped set: EMPTY at v2.74.2009 (user direction); FIRST template landed v2.74.2023.** The four proposed
+  starters ("Daily digest of new items," "Triage & tag incoming," "Weekly summary," "Follow up on stalled items")
+  were removed — they were guesses, and each real template is to be built and proven one at a time. The first
+  proven one is **`warranty-shopify-customers`** ("Warranty → Shopify customers"): read new warranty tasks across
+  every division → per-task map to the homeowner's Shopify customer (contact enrichment rides the map's
+  drill+sidecar, not a separate step) → create customers for the unmatched. Landed only after every step verified
+  live (2026-08-05: map 16 matched/2 no-match/0 failed at 14:05Z; create `1 created, 0 blocked` and the new
+  customer matching on re-lookup at 14:45–14:49Z). Its subAsks are the exact phrasings from those traces.
+  *(WFG-2, v2.74.2024, user direction: a template pick now ADDS the workflow directly — banked `ready` with
+  preset provenance, visible in the Automate tab, `WF_PRESET ▸ added` — instead of seeding the wizard. The
+  wizard remains the path for hand-written plans via "+ Custom workflow…".)*
 - **User layer** (mirror `Core/userCatalog.js`): "Your workflows" already comes from `listAllWorkflows`; no new store
   needed for WFG-1. A saved workflow promoted to a *shared template* is a WFG-3 concern.
 
@@ -239,9 +248,10 @@ Mirror `Core/appCatalog.js` with a new pure module `Core/workflowCatalog.js`:
 - **A — binding model for WFG-1. RESOLVED (user direction): SCOPED.** The per-view "＋ Workflow" is the single
   entry and opens the gallery pre-scoped to its view; no unscoped top-level entry, no "add to which view?" picker (a
   workflow is always added under a specific view). The standalone-gallery + picker option was built then removed.
-- **B — the preset set.** Recommended: I curate the §8 starter set (generic, editable). Alt: ship WFG-1 shell (custom
-  + yours) first, add presets once the exact set is agreed. If specific templates are wanted, name them and they seed
-  §8 instead of the generic guesses.
+- **B — the preset set. RESOLVED (user direction, v2.74.2009): ship the WFG-1 shell with NO presets.** The curated
+  starter set was built, then deleted: templates get authored one at a time rather than guessed in a batch. The
+  gallery is "+ Custom workflow…" + "Your workflows" until the first hand-built template lands in §8's catalog.
+  *(That happened at v2.74.2023: `warranty-shopify-customers`, proven live before landing — see §8.)*
 - **C — how far to go now.** Recommended: **WFG-1 only** (delivers the request, zero data-model risk), then decide
   WFG-2/3 from live use. Full first-class independence (WFG-3) is worth committing to now **only if** cross-view /
   portable / shareable workflows are a near-term goal.

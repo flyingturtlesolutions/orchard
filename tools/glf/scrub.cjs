@@ -37,6 +37,8 @@ const PATTERNS = [
 const NAMES = [
   'Divine Monkam', 'CJ Bouchard', 'John Froh', 'Brian Sweet', 'Phillip Edwards', 'Daniel Shaw',
   'John Smith',
+  // v2.74.2015 window — FOCUS ▸ pinned-record lines carry Shopify customer names verbatim:
+  'Jeremiah Adkins', 'Wendell Mendes', 'Roberto Garcia Vargas', 'Julio Duran', 'Reepa Barboza', 'Parm Purewal',
 ];
 // NOT scrubbed, deliberately: DIVISION names (Raleigh, Atlanta West, Las Vegas) and product names (Zendesk
 // Guide). They are business geography, they are already in Core/connectorRecipes.js, and they carry the scope

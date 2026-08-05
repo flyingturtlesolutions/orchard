@@ -153,6 +153,28 @@ function recipeParamSchema(params) {
  * inside a fix for the same class. Now normalizes: recipe shape (params[{name,required}]) OR leg shape
  * (paramSchema.required), reading `urlParam` from whichever level carries it.
  */
+/**
+ * v2.74.2021 — EVERY param def a WRITE fill needs, in one shape. Live 14:22/14:32: `_runWriteClause` read
+ * `createLeg.tool.params` (recipe shape) on a projected leg — recipeToLeg puts NAMES on `leg.params` and
+ * required on `paramSchema`, so `tool.params` is undefined, the fill loop never ran, fillBody sent
+ * `{operationName:'CustomerCreate'}` with no variables → Shopify `CustomerInput! … Expected value to not be null`.
+ * Same inert-reader class as v1854/v1864. PURE. Returns [{name, required, …}] for both recipe and leg shapes.
+ */
+export function legParamDefs(legOrRecipe) {
+  const o = (legOrRecipe && typeof legOrRecipe === 'object') ? legOrRecipe : null;
+  if (!o) return [];
+  const tool = (o.tool && typeof o.tool === 'object') ? o.tool : {};
+  const objParams = [tool.params, o.params].find((p) => Array.isArray(p) && p.some((x) => x && typeof x === 'object' && x.name));
+  if (objParams) {
+    return objParams.filter((p) => p && p.name).map((p) => ({ ...p, name: String(p.name), required: p.required === true }));
+  }
+  const names = Array.isArray(o.params) ? o.params.filter((n) => typeof n === 'string' && n) : [];
+  const schema = o.paramSchema || tool.paramSchema || {};
+  const req = new Set((Array.isArray(schema.required) ? schema.required : []).map(String));
+  const props = (schema.properties && typeof schema.properties === 'object') ? schema.properties : {};
+  return names.map((n) => ({ name: String(n), required: req.has(String(n)), ...(props[n] && typeof props[n] === 'object' ? props[n] : {}) }));
+}
+
 export function missingRequiredParams(legOrRecipe, params = {}) {
   const o = (legOrRecipe && typeof legOrRecipe === 'object') ? legOrRecipe : null;
   if (!o) return [];
