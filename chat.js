@@ -9318,12 +9318,13 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey 
       // 104907 identity investigation). Records carry their own origin; the host also feeds sessionHost.
       const _pinHost = String(pinnedKey).split('@')[1] || '';
       const legs = harvestedRecipeLegs((rr && rr.recipes) || [], { host: _pinHost, groundId: pinnedGroundId });
-      const leg = (legs || []).find((l) => l && l.key === pinnedKey);
+      // v2.74.2037 — match leg.key (legacy) OR bare recipeId (SW-safe pin shape).
+      const leg = (legs || []).find((l) => l && (l.key === pinnedKey || (l.tool && (l.tool.recipeId === pinnedKey || l.tool.id === pinnedKey))));
       if (leg) {
         try { _orchLog(`WORKFLOW ▸ pinned ${pinnedKey} → banked bindings, no interpret`); } catch { /* */ }
         const bound = coerceParams(pinnedBindings, leg.paramSchema);
         const run = await _runConnectorLeg(leg, bound, { tabId, groundId: pinnedGroundId, onEach });
-        return { leg, boundParams: bound, ...run };
+        return { leg, boundParams: bound, groundId: pinnedGroundId, ...run };
       }
     } catch { /* fall through — the interpret path below still enforces the pin */ }
   }
@@ -9340,12 +9341,18 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey 
   // what the human approved is the whole point of pinning. A pin absent from the current palette is DRIFT: return
   // the honest stale marker (the caller stops; §10.4 — never silently re-interpret).
   if (pinnedKey) {
-    const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === pinnedKey);
+    // v2.74.2037 — bare recipeId pins (post-2037) OR legacy leg.key.
+    const leg = retrieved.find((l) => l && l.domain === 'connector' && (
+      l.key === pinnedKey || (l.tool && (l.tool.recipeId === pinnedKey || l.tool.id === pinnedKey))
+    ));
     if (!leg) { try { _orchLog(`WORKFLOW ▸ pin STALE ${pinnedKey} — not in the current palette`); } catch { /* */ } return { pinnedStale: true, pinnedKey }; }
-    if (d && d.capabilityId && d.capabilityId !== pinnedKey) { try { _orchLog(`WORKFLOW ▸ pin held: interpret aimed ${d.capabilityId}, running pinned ${pinnedKey}`); } catch { /* */ } }
+    if (d && d.capabilityId && d.capabilityId !== pinnedKey && d.capabilityId !== (leg.tool && leg.tool.recipeId) && d.capabilityId !== leg.key) {
+      try { _orchLog(`WORKFLOW ▸ pin held: interpret aimed ${d.capabilityId}, running pinned ${pinnedKey}`); } catch { /* */ }
+    }
     const bound = coerceParams((d && d.params) || {}, leg.paramSchema);
-    const run = await _runConnectorLeg(leg, bound, { tabId, groundId: pinnedGroundId || groundId, onEach });
-    return { leg, boundParams: bound, ...run };
+    const _gid = pinnedGroundId || groundId || (leg.tool && leg.tool.groundId) || null;
+    const run = await _runConnectorLeg(leg, bound, { tabId, groundId: _gid, onEach });
+    return { leg, boundParams: bound, groundId: _gid, ...run };
   }
   // PM-5 (v2.74.1627) — a MAP verdict rides back to the chain, which owns the executor. This is the door a PLAIN
   // ask actually takes (live 075620: `map` fired twice at conf 0.95 and was DISCARDED here — `_tryInterpret`'s
@@ -9393,7 +9400,7 @@ async function _chainConnectorRun(clauseText, { tabId, onEach = null, pinnedKey 
     }
   }
   const run = await _runConnectorLeg(leg, _dispatch, { tabId, groundId, onEach });
-  return { leg, boundParams: bound, ...run };
+  return { leg, boundParams: bound, groundId: groundId || (leg.tool && leg.tool.groundId) || null, ...run };
 }
 
 // Run a decomposed chain JIT: match EACH clause against the page state AT THAT POINT (so a clause on the
@@ -9875,7 +9882,22 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           st.lastReadoutIdx = st.readouts.length - 1;   // DK-8i — this readout's slot (dropped if a spawn consumes the read)
           // v1730 — the BOUND params ride the ranStep so pinnedClause can bank them (pre-resolve values —
           // "each"/names re-resolve fresh at replay; banking resolved IDs would freeze them).
-          st.ranSteps.push({ capabilityId: cr.leg.key, bindings: (cr.boundParams && typeof cr.boundParams === 'object') ? cr.boundParams : {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
+          // v2.74.2037 — bank bare recipeId + groundId (SW rideStep looks up by recipe id; workflowTier needs
+          // groundId or the whole chain stays panel-tier / due-on-open only). Fall back to leg.key for older pins.
+          {
+            const _tool = cr.leg && cr.leg.tool;
+            const _rid = (_tool && (_tool.recipeId || _tool.id)) || null;
+            const _gid = cr.groundId || (_tool && _tool.groundId) || st.chainGroundId || null;
+            if (_gid) st.chainGroundId = _gid;
+            st.ranSteps.push({
+              capabilityId: _rid || cr.leg.key,
+              groundId: _gid,
+              bindings: (cr.boundParams && typeof cr.boundParams === 'object') ? cr.boundParams : {},
+              kind: 'connector',
+              clause: clause.text,
+              intent: cr.leg.name || clause.text,
+            });
+          }
           continue;
         }
         if (cr && !cr.ok) {
@@ -10832,9 +10854,22 @@ async function _wfPersistPinsFromRun(wf, wfKey, st) {
       return { text, via: prov.via, bankedAt: prov.bankedAt || Date.now(), ...(prov.clause ? { clause: prov.clause } : {}) };
     });
     const hasMapPin = steps.some((s) => s.clause && s.clause.kind === 'map' && s.clause.capabilityId && s.clause.groundId && s.clause.valueParam);
-    if (!hasMapPin) return;
+    const hasRidePin = steps.some((s) => {
+      const k = s.clause && s.clause.kind;
+      return (k === 'connector' || k === 'ride') && s.clause.capabilityId && s.clause.groundId;
+    });
+    if (!hasMapPin) {
+      try { _orchLog('WORKFLOW ▸ pins not banked — map pin incomplete (need capabilityId+groundId+valueParam)'); } catch { /* */ }
+      return;
+    }
+    if (!hasRidePin) {
+      try { _orchLog('WORKFLOW ▸ pins not banked — ride step missing groundId (stays due-on-open / panel-tier)'); } catch { /* */ }
+      return;
+    }
     await updateWorkflow(wfKey, wf.id, { steps });
-    try { _orchLog(`WORKFLOW ▸ pins banked for headless — "${String(wf.name || wf.ask).slice(0, 40)}"`); } catch { /* */ }
+    const tier = workflowTier({ ...wf, steps });
+    try { _orchLog(`WORKFLOW ▸ pins banked for headless — "${String(wf.name || wf.ask).slice(0, 40)}" → tier-${tier}`); } catch { /* */ }
+    try { if (_railTab === 'automations') void _renderRailAutomations(); } catch { /* */ }
   } catch { /* never block history */ }
 }
 

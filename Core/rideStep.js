@@ -19,6 +19,27 @@ const _pinOf = (clause) => {
 };
 
 /**
+ * Resolve a pin's capabilityId against stored recipes. Accepts the bare recipe id (SW / map pins) OR a legacy
+ * connector leg.key (`me.app.id@host`) that panel qualify historically banked. PURE.
+ */
+export function findRecipeByCapId(recipes, capabilityId) {
+  const capId = String(capabilityId || '').trim();
+  if (!capId) return null;
+  const list = Array.isArray(recipes) ? recipes : [];
+  const byId = list.find((r) => r && r.id === capId);
+  if (byId) return byId;
+  // legacy: me.<app>.<id>@<host> — id is the segment before @ after the second dot
+  const bare = capId.includes('@') ? capId.slice(0, capId.indexOf('@')) : capId;
+  const parts = bare.split('.');
+  if (parts.length >= 3) {
+    const id = parts.slice(2).join('.');   // ids are usually undotted; join keeps odd ids intact
+    const hit = list.find((r) => r && r.id === id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
  * Does a pinned clause still resolve? — replayPlan's drift check (§2.1). A ground + capability that reads back an
  * ARMABLE recipe resolves; anything else is drift → the caller STOPS the run rather than re-interpreting prose.
  * A loose (unpinned) step is legitimately resolvable (there is nothing pinned to have drifted). Injected readRecipes.
@@ -39,7 +60,7 @@ export async function rideStepResolvable(clause, { readRecipes } = {}) {
   if (!groundId) return false;   // a leg pin that lost its ground IS drift
   try {
     const recs = (typeof readRecipes === 'function' ? await readRecipes(groundId) : []) || [];
-    const rec = recs.find((r) => r && r.id === capId);
+    const rec = findRecipeByCapId(recs, capId);
     return !!(rec && armable(rec));
   } catch { return false; }
 }
@@ -68,7 +89,7 @@ export async function runRideStep(clause, { readRecipes, invoke, reporter = null
 
   let recs = [];
   try { recs = (typeof readRecipes === 'function' ? await readRecipes(groundId) : []) || []; } catch { recs = []; }
-  const rec = recs.find((r) => r && r.id === capId);
+  const rec = findRecipeByCapId(recs, capId);
   if (!rec) return { ok: false, error: 'recipe-gone' };
   if (!armable(rec)) return { ok: false, error: 'not-armed' };
 

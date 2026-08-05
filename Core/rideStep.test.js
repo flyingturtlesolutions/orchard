@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runRideStep, rideStepResolvable } from './rideStep.js';
+import { runRideStep, rideStepResolvable, findRecipeByCapId } from './rideStep.js';
 
 // a valid session-ride READ recipe: recipeToLeg needs id+app+endpoint+origin; armable needs enabled+accepted.
 const READ = { id: 'cap-1', app: 'zendesk', origin: 'https://x.zendesk.com', endpoint: '/api/tickets', method: 'GET', enabled: true, reviewState: 'accepted', safetyClass: 'auto', name: 'read tickets' };
@@ -40,6 +40,12 @@ describe('rideStep — runRideStep', () => {
     assert.deepEqual(r.value, [1, 2, 3]);
     assert.equal(sawPayload.endpoint, '/api/tickets', 'the INVOKE_SESSION payload carried the recipe endpoint');
   });
+  it('v2037 — a legacy leg.key pin still resolves on the SW path', async () => {
+    const legacy = { text: 'read', pinned: { kind: 'connector', capabilityId: 'me.zendesk.cap-1@x.zendesk.com', groundId: 'g-1' } };
+    const r = await runRideStep(legacy, { readRecipes: recipesFor([READ]), invoke: okInvoke([9]) });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.value, [9]);
+  });
   it('v1730 — banked bindings reach the headless payload, LITERAL-SAFE: each-values and resolve-marked params drop', async () => {
     let sawPayload = null;
     const invoke = async (payload) => { sawPayload = payload; return { success: true, value: [] }; };
@@ -74,6 +80,14 @@ describe('rideStep — runRideStep', () => {
   it('NO reporter ⇒ a write parks (fail safe — nobody watching)', async () => {
     const r = await runRideStep(writeClause, { readRecipes: recipesFor([WRITE]), invoke: async () => ({ success: true }), runId: 'run_x' });
     assert.deepEqual(r, { park: true, parkedRunId: 'run_x' });
+  });
+});
+
+describe('rideStep — findRecipeByCapId (bare id + legacy leg.key)', () => {
+  it('matches bare recipe id and me.app.id@host pins', () => {
+    assert.equal(findRecipeByCapId([READ], 'cap-1').id, 'cap-1');
+    assert.equal(findRecipeByCapId([READ], 'me.zendesk.cap-1@x.zendesk.com').id, 'cap-1');
+    assert.equal(findRecipeByCapId([READ], 'missing'), null);
   });
 });
 
