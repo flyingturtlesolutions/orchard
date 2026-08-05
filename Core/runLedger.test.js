@@ -155,8 +155,12 @@ describe('runVerdict (v2.74.1859) — outcomes, not step positions', () => {
     assert.equal(runVerdict(snap(createRunLedger().effect('case', 3)), { done: 2, total: 2 }), 'complete');
     assert.equal(runVerdict(snap(createRunLedger().read(3)), { done: 2, total: 2 }), 'complete');
   });
-  it('silent nothing (no error, no work) is failed — a run that touched nothing did not complete', () => {
-    assert.equal(runVerdict(snap(createRunLedger()), { done: 2, total: 2 }), 'failed');
+  it('silent nothing with no steps engaged is failed', () => {
+    assert.equal(runVerdict(snap(createRunLedger()), { done: 0, total: 2 }), 'failed');
+  });
+  it('v2042 — steps engaged, no error, empty result → partial (found nothing), not failed', () => {
+    assert.equal(runVerdict(snap(createRunLedger()), { done: 1, total: 3 }), 'partial');
+    assert.equal(runVerdict(snap(createRunLedger()), { done: 2, total: 2 }), 'partial');
   });
   it('no ledger → the legacy positional read, so an unmeasured host is never made worse', () => {
     assert.equal(runVerdict(null, { done: 2, total: 2 }), 'complete');

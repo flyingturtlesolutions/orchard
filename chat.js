@@ -93,6 +93,7 @@ import { isCsrfColdFailure } from './Core/connection.js';   // v2.74.1759 — CS
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
 import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) — the honest label: a tier-'sw' workflow "runs" on the clock, a tier-'panel' one is "due" on next desk-open
+import { evaluatePinBank, refinePinBankAfterStore } from './Core/workflowPinBank.js';   // v2.74.2038 — pin-bank cause probes (refuse taxonomy; no remediation)
 import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun, explainPartialWhy, normalizeHistoryTrace, formatTraceLines } from './Core/runHistory.js';   // CD-6; v2027 items; v2029 partial why; v2030 banked trace
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
@@ -9526,6 +9527,13 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
         // Offering "Teach it with a quick demo" there invites a demo of a capability that already works.
         // Mirrors `lastAuthStop`, the existing precedent for "not engaged, but not broken either".
         st.lastEmptyStop = { text: clause.text, narrowedFrom: st.lastNarrowedFrom || 0, at: Date.now() };
+        // v2.74.2042 — bank the WHY for history (partial + description; never "→ failed" for found-nothing).
+        {
+          const from = Number(st.lastNarrowedFrom) || 0;
+          st.lastStopWhy = from
+            ? `nothing to act on — last step matched 0 of ${from}`
+            : 'nothing found — last step returned 0 rows';
+        }
         _setMessageBody(msg, _stop.message, { markdown: true });
         _orchFinalize(msg);
         return;
@@ -9699,7 +9707,15 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
         _presenceProceed = true;
         try { _orchLog(`PRESENCE ▸ ${_pinHost || '?'} · ${(pr && pr.state) || 'unchecked'} · ${(pr && pr.reason) || 'check-failed-proceeding'} — pinned step proceeds without a desk binding`); } catch { /* */ }
       }
-      if (_boundConnections().length || _presenceProceed) {
+      // v2.74.2041 — a MULTI-STEP chain (workflow ▶ / due-on-open) must try the connector door even when
+      // `_boundConnections()` is still empty (reload race / pin-bank never landed → always cold). Live 23:04–23:08:
+      // ORCH_MATCH miss → gate false → RUN no-effect in <200ms with no INTERPRET_ASK — Warranty step 1 looked like
+      // "don't know how on this page" while VS was fresh. Pre-2036 pin typo kept every ▶ unpinned on this path.
+      const _multiStep = Array.isArray(clauses) && clauses.length >= 2;
+      if (_boundConnections().length || _presenceProceed || _multiStep) {
+        if (_multiStep && !_boundConnections().length && !_presenceProceed) {
+          try { _orchLog('WORKFLOW ▸ connector door — multi-step miss with empty bindings (cold path; interpret may still resolve rides)'); } catch { /* */ }
+        }
         // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
         // run's whole first clause showed one static line while 121 reads ran.
         const cr = await _chainConnectorRun(clause.text, { tabId, pinnedKey: _pinConn ? _pin.capabilityId : null, pinnedGroundId: _pinConn ? (_pin.groundId || null) : null, pinnedBindings: _pinConn ? (_pin.bindings || null) : null, onEach: (n, t2, label) => { try { _setMessageBody(msg, `${_pfx(i)}“${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
@@ -10843,34 +10859,55 @@ async function _renderWorkflowRuns(wf) {
 // failedStep stays SW-only (the panel renders its failures in-chat, where the person already saw them).
 // v2.74.2036 — after a panel ▶ that banked map/write pins in ranSteps, merge them into the saved workflow
 // so the next cadence tick can fire headless (tier-sw). One successful panel run "requalifies" the preset.
+// v2.74.2038 — PINBANK ▸ enter/refuse via evaluatePinBank. v2.74.2039 — read wf.subAsks (not lowercase).
+// v2.74.2040 — local binding named `asks` (2039 live threw ReferenceError: shorthand used subasks ≠ subAsks).
 async function _wfPersistPinsFromRun(wf, wfKey, st) {
+  let refuseLogged = false;
+  const ver = (() => { try { return chrome.runtime.getManifest().version; } catch { return '?'; } })();
   try {
-    if (!wf || !wfKey || !st || !Array.isArray(st.ranSteps) || !st.ranSteps.length) return;
-    const subasks = Array.isArray(wf.subasks) ? wf.subasks : [];
-    if (subasks.length < 2) return;
-    const steps = subasks.map((text, i) => {
-      const ran = st.ranSteps[i] || st.ranSteps.find((r) => r && String(r.clause || r.intent || '') === String(text));
-      const prov = ran ? stepProvenance(ran, text, '', Date.now()) : { text, via: { kind: null, host: null, name: null }, bankedAt: Date.now() };
-      return { text, via: prov.via, bankedAt: prov.bankedAt || Date.now(), ...(prov.clause ? { clause: prov.clause } : {}) };
-    });
-    const hasMapPin = steps.some((s) => s.clause && s.clause.kind === 'map' && s.clause.capabilityId && s.clause.groundId && s.clause.valueParam);
-    const hasRidePin = steps.some((s) => {
-      const k = s.clause && s.clause.kind;
-      return (k === 'connector' || k === 'ride') && s.clause.capabilityId && s.clause.groundId;
-    });
-    if (!hasMapPin) {
+    try { _orchLog(`PINBANK ▸ enter v=${ver}`); } catch { /* */ }
+    const ranSteps = (st && Array.isArray(st.ranSteps)) ? st.ranSteps : [];
+    // Local name `asks` — avoid subasks/subAsks identifier collisions (2039 live: ReferenceError on shorthand).
+    const asks = (wf && Array.isArray(wf.subAsks)) ? wf.subAsks : [];
+    const asksTypo = (wf && Array.isArray(wf.subasks)) ? wf.subasks.length : 0;   // regression: lowercase must stay 0
+    let keyOk = !!(wf && wfKey && wf.id);
+    let recordExists = true;
+    try {
+      if (!keyOk) recordExists = false;
+      else {
+        const items = await loadWorkflows(wfKey);
+        if (!Array.isArray(items) || !items.length) recordExists = false;
+        else if (!items.some((x) => x && x.id === wf.id)) recordExists = 'other-only';
+      }
+    } catch { recordExists = false; }
+
+    let decision = evaluatePinBank({ subasks: asks, ranSteps, recordExists });
+    if (decision.refuse === 'ok-ready' && keyOk) {
+      await updateWorkflow(wfKey, wf.id, { steps: decision.steps });
+      let stored = null;
+      try {
+        const items = await loadWorkflows(wfKey);
+        stored = (Array.isArray(items) ? items : []).find((x) => x && x.id === wf.id) || null;
+      } catch { /* */ }
+      decision = refinePinBankAfterStore(decision, stored);
+      if (decision.refuse === 'ok') {
+        try { _orchLog(`WORKFLOW ▸ pins banked for headless — "${String(wf.name || wf.ask).slice(0, 40)}" → tier-${decision.tier}`); } catch { /* */ }
+        try { if (_railTab === 'automations') void _renderRailAutomations(); } catch { /* */ }
+      }
+    } else if (decision.refuse === 'map-fields') {
       try { _orchLog('WORKFLOW ▸ pins not banked — map pin incomplete (need capabilityId+groundId+valueParam)'); } catch { /* */ }
-      return;
-    }
-    if (!hasRidePin) {
+    } else if (decision.refuse === 'ride-incomplete') {
       try { _orchLog('WORKFLOW ▸ pins not banked — ride step missing groundId (stays due-on-open / panel-tier)'); } catch { /* */ }
-      return;
     }
-    await updateWorkflow(wfKey, wf.id, { steps });
-    const tier = workflowTier({ ...wf, steps });
-    try { _orchLog(`WORKFLOW ▸ pins banked for headless — "${String(wf.name || wf.ask).slice(0, 40)}" → tier-${tier}`); } catch { /* */ }
-    try { if (_railTab === 'automations') void _renderRailAutomations(); } catch { /* */ }
-  } catch { /* never block history */ }
+    try {
+      _orchLog(`PINBANK ▸ refuse=${decision.refuse} keyOk=${keyOk ? 1 : 0} storedPinned=${Number.isFinite(decision.storedPinned) ? decision.storedPinned : 0} tier=${decision.tier || 'panel'} ran=${decision.ranPresence || ''} asks=${asks.length} asksTypo=${asksTypo}`);
+      refuseLogged = true;
+    } catch { /* */ }
+  } catch (e) {
+    try {
+      if (!refuseLogged) _orchLog(`PINBANK ▸ refuse=thrown err=${String((e && e.message) || e).slice(0, 80)}`);
+    } catch { /* */ }
+  }
 }
 
 async function _wfRecordPanelRun(wf, t0, total, st) {

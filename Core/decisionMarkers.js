@@ -97,6 +97,8 @@ export const DECISION_MARKERS = [
   // v2.74.2023 — the gallery template seed: which preset, how many steps. Without it a preset-seeded wizard is
   // indistinguishable from a hand-typed plan in a decisions download (invariant #1, registered WITH the marker).
   { key: 'wf-preset', src: "WF_PRESET ▸" },
+  // v2.74.2038 — post-▶ pin-bank refuse taxonomy (enter/refuse pairing). Absent → cause A/A2 invisible in -decisions-.
+  { key: 'pinbank', src: "PINBANK ▸" },
   { key: 'cadence', src: "CADENCE ▸", metric: true, metricPattern: ['CADENCE ▸ fired', 'CADENCE ▸ auto-disarmed'] },
   { key: 'trigger', src: "TRIGGER ▸" },
   { key: 'ride-write', src: "RIDE_WRITE ▸" },

@@ -164,6 +164,8 @@ export function runVerdict(snapshot, { done = 0, total = 0 } = {}) {
   const did = touched > 0 || rows > 0;
   if (errors > 0) return did ? 'partial' : 'failed';   // something failed: only 'complete' is ruled out absolutely
   if (!s) return done >= total && total > 0 ? 'complete' : (done > 0 ? 'partial' : 'failed');   // no ledger → the legacy positional read
-  if (!did) return 'failed';                            // no error recorded, but nothing happened either
+  // v2.74.2042 — steps ran, nothing errored, empty result / empty-prior stop: "found nothing" is partial
+  // with a why, not failed (Warranty ride ×121 divisions → 0 rows → map stopped — user: not a failure).
+  if (!did) return (errors === 0 && done > 0) ? 'partial' : 'failed';
   return done >= total && total > 0 ? 'complete' : 'partial';
 }
