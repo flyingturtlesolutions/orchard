@@ -7,10 +7,9 @@
 // Never an alarm per workflow. Deleting a workflow or a desk cannot orphan anything — the scanner simply stops
 // finding the record. Everything is fail-safe: cadence must never break the boot it rides or the call it observes.
 //
-// TIER (§11.3): only a tier-'sw' workflow (all steps are pinned rides / navs — Core/workflowTier) fires HEADLESS
-// here. A tier-'panel' workflow is logged as due and its clock advanced (coalescing), then left for the panel to
-// run on next desk-open — the honest label §7.3 already tells the user which it is. Phase 1 executes only READ
-// rides; a write reached unattended PARKS (§8), because writePolicy has no 'auto' and nobody is watching.
+// TIER (§11.3): only a tier-'sw' workflow fires HEADLESS here (pinned ride/nav/fieldRead/map/write — Core/workflowTier).
+// A tier-'panel' workflow is deferred (WORKFLOW_DUE_CHANGED) for panel due-on-open. Writes use pipelineGate (§8
+// amended v2036): internal+reversible → auto; outward/undeclared → park; destructive → refuse.
 
 import { Logger } from '../../Core/Logger.js';
 import { ConversationStore } from '../../Services/ConversationStore.js';   // §2.1 check 4 (v1715) — desk LIVENESS, not just the orphan stamp
@@ -25,6 +24,9 @@ import { mintRunId } from '../../Core/pipelineRun.js';
 import { priorRunVerdict } from '../../Core/fleetSchedule.js';
 import { runRideStep, rideStepResolvable } from '../../Core/rideStep.js';   // CD-1a (§9.4) — the SHARED pinned-ride/nav step primitive (one impl for SW + panel)
 import { runFieldReadStep } from '../../Core/headlessClause.js';   // CD-1a phase 2, extraction 1 (v1717) — the headless banked field read
+import { runMapStep } from '../../Core/headlessMap.js';           // v2.74.2036 — pinned map (no INTERPRET)
+import { runWriteStep } from '../../Core/headlessWrite.js';       // v2.74.2036 — write + pipelineGate (auto for internal)
+import { recipeToLeg } from '../../Core/connectorLeg.js';
 
 const TICK_ALARM = 'cadence:tick';
 const TICK_MINUTES = 5;                    // honor the 5-min cadence floor (Core/trigger clamps below this)
@@ -183,6 +185,8 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
   await _stampRunMarker(wf.id, runId, now);
   const rep = reporter || makeAccumulatorReporter();
   let out = { verdict: 'failed' };
+  // v2.74.2036 — closed-panel presence: pulse toolbar while a scheduled fire runs.
+  try { _cadencePresence('running', { name: wf.name || wf.ask || wf.id }); } catch { /* */ }
   try {
     const plan = replayPlan(wf, (clause) => _canResolve(clause));
     if (!plan.runnable) {
@@ -203,6 +207,10 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
     out = { verdict: 'failed' };
   }
   await _clearRunMarker(wf.id);
+  try {
+    const v = out.verdict === 'parked' ? 'parked' : out.verdict;
+    _cadencePresence(v === 'parked' || v === 'failed' ? v : 'done', { name: wf.name || wf.ask || wf.id, verdict: v });
+  } catch { /* */ }
 
   const snap = rep.snapshot();
   const _rows = (v) => (Array.isArray(v) ? v.length : (v && typeof v === 'object' && Array.isArray(v.rows) ? v.rows.length : 0));
@@ -259,16 +267,85 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
 // chain state (state.lastValue) so a following fieldRead has rows to read — phase 2's composition seam.
 async function _runStep(clause, ctx) {
   const pin = (clause && clause.pinned && typeof clause.pinned === 'object') ? clause.pinned : null;
+  const invoke = (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', payload);
+  const readRecipes = _ctx.readRideRecipes;
   if (pin && pin.kind === 'fieldRead') return runFieldReadStep(clause, { state: ctx.state });
+  if (pin && pin.kind === 'map') {
+    return runMapStep(clause, { state: ctx.state, invoke, readRecipes });
+  }
+  if (pin && pin.kind === 'write') {
+    return runWriteStep(clause, {
+      state: ctx.state, invoke, readRecipes, reporter: ctx.reporter, runId: ctx.runId,
+    });
+  }
   const r = await runRideStep(clause, {
-    readRecipes: _ctx.readRideRecipes,
-    invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', payload),
+    readRecipes,
+    invoke,
     reporter: ctx.reporter,
     runId: ctx.runId,
     workflowId: ctx.wf && ctx.wf.id,
   });
-  if (r && r.ok && r.value !== undefined && r.value !== null) return { ...r, state: { ...(ctx.state || {}), lastValue: r.value } };
+  if (r && r.ok && r.value !== undefined && r.value !== null) {
+    // Thread lastLeg for a following map's joinKey ladder (panel does this on connector success).
+    let lastLeg = (ctx.state && ctx.state.lastLeg) || null;
+    try {
+      const p = pin;
+      if (p && p.groundId && p.capabilityId) {
+        const recs = (await readRecipes(p.groundId)) || [];
+        const rec = recs.find((x) => x && x.id === p.capabilityId);
+        if (rec) {
+          lastLeg = recipeToLeg({ ...rec, groundId: p.groundId }, { account: 'me', trusted: true }) || lastLeg;
+        }
+      }
+    } catch { /* */ }
+    return { ...r, state: { ...(ctx.state || {}), lastValue: r.value, lastLeg } };
+  }
   return r;
+}
+
+// v2.74.2036 — toolbar presence when the panel is closed (DESIGN_panel_surfaces §7 standing channel).
+let _cadenceDoneSinceOpen = 0;
+function _cadencePresence(phase, { name = '', verdict = '' } = {}) {
+  try {
+    if (phase === 'running') {
+      chrome.action.setTitle({ title: `Running: ${String(name).slice(0, 80)}` });
+      chrome.action.setBadgeText({ text: '…' });
+      chrome.action.setBadgeBackgroundColor({ color: '#d97757' });
+      try { if (_ctx && typeof _ctx.startPulse === 'function') _ctx.startPulse(); } catch { /* */ }
+      return;
+    }
+    try { if (_ctx && typeof _ctx.stopPulse === 'function') _ctx.stopPulse(); } catch { /* */ }
+    if (phase === 'parked' || phase === 'failed') {
+      chrome.action.setBadgeText({ text: '!' });
+      chrome.action.setBadgeBackgroundColor({ color: phase === 'failed' ? '#c25a5a' : '#c8954a' });
+      chrome.action.setTitle({ title: phase === 'failed'
+        ? `Failed: ${String(name).slice(0, 60)}`
+        : `Needs you: ${String(name).slice(0, 60)}` });
+      try {
+        chrome.notifications.create(`cadence-${phase}-${Date.now()}`, {
+          type: 'basic',
+          iconUrl: 'assets/icon128.png',
+          title: phase === 'failed' ? 'Scheduled run failed' : 'Scheduled run needs approval',
+          message: String(name).slice(0, 120),
+        });
+      } catch { /* notifications permission optional */ }
+      return;
+    }
+    // done
+    _cadenceDoneSinceOpen = Math.min(99, _cadenceDoneSinceOpen + 1);
+    chrome.action.setBadgeText({ text: _cadenceDoneSinceOpen > 1 ? String(_cadenceDoneSinceOpen) : '✓' });
+    chrome.action.setBadgeBackgroundColor({ color: '#6b9e5c' });
+    chrome.action.setTitle({ title: `Done: ${String(name).slice(0, 60)}${verdict ? ` (${verdict})` : ''}` });
+  } catch { /* badge best-effort */ }
+}
+
+/** Panel open clears the "done while closed" standing badge. */
+export function clearCadenceDoneBadge() {
+  _cadenceDoneSinceOpen = 0;
+  try {
+    chrome.action.setBadgeText({ text: '' });
+    chrome.action.setTitle({ title: 'Orchard' });
+  } catch { /* */ }
 }
 
 // The drift check (§2.1), via the same shared primitive.
@@ -299,6 +376,12 @@ async function _autoDisarm(appId, wf, why, now) {
 // ── the handlers the panel arms / reads history from ─────────────────────────────────────────────────────────────
 export function createCadenceHandlers() {
   return {
+    // v2.74.2036 — panel open clears the closed-panel "done" toolbar badge.
+    CADENCE_PRESENCE_CLEAR: (_payload, _sender, sendResponse) => {
+      clearCadenceDoneBadge();
+      sendResponse({ success: true });
+      return false;
+    },
     // TRIGGER ▸ arm/edit/disarm a workflow's cadence. payload: { appId, workflowId, trigger|null }. The trigger is
     // normalized here; a null/invalid trigger clears the cadence.
     WORKFLOW_TRIGGER_SET: (payload, _sender, sendResponse) => {

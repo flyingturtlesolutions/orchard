@@ -47,6 +47,30 @@ describe('workflowTier — phase 2 extraction 1: the banked field read (v1717)',
   });
 });
 
+describe('workflowTier — phase 2: banked map + write (v2.74.2036)', () => {
+  const bankedMap = {
+    text: 'find in Shopify', via: { kind: 'map' },
+    clause: { kind: 'map', capabilityId: 'shopify_find_customer', groundId: 'g-s', valueParam: 'query', system: 'shopify' },
+  };
+  const bankedWrite = {
+    text: 'create customers', via: { kind: 'write' },
+    clause: { kind: 'write', capabilityId: 'shopify_create_customer', groundId: 'g-s', system: 'shopify' },
+  };
+  const bareMap = { text: 'find', via: { kind: 'map' }, clause: { kind: 'map' } };
+  it('a banked map after a ride is sw; bare map stays panel', () => {
+    assert.equal(stepTier(bankedMap, { priorRead: true }), 'sw');
+    assert.equal(stepTier(bankedMap, { priorRead: false }), 'panel');
+    assert.equal(stepTier(bareMap, { priorRead: true }), 'panel');
+  });
+  it('ride → map → write is sw when pins are complete', () => {
+    assert.equal(workflowTier({ steps: [pinnedRide, bankedMap, bankedWrite] }), 'sw');
+    assert.equal(runsHeadless({ steps: [pinnedRide, bankedMap, bankedWrite] }), true);
+  });
+  it('ride → bare map demotes the workflow', () => {
+    assert.equal(workflowTier({ steps: [pinnedRide, bareMap] }), 'panel');
+  });
+});
+
 describe('workflowTier — the whole workflow', () => {
   it("'sw' only when EVERY step is headless-safe", () => {
     assert.equal(workflowTier({ steps: [nav, pinnedRide] }), 'sw');

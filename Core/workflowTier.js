@@ -40,6 +40,17 @@ export function stepTier(step, { priorRead = false } = {}) {
     const c = s.clause;
     return (priorRead && c && typeof c === 'object' && c.field) ? 'sw' : 'panel';
   }
+  // v2.74.2036 — banked map (target leg + valueParam) after a prior ride; write after a prior read/map.
+  if (kind === 'map') {
+    const c = s.clause;
+    const resolvable = priorRead && c && typeof c === 'object'
+      && c.capabilityId && c.groundId && c.valueParam;
+    return resolvable ? 'sw' : 'panel';
+  }
+  if (kind === 'write') {
+    const c = s.clause;
+    return (priorRead && c && typeof c === 'object' && (c.capabilityId || c.kind === 'write')) ? 'sw' : 'panel';
+  }
   return 'panel';   // fail closed — any kind the SW driver can't run demotes the whole workflow
 }
 
@@ -56,7 +67,7 @@ export function workflowTier(wf) {
   for (const s of steps) {
     if (stepTier(s, { priorRead }) !== 'sw') return 'panel';
     const kind = String(((s && s.via) || {}).kind || '').trim();
-    if (RIDE_KINDS.has(kind)) priorRead = true;   // a ride READ stocks the chain state a fieldRead consumes
+    if (RIDE_KINDS.has(kind) || kind === 'map') priorRead = true;   // ride/map stock rows for fieldRead/write
   }
   return 'sw';
 }

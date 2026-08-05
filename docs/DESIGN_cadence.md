@@ -396,13 +396,17 @@ no schedule.
 
 **This is the decision that shapes the record, and it comes first.**
 
-`writePolicy` has exactly two values in the codebase — `gated` and `never`. **There is no `auto`.** A triggered
-workflow containing a write therefore cannot complete unattended, by construction. That property is correct and
-this design does not touch it.
+`writePolicy` on the app record remains `gated` | `never`. **(Amended v2.74.2036 — product ruling 2026-08-05.)**
+A triggered write no longer blanket-parks: it uses the **pipeline gate** (`Core/pipelineGate.js`).
 
-So a triggered run that reaches a write step **parks**: persist `{runId, workflowId, stepIndex, chainState,
+- **auto** — `outward:false` + `reversible:true` (create customer, draft order, draft message): completes
+  unattended on the clock with the side panel closed.
+- **queued** — outward / undeclared axes: still **parks** with preview + Approve & continue.
+- **refused** — money / inventory / destructive: never unattended.
+
+So a triggered run that reaches a **queued** write **parks**: persist `{runId, workflowId, stepIndex, chainState,
 writePreview}` and surface it with the write preview and `Approve & continue` / `Cancel run`. This is
-`DESIGN_workflow_wizard.md` §4.3, retained; it is the one part of RT that survives intact.
+`DESIGN_workflow_wizard.md` §4.3 for the outward class; internal reversible writes complete in the SW.
 
 **As built (v1695–1715):** the park record is the `cadence:parked:<runId>` marker (chainState included, v1715),
 and Approve resumes through the SW driver — `_fire({reporter: makeResumeReporter(), startIndex, state})` — not

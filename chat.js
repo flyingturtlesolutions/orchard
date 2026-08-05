@@ -769,6 +769,7 @@ async function _renderConnect() {
 async function _openRail() {
   await _renderActiveRailTab({ force: true });   // v1816/1933 — opening the rail is a user action; render the active tab now
   $('rail').classList.add('open');   // width 0 → drawer-w (chat column shrinks alongside)
+  try { _orchReq('CADENCE_PRESENCE_CLEAR', {}).catch(() => {}); } catch { /* */ }   // v2.74.2036 — clear closed-panel done badge
 }
 
 function _closeRail() {
@@ -9753,7 +9754,21 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
             for (const u of (wrr.unfillable || [])) _wi.push({ kind: 'unfillable', label: u.label, note: Array.isArray(u.missing) ? `missing ${u.missing.join(', ')}` : '' });
             st.lastHistoryItems = normalizeHistoryItems([...(Array.isArray(st.lastHistoryItems) ? st.lastHistoryItems : []), ..._wi]);
           }
-          st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'write', clause: clause.text, intent: clause.text });
+          // v2.74.2036 — bank write target pin (create recipe + target ground) for headless schedule.
+          {
+            const _wm = st.lastMapLeg && st.lastMapLeg.tool && st.lastMapLeg.tool.writeMap;
+            const _tid = (_wm && typeof _wm === 'object' && Object.keys(_wm)[0]) || null;
+            const _gid = (st.lastMapLookup && st.lastMapLookup.groundId) || null;
+            st.ranSteps.push({
+              kind: 'write',
+              clause: clause.text,
+              intent: clause.text,
+              capabilityId: _tid,
+              groundId: _gid,
+              system: st.lastMapSystem || '',
+              bindings: {},
+            });
+          }
           continue;   // st.lastValue unchanged: a write CREATES records, it does not replace the working set
         }
         if (cr && cr.case) {   // PP-3 (v1686) — door A′. `state` carries the chain's stage trail: a case may record only what ran.
@@ -9833,7 +9848,23 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
             ]);
           }
           if (mr.text) { st.readouts.push(mr.text); st.lastReadoutIdx = st.readouts.length - 1; }
-          st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'map', clause: clause.text, intent: clause.text });
+          // v2.74.2036 — bank TARGET lookup pin so the next schedule can fire headless (no INTERPRET).
+          {
+            const _lk = mr.lookup || null;
+            const _leg = _lk && _lk.leg;
+            const _tool = _leg && _leg.tool;
+            st.ranSteps.push({
+              kind: 'map',
+              clause: clause.text,
+              intent: clause.text,
+              capabilityId: (_tool && (_tool.recipeId || _tool.id)) || null,
+              groundId: (_lk && _lk.groundId) || (_tool && _tool.groundId) || null,
+              system: mr.system || '',
+              itemField: (cr.map && cr.map.itemField) || '',
+              valueParam: (_lk && _lk.valueParam) || '',
+              bindings: (_lk && _lk.baseParams && typeof _lk.baseParams === 'object') ? _lk.baseParams : {},
+            });
+          }
           continue;
         }
         if (cr && cr.ok) {
@@ -10399,7 +10430,11 @@ function _railWorkflowRow(row, parentConv) {
         else if (_chip && r.outcome === 'ok' && ((r.created || 0) + (r.updated || 0)) > 0) { _chip.dataset.outcome = 'effect'; _chip.style.outline = '2px solid var(--border-success, #3B6D11)'; _chip.style.outlineOffset = '1px'; _chip.title = `rows ${r.rowsIn ?? '?'}→${r.rowsOut ?? '?'} · ${r.created || 0} new${r.updated ? `, ${r.updated} updated` : ''}`; }
       } catch { /* cosmetic — never breaks the run */ } };
       _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
-        .then(() => { _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); }); _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2); })
+        .then(() => {
+          _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); });
+          _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2);
+          void _wfPersistPinsFromRun(wf, wfKey, _st2);   // v2.74.2036 — bank map/write pins for headless cadence
+        })
         .catch(() => { /* */ })
         .finally(() => {
           try { _mo.disconnect(); } catch { /* */ }
@@ -10784,6 +10819,25 @@ async function _renderWorkflowRuns(wf) {
 // wrote NONE — CD-5's "manual and triggered alike" was half-implemented, which is why a manually-exercised
 // workflow showed an empty history). The chain returns no verdict, so it derives from the SHARED chain state;
 // failedStep stays SW-only (the panel renders its failures in-chat, where the person already saw them).
+// v2.74.2036 — after a panel ▶ that banked map/write pins in ranSteps, merge them into the saved workflow
+// so the next cadence tick can fire headless (tier-sw). One successful panel run "requalifies" the preset.
+async function _wfPersistPinsFromRun(wf, wfKey, st) {
+  try {
+    if (!wf || !wfKey || !st || !Array.isArray(st.ranSteps) || !st.ranSteps.length) return;
+    const subasks = Array.isArray(wf.subasks) ? wf.subasks : [];
+    if (subasks.length < 2) return;
+    const steps = subasks.map((text, i) => {
+      const ran = st.ranSteps[i] || st.ranSteps.find((r) => r && String(r.clause || r.intent || '') === String(text));
+      const prov = ran ? stepProvenance(ran, text, '', Date.now()) : { text, via: { kind: null, host: null, name: null }, bankedAt: Date.now() };
+      return { text, via: prov.via, bankedAt: prov.bankedAt || Date.now(), ...(prov.clause ? { clause: prov.clause } : {}) };
+    });
+    const hasMapPin = steps.some((s) => s.clause && s.clause.kind === 'map' && s.clause.capabilityId && s.clause.groundId && s.clause.valueParam);
+    if (!hasMapPin) return;
+    await updateWorkflow(wfKey, wf.id, { steps });
+    try { _orchLog(`WORKFLOW ▸ pins banked for headless — "${String(wf.name || wf.ask).slice(0, 40)}"`); } catch { /* */ }
+  } catch { /* never block history */ }
+}
+
 async function _wfRecordPanelRun(wf, t0, total, st) {
   try {
     const done = (st && Array.isArray(st.ranSteps)) ? st.ranSteps.length : 0;

@@ -141,6 +141,17 @@ export function pinnedClause(ranStep) {
     // per-replay interpret call (~13k tokens + a drift vector) AND closes the headless scope gap: a scheduled fire
     // reads the scope the human qualified, not the leg's default.
     ...((kind === 'connector' || kind === 'ride') ? (() => { const b = sanitizeBindings(r.bindings); return b ? { bindings: b } : {}; })() : {}),
+    // v2.74.2036 — map pin banks TARGET lookup (system + capabilityId + groundId + valueParam); no INTERPRET at fire.
+    ...(kind === 'map' ? {
+      ...(_str(r.system) ? { system: _str(r.system).slice(0, 40) } : {}),
+      ...(_str(r.itemField) ? { itemField: _str(r.itemField).slice(0, 80) } : {}),
+      ...(_str(r.valueParam) ? { valueParam: _str(r.valueParam).slice(0, 40) } : {}),
+      ...(() => { const b = sanitizeBindings(r.bindings); return b ? { bindings: b } : {}; })(),
+    } : {}),
+    // write pin banks create target id (+ ground); gate decides auto vs park at fire.
+    ...(kind === 'write' ? {
+      ...(_str(r.system) ? { system: _str(r.system).slice(0, 40) } : {}),
+    } : {}),
   };
 }
 

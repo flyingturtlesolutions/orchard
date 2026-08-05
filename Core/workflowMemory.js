@@ -67,6 +67,15 @@ function _normSteps(raw) {
           const b = sanitizeBindings(s.clause.bindings);
           if (b) out.clause.bindings = b;
         }
+        // v2.74.2036 — map/write pin fields survive normalize (same closed-literal discipline as fieldRead).
+        if (kind === 'map') {
+          if (_str(s.clause.system)) out.clause.system = _str(s.clause.system).slice(0, 40);
+          if (_str(s.clause.itemField)) out.clause.itemField = _str(s.clause.itemField).slice(0, 80);
+          if (_str(s.clause.valueParam)) out.clause.valueParam = _str(s.clause.valueParam).slice(0, 40);
+          const b = sanitizeBindings(s.clause.bindings);
+          if (b) out.clause.bindings = b;
+        }
+        if (kind === 'write' && _str(s.clause.system)) out.clause.system = _str(s.clause.system).slice(0, 40);
       }
     }
     return out;

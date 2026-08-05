@@ -449,7 +449,13 @@ registerConnTransitionListener(onConnTransition);
 // CD-1 (v2.74.1692, DESIGN_cadence.md §2/§5) — the ONE clock owner for time-triggered workflows: a single
 // `cadence:tick` alarm that scans workflow records and fires the tier-'sw' ones that are due (headless, through
 // the normal INVOKE_SESSION executor). Like vitals, the alarm is durable and only the listener re-registers here.
-initCadence({ invokeSgHandler: _invokeSgHandler, readRideRecipes: _readRideRecipes });
+initCadence({
+  invokeSgHandler: _invokeSgHandler,
+  readRideRecipes: _readRideRecipes,
+  // v2.74.2036 — closed-panel cadence presence shares the invoke pulse language
+  startPulse: __startPulse,
+  stopPulse: __stopPulse,
+});
 
 
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
