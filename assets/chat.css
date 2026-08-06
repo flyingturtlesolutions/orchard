@@ -3459,3 +3459,26 @@ div.suggestion-card { cursor: pointer; }
 /* v2.74.1614 — a faint light top-edge so the glass reads even where the backdrop behind is a flat
    colour (backdrop-filter can only blur textured content — e.g. the tab-tint gradient / the thread). */
 .suggestion-card, .btn-secondary { border-color: color-mix(in srgb, #ffffff 10%, var(--c-border-soft)); }
+
+/* ── RB-3/RB-5 (rail tabs review) ─────────────────────────────────────────────────────────────────────────────
+   Appended overrides — the cascade wins, so the fixes live in one auditable block. */
+/* Keyboard/touch reveal for the hover-only row actions: focus must never land on an invisible destructive button. */
+.rail-item:focus-within .rail-item-delete,
+.rail-item:focus-within .rail-item-preview,
+.rail-item:focus-within .rail-item-subtask,
+.rail-item-delete:focus-visible,
+.rail-item-preview:focus-visible,
+.rail-item-subtask:focus-visible { opacity: 1; }
+/* WCAG 2.2 hit targets: the rail's action chips reach 24px. */
+.rail-item-actions button, .rail-item-cases, .rail-item-delete, .rail-item-preview, .rail-item-subtask { min-width: 24px; min-height: 24px; }
+/* The parked badge's warning border finally has a border STYLE to paint (border-color alone renders nothing). */
+.rail-item-badge.parked { border: 1px solid #c9922a88; }
+/* CN-1.1 consistency — the ☰ roll-up dot speaks the SAME visual language as the tab dots (neutral accent, calm),
+   not a pulsing amber alarm. */
+#btn-rail.needs-action::after { background: var(--c-accent, #378ADD); animation: none; }
+/* First-run legibility — with no views yet, the ＋ view / ＋ Workflow descriptions are VISIBLE, not hover-only
+   (an empty rail otherwise reads as a dead pane). Matches the max-height/opacity hiding mechanism above. */
+.rail-item.rail-new-app:only-child .rail-add-desc,
+.rail-automations-empty ~ .rail-wf-add .rail-add-desc { max-height: 3em; opacity: 1; }
+/* Contrast floor — the dim rail meta text and badges step up to ~4.5:1. */
+.rail-item-meta { color: color-mix(in srgb, var(--c-text) 62%, transparent); }

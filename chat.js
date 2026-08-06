@@ -32,6 +32,7 @@ import { declaredMismatchesResolved, isEntityRead } from './Core/selfMapGuard.js
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
 import { galleryWorkflows } from './Core/workflowCatalog.js';   // WFG-1 (DESIGN_workflows.md §8) — the curated workflow templates the workflow gallery lists (presets seed the authoring flow's plan gate).
+import { setEnabled } from './Core/trigger.js';   // RB-2 (rail review) — the one-click Re-arm on an auto-disarmed workflow (resets failures, clears the disarm stamp, anchors a fresh nextDue)
 import { buildDeskLanding } from './Core/deskLanding.js';   // DL-1 (v2.74.1600) — the desk LAUNCH page (pure assembly; proven sources only)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
@@ -602,14 +603,16 @@ async function _editDevConcern(convId, current) {
 // v2.74.1030 — the drawer is an inline push panel now, so the header button TOGGLES it (open ↔ close)
 // rather than only opening — there's no dark backdrop to click away.
 // v1826 (user directive) — the button joins the HOVER-REVEAL family (the section-button semantics, v1783):
-// hovering it (150ms intent) PEEKS the rail open; leaving it (300ms grace) closes an unpinned peek; CLICK
-// pins it open (or closes a pinned rail). A peek converts to a pin on click, never toggles shut.
+// hovering it (150ms intent) PEEKS the rail open; leaving it (300ms grace) closes an unpinned peek.
+// RB-5 (rail review, supersedes the v1826 click-pins clause) — a click on an OPEN rail now CLOSES it regardless
+// of how it opened: the silent peek→pin conversion had no visible payoff and cost a dead click ("the button
+// reads as broken every time"). Pinning is what NOT leaving does; closing is what the click does.
 let _railPeek = false;
 let _railPeekOpenT = null, _railPeekCloseT = null;
 $('btn-rail').addEventListener('click', async () => {
   clearTimeout(_railPeekOpenT); clearTimeout(_railPeekCloseT);
   if ($('rail').classList.contains('open')) {
-    if (_railPeek) { _railPeek = false; return; }   // hover-opened → the click PINS it
+    _railPeek = false;
     _closeRail();
     return;
   }
@@ -626,8 +629,19 @@ $('btn-rail').addEventListener('pointerleave', () => {
   if (!_railPeek) return;
   _railPeekCloseT = setTimeout(() => { if (_railPeek) { _railPeek = false; _closeRail(); } }, 300);
 });
+// RB-5 (rail review, WCAG 1.4.13) — the hover corridor for the RAIL itself: a hover-peeked rail must not close
+// while the pointer is INSIDE it. Entering the rail converts the grace timer; leaving re-arms it.
+try {
+  $('rail').addEventListener('pointerenter', () => { clearTimeout(_railPeekCloseT); });
+  $('rail').addEventListener('pointerleave', () => {
+    if (!_railPeek) return;
+    _railPeekCloseT = setTimeout(() => { if (_railPeek) { _railPeek = false; _closeRail(); } }, 300);
+  });
+} catch { /* */ }
 
 $('btn-close-rail').addEventListener('click', _closeRail);
+// RB-3 — boot state: the rail starts closed, so it starts inert (see _openRail/_closeRail).
+try { if (!$('rail').classList.contains('open')) { $('rail').inert = true; } $('btn-rail').setAttribute('aria-expanded', $('rail').classList.contains('open') ? 'true' : 'false'); } catch { /* */ }
 // v2.74.1030 — the dark click-to-close overlay is gone (the drawer pushes the chat instead of covering it).
 
 // v2.74.1999 — the "delete all conversations" header icon + handler were REMOVED (a one-click destructive bulk
@@ -698,7 +712,7 @@ async function _updateTabDots() {
         connectN = model.total;
       }
     } catch { /* */ }
-    try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked.length : 0; } catch { /* */ }
+    try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = ((r && r.success !== false && Array.isArray(r.parked)) ? r.parked.length : 0) + ((r && Number(r.disarmedN)) || 0); } catch { /* */ }   // RB-2 — the dot covers auto-disarmed automations too (parked + stopped both need a decision)
     try {
       const all = await ConversationStore.list();
       const insts = (all || []).filter((c) => c && c.kind !== 'dev' && c.instanceId).map((c) => c.instanceId);
@@ -706,7 +720,7 @@ async function _updateTabDots() {
       pending = Object.values(counts || {}).reduce((a, b) => a + (Number(b) || 0), 0);
     } catch { /* */ }
     _setTabDot('rail-tab-conversations', pending, `Chat — ${pending} pending review${pending === 1 ? '' : 's'}`);
-    _setTabDot('rail-tab-automations', parked, `Automate — ${parked} parked run${parked === 1 ? '' : 's'} awaiting a decision`);
+    _setTabDot('rail-tab-automations', parked, `Automate — ${parked} run${parked === 1 ? '' : 's'} awaiting a decision (parked or stopped)`);
     _setTabDot('rail-tab-connect', connectN, `Connect — ${connectN} connection${connectN === 1 ? '' : 's'} need attention`);
     _tabAttention = (pending + parked + connectN) > 0;
     _updateRailActionDot();   // refresh the ☰ roll-up now that _tabAttention changed
@@ -819,11 +833,16 @@ async function _renderConnect() {
 async function _openRail() {
   await _renderActiveRailTab({ force: true });   // v1816/1933 — opening the rail is a user action; render the active tab now
   $('rail').classList.add('open');   // width 0 → drawer-w (chat column shrinks alongside)
+  // RB-3 (rail review) — a closed rail was invisible but fully keyboard-focusable and SR-perceivable (dozens of
+  // invisible tab stops; Enter on an unseen row silently retargeted the composer). inert is the section fix
+  // (v1809) applied to the whole drawer.
+  try { $('rail').inert = false; $('btn-rail').setAttribute('aria-expanded', 'true'); } catch { /* */ }
   try { _orchReq('CADENCE_PRESENCE_CLEAR', {}).catch(() => {}); } catch { /* */ }   // v2.74.2036 — clear closed-panel done badge
 }
 
 function _closeRail() {
   $('rail').classList.remove('open');
+  try { $('rail').inert = true; $('btn-rail').setAttribute('aria-expanded', 'false'); } catch { /* */ }   // RB-3 — see _openRail
 }
 
 // v2.74.1042 — Refresh the drawer list IF it's currently open. The drawer otherwise re-renders only
@@ -921,7 +940,7 @@ function _startRailStatusTimer() {
   _railStatusTimer = setInterval(() => {
     if (!$('rail')?.classList.contains('open')) { _stopRailStatusTimer(); return; }
     let anyActive = false;
-    document.querySelectorAll('#rail-list .rail-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
+    document.querySelectorAll('#rail-list .rail-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });   // RB-1 — mirror the render-pass guard: the ＋ rows have no conversation, and the tick was overwriting their hover descriptions with "just now"
     const anyCountdown = !!document.querySelector('#rail-list .rail-item[data-next-sweep]');   // FL-6d — countdowns keep ticking
     if (!anyActive && !anyCountdown) _stopRailStatusTimer();
   }, 1000);
@@ -979,49 +998,17 @@ async function _renderRailListNow() {
 
   const all = await ConversationStore.list();
 
-  // v2.74.1777 ("one class") — workflows per desk, ONE sweep (the parked-badge pattern): counts + row content
-  // for every desk, so a section peek is instant — no per-hover fetch, no pop-in. Orphaned (stamped) banks stay
-  // out of the rail (no desk row to sit under); they still surface via _loadWorkflowsMerged on the landing.
-  // v2.74.1778 (regression: the rail button did NOTHING) — this block must precede buildRailTree, which reads
-  // _wfByConv: declared after it, the reference hit the temporal dead zone and every render threw.
-  const _wfByConv = new Map();
-  try {
-    // v2.74.1780 (user ruling) — workflows belong to the CLASS: every bank resolves to a class before desks
-    // read it. A bank keyed by a live desk's instanceId (pre-ruling legacy) belongs to THAT desk's class; a
-    // bank keyed by an appId IS class-keyed. v1814 (user ruling) — cards appear ONLY under their parent desk:
-    // a bank matching NO live desk (stamped orphans, dead keys) shows nowhere in the rail (the everywhere-
-    // merge of 1780 is gone; such workflows remain recallable through _loadWorkflowsMerged until a desk of
-    // their class exists again). Items are stamped with their bank key so run/schedule/delete address the
-    // right store (DK-8k own-key rule).
-    const banks = await listAllWorkflows();
-    const desks = all.filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev');
-    const byClass = new Map();   // classId → items
-    for (const b of banks) {
-      if (!b || !Array.isArray(b.items) || !b.items.length) continue;
-      const key = String(b.appId);
-      const owner = desks.find((c) => String(c.instanceId) === key || String(c.appId) === key);
-      if (!owner) continue;   // v1814 — no parent desk, no card
-      const stamped = b.items.map((w) => (w && !w.appId) ? { ...w, appId: key } : w).filter(Boolean);
-      (byClass.get(String(owner.appId)) || byClass.set(String(owner.appId), []).get(String(owner.appId))).push(...stamped);
-    }
-    for (const c of desks) {
-      const merged = []; const seen = new Set();
-      for (const w of (byClass.get(String(c.appId)) || [])) {
-        const dk = w.id || w.contentId;
-        if (dk && seen.has(dk)) continue;
-        if (dk) seen.add(dk);
-        merged.push(w);
-      }
-      if (merged.length) _wfByConv.set(c.id, merged);
-    }
-    window.__wfLandingCache = _wfByConv;   // v2.74.1842 — the landing reads the SAME class-owned map the Rail just built (one source, no second loader)
-  } catch { /* section-only — never blocks the Rail */ }
+  // RB-4 (rail review) — the v1777 per-desk workflow sweep is GONE from this hot path: since v1934 the Chat tab
+  // renders no workflow rows (_grpWfs is pinned null), so the full-area listAllWorkflows scan here fed only the
+  // desk-landing cache — a chrome.storage.get(null) deserialize per render (up to 5/sec under churn) for a value
+  // read once at desk-open. The landing now builds its own list on demand (_wfLandingFor — same class-owned
+  // v1780/v1814 semantics, one desk at a time). The Automate tab keeps its own sweep; it renders the rows.
 
   // CV-3c (v2.74.1168, DESIGN_conversations.md §7) — render the flush-left ACCORDION (Core/railTree.js): an
   // Overview pin → apps → (when expanded) their sub-tasks → a New-app entry. The dev-filter, the per-row
   // preview/delete/run-status, and the active highlight are all preserved; only the ORDER + grouping + the
   // Overview/New-app pins are new. Hierarchy is glyph + chevron + weight, NEVER indentation.
-  const rows = buildRailTree(all, { devMode: _devModeEnabled, activeId: _currentConversationId, expanded: _expandedApps, workflowsByConv: _wfByConv });
+  const rows = buildRailTree(all, { devMode: _devModeEnabled, activeId: _currentConversationId, expanded: _expandedApps });   // RB-4 — workflowsByConv dropped: its rows have been dead since v1934
   const byId = new Map(all.map((c) => [c.id, c]));
 
   // FL-6c (v2.74.1357) — the APP CARD is the pending-proposals signal (the extension-icon badge belongs to other
@@ -1254,18 +1241,25 @@ function _wireSectionPeek(btn, section) {
   if (!btn || !section) return;
   let openT = null, closeT = null;
   const syncInert = () => { section.inert = !_sectionHeldOpen(section); };
-  btn.addEventListener('pointerenter', () => {
+  const armClose = () => {
     clearTimeout(closeT);
-    openT = setTimeout(() => { section.classList.add('peek'); _slideOpen(section); syncInert(); }, 150);
-  });
-  btn.addEventListener('pointerleave', () => {
-    clearTimeout(openT);
     closeT = setTimeout(() => {
       section.classList.remove('peek');
       if (!section.classList.contains('pinned') && !section.querySelector('.detail-pinned')) _slideClosed(section);   // v1809 — a pinned card holds it open
       syncInert();
     }, 300);
+  };
+  btn.addEventListener('pointerenter', () => {
+    clearTimeout(closeT);
+    openT = setTimeout(() => { section.classList.add('peek'); _slideOpen(section); syncInert(); }, 150);
   });
+  btn.addEventListener('pointerleave', () => { clearTimeout(openT); armClose(); });
+  // RB-5 (rail review) — the HOVER CORRIDOR: the peeked section is part of the same hover zone as its button
+  // (the standard menu pattern). Pre-fix the revealed rows invited a click while guaranteed to collapse 300ms
+  // after the pointer left the BUTTON — the list reflowed mid-approach and the click landed on whatever slid
+  // under the cursor. Entering the section holds the peek; leaving it re-arms the close.
+  section.addEventListener('pointerenter', () => { clearTimeout(closeT); });
+  section.addEventListener('pointerleave', () => { if (section.classList.contains('peek')) armClose(); });
 }
 
 // v2.74.1777 — the shared pin toggle (cases + workflows buttons): flip the store, flip the section classes in
@@ -1303,27 +1297,32 @@ async function _dismissWizardToDesk() {
   } catch { /* */ }
 }
 
+// RB-1 (rail review) — both selectors return FALSE on the guard-decline so callers can revert an optimistic
+// highlight; every other exit returns true. Pre-fix, Cancel left row B marked active+body-pinned while messages
+// still routed to A — the rail lying about the composer target.
 async function _selectConvForInput(conv) {
-  if (!conv) return;
-  if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); return; }   // the builder covers the current desk → selecting it reveals the desk
-  if (conv.id === _currentConversationId) return;
-  if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch the input target anyway?')) return;
+  if (!conv) return true;
+  if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); return true; }   // the builder covers the current desk → selecting it reveals the desk
+  if (conv.id === _currentConversationId) return true;
+  if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch the input target anyway?')) return false;
   const full = await ConversationStore.load(conv.id);
   if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
   await _renderRailList();   // re-highlight the selected row; the drawer STAYS open
+  return true;
 }
 
 // v2.74.1223 — DOUBLE-click: open a conversation's FULL timeline — load it (if not already selected) + CLOSE the drawer.
 async function _openConvFullTimeline(conv) {
-  if (!conv) return;
-  if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); _closeRail(); return; }   // the builder covers the current desk → selecting it reveals the desk
+  if (!conv) return true;
+  if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); _closeRail(); return true; }   // the builder covers the current desk → selecting it reveals the desk
   if (conv.id !== _currentConversationId) {
-    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
+    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return false;
     const full = await ConversationStore.load(conv.id);
     if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
   }
   await _renderRailList();
   _closeRail();
+  return true;
 }
 
 
@@ -1437,8 +1436,11 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
                       : (row.role === 'subtask' ? `<span class="rail-item-badge case" aria-label="a case under ${escHtml(conv.title)}">case</span>` : `<span class="rail-item-badge app" aria-label="${escHtml(conv.title)} — a view">view</span>`);   // v1794 — view/case/workflow each get their own badge color   // Case rename (v1492) — a spawned child badges as a CASE
   // FL-6c (v2.74.1357) — the pending-proposals chip: a sweep with results lights the APP row (children share the
   // instance, so only the app row carries it). `pending` is a derived count (number), never untrusted text.
+  // RB-2 (rail review, iron principle) — the ⏳ chip is a DOOR now, like ✋ one line below: click selects the view
+  // and opens the pending review directly. Pre-fix it was inert, and its tooltip drafted the user as the router
+  // ("open the view and say pending" — carrying a token the system already holds).
   const pendingChip = (row.role === 'app' && pending > 0)
-    ? `<span class="rail-item-badge pending" title="${pending} proposal${pending === 1 ? '' : 's'} awaiting review — open the view and say pending">⏳ ${pending}</span>`
+    ? `<span class="rail-item-badge pending" data-row-action role="button" tabindex="0" title="${pending} proposal${pending === 1 ? '' : 's'} awaiting review — click to review">⏳ ${pending}</span>`
     : '';
   // PS-6 (v2.74.1768, §7) — the parked-run badge: a scheduled run stopped at a write; click opens the desk's
   // workflows overlay (where the approve/cancel strip lives). The calm channel — no thread bubble.
@@ -1501,10 +1503,26 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   });
 
   // PS-6/1934 — the parked badge is a DOOR to the approve rows, which now live in the Automations tab.
-  item.querySelector('.rail-item-badge.parked')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    _switchRailTab('automations');
-  });
+  {
+    const _parked = item.querySelector('.rail-item-badge.parked');
+    const _goParked = (e) => { e.stopPropagation(); _switchRailTab('automations'); };
+    _parked?.addEventListener('click', _goParked);
+    // RB-3 (rail review) — the chip claims role=button + tabindex; Enter/Space must actually work.
+    _parked?.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); _goParked(e); } });
+    const _pend = item.querySelector('.rail-item-badge.pending');
+    const _goPending = (e) => {
+      e.stopPropagation();
+      _selectConvForInput(conv).then(async (ok) => {
+        if (ok === false) return;
+        try {
+          const pend = (await loadProposals(conv.instanceId || conv.appId)).filter((x) => x && x.status === 'pending');
+          if (pend.length) _renderProposalBatch(pend);
+        } catch { /* the view is open either way */ }
+      });
+    };
+    _pend?.addEventListener('click', _goPending);
+    _pend?.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); _goPending(e); } });
+  }
 
   // v2.74.1223 (message-input redesign) — SINGLE-click SELECTS this conversation as the message-input target and KEEPS
   // the drawer open (the drawer is a live multi-conversation surface; a reply refreshes this row's peek). DOUBLE-click
@@ -1523,7 +1541,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
       // v1810 (user: "rule not honored") — ONE shifted card across the WHOLE rail: selecting a view/case
       // releases any pinned workflow card in place (its section too, if the pin was all that held it open).
       _expandedWfDetails.clear();
-      document.querySelectorAll('#rail-list .rail-item.is-workflow.detail-pinned').forEach((el) => {
+      document.querySelectorAll('#rail-list .rail-item.is-workflow.detail-pinned, #rail-automations .rail-item.is-workflow.detail-pinned').forEach((el) => {
         el.classList.remove('detail-pinned');
         el.setAttribute('aria-expanded', 'false');
         const d = el.querySelector('.wf-row-detail');
@@ -1533,27 +1551,36 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
       });
     } catch { /* */ }
   };
+  // RB-1 (rail review) — revert the optimistic highlight when the switch-confirm is DECLINED: restore the
+  // previous pin and let a full re-render heal 'active' back to the real selection.
+  const _revertOptimistic = (prevPinned) => {
+    _railBodyPinned = prevPinned;
+    void _renderRailList();
+  };
   item.addEventListener('click', (e) => {
     if (_isRowActionTarget(e)) return;
     if (_rowClickTimer) return;                          // 2nd click of a double — dblclick handles it
     _rowClickTimer = setTimeout(() => {
       _rowClickTimer = null;
+      if (!item.isConnected) return;   // RB-1 — the trailing click of a triple can fire after a re-render/close; a detached row must not mutate pin state
       // v1811 (user directive) — first click PINS the shift (+ selects), second click UNPINS it (selection
       // stays — a conversation is always current); double-click keeps its open-timeline behavior.
+      const prevPinned = _railBodyPinned;
       if (item.classList.contains('body-pinned')) {
         item.classList.remove('body-pinned');
         _railBodyPinned = null;
       } else {
         _optimisticActive();
       }
-      void _selectConvForInput(conv);   // no-op when already the selected target
+      _selectConvForInput(conv).then((ok) => { if (ok === false) _revertOptimistic(prevPinned); });   // no-op when already the selected target
     }, 220);
   });
   item.addEventListener('dblclick', (e) => {
     if (_isRowActionTarget(e)) return;
     if (_rowClickTimer) { clearTimeout(_rowClickTimer); _rowClickTimer = null; }
+    const prevPinned = _railBodyPinned;
     _optimisticActive();
-    void _openConvFullTimeline(conv);
+    _openConvFullTimeline(conv).then((ok) => { if (ok === false) _revertOptimistic(prevPinned); });
   });
 
   // v2.74.1095 — dev-aware delete: stop a live run (free the host slot) before removing the record; keep the branch.
@@ -1583,7 +1610,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     try {
       const _all = await ConversationStore.list().catch(() => []);
       const _keys = [conv.instanceId, conv.appId].filter(Boolean).filter((k, i, a) => a.indexOf(k) === i)
-        .filter((k) => !(_all || []).some((c) => c && c.id !== conv.id && (c.instanceId === k || c.appId === k)));
+        .filter((k) => !(_all || []).some((c) => c && c.id !== conv.id && c.parentId !== conv.id && (c.instanceId === k || c.appId === k)));   // RB-1 (rail review) — the desk's OWN cases share both keys and die in the same cascade; counting them as key-holding siblings vetoed EVERY key, so the orphan stamp + fleet-clock shutdown silently never ran for any desk with a case
       for (const k of _keys) {
         await markWorkflowsOrphaned(k, conv.title);
         // CD-1 / DESIGN_cadence.md §10.1 (v2.74.1713) — clear the desk's FLEET CLOCKS with it: the delete path
@@ -1627,7 +1654,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
 
   // v1343 (a11y) — Enter/Space SELECTS the conversation (the single-click action; the 220ms disambiguation is a
   // mouse concern, and dblclick-to-open has no keyboard analogue that matters here).
-  _wireRowKeyboard(item, () => { void _selectConvForInput(conv); }, `${isDev ? 'Dev' : 'App'} conversation: ${conv.title}`);
+  _wireRowKeyboard(item, () => item.click(), `${isDev ? 'Dev' : 'View'} conversation: ${conv.title}`);   // RB-3 — keyboard mirrors the mouse path exactly (pin toggle + optimistic + revert), and the aria name matches the badge vocabulary ("view", not "app")
 
   return item;
 }
@@ -9079,7 +9106,10 @@ async function _cachedHostRecipes(host, { groundId = null } = {}) {
   const _hb = _bare(h);
   const _own = recipes.filter((r) => r && _bare(r.origin) === _hb);
   if (_own.length < recipes.length) {
-    const _foreign = [...new Set(recipes.filter((r) => r && _bare(r.origin) !== h).map((r) => _bare(r.origin) || '(no origin)'))].slice(0, 3);
+    // v2.74.2049 — the NAMES list compares bare-to-bare like the filter above; against verbatim `h` it named the
+    // ground's OWN kept records as pollution on every www ground ("33 foreign … (ups.com, …)" — the 'ups.com'
+    // was partly the ground itself). The count was already right; only the name set lied.
+    const _foreign = [...new Set(recipes.filter((r) => r && _bare(r.origin) !== _hb).map((r) => _bare(r.origin) || '(no origin)'))].slice(0, 3);
     try { _orchLog(`RIDE_RESOLVE ▸ ${recipes.length - _own.length} foreign recipe(s) stored under ${h} (${_foreign.join(', ')}) — filtered from every reader`); } catch { /* */ }
   }
   const entry = { at: now, groundId: gid || '', recipes: _own };
@@ -10488,7 +10518,7 @@ function _railWorkflowRow(row, parentConv) {
     if (_railRunBusy > 0) {
       if (btn) btn.disabled = false;
       try {
-        const active = document.querySelector('#rail-list .wf-card-run.wf-run-live')?.closest('.rail-item');
+        const active = document.querySelector('#rail-list .wf-card-run.wf-run-live, #rail-automations .wf-card-run.wf-run-live')?.closest('.rail-item');
         if (active) { active.classList.add('wf-run-blocked'); active.scrollIntoView({ block: 'nearest' }); setTimeout(() => active.classList.remove('wf-run-blocked'), 1200); }
       } catch { /* */ }
       return;
@@ -10564,6 +10594,7 @@ function _railWorkflowRow(row, parentConv) {
         _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.remove('step-done'); });
         _wfReplayStopped(host, wf, _p2);
         _railRunBusy--;
+        if (btn) btn.disabled = false;   // RB-1 — a stopped run must not brick the ▶
         try { item.style.boxShadow = ''; } catch { /* */ }
         return;
       }
@@ -10613,14 +10644,14 @@ function _railWorkflowRow(row, parentConv) {
           window.__wfStepHook = null;   // WC-1 — the hook dies with the run; a stale hook must not tick a dead card
           _chips.forEach((c) => c.classList.remove('step-running'));   // a failed run keeps its ✓s honest — only finished steps stay marked
           host.classList.remove('wf-run-live');   // the body now shows the RESULT
-          _pb2.done(); _railRunBusy--; try { item.style.boxShadow = ''; } catch { /* */ } if (_detail) _slideOpen(_detail);
+          _pb2.done(); _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } if (_detail) _slideOpen(_detail);
         });
-    } catch { _railRunBusy--; try { item.style.boxShadow = ''; } catch { /* */ } try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
+    } catch { _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
   }, { once: true }));
   if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
     _closeRail();
     const _mh = appendMessage({ role: 'assistant', body: '' });
-    _setMessageBody(_mh, 'Running “' + escHtml(wf.name || wf.ask) + '” in the background…', { markdown: true });
+    _setMessageBody(_mh, 'Running “' + (wf.name || wf.ask) + '” in the background…', { markdown: true });   // RB-4 — no escHtml before a markdown render (renderMarkdown escapes; doubling turned & into &amp;amp;)
     let res = null;
     try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
     const v = res && res.verdict;
@@ -10668,10 +10699,10 @@ function _railWorkflowRow(row, parentConv) {
     if (nowPinned) {
       // v1808 (user directive) — ONE pinned card at a time: pinning this one releases any other, in place.
       _railBodyPinned = null;   // v1811 — the view/case body pin yields too (one shift rail-wide)
-      try { document.querySelectorAll('#rail-list .rail-item.body-pinned').forEach((el) => el.classList.remove('body-pinned')); } catch { /* */ }
+      try { document.querySelectorAll('#rail-list .rail-item.body-pinned, #rail-automations .rail-item.body-pinned').forEach((el) => el.classList.remove('body-pinned')); } catch { /* */ }
       _expandedWfDetails.clear();
       try {
-        document.querySelectorAll('#rail-list .rail-item.is-workflow.detail-pinned').forEach((el) => {
+        document.querySelectorAll('#rail-list .rail-item.is-workflow.detail-pinned, #rail-automations .rail-item.is-workflow.detail-pinned').forEach((el) => {
           if (el === item) return;
           el.classList.remove('detail-pinned');
           el.setAttribute('aria-expanded', 'false');
@@ -10711,7 +10742,7 @@ function _railWorkflowRow(row, parentConv) {
 // CD-7 (§8) / v2.74.1777 — a PARKED run renders as a needs-action row atop its desk's workflows section:
 // the run reached a write on a schedule and stopped. Approve re-fires from the parked step (one approval per
 // write — a later write re-parks); Cancel drops it. Actions are always visible (it needs a human).
-function _railParkedRow(p) {
+function _railParkedRow(p, ownerTitle) {
   // v2.74.2043 — read BOTH park shapes. A ride-kind write (Core/rideStep.js:99) banks {recipe, step}; a headless
   // map→write (Core/headlessWrite.js) banks {targetId, recipe, count}. This read the ride shape only, so every
   // pipeline park rendered as the bare fallback. Unwrap one legacy `{preview:{…}}` nesting too — parks banked
@@ -10720,14 +10751,24 @@ function _railParkedRow(p) {
   if (prev.preview && typeof prev.preview === 'object') prev = prev.preview;
   const what = prev.recipe || prev.step || prev.targetId || 'a write step';
   const scale = Number(prev.count) > 0 ? ` (${prev.count} row${Number(prev.count) === 1 ? '' : 's'})` : '';
+  // RB-2 (rail review) — DECISION MATERIAL: the card asks for the tab's most consequential decision, so it says
+  // WHY it parked (the gate reason the preview banks), HOW OLD the parked data is, and WHICH view owns it —
+  // not just a recipe name. (The full field-level preview is a model change, deferred with a note in findings.)
+  const why = prev.why ? ` — ${prev.why}` : ' — a write that needs your approval';
+  const age = Number(p.at) > 0 ? `stopped ${relTime(Number(p.at))} at ` : 'stopped at ';
   const item = document.createElement('div');
   item.className = 'rail-item is-subtask is-parked';
-  item.innerHTML = '<div class="rail-item-title"><span class="rail-item-badge parked">✋</span>' + escHtml(p.name || p.workflowId || 'scheduled run') + '</div>'
-    + '<div class="rail-item-meta">stopped at ' + escHtml(String(what)) + escHtml(scale) + ' — a write that needs your approval</div>';
+  item.innerHTML = '<div class="rail-item-title"><span class="rail-item-badge parked">✋</span>' + escHtml(p.name || p.workflowId || 'scheduled run')
+    + (ownerTitle ? ' <span class="rail-item-badge">' + escHtml(ownerTitle) + '</span>' : '') + '</div>'
+    + '<div class="rail-item-meta">' + escHtml(age) + escHtml(String(what)) + escHtml(scale) + escHtml(why) + '</div>';
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions rail-static';
   acts.dataset.rowAction = '';
+  // RB-1 (rail review) — the pair is MUTUALLY locking: Approve's await spans the whole resumed run, and a live
+  // Cancel beside it produced a false "the write was not sent" AFTER the write went out.
+  const _lockPair = () => { acts.querySelectorAll('button').forEach((b) => { b.disabled = true; }); };
   acts.appendChild(_mkOnceBtn('✓ Approve', async () => {
+    _lockPair();
     let res = null;
     try { res = await _orchReq('WORKFLOW_RESUME_PARKED', { runId: p.runId }); } catch { /* */ }
     const v = res && res.verdict;
@@ -10738,9 +10779,15 @@ function _railParkedRow(p) {
     setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1400);
   }));
   acts.appendChild(_mkBtn('✕ Cancel', async () => {
-    try { await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
+    _lockPair();
+    let res = null;
+    try { res = await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: p.runId }); } catch { /* */ }
     const meta = item.querySelector('.rail-item-meta');
-    if (meta) meta.textContent = 'cancelled — the write was not sent';
+    // Honest outcome: found:false means the park marker was already consumed (approved/finished) — say so,
+    // never claim a stop that did not happen.
+    if (meta) meta.textContent = (res && res.found === false)
+      ? 'already resumed or finished — nothing left to cancel'
+      : 'cancelled — the write was not sent';
     setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1400);
   }));
   item.appendChild(acts);
@@ -10754,10 +10801,12 @@ function _railParkedRow(p) {
 // its owning desk name via the parentConv passed to the row.
 // CN-1.2 (user directive) — the "＋ Workflow" add row, per VIEW. Extracted so BOTH a desk-group AND the EMPTY
 // Automate tab can offer it (creation is per-view: a workflow lives in a desk). Opens the view, then prompts intent.
-function _railWfAddRow(desk) {
+function _railWfAddRow(desk, opts = {}) {
   const add = document.createElement('div');
   add.className = 'rail-item is-subtask rail-wf-add';
-  add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>'
+  // RB-2 (rail review) — opts.named: the EMPTY tab renders one of these per view; N identical "＋ Workflow" rows
+  // with the view name hidden in a hover-only description were indistinguishable. Name the view in the title.
+  add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow' + (opts.named ? ' — ' + escHtml(String(desk.title || 'this view')) : '') + '</div>'
     + '<div class="rail-item-meta rail-add-desc">save a multi-step task you run often — it can run on a schedule</div>';
   add.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -10811,14 +10860,48 @@ async function _renderRailAutomations() {
       ? 'No workflows yet — save a multi-step task you run often (it can run on a schedule). Add one to a view:'
       : 'No workflows yet. A workflow lives in a view — create a view in Chat first, then add one here.';
     container.appendChild(empty);
-    for (const desk of desks.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) container.appendChild(_railWfAddRow(desk));
+    for (const desk of desks.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) container.appendChild(_railWfAddRow(desk, { named: true }));
+    // RB-1 (rail review) — swap-time fence: the awaits above let a run start after the entry check; swapping
+    // now would destroy the live card's DOM (WFC-2). Same discipline as _renderRailListNow's second check.
+    if (_railRunBusy > 0) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
+    if (!live.isConnected) return;
     live.replaceChildren(...container.childNodes);
     return;
   }
   if (parked.length) {
     const h = document.createElement('div'); h.className = 'rail-auto-group'; h.textContent = 'Needs approval';
     container.appendChild(h);
-    for (const p of parked) container.appendChild(_railParkedRow(p));
+    for (const p of parked) {
+      const owner = desks.find((c) => String(c.instanceId) === String(p.appId) || String(c.appId) === String(p.appId));   // RB-2 — the card names its view
+      container.appendChild(_railParkedRow(p, owner ? owner.title : ''));
+    }
+  }
+  // RB-2 (rail review, iron principle) — AUTO-DISARMED workflows are a needs-a-look group, never a silent tint:
+  // the system switched a user-armed automation off; the surface says so, says why, and offers the one decision
+  // (re-arm) in place. A user-paused schedule (no disarmedWhy stamp) stays quiet — that state is the user's own.
+  const stopped = [];
+  for (const g of wfByDesk.values()) for (const wf of g.wfs) { const t = wf.trigger; if (t && t.enabled === false && t.disarmedWhy) stopped.push({ wf, desk: g.desk }); }
+  if (stopped.length) {
+    const h = document.createElement('div'); h.className = 'rail-auto-group'; h.textContent = 'Stopped — needs a look';
+    container.appendChild(h);
+    for (const { wf, desk } of stopped) {
+      const row = document.createElement('div');
+      row.className = 'rail-item is-subtask is-parked';
+      row.innerHTML = '<div class="rail-item-title"><span class="rail-item-badge parked">⏹</span>' + escHtml(wf.name || wf.ask || 'workflow')
+        + ' <span class="rail-item-badge">' + escHtml(desk.title || 'View') + '</span></div>'
+        + '<div class="rail-item-meta">' + escHtml((Number(wf.trigger.disarmedAt) > 0 ? `stopped ${relTime(Number(wf.trigger.disarmedAt))} — ` : 'stopped — ') + wf.trigger.disarmedWhy) + '</div>';
+      const acts = document.createElement('div');
+      acts.className = 'rail-item-actions rail-static';
+      acts.dataset.rowAction = '';
+      acts.appendChild(_mkOnceBtn('↻ Re-arm', async () => {
+        try { await updateWorkflow(wf.appId, wf.id, { trigger: setEnabled(wf.trigger, true, Date.now()) }); } catch { /* */ }
+        const meta = row.querySelector('.rail-item-meta');
+        if (meta) meta.textContent = 're-armed — next run one interval out';
+        setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1200);
+      }));
+      row.appendChild(acts);
+      container.appendChild(row);
+    }
   }
   // desks by recency; within a desk, scheduled (soonest-due) first, then the rest
   groups.sort((a, b) => (b.desk.updatedAt || 0) - (a.desk.updatedAt || 0));
@@ -10836,6 +10919,12 @@ async function _renderRailAutomations() {
     container.appendChild(_railWfAddRow(g.desk));
   }
   if (!live.isConnected) return;
+  // RB-1 (rail review) — swap-time fence re-check: three awaits sit between the entry fence and this swap; a ▶
+  // in that window (or a due auto-run from a concurrent render) would have its card destroyed mid-run.
+  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
+  // RB-5 (rail review) — engagement fence (v1816 parity with Chat): never swap the DOM out from under the
+  // pointer or keyboard focus; defer exactly like the busy fence.
+  if (live.matches(':hover') || live.matches(':focus-within')) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
   live.replaceChildren(...container.childNodes);
   // v2.74.2035 — CD-1a due-on-open: after the Automate cards land, fulfill ONE due panel-tier schedule.
   void _maybeAutoRunDueWorkflowCard();
@@ -17556,6 +17645,34 @@ function _dismissDeskLanding() {
 // tested asks (fill-and-send through the normal front door — invariant #4 claims at entry). The Admin desk appends
 // its three operator commands and keeps the vitals card BELOW. APPENDED at the bottom, where the open lands
 // (v1600 prepended — hidden under the scroll-to-bottom). Transient DOM; the first operator ask retires it.
+// RB-4 (rail review) — the desk landing's workflow list, built for ONE desk at open time. Faithful to the
+// v1780/v1814 rulings: class-owned (a bank keyed by ANY sibling instance of this desk's class counts), deduped by
+// surrogate id, items stamped with their bank key (DK-8k own-key rule). Replaces the every-Rail-render full-area
+// sweep whose only consumer was this page.
+async function _wfLandingFor(conv) {
+  try {
+    if (!conv || !conv.appId) return [];
+    const all = await ConversationStore.list().catch(() => []);
+    const keys = new Set([String(conv.appId)]);
+    for (const c of (all || [])) {
+      if (c && !c.parentId && String(c.appId) === String(conv.appId) && c.instanceId) keys.add(String(c.instanceId));
+    }
+    const banks = await listAllWorkflows();
+    const merged = []; const seen = new Set();
+    for (const b of (banks || [])) {
+      if (!b || !Array.isArray(b.items) || !keys.has(String(b.appId))) continue;
+      for (const w of b.items) {
+        if (!w) continue;
+        const dk = w.id || w.contentId;
+        if (dk && seen.has(dk)) continue;
+        if (dk) seen.add(dk);
+        merged.push(w.appId ? w : { ...w, appId: String(b.appId) });
+      }
+    }
+    return merged;
+  } catch { return []; }
+}
+
 async function _renderDeskLanding(conv) {
   try {
     const isAdmin = !!conv && conv.id === ADMIN_ID;
@@ -17575,12 +17692,10 @@ async function _renderDeskLanding(conv) {
     // Admin keeps the user-role gate (its vitals card is an assistant message and must not suppress the landing).
     if (isAdmin ? (conv.messages || []).some((m) => m && m.role === 'user') : (conv.messages || []).length > 0) return;
     try { if (!isAdmin) { const _mc = $('messages'); if (_mc && _mc.querySelector('.message')) return; } } catch { /* */ }
-    // v2.74.1842 (user directive, reversing TL-1's retirement) — workflow cards RETURN to the landing: the
-    // user asked "where are my workflows?" at the What-would-you-like-to-do page (live 07-27). The Rail section
-    // stays the canonical surface; the landing shows the SAME class-owned list the Rail built (§ rulings
-    // v1777/v1780 — never keyed by instanceId), read from the cache the Rail render just populated. No second
-    // loader, so the two surfaces cannot disagree; an empty/unbuilt cache degrades to the TL-1 behaviour.
-    const workflows = (window.__wfLandingCache && window.__wfLandingCache.get(String(conv.id))) || [];
+    // v2.74.1842 (user directive, reversing TL-1's retirement) — workflow cards on the landing. RB-4: built ON
+    // DEMAND for THIS desk (the every-render Rail sweep that used to feed a cache read only here is deleted);
+    // same class-owned v1780/v1814 semantics, one desk at a time.
+    const workflows = await _wfLandingFor(conv);
     const def = (() => { try { return builtinApp(conv.presetId || conv.appId) || null; } catch { return null; } })();
     const spec = buildDeskLanding({
       title: conv.title || (def && def.name) || '',
@@ -18026,7 +18141,10 @@ try {
 try {
   chrome.runtime.onMessage.addListener((m) => {
     if (!m || m.type !== 'WORKFLOW_PARKED_CHANGED') return;
-    void _renderActiveRailTab();
+    // RB-4 (rail review) — a CLOSED rail pays only the dot refresh (the badge appears on open); a full tab
+    // render into an invisible drawer was 3 storage scans per broadcast for nothing.
+    if ($('rail')?.classList.contains('open')) void _renderActiveRailTab();
+    else void _updateTabDots();
   });
 } catch { /* */ }
 // v2.74.2035 — SW cadence tick found a due panel-tier workflow; wake Automate so due-on-open can ▶ it.

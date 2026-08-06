@@ -1,9 +1,12 @@
 # DESIGN — Session Governor (SGV): session health without an attention sink
 
-**Status: spec v1.12 (2026-08-06).** Loop5 B1–B3 (+nit): fire-level `presenceStop` · `_orchRunChain`
+**Status: spec v1.13 (2026-08-06).** Review pass R1–R7 (lane-663f critical review): `watching` never overrides
+the steal gate · LLM pack fenced + `relink` behind the focus gate · SGV-4 teardown scoped to the CN-1.1 sites ·
+expansion-pass prerequisite (the v1.4 lesson) · pulses presence-gated · `connect_ui_visits` dev-scoped.
+Prior seal (v1.12, Loop5 B1–B3 +nit): fire-level `presenceStop` · `_orchRunChain`
 return contract · origin-scoped fire-hold · `presenceToken(error)` binding.
 
-**Loop history:** v1.7 W1–12 · v1.8 X1–8 · v1.9 Y1–7 · v1.10 Z1–6 · v1.11 A1–5 · **v1.12 B1–3**.  
+**Loop history:** v1.7 W1–12 · v1.8 X1–8 · v1.9 Y1–7 · v1.10 Z1–6 · v1.11 A1–5 · v1.12 B1–3 · **v1.13 R1–7**.  
 Companions: `DESIGN_vitals.md`, `DESIGN_connectors.md` §14–§16, `DESIGN_injection_boundary.md`,
 `DESIGN_cadence.md`, `DESIGN_workflows.md`.  
 **Product law:** if the user is managing sign-in, Orchard has already failed. Connect chore rejected.
@@ -43,6 +46,9 @@ userActiveOn: `SGV_USER_TOUCH` 5min primary; lastAccessed ≤60s secondary.
 ## 3. Contested + pass-through
 
 `DRIVE_STALL_STEPS = 3`. Contested / give_up / LLM pack (≤1/tick, 4s → mechanical) as prior.  
+**Pack fencing (R2):** the pack is page-derived → FENCED DATA (`DESIGN_injection_boundary.md`) — a verb outside
+`allowedVerbs`, or ANY pack-derived selector/URL/param, is discarded; drive micro-ops are UrlClass-TEMPLATE-driven,
+never page-text-driven.  
 UrlClass: `app|login_identify|login_password|sso|mfa|captcha|password_reset|other`.  
 rideSignals; warmAt. Mechanical defaults as prior.
 
@@ -60,14 +66,16 @@ headless `error` + `reportAuthSignal`, or interactive error.
 | keepalive | KA §6; !ledger | cheap touch | lastVerifiedAt | backoff |
 | focus | focus gate | CONN_FOCUS — **only** FG steal | app\|FRESH\|secret | →drive |
 | drive_assist | workDemands; drive table | micro-ops; busy-mark | progress\|secret\|FRESH | stall→escalate |
-| relink | brokerDead | LINK_CONNECTOR | linked\|abandoned | escalate/cooldown |
+| relink | brokerDead; **focus gate (R2 — a consent flow IS a FG steal)** | LINK_CONNECTOR | linked\|abandoned | escalate/cooldown |
 | escalate_secret | joinKey | stage + §8; watching | FRESH | give_up |
 | noop | — | — | — | — |
 
 Resume = `dueNudges` / `chainResumes` only (not Heal verbs).
 
-**Focus gate:** workDemands via blocked|activeAsk; signed-out|wrong-account|login_*; !userActiveOn
-(unless watching); prevention tried for incident OR determinate auth status.
+**Focus gate:** workDemands via blocked|activeAsk; signed-out|wrong-account|login_*; !userActiveOn —
+**`watching` never overrides it (R1)**: a foreground steal while the user is active is the attention sink
+returning with interest; idle is judged across ALL windows, not the target tab; prevention tried for incident OR
+determinate auth status.
 
 **brokerDead:** broker/MCP token missing|401; LINK required; OAuth refresh fail — not site cookie.
 
@@ -209,6 +217,8 @@ Never type secrets.
 ```
 
 Pulse ≤1/join/30min; toolbar if panel opened since block; else OS; never Connect.
+**Presence-gated (R5):** pulse only when `userActiveOn`-recent — a 3am OS toast burns the scarce budget on a
+sleeping human; otherwise hold for the toolbar badge at next panel-open (quiet hours §6 cover interrupts too).
 
 ---
 
@@ -221,7 +231,7 @@ Pulse ≤1/join/30min; toolbar if panel opened since block; else OS; never Conne
 | **SGV-1b** | ChainPark + SGV_CHAIN_RESUME |
 | **SGV-2** | Interrupt + pulse |
 | **SGV-3** | Drive + UrlClass + LLM |
-| **SGV-4** | Retire Connect chore |
+| **SGV-4** | Retire Connect chore — **scoped teardown (R3, the §8.4-style inventory rule applied to removal):** chat.js `_updateTabDots`' Connect leg (`VITALS_BADGE`-driven dot, CN-1.1) dies; `_tabAttention` roll-up keeps pending+parked only; `_renderConnect`/`_connectCard` fold to dev render; desk chips re-point (pulses go toolbar/OS, never Connect) |
 
 Interim: Connect = dev/debug only.
 
@@ -230,14 +240,21 @@ Interim: Connect = dev/debug only.
 ## 10. Metrics
 
 `SGV ▸ heal|verify|escalate|nudge_due|resume-ack|chain-resume|budget-exhausted|blocked-expired|interrupt-pulse`;  
-`connect_ui_visits`; `presence_fail_runs`.  
+`connect_ui_visits` (**counted only when `!_devModeEnabled` — the operator debugging in dev must not fail the
+user-metric, R6**); `presence_fail_runs` (**per-incident dedup, R7 — a burst morning of one SSO rotation must not
+dominate the residual**).  
 Pass bar 7d: connect visits 0; presence fails ≤50% baseline; no blocked &gt;24h without ack/abort.
 
 ---
 
 ## 11. Build order
 
-1. SGV-0 — planner tests + no-op fold.  
+0. **Expansion pass (R4, prerequisite)** — inline every "as prior"/"as before" in this file before SGV-0: the
+   v1.4 seal records this spec once LOSING machinery to its own compression; an implementing session must not
+   need git archaeology across 13 revisions to resolve a contract term.  
+1. SGV-0 — planner tests + no-op fold. **Wire the §10 metrics onto the glf bus as tests at SGV-1** — the pass
+   bar's arms are pre-registered predictions in everything but format; the loop that graded the census grades
+   the governor.  
 2. SGV-1 — full presence pipe + hold + doors + ack.  
 3. SGV-1b — ChainPark.  
 4. SGV-2 — interrupt + pulse.  
@@ -248,7 +265,7 @@ Pass bar 7d: connect visits 0; presence fails ≤50% baseline; no blocked &gt;24
 
 ## 12. Revision history (durable)
 
-Spec iterated 2026-08-05 → 2026-08-06. Living contract is **this file @ v1.12**. Findings also in
+Spec iterated 2026-08-05 → 2026-08-06. Living contract is **this file @ v1.13**. Findings also in
 `logs/run/findings.md` (local); canvases under Cursor project `canvases/sgv-*.canvas.tsx` are review
 artifacts, not the source of truth.
 
@@ -266,7 +283,8 @@ artifacts, not the source of truth.
 | v1.9 | 08-06 | **Loop2** Y1–Y7 authClass, partial Door A, fire-hold, badge suppress, in-file again |
 | v1.10 | 08-06 | **Loop3** Z1–Z6 all-auto hold, PresenceCtx fields, MARK_RAN defer, Door B=predicate |
 | v1.11 | 08-06 | **Loop4** A1–A5 hold-until-ack, headlessWrite stop, panel≠success, transient∩authClass |
-| **v1.12** | **08-06** | **Loop5** B1–B3 fire `presenceStop`, `_orchRunChain` return, **origin-scoped** hold |
+| v1.12 | 08-06 | Loop5 B1–B3 fire `presenceStop`, `_orchRunChain` return, origin-scoped hold |
+| **v1.13** | **08-06** | **Review pass** R1 watching≠steal-override · R2 pack fenced + relink gated · R3 SGV-4 teardown scoped (CN-1.1 sites) · R4 expansion-pass prerequisite · R5 pulses presence-gated · R6 dev-scoped visits metric · R7 burst dedup (review: lane-663f; full text in that session's transcript) |
 
 ### 12b. Non-goals (frozen)
 

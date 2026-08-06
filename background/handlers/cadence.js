@@ -557,7 +557,7 @@ async function _recordFailure(appId, wf, now, error = '') {
   }
 }
 async function _autoDisarm(appId, wf, why, now) {
-  const next = disarm(wf.trigger);
+  const next = disarm(wf.trigger, why, now);   // RB-2 — stamp the reason on the trigger so the Automate tab can say it
   try { await updateWorkflow(appId, wf.id, { trigger: next }); } catch { /* */ }
   Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" auto-disarmed — ${why}`);
   try { await appendRunEntry(wf.id, { at: now, ranAt: now, trigger: 'auto', verdict: 'disarmed', why }); } catch { /* */ }
@@ -657,7 +657,18 @@ export function createCadenceHandlers() {
           const appId = payload && payload.appId;
           let parked = await _listParked();
           if (appId) parked = parked.filter((p) => p && p.appId === appId);
-          sendResponse({ success: true, parked });
+          // RB-2 (rail review) — count auto-disarmed triggers in the same response so the Automate attention dot
+          // covers "the system switched your automation off" without the panel paying a second bank sweep.
+          let disarmedN = 0;
+          try {
+            for (const g of await listAllWorkflows()) {
+              for (const w of (g.items || [])) {
+                const t = w && w.trigger;
+                if (t && t.enabled === false && t.disarmedWhy) disarmedN++;
+              }
+            }
+          } catch { /* the dot degrades to parked-only */ }
+          sendResponse({ success: true, parked, disarmedN });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'parked-failed' }); }
       })();
       return true;
@@ -695,7 +706,9 @@ export function createCadenceHandlers() {
             try { await appendRunEntry(marker.workflowId, { at: marker.at || Date.now(), ranAt: Date.now(), trigger: 'manual', verdict: 'partial', why: 'parked write cancelled by the user' }); } catch { /* */ }
             Logger.info('cadence', `TRIGGER ▸ cancel parked run ${runId} ("${marker.name || marker.workflowId}") — the write was not sent`);
           }
-          sendResponse({ success: true });
+          // RB-1 (rail review) — found:false = the marker was already consumed (approved/finished); the panel
+          // must not tell the user a stop happened when there was nothing left to stop.
+          sendResponse({ success: true, found: !!marker });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'cancel-failed' }); }
       })();
       return true;

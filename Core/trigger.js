@@ -49,6 +49,10 @@ export function normalizeTrigger(raw) {
     nextDue: Number.isFinite(t.nextDue) && t.nextDue > 0 ? t.nextDue : 0,
     lastFiredAt: Number.isFinite(t.lastFiredAt) && t.lastFiredAt > 0 ? t.lastFiredAt : 0,
     failures: Number.isFinite(t.failures) && t.failures > 0 ? Math.floor(t.failures) : 0,
+    // RB-2 (rail review) — WHY a disarm happened, carried on the trigger so the Automate tab can surface it
+    // (pre-fix the reason lived only in run history and the row was indistinguishable from a user pause — the
+    // user as state manager). The closed shape above is this file's own recurring-bug-class warning; these ride it.
+    ...(t.disarmedWhy ? { disarmedWhy: String(t.disarmedWhy), disarmedAt: Number.isFinite(t.disarmedAt) && t.disarmedAt > 0 ? t.disarmedAt : 0 } : {}),
   };
 }
 
@@ -120,7 +124,11 @@ export function recordFailure(trigger, { max = MAX_FAILURES, now = 0, transient 
   // is deliberately left UNCHANGED rather than reset: a real drift interleaved with auth blips still accumulates.
   const failures = transient ? t.failures : t.failures + 1;
   const disarmed = failures >= max;
-  return { ...t, failures, nextDue: _nextDueAfter(t, base), lastFiredAt: base, enabled: disarmed ? false : t.enabled };
+  return {
+    ...t, failures, nextDue: _nextDueAfter(t, base), lastFiredAt: base, enabled: disarmed ? false : t.enabled,
+    // RB-2 — the strike disarm names itself on the trigger (the Automate tab renders this; run history keeps the narrative).
+    ...(disarmed ? { disarmedWhy: `${failures} consecutive failures — its route may have drifted`, disarmedAt: base } : {}),
+  };
 }
 
 /**
@@ -137,11 +145,13 @@ export function isTransientFailure(error) {
   return /not-logged-in|no-authenticated-tab|no-content-script|reauth|unauthori[sz]ed|http-401|http-403|offline|network|failed to fetch|lookup-failed/.test(e);
 }
 
-/** Disable a trigger (manual pause / orphaned desk), preserving cadence + counters. PURE. */
-export function disarm(trigger) {
+/** Disable a trigger (manual pause / orphaned desk), preserving cadence + counters. PURE.
+ *  RB-2 — an optional `why`/`now` stamps the reason so the surface can distinguish a system disarm from a user
+ *  pause; omitted (the manual-pause path) leaves no stamp, which is exactly the distinction. */
+export function disarm(trigger, why = '', now = 0) {
   const t = normalizeTrigger(trigger);
   if (!t) return undefined;
-  return { ...t, enabled: false };
+  return { ...t, enabled: false, ...(why ? { disarmedWhy: String(why), disarmedAt: Number.isFinite(now) ? now : 0 } : {}) };
 }
 
 /**
@@ -152,9 +162,11 @@ export function setEnabled(trigger, enabled, now = 0) {
   const t = normalizeTrigger(trigger);
   if (!t) return undefined;
   if (!enabled) return { ...t, enabled: false };
-  if (!_isCadence(t)) return { ...t, enabled: true };   // the arm bit is universal; the nextDue anchor is cadence-only
+  // RB-2 — re-arming CLEARS the disarm stamp (the reason described a state that no longer holds).
+  const { disarmedWhy: _w, disarmedAt: _a, ...rest } = t;
+  if (!_isCadence(rest)) return { ...rest, enabled: true };   // the arm bit is universal; the nextDue anchor is cadence-only
   const base = Number.isFinite(now) ? now : 0;
-  return { ...t, enabled: true, failures: 0, nextDue: base + t.minutes * MS_PER_MIN };
+  return { ...rest, enabled: true, failures: 0, nextDue: base + rest.minutes * MS_PER_MIN };
 }
 
 /** Render minutes as a human interval ("30m", "2h", "1h30m"). PURE. */

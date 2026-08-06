@@ -182,3 +182,40 @@ describe('trigger — human labels', () => {
     assert.equal(describeTrigger(null), '');
   });
 });
+
+// RB-2 (rail review, iron principle) — a system disarm NAMES ITSELF on the trigger so the Automate tab can
+// distinguish it from a user pause; pre-fix the reason lived only in run history and the surface was silent.
+describe('disarm stamping (RB-2) — the surface can say WHY an automation stopped', () => {
+  it('disarm(why, now) stamps; the stamp SURVIVES normalizeTrigger (the closed-shape trap)', () => {
+    const t = disarm(armTrigger(240, 0), 'the owning view was deleted', 5 * MIN);
+    assert.equal(t.enabled, false);
+    assert.equal(t.disarmedWhy, 'the owning view was deleted');
+    assert.equal(t.disarmedAt, 5 * MIN);
+    const round = normalizeTrigger(t);
+    assert.equal(round.disarmedWhy, 'the owning view was deleted', 'normalize must not strip the stamp');
+    assert.equal(round.disarmedAt, 5 * MIN);
+  });
+
+  it('disarm without a why (the user-pause path) leaves NO stamp — that distinction IS the feature', () => {
+    const t = disarm(armTrigger(240, 0));
+    assert.equal(t.enabled, false);
+    assert.ok(!('disarmedWhy' in t));
+  });
+
+  it('the strike disarm stamps itself at the threshold', () => {
+    let t = armTrigger(60, 0);
+    for (let i = 0; i < TRIGGER_LIMITS.MAX_FAILURES; i++) t = recordFailure(t, { now: (i + 1) * MIN });
+    assert.equal(t.enabled, false);
+    assert.match(t.disarmedWhy, /consecutive failures/);
+    assert.ok(t.disarmedAt > 0);
+  });
+
+  it('re-arming clears the stamp (the reason described a state that no longer holds)', () => {
+    const dead = disarm(armTrigger(240, 0), 'route drifted', 5 * MIN);
+    const alive = setEnabled(dead, true, 10 * MIN);
+    assert.equal(alive.enabled, true);
+    assert.equal(alive.failures, 0);
+    assert.ok(!('disarmedWhy' in alive), 're-arm must clear disarmedWhy');
+    assert.ok(!('disarmedAt' in alive), 're-arm must clear disarmedAt');
+  });
+});
