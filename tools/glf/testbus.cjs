@@ -170,9 +170,20 @@ function ackRow({ ts, lane, result, test, verdict, disposition }) {
   };
 }
 
+/**
+ * v2.74.2043 â€” a test's `files:` value â†’ the path list. PURE, and exported ONLY so the separator rule is
+ * characterized: this split silently decided which tests were gradeable, and when it was whitespace-only every
+ * comma-authored list collapsed into one impossible filename whose fingerprint could never move (see
+ * currentFilesFp). Both separators are accepted because both are in the corpus; the parser is the wrong place to
+ * enforce an authoring style, since getting it wrong here fails OPEN (a test looks gradeable when it is not).
+ */
+function filesPaths(filesStr) {
+  return String(filesStr || '').split(/[\s,]+/).filter(Boolean);
+}
+
 module.exports = {
   parseDoc, formatDoc, leaseState, isOrphan, resultFileName,
-  ackedSet, inboxRows, ackRow, NEXT_BY_VERDICT, filesFingerprint,
+  ackedSet, inboxRows, ackRow, NEXT_BY_VERDICT, filesFingerprint, filesPaths,
   LEASE_TTL_MIN, ORPHAN_H, ACK_FILE, ACK_DISPOSITIONS,
 };
 
@@ -193,8 +204,24 @@ function currentFingerprint() {
 }
 
 // v2.74.2022 â€” the working-tree contents of a test's declared files (extension-repo cwd, the tree Chrome loads).
+//
+// v2.74.2043 â€” SPLIT ON COMMAS TOO. This split was whitespace-only, and tests are authored with both separators
+// ("chat.js Core/x.js" and "chat.js,Core/x.js"). A comma-separated list therefore parsed as ONE path literally
+// named "chat.js,Core/workflowPinBank.js,..." â€” a file that cannot exist, so readFileSync threw, `text` stayed
+// null, and the fingerprint became a hash of "one missing file": CONSTANT FOREVER. Every comma-form test read
+// LIVE* on every tick no matter how much its claimed files changed, which is exactly the hole v2022's
+// files-scoping was built to close, reintroduced through a format inconsistency rather than a logic error.
+//
+// Measured when found: 5 of 14 open tests were comma-form â€” 2036-sw-headless-map-write,
+// 2037-ride-pin-grounds-tier-sw and all three 2038-pinbank-* â€” i.e. precisely the headless/pin-bank arc whose
+// claimed files (chat.js, Core/workflowPinBank.js, Core/decisionMarkers.js, manifest.json) had just been
+// rewritten. All five presented as gradeable. A grade against any of them would have been a grade against a
+// build the test never measured, and would have looked entirely legitimate in the result file.
+//
+// A missing file still hashes as its own marker (that is deliberate â€” a test claiming a deleted file must go
+// stale). The point is that a REAL path list can no longer masquerade as one missing file.
 function currentFilesFp(filesStr) {
-  const paths = String(filesStr || '').split(/\s+/).filter(Boolean);
+  const paths = filesPaths(filesStr);
   if (!paths.length) return null;
   return filesFingerprint(paths.map((p) => {
     let text = null; try { text = fs.readFileSync(p, 'utf8'); } catch { /* missing hashes as its own marker */ }

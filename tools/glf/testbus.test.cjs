@@ -5,7 +5,7 @@
 const assert = require('node:assert/strict');
 const {
   parseDoc, formatDoc, leaseState, isOrphan, resultFileName,
-  ackedSet, inboxRows, ackRow, NEXT_BY_VERDICT, filesFingerprint,
+  ackedSet, inboxRows, ackRow, NEXT_BY_VERDICT, filesFingerprint, filesPaths,
   LEASE_TTL_MIN, ORPHAN_H,
 } = require('./testbus.cjs');
 
@@ -197,4 +197,48 @@ it('ackRow defaults disposition to seen and preserves the closed vocabulary fiel
   assert.equal(row.disposition, 'seen');
   assert.equal(row.lane, 'lane-8289');
   assert.equal(row.verdict, 'UNMAPPED');
+});
+
+// ── filesPaths — the separator rule that decides gradeability (v2.74.2043) ────────────────────────────────────────
+//
+// This existed as a bare `split(/\s+/)` and silently governed which tests were admissible. A comma-authored
+// `files:` list therefore became ONE impossible filename, readFileSync threw, the entry hashed as
+// {path:"a.js,b.js", text:null}, and that hash is constant for all time — so the test read LIVE* forever no matter
+// how far its claimed files drifted. Found live: 5 of 14 open tests were comma-form, and they were precisely the
+// headless/pin-bank arc (2036, 2037, 2038×3) whose claimed files had just been rewritten. Both neighbours had
+// rearmed them on that dead signal.
+//
+// The failure mode is what makes this worth a test: it fails OPEN. A test that wrongly reads STALE just waits; a
+// test that wrongly reads LIVE* gets GRADED, and the resulting PASS/FAIL looks completely legitimate.
+
+it('splits on commas AND whitespace — both forms are in the corpus', () => {
+  assert.deepEqual(filesPaths('chat.js Core/workflowCatalog.js'), ['chat.js', 'Core/workflowCatalog.js']);
+  assert.deepEqual(filesPaths('chat.js,Core/workflowPinBank.js,manifest.json'), ['chat.js', 'Core/workflowPinBank.js', 'manifest.json']);
+  assert.deepEqual(filesPaths('chat.js, Core/a.js,  Core/b.js'), ['chat.js', 'Core/a.js', 'Core/b.js']);
+});
+
+it('never yields a path containing a separator — the bug was one impossible filename', () => {
+  for (const s of ['a.js,b.js', 'a.js b.js', 'a.js , b.js', 'a.js,,b.js', ' a.js, b.js ']) {
+    for (const p of filesPaths(s)) {
+      assert.ok(!/[\s,]/.test(p), `"${p}" from "${s}" still carries a separator`);
+    }
+  }
+});
+
+it('an empty / absent files: yields no paths (caller treats that as "no claim")', () => {
+  for (const s of ['', '   ', ',', ' , ,', null, undefined]) assert.deepEqual(filesPaths(s), []);
+});
+
+it('a comma-form claim now produces a fingerprint that MOVES when a claimed file changes', () => {
+  // the regression itself, at the fingerprint level: same path list, different contents ⇒ different fp.
+  const fpOf = (entries) => filesFingerprint(entries);
+  const paths = filesPaths('chat.js,Core/decisionMarkers.js');
+  assert.equal(paths.length, 2, 'precondition: the comma list actually split');
+  const before = fpOf(paths.map((p) => ({ path: p, text: 'X' })));
+  const after = fpOf(paths.map((p, i) => ({ path: p, text: i === 0 ? 'X-EDITED' : 'X' })));
+  assert.notEqual(before, after, 'editing a claimed file must move the files-fp');
+  // and the pre-fix shape — one unsplit name that cannot be read — was frozen regardless of any edit
+  const frozenA = fpOf([{ path: 'chat.js,Core/decisionMarkers.js', text: null }]);
+  const frozenB = fpOf([{ path: 'chat.js,Core/decisionMarkers.js', text: null }]);
+  assert.equal(frozenA, frozenB, 'documents WHY it was invisible: a missing file has no contents to change');
 });
