@@ -251,7 +251,9 @@ Push the rearms with the commit's orchard-logs sync.
   (the owner fixes interactively), STEP 3B never applies. Output appends to `logs/run/cron.out` (rotated at 5MB).
   Interactive sessions keep working exactly as before: they out-claim nothing â€” the headless grader holds the
   lease when no one else does, and lands in a one-line refused tick when an interactive grader is live. The
-  full-rights variant (headless landing code on `main`) stays NOT built â€” that grant is the user's call.
+  full-rights variant (headless landing code on `main`) stays NOT built â€” that grant is the user's call; the
+  parked decisions (full-rights Â· multi-machine lease/acks) and the owed sleep/wake recovery check are documented
+  with their re-open triggers in `docs/RESEARCH_auto_glf.md` Â§9.
 - **Item 5** â€” `EXERCISE` is in the template but nothing consumes it yet. `tools/exercise/exercise.cjs` exists,
   drove 4 of 4 historical drains to a graded PASS, and is documented in no file the loop reads.
 - **Item 3â€²** â€” the journal still has one copy and no history. It must NOT be committed here (bundle exposure);

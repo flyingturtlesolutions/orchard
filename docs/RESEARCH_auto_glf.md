@@ -1,9 +1,12 @@
 # RESEARCH — Auto-glf: model, implementation, live state, and the fix proposal
 
-**Status:** research report, 2026-08-06 (~13:00Z read). Five-reader deep-read (protocol · testbus impl ·
-instrumentation · live bus state · history), synthesized. Sources: `tools/glf/*` (CRON_PROMPT.md v2.74.2024,
-testbus.cjs, tick.cjs, blocks.cjs, scrub.cjs), the `apps/orchard-logs` bus repo, `logs/run/findings.md` 2026-08-02→06
-entries, `docs/DESIGN_cloud_logs.md` (the CW-8 substrate). §8 is the fix proposal — **proposed, not built**.
+**Status:** research report, 2026-08-06 (~13:00Z read); **§8 F1–F5 BUILT same day (v2.74.2044, commit dd9146d)** —
+the grade-only scheduler variant, per the user's authorization. As-built deviations + the adversarial-verify
+critical catch are stamped at §8's head; the two decisions deliberately left parked and the one verification still
+owed live in **§9**. Five-reader deep-read (protocol · testbus impl · instrumentation · live bus state · history),
+synthesized. Sources: `tools/glf/*` (CRON_PROMPT.md v2.74.2024, testbus.cjs, tick.cjs, blocks.cjs, scrub.cjs), the
+`apps/orchard-logs` bus repo, `logs/run/findings.md` 2026-08-02→06 entries, `docs/DESIGN_cloud_logs.md` (the CW-8
+substrate).
 
 ---
 
@@ -145,9 +148,22 @@ redesign).
 
 ---
 
-## 8. Fix proposal (proposed 2026-08-06 — nothing built)
+## 8. Fix proposal — IMPLEMENTED v2.74.2044 (dd9146d), same day
 
 Ordered by leverage-per-risk. F1–F4 are small, independent, and need no protocol change. F5 is the decision item.
+
+**As-built stamp (2026-08-06).** All five landed; F5 as the recommended grade-only variant (b), user-authorized.
+Deviations from the text below: F1 also gained the `BUS UNDELIVERED ▸` sentinel in tick.cjs (checked at tick time,
+so anything dirty is by definition a *previous* tick's undelivered work — no mtime logic needed); the allowlist's
+file rule is `Edit(logs/run/**)` (a `Write(…)` rule is not matched by file permission checks — the first live
+firing caught this); and the **critical adversarial-verify catch**: the user-level `permissions.defaultMode:
+bypassPermissions` made the entire `--allowedTools` list INERT (empirically proven — a non-allowlisted command
+executed), so `headless-tick.cmd` pins `--permission-mode default` (the dev-bridge pattern) + `--add-dir` for the
+bus repo (an allowlist never widens the directory boundary). Verified live across three firings; the first
+ENFORCED one ran clean end-to-end (tick quoted · lease claimed as `lane-cron` · honest QUIET · census quoted and
+deduplicated into an ordered human to-do list · zero denials). LESSON banked: *an allowlist is only a mechanism
+under an enforcing mode* — an unattended invocation must pin its own permission mode, never inherit the
+interactive default.
 
 - **F1 — Deliver the stranded rearms (bus hygiene, ~zero code).** Commit+push the 10 modified `tests/` files in
   orchard-logs (a `tests: deliver stranded rearms` bus commit). They are another lane's rearm — flag it in the
@@ -185,3 +201,69 @@ Ordered by leverage-per-risk. F1–F4 are small, independent, and need no protoc
 F5 ≈ one decision + one command. F2/F3/F4 are `tools/`-only (never the shipped bundle's behavior) — by prior
 convention these can ride a `tools/glf:`-prefixed commit without a manifest bump unless process files change the
 loop's behavior (CRON_PROMPT edits bump, per the v2024 precedent).
+
+---
+
+## 9. Parked decisions + owed verification (as-built addendum, 2026-08-06)
+
+Two capabilities were **deliberately not built** at v2.74.2044, and one claim is **not yet proven**. Each parked
+item names its trigger so the decision re-opens itself instead of relying on memory.
+
+### 9.1 PARKED — the full-rights headless variant (trigger: FAIL-to-fix latency demonstrably hurts)
+
+Grade-only means the scheduled `lane-cron` session **observes and reports, never changes code**: on a confirmed
+FAIL it writes the FAIL result to the bus and stops — the protocol's STEP 3A tail (diagnose in source → fix →
+bump → rearm) waits for a human-opened session whose builder inbox picks the FAIL up. Full-rights would close that
+loop unattended: symptom in fleet traffic at 3am → diagnosed → fixed → committed+pushed to `main` → test rearmed →
+graded next tick. Zero human latency.
+
+Why it stays parked — three concrete risks, not one abstract one:
+1. **The shared checkout.** An unattended editor writes into the same tree the interactive lanes hold 30+ dirty
+   files in — the co-edit hazard (`git add <file>` cannot separate two authors inside one file) with no human
+   present to notice.
+2. **Uncommitted IS live.** Chrome loads the repo root; a wrong 3am "fix" is running in the browser the moment it
+   is written, and pushed to `main` moments later.
+3. **HITL inversion.** Today every code change traces to a session the user started. Full-rights breaks that
+   provenance property silently.
+
+Mechanically it is one edit (widen `headless-tick.cmd`'s allowlist; drop the STEP 3A/3B overrides in
+`HEADLESS_PROMPT.md`) — **the grant is the decision, not the build**. The evidence that would justify re-opening:
+measured FAIL-to-fix latency once FAILs actually fire (as of v2.74.2044, no FAIL has ever fired — the bad-news
+path is still unexercised, §7 gap 3).
+
+### 9.2 PARKED — the multi-machine lease/acks port (trigger: a second machine actually joins)
+
+The bus is a git-synced channel — tests and results travel, so a grader on any machine can in principle answer a
+builder on any other. But two pieces of coordination state never made that jump; both are plain local files:
+
+- **The lease** (`logs/run/grader.lease`) — the exactly-one-grader guarantee is machine-local. A second machine's
+  sessions would hold "the" lease concurrently with this one's and write duplicate results — the exact failure the
+  lease prevents, failing SILENTLY (each machine sees a perfectly valid lease).
+- **The ack ledger** (`logs/run/builder-ack.jsonl`) — "which results have I acted on" is machine-local. A builder
+  lane resumed elsewhere has amnesia: its inbox re-shows everything, and it may re-act on handled results.
+
+The port: move both into the bus repo as host-scoped files (`state/lease-<host>.json` + a cross-host election
+rule; `state/acks-<lane>.jsonl`), riding the same pull/push the results already do. Contained — but it buys
+nothing until a second machine exists, and it *costs* something today: a bus-synced lease depends on git latency,
+which is strictly worse than a local file while there is one machine. Parked on the trigger, not the difficulty.
+
+### 9.3 OWED — the sleep/wake recovery eyeball (the MECH-vs-VALUE gap on F5 itself)
+
+F5 exists because the session cron **died silently with the laptop** — the two largest gaps (314/450 min) sat
+exactly on the user's absences. The scheduled task is supposed to survive sleep and resume alone. Everything
+verified at build time, however, happened **while a human was present**. The one unobserved scenario is the very
+one the feature was built for: sleep → wake with no session open → the task resumes with nobody prompting.
+
+What to look for in `logs/run/cron.out` after the first overnight:
+1. A **gap in firing headers** covering the sleep — expected, not a bug (schtasks cannot fire a sleeping machine).
+2. The first post-wake firing appearing **on its own**, its `LOOP GAP <n>min` honestly sized to the sleep — the
+   gap named, never silently absorbed.
+3. That firing doing real work unattended: lease claimed by `lane-cron` (or refused to an interactive grader), an
+   honest QUIET or a grade, the census.
+4. Failure signatures: no post-wake headers at all (task didn't resume — check `schtasks /query /tn
+   orchard-auto-glf`; note its `Logon Mode: Interactive only`), or headers followed by permission-denial aborts (a
+   missing allowlist rule only some code path hits).
+
+`node tools/glf/report.cjs duty --hours 24` grades the recovery numerically. Until 1–3 are observed, F5's status
+is honestly "MECH proven, VALUE pending" — the same half-hit distinction the loop itself grades by (v2.74.2024),
+applied to the loop's own scheduler.
