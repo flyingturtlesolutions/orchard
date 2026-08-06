@@ -16,29 +16,49 @@ import { ConversationStore } from '../../Services/ConversationStore.js';   // §
 import { listAllWorkflows, updateWorkflow } from '../../Services/Storage/WorkflowStore.js';
 import { appendRunEntry, loadRuns } from '../../Services/Storage/WorkflowRunStore.js';   // v1739 — loadRuns STATIC: MV3 SWs disallow dynamic import() at runtime (the WORKFLOW_RUNS lazy-load threw on every call — background.js:77 records the same purge once before)
 import { normalizeWorkflow } from '../../Core/workflowMemory.js';
-import { isDue, coalescedCount, advanceTrigger, recordFailure, disarm, normalizeTrigger, armTrigger } from '../../Core/trigger.js';
-import { runsHeadless } from '../../Core/workflowTier.js';
+import { isDue, coalescedCount, advanceTrigger, recordFailure, disarm, normalizeTrigger, armTrigger, isTransientFailure } from '../../Core/trigger.js';   // v2.74.2043 — isTransientFailure keeps auth blips out of the disarm count
+import { runsHeadless, explainTier } from '../../Core/workflowTier.js';   // v2.74.2043 — explainTier names the demoting step (`TIER ▸`)
 import { replayPlan } from '../../Core/workflowWizard.js';
 import { runWorkflow, makeAccumulatorReporter, makeResumeReporter } from '../../Core/runDriver.js';
 import { mintRunId } from '../../Core/pipelineRun.js';
 import { priorRunVerdict } from '../../Core/fleetSchedule.js';
-import { runRideStep, rideStepResolvable } from '../../Core/rideStep.js';   // CD-1a (§9.4) — the SHARED pinned-ride/nav step primitive (one impl for SW + panel)
+import { runRideStep, rideStepResolvable, projectRideLeg } from '../../Core/rideStep.js';   // CD-1a (§9.4) — the SHARED pinned-ride/nav step primitive (one impl for SW + panel); projectRideLeg = the one SW projection (v2047)
 import { runFieldReadStep } from '../../Core/headlessClause.js';   // CD-1a phase 2, extraction 1 (v1717) — the headless banked field read
 import { runMapStep } from '../../Core/headlessMap.js';           // v2.74.2036 — pinned map (no INTERPRET)
 import { runWriteStep } from '../../Core/headlessWrite.js';       // v2.74.2036 — write + pipelineGate (auto for internal)
-import { recipeToLeg } from '../../Core/connectorLeg.js';
 
 const TICK_ALARM = 'cadence:tick';
 const TICK_MINUTES = 5;                    // honor the 5-min cadence floor (Core/trigger clamps below this)
 const RUN_PREFIX = 'cadence:run:';         // per-workflow in-flight marker { runId, startedAt } — survives SW death
 const PARK_PREFIX = 'cadence:parked:';     // a parked run's minimal resume marker (CD-7 promotes this to a wfp_ case)
+// v2.74.2047 — how often an EACH sweep re-stamps its own run marker (see _runStepInner's onEach): the 5-min
+// in-flight window (Core/fleetSchedule.priorRunVerdict) is a hard ceiling on run DURATION, and a 121-invoke sweep
+// can cross it cold (measured 6.8–11.9s per cold ride) — after which the next 5-min tick judges the marker DIED
+// and fires a CONCURRENT duplicate over the still-running sweep, re-executing the whole prefix. Refreshing the
+// marker on sweep progress makes the window measure from the last life-sign instead of fire-start; a mid-sweep SW
+// death stops the refreshes, so the died-verdict recovery still runs — at most one refresh interval later.
+const RUN_MARKER_REFRESH_MS = 60_000;
 
 let _ctx = null;
 
 // ── registration — copy vitals.js: alarms are durable across SW restarts, only the LISTENER re-registers ──────────
 export function initCadence(ctx) {
   _ctx = (ctx && typeof ctx === 'object') ? ctx : null;
-  try { chrome.alarms.create(TICK_ALARM, { periodInMinutes: TICK_MINUTES }); } catch { /* */ }
+  // v2.74.2043 — EXISTENCE GUARD, copied from vitals.js:384 (which has always had it; this file said "copy vitals"
+  // and then didn't). `chrome.alarms.create` with an existing NAME replaces the alarm and RESTARTS its period from
+  // zero. initCadence runs on every service-worker boot, and the SW boots dozens of times a day, so an unguarded
+  // create meant the 5-minute periodic alarm was continually pushed back: during active browsing it could go long
+  // stretches without ever firing, and the effective clock was the 6-second boot kick below rather than the cadence
+  // this file claims to own. Recreate ONLY when the period itself changed (so editing TICK_MINUTES still takes).
+  (async () => {
+    try {
+      const existing = await chrome.alarms.get(TICK_ALARM);
+      if (!existing) { chrome.alarms.create(TICK_ALARM, { periodInMinutes: TICK_MINUTES }); return; }
+      if (existing.periodInMinutes !== TICK_MINUTES) chrome.alarms.create(TICK_ALARM, { periodInMinutes: TICK_MINUTES });
+    } catch {
+      try { chrome.alarms.create(TICK_ALARM, { periodInMinutes: TICK_MINUTES }); } catch { /* */ }
+    }
+  })();
   try {
     chrome.alarms.onAlarm.addListener((alarm) => {
       if (alarm && alarm.name === TICK_ALARM) { _tick().catch(() => { /* */ }); }
@@ -76,6 +96,28 @@ async function _readParked(runId) {
 async function _clearParked(runId) {
   try { await chrome.storage.local.remove(PARK_PREFIX + runId); } catch { /* */ }
 }
+/**
+ * v2.74.2043 — does this workflow already have a park waiting on a human? The §7.2 overlap check reads only
+ * `cadence:run:` (an IN-FLIGHT run), and a park is not in flight — so a parked workflow was re-fired on its very
+ * next due-time, forever, until someone approved it. Each re-fire re-ran the whole prefix and minted ANOTHER park
+ * record and another history row: N parks for one decision, and the panel's parked list grew a duplicate per
+ * interval.
+ *
+ * This turns load-bearing with v2.74.2043's auto-write authority: in a chain where an early write is gate-`auto`
+ * and a LATER step parks, every re-fire re-executes that write. The per-item shape does defend itself here — the
+ * map ahead of the write no longer counts the created rows as misses, so the re-run writes nothing — but that
+ * defence is a property of one workflow shape, not of the scheduler, and it evaporates the moment a lookup is
+ * eventually-consistent or keyed differently from the create. Don't rely on it; don't re-fire a parked workflow.
+ */
+async function _hasOpenPark(workflowId) {
+  try {
+    const all = await chrome.storage.local.get(null);
+    for (const [k, v] of Object.entries(all || {})) {
+      if (k.startsWith(PARK_PREFIX) && v && typeof v === 'object' && v.workflowId === workflowId) return v;
+    }
+  } catch { /* fail OPEN: a storage read failure must not wedge the clock permanently */ }
+  return null;
+}
 async function _resolveWorkflow(workflowId) {
   try {
     for (const g of await listAllWorkflows()) {
@@ -105,6 +147,7 @@ async function _tick() {
     }
   } catch { liveKeys = null; }
   let scanned = 0, fired = 0, deferred = 0, parked = 0, disarmed = 0, inflight = 0, failedFire = 0;
+  let parkHold = 0;   // v2.74.2043 — held because ALREADY parked (a standing state; deliberately not in the summary gate)
 
   for (const g of (Array.isArray(groups) ? groups : [])) {
     const appId = g && g.appId;
@@ -142,6 +185,26 @@ async function _tick() {
         await _clearRunMarker(wf.id);
       }
 
+      // check 5b (v2.74.2043) — no PARK already waiting on a human for this workflow. See _hasOpenPark. Throttled
+      // to the same once-an-hour report as a deferral: this is a standing state, and the panel's parked banner is
+      // where a person is meant to see it.
+      const openPark = await _hasOpenPark(wf.id);
+      if (openPark) {
+        // NOT `parked++`. `parked` counts runs that parked THIS tick — an EVENT. A workflow held because it is
+        // already parked is a STANDING STATE, and feeding it into `parked` would put a nonzero value in the
+        // summary's fire condition below on every single tick, re-creating the exact `gc` spam that condition
+        // exists to prevent (and doing it for as long as the park went unapproved).
+        parkHold++;
+        try {
+          const last = _deferLoggedAt.get('park:' + wf.id) || 0;
+          if (now - last >= DEFER_LOG_MS) {
+            _deferLoggedAt.set('park:' + wf.id, now);
+            Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" not re-fired — a parked run (${openPark.runId}) is waiting for approval`);
+          }
+        } catch { /* */ }
+        continue;
+      }
+
       const coalesced = coalescedCount(trig, now);          // §7.2 — several due-times passed → run ONCE, record it
 
       // ── tier gate (§11.3): tier-'panel' defers to the PANEL; only tier-'sw' fires headless here ───────────────
@@ -158,6 +221,11 @@ async function _tick() {
             () => { void chrome.runtime.lastError; },
           );
         } catch { /* panel closed — next Automate render / desk-open still picks it up */ }
+        // v2.74.2043 — the DEFERRED BACKLOG WAS STRUCTURALLY INVISIBLE. The broadcast above is fire-and-forget: with
+        // the panel closed nothing receives it, and the scan summary below is suppressed unless something HAPPENED.
+        // So "my workflow never ran" and "the SW never even considered it" produced byte-identical traces (empty).
+        // Say it — but THROTTLED (the suppression rationale below is real: a standing due must not emit every 5 min).
+        await _reportDeferred(wf, appId, trig, now);
         continue;
       }
 
@@ -173,8 +241,40 @@ async function _tick() {
   // line every 5-min tick, or it spams the decisions log (`CADENCE ▸` is in _DECISION_RE, so gc would fill with
   // "0 fired, 0 parked …" forever). The panel surfaces standing-due; the scan need only speak when it acts.
   if (fired || parked || disarmed || failedFire || inflight) {
-    Logger.info('cadence', `CADENCE ▸ scan: ${scanned} triggered — ${fired} fired, ${parked} parked, ${deferred} deferred(panel), ${disarmed} disarmed, ${inflight} in-flight, ${failedFire} failed`);
+    Logger.info('cadence', `CADENCE ▸ scan: ${scanned} triggered — ${fired} fired, ${parked} parked, ${deferred} deferred(panel), ${disarmed} disarmed, ${inflight} in-flight, ${failedFire} failed${parkHold ? `, ${parkHold} awaiting approval` : ''}`);
   }
+}
+
+// ── v2.74.2043 — the deferral report (§11.3's missing half) ───────────────────────────────────────────────────────
+// THROTTLED to once an hour per workflow: the standing-due suppression above is correct (a tier-'panel' workflow
+// stays due until a panel runs it, so an un-throttled line would fill `gc` forever), but SILENCE was worse — it is
+// why four passes re-diagnosed the same demotion. Once an hour is loud enough to see in any real window and quiet
+// enough that a week of deferrals is ~168 lines, not ~2000.
+const DEFER_LOG_MS = 60 * 60 * 1000;
+const _deferLoggedAt = new Map();   // workflowId → last report (module scope; a SW death just re-reports once)
+
+/** Is a side panel actually listening? `getContexts` is Chrome 116+; unknown ≠ closed (fail-safe). */
+async function _panelOpen() {
+  try {
+    if (!chrome.runtime || typeof chrome.runtime.getContexts !== 'function') return null;
+    const ctxs = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] });
+    return Array.isArray(ctxs) ? ctxs.length > 0 : null;
+  } catch { return null; }
+}
+
+async function _reportDeferred(wf, appId, trig, now) {
+  try {
+    const last = _deferLoggedAt.get(wf.id) || 0;
+    if (now - last < DEFER_LOG_MS) return;
+    _deferLoggedAt.set(wf.id, now);
+    const t = explainTier(wf);
+    const open = await _panelOpen();
+    const dueMin = Math.max(0, Math.round((now - (trig.nextDue || now)) / 60000));
+    const where = open === true ? 'panel open — due-on-open should run it'
+      : (open === false ? 'PANEL CLOSED — nothing will run it' : 'panel presence unknown');
+    Logger.info('cadence', `CADENCE ▸ deferred "${wf.name || wf.id}" — tier-panel, due ${dueMin}m, ${where}`);
+    Logger.info('cadence', `TIER ▸ "${wf.name || wf.id}" panel — step ${t.stepIndex + 1} kind=${t.kind}: ${t.why}`);
+  } catch { /* a report must never break the scan */ }
 }
 
 // ── the fire: resolve → drive → write history → advance/record (§5.5 "go through the normal executor") ────────────
@@ -185,13 +285,23 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
   await _stampRunMarker(wf.id, runId, now);
   const rep = reporter || makeAccumulatorReporter();
   let out = { verdict: 'failed' };
+  // v2.74.2048 — bank the run's OWN lines as the durable Trace. v2030 gave PANEL runs this ({t,m} on the
+  // history entry, preferred by the drill); an AUTO run's row apologized "No workflow lines left in the session
+  // log" the moment the INFO ring rotated — live report, minutes after the first real headless fire. The SW
+  // banks the same lines it logs (RIDE_EACH/STEP/GATE/STOPPED); normalizeHistoryTrace caps + scrubs at append.
+  const traceBank = [];
+  const bankLine = (m) => { if (traceBank.length < 40) traceBank.push({ t: new Date().toISOString().slice(11, 23), m: String(m) }); };
   // v2.74.2036 — closed-panel presence: pulse toolbar while a scheduled fire runs.
   try { _cadencePresence('running', { name: wf.name || wf.ask || wf.id }); } catch { /* */ }
   try {
-    const plan = replayPlan(wf, (clause) => _canResolve(clause));
+    // v2.74.2044 — drift is resolved BEFORE the plan (see _resolveDrift); replayPlan's predicate must stay sync.
+    const resolvable = await _resolveDrift(wf);
+    const plan = replayPlan(wf, (pin) => resolvable.get(pin) !== false);   // absent pin (can't happen) → no manufactured drift
     if (!plan.runnable) {
       // a banked step no longer resolves (drift) — never silently re-interpret (§2.1). Count as a failure.
-      Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" STOPPED — ${plan.stale.length} banked step(s) no longer resolve`);
+      const _stopLine = `CADENCE ▸ "${wf.name || wf.id}" STOPPED — ${plan.stale.length} banked step(s) no longer resolve`;
+      Logger.info('cadence', _stopLine);
+      bankLine(_stopLine);
       out = { verdict: 'failed' };
     } else {
       out = await runWorkflow({
@@ -199,7 +309,7 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
         reporter: rep,
         startIndex: Math.max(0, Number(startIndex) || 0),
         state,
-        runStep: (clause, cctx) => _runStep(clause, { ...cctx, runId, wf }),
+        runStep: (clause, cctx) => _runStep(clause, { ...cctx, runId, wf, bank: bankLine }),
       });
     }
   } catch (e) {
@@ -223,6 +333,7 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
     await appendRunEntry(wf.id, {
       at: trig.nextDue || now, ranAt: now, trigger, verdict, counts,
       ms: Date.now() - now, runId, contentId: wf.contentId || '',
+      ...(traceBank.length ? { trace: traceBank } : {}),   // v2.74.2048 — the durable Trace (parity with panel ▶)
       ...(out.failedStep ? { failedStep: out.failedStep } : {}),
       ...(resumedFrom ? { resumedFrom } : {}),
       ...(verdict === 'parked' ? { parkedRunId, why: 'a write step needs approval' } : {}),
@@ -253,7 +364,8 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
     Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" PARKED at step ${out.parkedAt + 1} — a write needs a human (run ${parkedRunId})`);
     if (auto) await _advance(appId, wf, now);
   } else if (verdict === 'failed') {
-    if (auto) await _recordFailure(appId, wf, now);
+    // v2.74.2043 — pass the FIRST failing step's error so an auth/offline failure doesn't burn a disarm strike.
+    if (auto) await _recordFailure(appId, wf, now, (out.failedStep && out.failedStep.error) || '');
   } else {
     Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" ran → ${verdict} (${counts.done}/${snap.total} step(s))${coalesced > 1 ? ` · ${coalesced} collapsed` : ''}`);
     if (auto) await _advance(appId, wf, now);
@@ -266,16 +378,70 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
 // is the pinned-ride/nav path (Core/rideStep) with the SW's IO injected. A ride READ threads its value into the
 // chain state (state.lastValue) so a following fieldRead has rows to read — phase 2's composition seam.
 async function _runStep(clause, ctx) {
+  // A THROWN step must still report. runDriver catches throws and converts them to {ok:false}, so without this
+  // catch the one case most likely to need a trace line — an unexpected exception — was the one case that emitted
+  // none. Converting here is behaviour-identical to what runDriver would have done with the throw.
+  let r;
+  try { r = await _runStepInner(clause, ctx); }
+  catch (e) { r = { ok: false, error: `threw: ${(e && e.message) || e}` }; }
+  // v2.74.2043 — the SW ran every headless step SILENTLY. A whole scheduled run produced at most one summary line,
+  // so "which step died, and how" was unanswerable from a trace — the exact question every v2038–2042 pass asked.
+  try {
+    const pin = (clause && clause.pinned && typeof clause.pinned === 'object') ? clause.pinned : null;
+    const kind = (pin && pin.kind) || 'ride';
+    const at = `${(ctx.index || 0) + 1}/${ctx.total || '?'}`;
+    const outcome = r && r.park ? 'parked' : (r && r.ok ? 'ok' : `fail(${(r && r.error) || '?'})`);
+    const ids = pin ? [pin.capabilityId && `cap=${pin.capabilityId}`, pin.groundId && `g=${pin.groundId}`].filter(Boolean).join(' ') : 'unpinned';
+    // v2.74.2047 — the HOST speaks the each-sweep's lines (Core/rideEach stays Logger-free), in the panel fan's
+    // exact vocabulary so gc/gl read ONE language — `(sw…)`/`[sw]` marks this driver the way `(chain…)`/`[chain]`
+    // marks the panel chain. trace-lint's ride-each-receipt pairing holds by construction: the tally OPENS the
+    // span and the `returned`/`exit` terminal is emitted adjacent, in the same guarded block. RIDE_EACH ▸ is an
+    // already-registered marker family (Core/decisionMarkers.js) — invariant #1 satisfied by reuse.
+    // v2.74.2048 — every run line ALSO banks onto the history entry's durable Trace (ctx.bank, seeded by _fire).
+    const _say = (m) => { Logger.info('cadence', m); if (typeof ctx.bank === 'function') { try { ctx.bank(m); } catch { /* */ } } };
+    if (r && r.each && typeof r.each === 'object') {
+      const e = r.each;
+      _say(`RIDE_EACH ▸ ${e.recipeId || (pin && pin.capabilityId) || '?'} × ${e.total} ${e.noun}(s) (sw${e.fixed ? `, ${e.fixed}` : ''}) → ${e.ok} ok, ${e.failed} failed, ${e.seen} row(s)`);
+      if (e.ok > 0) _say(`RIDE_EACH ▸ returned ${e.returned} row(s)${e.truncated ? ` of ${e.seen} — CAPPED at ${e.rowCap}` : ''} from ${e.ok}/${e.total} ${e.noun}(s) [sw]`);
+      else _say(`RIDE_EACH ▸ exit — total failure (0 ok, ${e.failed} tried) [sw]`);
+    }
+    _say(`STEP ▸ ${at} ${kind} ${ids} → ${outcome}`);
+    // The gate verdict headlessWrite now returns (Core stays Logger-free — the host speaks).
+    if (r && r.gate) _say(`GATE   ▸ item=${r.gate.targetId || '?'} headless write → ${r.gate.decision}${r.gate.decision === 'auto' ? '' : `(${r.gate.why})`}`);
+  } catch { /* a trace line must never change a run */ }
+  return r;
+}
+
+async function _runStepInner(clause, ctx) {
   const pin = (clause && clause.pinned && typeof clause.pinned === 'object') ? clause.pinned : null;
-  const invoke = (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', payload);
+  // v2.74.2043 — `headless: true`, matching background/handlers/fleet.js:42 (which has stamped it on every
+  // scheduled read since H-1a). Without it, connector.js's identity gate takes the INTERACTIVE branch on a
+  // signed-out ground: `_focusTab` + `_waitForReauth`. That means a 3 AM scheduled run STEALS THE SCREEN — it
+  // raises a login tab in front of whatever the person is doing, or in front of nobody, and then blocks the
+  // worker waiting for a human who isn't there. With the flag the same verdict fails fast as `not-logged-in`,
+  // which Core/trigger.isTransientFailure then keeps out of the auto-disarm count.
+  const invoke = (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...payload, headless: true });
   const readRecipes = _ctx.readRideRecipes;
+  // v2.74.2047 — keep the in-flight marker ALIVE across every long step (see RUN_MARKER_REFRESH_MS): each
+  // completion beat re-stamps `cadence:run:<wfId>` at most once a minute, so priorRunVerdict's 5-min window
+  // measures from the last life-sign and a slow run — a 121-invoke EACH sweep, a 121-row map lookup chain, a
+  // 25-row write — is never declared dead (and duplicated) mid-run. Same runId: a heartbeat, not a new run.
+  // Fire-and-forget (_stampRunMarker never throws). Seeded to NOW — _fire stamped the marker moments ago, so
+  // the first re-stamp is owed a full interval out, not at once.
+  let lastBeat = Date.now();
+  const onEach = () => {
+    const t = Date.now();
+    if (t - lastBeat < RUN_MARKER_REFRESH_MS) return;
+    lastBeat = t;
+    if (ctx.wf && ctx.wf.id && ctx.runId) void _stampRunMarker(ctx.wf.id, ctx.runId, t);
+  };
   if (pin && pin.kind === 'fieldRead') return runFieldReadStep(clause, { state: ctx.state });
   if (pin && pin.kind === 'map') {
-    return runMapStep(clause, { state: ctx.state, invoke, readRecipes });
+    return runMapStep(clause, { state: ctx.state, invoke, readRecipes, onRow: onEach });
   }
   if (pin && pin.kind === 'write') {
     return runWriteStep(clause, {
-      state: ctx.state, invoke, readRecipes, reporter: ctx.reporter, runId: ctx.runId,
+      state: ctx.state, invoke, readRecipes, reporter: ctx.reporter, runId: ctx.runId, onRow: onEach,
     });
   }
   const r = await runRideStep(clause, {
@@ -284,6 +450,7 @@ async function _runStep(clause, ctx) {
     reporter: ctx.reporter,
     runId: ctx.runId,
     workflowId: ctx.wf && ctx.wf.id,
+    onEach,
   });
   if (r && r.ok && r.value !== undefined && r.value !== null) {
     // Thread lastLeg for a following map's joinKey ladder (panel does this on connector success).
@@ -294,7 +461,7 @@ async function _runStep(clause, ctx) {
         const recs = (await readRecipes(p.groundId)) || [];
         const rec = recs.find((x) => x && x.id === p.capabilityId);
         if (rec) {
-          lastLeg = recipeToLeg({ ...rec, groundId: p.groundId }, { account: 'me', trusted: true }) || lastLeg;
+          lastLeg = projectRideLeg(rec, p.groundId) || lastLeg;   // v2.74.2047 — the one SW projection (raw recipeToLeg lost seeded records)
         }
       }
     } catch { /* */ }
@@ -348,9 +515,28 @@ export function clearCadenceDoneBadge() {
   } catch { /* */ }
 }
 
-// The drift check (§2.1), via the same shared primitive.
-function _canResolve(clause) {
-  return rideStepResolvable(clause, { readRecipes: _ctx.readRideRecipes });
+// The drift check (§2.1), via the same shared primitive — PRE-resolved (v2.74.2044). rideStepResolvable is
+// async, but replayPlan's canResolve contract is SYNCHRONOUS (the panel path relies on that — keep it): handing
+// it the async function returned a Promise per call, which `!!` coerced truthy — plan.stale stayed empty,
+// plan.runnable stayed true, and the STOPPED branch in _fire was unreachable dead code. A drifted workflow
+// therefore ran its live prefix (including gate-auto writes — the re-execution hazard _hasOpenPark documents)
+// every due-tick before dying mid-run as generic 'recipe-gone'/'not-armed'. So: await every pin's verdict FIRST
+// (Promise.all), then hand replayPlan a sync lookup keyed by pin IDENTITY (replayPlan passes steps[i].clause
+// through unchanged). NOTE the {pinned:pin} wrapper — replayPlan hands canResolve the BARE pin, while
+// rideStepResolvable unwraps `.pinned`/`.clause`; a naked pin finds no pin inside and answers true for
+// everything, which was the same vacuity by a second route.
+async function _resolveDrift(wf) {
+  const out = new Map();
+  const pins = [];
+  for (const s of (Array.isArray(wf && wf.steps) ? wf.steps : [])) {
+    if (s && s.clause && typeof s.clause === 'object') pins.push(s.clause);
+  }
+  await Promise.all(pins.map(async (pin) => {
+    let ok = false;
+    try { ok = (await rideStepResolvable({ pinned: pin }, { readRecipes: _ctx.readRideRecipes })) === true; } catch { ok = false; }
+    out.set(pin, ok);
+  }));
+  return out;
 }
 
 // ── trigger write-backs (through the sanctioned store path; updateWorkflow re-normalizes + whitelists trigger) ─────
@@ -358,9 +544,13 @@ async function _advance(appId, wf, now) {
   const next = advanceTrigger(wf.trigger, now);
   try { await updateWorkflow(appId, wf.id, { trigger: next }); } catch { /* */ }
 }
-async function _recordFailure(appId, wf, now) {
-  const next = recordFailure(wf.trigger, { now });
+async function _recordFailure(appId, wf, now, error = '') {
+  const transient = isTransientFailure(error);
+  const next = recordFailure(wf.trigger, { now, transient });
   try { await updateWorkflow(appId, wf.id, { trigger: next }); } catch { /* */ }
+  if (transient) {
+    Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" failed transiently (${error}) — clock advanced, no disarm strike`);
+  }
   if (next && next.enabled === false) {
     Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" AUTO-DISARMED after ${next.failures} consecutive failures — its route may have drifted`);
     try { await appendRunEntry(wf.id, { at: now, ranAt: now, trigger: 'auto', verdict: 'disarmed', why: `${next.failures} consecutive failures` }); } catch { /* */ }
@@ -426,6 +616,15 @@ export function createCadenceHandlers() {
           for (const g of items) { const hit = (g.items || []).find((x) => x && x.id === workflowId); if (hit) { wf = normalizeWorkflow(hit); owner = g.appId; break; } }
           if (!wf) { sendResponse({ success: false, error: 'workflow-not-found' }); return; }
           if (!runsHeadless(wf)) { sendResponse({ success: false, error: 'panel-tier', tier: 'panel' }); return; }
+          // v2.74.2047 — a manual fire must not overlap an in-flight run: an each sweep widened this window from
+          // seconds to minutes, and two concurrent runs share one ground (duplicate reads, racing markers, the
+          // heartbeat alternating runIds). The scan's own overlap rule, applied to the manual door.
+          const _mk = await _readRunMarker(wf.id);
+          if (priorRunVerdict(_mk, Date.now()).inFlight) {
+            Logger.info('cadence', `CADENCE ▸ manual fire of "${wf.name || wf.id}" refused — a run is already in flight (${_mk.runId})`);
+            sendResponse({ success: false, error: 'in-flight', runId: _mk.runId || '' });
+            return;
+          }
           const now = Date.now();
           const res = await _fire(owner, wf, wf.trigger || normalizeTrigger({ minutes: 60 }), { now, coalesced: 1, trigger: 'headless' });   // §6.5 — the 4-way initiation stamp
           sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });

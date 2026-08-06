@@ -301,7 +301,11 @@ function adaptParamBindingsForSieve(bindings) {
  * Strategy-tier scope and merges the produced output binding back into
  * workflowScope so downstream steps can reference it via `scope_binding`.
  */
-async function executeAnalysisStep(step, stepIndex, paramValues, workflowScope, ctx, workflow) {
+// v2.74.2044 — stepPath rides every step-level emission (additive; stepIndex stays for back-compat).
+// The debug panel keys its rows by full dot-path ('0.body.1'); a nested step emitting only its LOCAL
+// index marked the wrong TOP-LEVEL row done and made Step Over derive a top-level prefix mid-body.
+// Default String(stepIndex) keeps top-level callers (runCompensation) correct without threading.
+async function executeAnalysisStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, stepPath = String(stepIndex)) {
   if (!step.analysisId) {
     return { status: 'failed', error: 'Analysis step has no analysisId picked yet' };
   }
@@ -314,6 +318,7 @@ async function executeAnalysisStep(step, stepIndex, paramValues, workflowScope, 
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'analysis',
     analysisId: step.analysisId,
     message: `Step ${stepIndex + 1}: running Analysis`,
@@ -334,6 +339,7 @@ async function executeAnalysisStep(step, stepIndex, paramValues, workflowScope, 
   ctx.emit({
     type: 'strategy_step_done',
     stepIndex,
+    stepPath,
     stepType: 'analysis',
     success: result.status === 'ok',
     error: result.error ?? null,
@@ -356,7 +362,8 @@ async function executeAnalysisStep(step, stepIndex, paramValues, workflowScope, 
   return result;
 }
 
-async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, ctx) {
+// v2.74.2044 — stepPath threaded (see executeAnalysisStep's marker for the mis-keying it fixes).
+async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, ctx, stepPath = String(stepIndex)) {
   if (!step.workflowId) {
     return { success: false, error: 'Workflow step has no workflowId picked yet' };
   }
@@ -370,7 +377,7 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   // into workflowScope. This preserves the load-bearing act/read split — Fragments ACT,
   // Observations READ — rather than co-opting one to do the other's job.
   if (step.capabilityKind === 'observation') {
-    return _runObservationStep(step, stepIndex, paramValues, workflowScope, ctx);
+    return _runObservationStep(step, stepIndex, paramValues, workflowScope, ctx, stepPath);
   }
 
   let innerParams = resolveWorkflowStepParams(step, paramValues, workflowScope, ctx);
@@ -389,6 +396,7 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'workflow',
     workflowId: step.workflowId,
     message: `Step ${stepIndex + 1}: running Workflow`,
@@ -409,7 +417,7 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
     let frag = null;
     try { frag = await StorageManager.getFragment(step.workflowId); } catch { /* */ }
     if (!frag) {
-      ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'workflow', success: false, error: `Fragment ${step.workflowId} not found`, message: `Step ${stepIndex + 1}: Fragment not found` });
+      ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'workflow', success: false, error: `Fragment ${step.workflowId} not found`, message: `Step ${stepIndex + 1}: Fragment not found` });
       return { success: false, error: `Fragment ${step.workflowId} not found` };
     }
     inlineStrategy = wrapFragmentAsStrategy(frag, { strategyId: `fragment:${frag.id}` });
@@ -456,6 +464,7 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   ctx.emit({
     type: 'strategy_step_done',
     stepIndex,
+    stepPath,
     stepType: 'workflow',
     success: !!result.success,
     error: result.error ?? null,
@@ -526,17 +535,18 @@ async function _waitTabComplete(tabId, timeoutMs = 15000) {
  * Returns the same { success, extractedValues?, error? } envelope a Strategy step returns, so
  * executeSteps merges its outputs into workflowScope identically.
  */
-async function _runObservationStep(step, stepIndex, paramValues, workflowScope, ctx) {
+async function _runObservationStep(step, stepIndex, paramValues, workflowScope, ctx, stepPath = String(stepIndex)) {
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'workflow',
     workflowId: step.workflowId,
     message: `Step ${stepIndex + 1}: reading${step.label ? ` "${step.label}"` : ''} on the other Ground`,
   });
 
   const fail = (error) => {
-    ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'workflow', success: false, error, message: `Step ${stepIndex + 1}: ${error}` });
+    ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'workflow', success: false, error, message: `Step ${stepIndex + 1}: ${error}` });
     return { success: false, error };
   };
 
@@ -608,6 +618,7 @@ async function _runObservationStep(step, stepIndex, paramValues, workflowScope, 
     ctx.emit({
       type: 'strategy_step_done',
       stepIndex,
+      stepPath,
       stepType: 'workflow',
       success: true,
       message: `Step ${stepIndex + 1}: read "${String(obs.value ?? '').slice(0, 60)}" → ${outName}`,
@@ -829,7 +840,9 @@ async function executeSteps(steps, paramValues, workflowScope, ctx, workflow, pa
     const step = steps[i];
 
     if (step.type === 'workflow') {
-      const r = await executeWorkflowStep(step, i, paramValues, workflowScope, ctx);
+      // v2.74.2044 — stepPath threads into every step handler so each step-level emission carries
+      // the full dot-path the debug panel keys its rows by (stepIndex alone is local to this body).
+      const r = await executeWorkflowStep(step, i, paramValues, workflowScope, ctx, stepPath);
       stepResults.push({ stepIndex: i, stepType: 'workflow', success: !!r.success, error: r.error ?? null });
       if (!r.success) return { stepResults, error: r.error ?? `Step ${i + 1} failed` };
 
@@ -840,7 +853,7 @@ async function executeSteps(steps, paramValues, workflowScope, ctx, workflow, pa
       }
     }
     else if (step.type === 'analysis') {
-      const r = await executeAnalysisStep(step, i, paramValues, workflowScope, ctx, workflow);
+      const r = await executeAnalysisStep(step, i, paramValues, workflowScope, ctx, workflow, stepPath);
       stepResults.push({ stepIndex: i, stepType: 'analysis', success: r.status === 'ok', error: r.error ?? null });
       if (r.status !== 'ok') return { stepResults, error: r.error ?? `Step ${i + 1} failed` };
     }
@@ -853,7 +866,7 @@ async function executeSteps(steps, paramValues, workflowScope, ctx, workflow, pa
       // v2.74.80 — Duration-mode WAIT only. Condition mode fails loudly
       // until the scope-condition evaluator lands. Abort during the sleep
       // returns to the caller via the same error channel.
-      const r = await executeWaitStep(step, i, ctx);
+      const r = await executeWaitStep(step, i, ctx, stepPath);
       stepResults.push({ stepIndex: i, stepType: 'wait', success: !r.error && !r.aborted, error: r.error ?? null });
       if (r.error)   return { stepResults, error: r.error };
       if (r.aborted) return { stepResults, error: 'Aborted' };
@@ -888,6 +901,7 @@ async function executeSteps(steps, paramValues, workflowScope, ctx, workflow, pa
         ctx.emit({
           type: 'strategy_paused',
           stepIndex: i,
+          stepPath,
           message: `Step ${i + 1}: PAUSE — waiting for resume`,
         });
         try { ctx.debug.requestPause(); } catch (_) { /* swallow */ }
@@ -896,20 +910,21 @@ async function executeSteps(steps, paramValues, workflowScope, ctx, workflow, pa
         ctx.emit({
           type: 'strategy_resumed',
           stepIndex: i,
+          stepPath,
           message: `Step ${i + 1}: resumed`,
         });
         stepResults.push({ stepIndex: i, stepType: 'pause', success: true });
       } else {
         const msg = `Step ${i + 1} (PAUSE): no debug envelope attached; continuing without halting`;
         Logger.warn('WorkflowExecutor', msg);
-        ctx.emit({ type: 'strategy_step_skipped', stepIndex: i, stepType: 'pause', message: msg });
+        ctx.emit({ type: 'strategy_step_skipped', stepIndex: i, stepPath, stepType: 'pause', message: msg });
         stepResults.push({ stepIndex: i, stepType: 'pause', success: false, skipped: true, error: 'no debug envelope' });
       }
     }
     else {
       const msg = `Step ${i + 1} (${step.type}): execution not yet implemented in this build; skipping`;
       Logger.warn('WorkflowExecutor', msg);
-      ctx.emit({ type: 'strategy_step_skipped', stepIndex: i, stepType: step.type, message: msg });
+      ctx.emit({ type: 'strategy_step_skipped', stepIndex: i, stepPath, stepType: step.type, message: msg });
       stepResults.push({ stepIndex: i, stepType: step.type, success: false, skipped: true, error: 'not implemented' });
     }
 
@@ -926,6 +941,7 @@ async function executeSteps(steps, paramValues, workflowScope, ctx, workflow, pa
       ctx.emit({
         type: 'strategy_scope_snapshot',
         stepIndex: i,
+        stepPath,
         snapshot: { ...workflowScope },
       });
     }
@@ -959,7 +975,10 @@ async function executeSteps(steps, paramValues, workflowScope, ctx, workflow, pa
  * Workflow-tier FOREACH). Authors who need per-iteration outputs should
  * have a downstream Analysis aggregate via the iter var name.
  */
-async function executeForeachStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, parentPath = '') {
+// v2.74.2044 — param renamed parentPath → stepPath: it has always carried this step's OWN full
+// dot-path (it is "parent" only from the body's perspective), and the step-level emissions below
+// now carry it so the debug panel can key this row exactly. Same rename in loop / detect / try.
+async function executeForeachStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, stepPath = String(stepIndex)) {
   const overName = step.over ?? '';
   const asName   = step.as ?? '';
   const body     = Array.isArray(step.body) ? step.body : [];
@@ -986,6 +1005,7 @@ async function executeForeachStep(step, stepIndex, paramValues, workflowScope, c
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'foreach',
     message: `Step ${stepIndex + 1}: FOREACH ${asName} in ${overName} (${items.length} item${items.length === 1 ? '' : 's'})`,
   });
@@ -997,15 +1017,15 @@ async function executeForeachStep(step, stepIndex, paramValues, workflowScope, c
     ctx.iterStack.push({ name: asName, value: items[i] });
     ctx.emit({
       type: 'strategy_foreach_iter',
-      stepIndex, iter: i, total: items.length,
+      stepIndex, stepPath, iter: i, total: items.length,
       message: `Step ${stepIndex + 1}: iteration ${i + 1}/${items.length}`,
     });
 
     try {
-      // v2.74.100 — Body steps run with `${parentPath}.body` as their
+      // v2.74.100 — Body steps run with `${stepPath}.body` as their
       // path prefix so breakpoints can target any individual body step
       // (e.g. "2.body.0" for the first step inside this FOREACH).
-      const r = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${parentPath}.body`);
+      const r = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${stepPath}.body`);
       if (r.error) {
         return { error: `${r.error} (iteration ${i + 1}/${items.length})`, iterations: i + 1 };
       }
@@ -1026,6 +1046,7 @@ async function executeForeachStep(step, stepIndex, paramValues, workflowScope, c
   ctx.emit({
     type: 'strategy_step_done',
     stepIndex,
+    stepPath,
     stepType: 'foreach',
     success: true,
     message: `Step ${stepIndex + 1}: FOREACH finished (${items.length} iteration${items.length === 1 ? '' : 's'})`,
@@ -1056,12 +1077,13 @@ async function executeForeachStep(step, stepIndex, paramValues, workflowScope, c
  *   - condition mode encountered → fail with "not yet shipped"
  *   - abort polled true during the sleep → return aborted: true
  */
-async function executeWaitStep(step, stepIndex, ctx) {
+async function executeWaitStep(step, stepIndex, ctx, stepPath = String(stepIndex)) {
   const mode = step.mode ?? 'duration';
 
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'wait',
     message: `Step ${stepIndex + 1}: WAIT ${mode === 'duration' ? `${step.durationMs ?? 0}ms` : `(condition mode)`}`,
   });
@@ -1084,6 +1106,7 @@ async function executeWaitStep(step, stepIndex, ctx) {
       ctx.emit({
         type: 'strategy_step_done',
         stepIndex,
+        stepPath,
         stepType: 'wait',
         success: false,
         message: `Step ${stepIndex + 1}: WAIT aborted after ${ms - remaining}ms / ${ms}ms`,
@@ -1098,6 +1121,7 @@ async function executeWaitStep(step, stepIndex, ctx) {
   ctx.emit({
     type: 'strategy_step_done',
     stepIndex,
+    stepPath,
     stepType: 'wait',
     success: true,
     message: `Step ${stepIndex + 1}: WAIT ${ms}ms complete`,
@@ -1124,7 +1148,7 @@ async function executeWaitStep(step, stepIndex, ctx) {
  *   - empty branches AND empty default → no-op, succeeds
  *   - body / default body returns an error → DETECT fails, propagates up
  */
-async function executeDetectStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, parentPath = '') {
+async function executeDetectStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, stepPath = String(stepIndex)) {
   const branches = Array.isArray(step.branches) ? step.branches : [];
   const defaultBody = Array.isArray(step.default) ? step.default : [];
 
@@ -1137,6 +1161,7 @@ async function executeDetectStep(step, stepIndex, paramValues, workflowScope, ct
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'detect',
     message: `Step ${stepIndex + 1}: DETECT (${branches.length} branch${branches.length === 1 ? '' : 'es'}${defaultBody.length ? ' + default' : ''})`,
   });
@@ -1161,14 +1186,14 @@ async function executeDetectStep(step, stepIndex, paramValues, workflowScope, ct
     if (result.ok) {
       ctx.emit({
         type: 'strategy_detect_branch',
-        stepIndex, branch: bi,
+        stepIndex, stepPath, branch: bi,
         message: `Step ${stepIndex + 1}: DETECT matched branch ${bi + 1} (${describeDataCondition(cond)})`,
       });
       const body = Array.isArray(branch.body) ? branch.body : [];
-      // v2.74.100 — Branch body path: "${parentPath}.branches.${bi}.body".
-      const r = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${parentPath}.branches.${bi}.body`);
+      // v2.74.100 — Branch body path: "${stepPath}.branches.${bi}.body".
+      const r = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${stepPath}.branches.${bi}.body`);
       if (r.error) return { error: r.error };
-      ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'detect', success: true });
+      ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'detect', success: true });
       return {};
     }
   }
@@ -1178,14 +1203,15 @@ async function executeDetectStep(step, stepIndex, paramValues, workflowScope, ct
     ctx.emit({
       type: 'strategy_detect_default',
       stepIndex,
+      stepPath,
       message: `Step ${stepIndex + 1}: DETECT no branch matched; running default body`,
     });
-    // v2.74.100 — Default body path: "${parentPath}.default".
-    const r = await executeSteps(defaultBody, paramValues, workflowScope, ctx, workflow, `${parentPath}.default`);
+    // v2.74.100 — Default body path: "${stepPath}.default".
+    const r = await executeSteps(defaultBody, paramValues, workflowScope, ctx, workflow, `${stepPath}.default`);
     if (r.error) return { error: r.error };
   }
 
-  ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'detect', success: true });
+  ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'detect', success: true });
   return {};
 }
 
@@ -1204,7 +1230,7 @@ async function executeDetectStep(step, stepIndex, paramValues, workflowScope, ct
  * call. This is the pagination pattern: body increments a counter or
  * fetches the next page, condition probes a "has more" binding.
  */
-async function executeLoopStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, parentPath = '') {
+async function executeLoopStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, stepPath = String(stepIndex)) {
   const cond = step?.condition;
   const body = Array.isArray(step.body) ? step.body : [];
   const cap = Number.isFinite(step.maxIterations) && step.maxIterations > 0 ? step.maxIterations : 100;
@@ -1220,6 +1246,7 @@ async function executeLoopStep(step, stepIndex, paramValues, workflowScope, ctx,
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'loop',
     message: `Step ${stepIndex + 1}: LOOP while ${describeDataCondition(cond)} (max ${cap} iterations)`,
   });
@@ -1231,15 +1258,15 @@ async function executeLoopStep(step, stepIndex, paramValues, workflowScope, ctx,
     const scope = buildAnalysisScope(workflow, paramValues, workflowScope, ctx);
     const result = evaluateDataCondition(cond, scope);
     if (!result.ok) {
-      ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'loop', success: true, message: `Step ${stepIndex + 1}: LOOP exited after ${iter} iteration${iter === 1 ? '' : 's'}` });
+      ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'loop', success: true, message: `Step ${stepIndex + 1}: LOOP exited after ${iter} iteration${iter === 1 ? '' : 's'}` });
       return { iterations: iter };
     }
 
     iter++;
-    ctx.emit({ type: 'strategy_loop_iter', stepIndex, iter, message: `Step ${stepIndex + 1}: LOOP iteration ${iter}` });
+    ctx.emit({ type: 'strategy_loop_iter', stepIndex, stepPath, iter, message: `Step ${stepIndex + 1}: LOOP iteration ${iter}` });
 
-    // v2.74.100 — LOOP body path: "${parentPath}.body".
-    const r = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${parentPath}.body`);
+    // v2.74.100 — LOOP body path: "${stepPath}.body".
+    const r = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${stepPath}.body`);
     if (r.error) return { error: `${r.error} (LOOP iteration ${iter})` };
   }
 
@@ -1262,21 +1289,22 @@ async function executeLoopStep(step, stepIndex, paramValues, workflowScope, ctx,
  *
  * An aborted body short-circuits TRY too — recovery doesn't run on abort.
  */
-async function executeTryStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, parentPath = '') {
+async function executeTryStep(step, stepIndex, paramValues, workflowScope, ctx, workflow, stepPath = String(stepIndex)) {
   const body     = Array.isArray(step.body) ? step.body : [];
   const recovery = Array.isArray(step.recovery) ? step.recovery : [];
 
   ctx.emit({
     type: 'strategy_step_start',
     stepIndex,
+    stepPath,
     stepType: 'try',
     message: `Step ${stepIndex + 1}: TRY (body ${body.length}, recovery ${recovery.length})`,
   });
 
-  // v2.74.100 — TRY body path: "${parentPath}.body".
-  const bodyResult = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${parentPath}.body`);
+  // v2.74.100 — TRY body path: "${stepPath}.body".
+  const bodyResult = await executeSteps(body, paramValues, workflowScope, ctx, workflow, `${stepPath}.body`);
   if (!bodyResult.error) {
-    ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'try', success: true, message: `Step ${stepIndex + 1}: TRY body succeeded` });
+    ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'try', success: true, message: `Step ${stepIndex + 1}: TRY body succeeded` });
     return {};
   }
   // v2.74.117 — Prefix match instead of exact equality. FOREACH wraps
@@ -1294,22 +1322,23 @@ async function executeTryStep(step, stepIndex, paramValues, workflowScope, ctx, 
   ctx.emit({
     type: 'strategy_try_recover',
     stepIndex,
+    stepPath,
     bodyError: bodyResult.error,
     message: `Step ${stepIndex + 1}: TRY body failed (${bodyResult.error}); running recovery`,
   });
 
   // Empty recovery → swallow the failure quietly.
   if (recovery.length === 0) {
-    ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'try', success: true, message: `Step ${stepIndex + 1}: TRY body failed; recovery is empty → swallowed` });
+    ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'try', success: true, message: `Step ${stepIndex + 1}: TRY body failed; recovery is empty → swallowed` });
     return {};
   }
 
-  // v2.74.100 — TRY recovery path: "${parentPath}.recovery".
-  const recResult = await executeSteps(recovery, paramValues, workflowScope, ctx, workflow, `${parentPath}.recovery`);
+  // v2.74.100 — TRY recovery path: "${stepPath}.recovery".
+  const recResult = await executeSteps(recovery, paramValues, workflowScope, ctx, workflow, `${stepPath}.recovery`);
   if (recResult.error) {
     return { error: `Step ${stepIndex + 1} (TRY): body failed (${bodyResult.error}); recovery also failed (${recResult.error})` };
   }
 
-  ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'try', success: true, message: `Step ${stepIndex + 1}: TRY recovered` });
+  ctx.emit({ type: 'strategy_step_done', stepIndex, stepPath, stepType: 'try', success: true, message: `Step ${stepIndex + 1}: TRY recovered` });
   return {};
 }

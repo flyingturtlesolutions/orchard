@@ -6,8 +6,7 @@ import { rowsOf } from './headlessClause.js';
 import { ladderValues, normalizeRungs } from './peritemMap.js';
 import { rowsFromValue } from './connectorRender.js';
 import { armable } from './rideRecipe.js';
-import { recipeToLeg } from './connectorLeg.js';
-import { invokeRideRecipe } from './rideStep.js';
+import { invokeRideRecipe, projectRideLeg } from './rideStep.js';
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
 
@@ -49,7 +48,7 @@ function _lookupHit(value) {
  * @param {object} clause  replayPlan clause; pin: { kind:'map', system, capabilityId, groundId, valueParam, itemField?, bindings? }
  * @param {{ state?:object, invoke?:Function, readRecipes?:Function }} io
  */
-export async function runMapStep(clause, { state = null, invoke = null, readRecipes = null } = {}) {
+export async function runMapStep(clause, { state = null, invoke = null, readRecipes = null, onRow = null } = {}) {
   const pin = _pinOf(clause);
   if (!pin || _str(pin.kind) !== 'map') return { ok: false, error: 'not-map' };
   const capId = _str(pin.capabilityId);
@@ -66,7 +65,7 @@ export async function runMapStep(clause, { state = null, invoke = null, readReci
   if (!rec) return { ok: false, error: 'target-gone' };
   if (!armable(rec)) return { ok: false, error: 'target-not-armed' };
 
-  const tgtLeg = recipeToLeg({ ...rec, groundId }, { account: 'me', trusted: true });
+  const tgtLeg = projectRideLeg(rec, groundId);   // v2.74.2047 — the one SW projection (raw recipeToLeg lost seeded records)
   if (!tgtLeg) return { ok: false, error: 'no-target-leg' };
 
   const baseParams = (pin.bindings && typeof pin.bindings === 'object') ? { ...pin.bindings } : {};
@@ -87,6 +86,7 @@ export async function runMapStep(clause, { state = null, invoke = null, readReci
     }
     let hit = null;
     let used = '';
+    let rowFailed = false;   // v2.74.2044 — some value's INVOKE failed (http-4xx/5xx/timeout); distinct from an empty result
     for (const v of vals) {
       used = v;
       const r = await invokeRideRecipe(rec, groundId, {
@@ -94,17 +94,27 @@ export async function runMapStep(clause, { state = null, invoke = null, readReci
         params: { ...baseParams, [valueParam]: v },
         literalSafeParams: true,
       });
-      if (!r || !r.ok) { failed++; continue; }
+      if (!r || !r.ok) { rowFailed = true; continue; }
       if (_lookupHit(r.value)) { hit = r.value; break; }
     }
     if (hit) {
       matched++;
       joined.push({ row, match: hit, value: used });
+    } else if (rowFailed) {
+      // v2.74.2044 — a FAILED lookup is NOT a no-match. Pre-2044 this row fell into `misses`, and
+      // Core/headlessWrite consumes lastMisses verbatim: one rate-limited run auto-CREATED records (gate-'auto')
+      // for rows that were never missing, or inflated the parked preview a human then approved. Unknown ≠ absent —
+      // the row stays OUT of the write set and tallies `failed` ONCE (per row, not per ladder value).
+      failed++;
+      joined.push({ row, match: null, value: used, lookupFailed: true });
     } else {
       noMatch++;
       misses.push({ row, label: _rowLabel(row), value: used, matched: false });
       joined.push({ row, match: null, value: used });
     }
+    // v2.74.2047 — per-row progress beat: the cadence host keeps the in-flight run marker alive across a long
+    // lookup chain (the same heartbeat the each sweep uses — a 121-row map exceeds the 5-min died-window too).
+    if (typeof onRow === 'function') { try { onRow(i + 1, cap); } catch { /* a beat must never break the map */ } }
   }
 
   const counts = { total: cap, matched, noMatch, noField, failed };
@@ -114,18 +124,27 @@ export async function runMapStep(clause, { state = null, invoke = null, readReci
     valueParam,
     groundId,
   };
+  const nextState = {
+    ...(state || {}),
+    lastValue: joined,
+    lastMisses: misses,
+    lastMapLeg: sourceLeg,
+    lastMapLookup: lookup,
+    lastMapSystem: _str(pin.system) || '',
+    lastMapCounts: counts,
+    lastMapRan: true,
+  };
+  // v2.74.2044 — failures with NO completed verdict (nothing matched, nothing verifiably missing) mean the lookup
+  // LAYER is down (auth / rate-limit), not that the data is absent. Surface it as a step failure and STOP the
+  // chain: without `stop`, runDriver continues and the write step reads `lastMisses:[] + lastMapRan` as the
+  // all-matched noop — a lying "every row matched" in run history. With partial signal (some matched / verified
+  // no-match) the run stays ok: the write set holds only VERIFIED misses, and counts.failed carries the rest.
+  if (failed > 0 && matched === 0 && noMatch === 0) {
+    return { ok: false, error: 'lookup-failed', stop: true, state: nextState };
+  }
   return {
     ok: true,
     value: { kind: 'map', joined, counts },
-    state: {
-      ...(state || {}),
-      lastValue: joined,
-      lastMisses: misses,
-      lastMapLeg: sourceLeg,
-      lastMapLookup: lookup,
-      lastMapSystem: _str(pin.system) || '',
-      lastMapCounts: counts,
-      lastMapRan: true,
-    },
+    state: nextState,
   };
 }

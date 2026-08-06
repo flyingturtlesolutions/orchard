@@ -89,6 +89,7 @@ import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retire
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
+import { connectScopeOrigins, connectPanelModel } from './Core/connectAttention.js';   // v2.74.2043 — Connect tab cards + badge + Front chip share one scoped attention model
 import { isCsrfColdFailure } from './Core/connection.js';   // v2.74.1759 — CSRF-cold silent retry (idle Shopify after reload)
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
 import { buildWorkflowSave, stepProvenance, replayPlan, replayLine, intentSplitSuggestion , stepBarClass } from './Core/workflowWizard.js';   // WW-1 (v2.74.1610) — the ＋ Workflow wizard's pure logic (provenance bridge, save assembly)
@@ -684,8 +685,19 @@ function _setTabDot(tabId, n, ariaLabel) {
 }
 async function _updateTabDots() {
   try {
-    let signIns = 0, parked = 0, pending = 0;
-    try { const r = await _orchReq('VITALS_BADGE', {}); signIns = (r && r.success !== false && Number(r.open)) || 0; } catch { /* */ }
+    let connectN = 0, parked = 0, pending = 0;
+    // v2.74.2043 — Connect badge = scoped panel cards (not raw VITALS_BADGE.open, which counted every incident).
+    try {
+      const r = await _orchReq('VITALS_STATUS', {});
+      if (r && r.success !== false) {
+        const model = connectPanelModel({
+          registry: r.registry || {},
+          incidents: r.incidents || [],
+          scopeOrigins: connectScopeOrigins(_connScopeBook, _boundConnections()),
+        });
+        connectN = model.total;
+      }
+    } catch { /* */ }
     try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked.length : 0; } catch { /* */ }
     try {
       const all = await ConversationStore.list();
@@ -695,8 +707,8 @@ async function _updateTabDots() {
     } catch { /* */ }
     _setTabDot('rail-tab-conversations', pending, `Chat — ${pending} pending review${pending === 1 ? '' : 's'}`);
     _setTabDot('rail-tab-automations', parked, `Automate — ${parked} parked run${parked === 1 ? '' : 's'} awaiting a decision`);
-    _setTabDot('rail-tab-connect', signIns, `Connect — ${signIns} connection${signIns === 1 ? '' : 's'} to sign in`);
-    _tabAttention = (pending + parked + signIns) > 0;
+    _setTabDot('rail-tab-connect', connectN, `Connect — ${connectN} connection${connectN === 1 ? '' : 's'} need attention`);
+    _tabAttention = (pending + parked + connectN) > 0;
     _updateRailActionDot();   // refresh the ☰ roll-up now that _tabAttention changed
   } catch { /* */ }
 }
@@ -714,21 +726,55 @@ function _pingTabDots() {
 }
 async function addProposals(...a) { try { return await _addProposalsRaw(...a); } finally { _pingTabDots(); } }
 async function decideProposal(...a) { try { return await _decideProposalRaw(...a); } finally { _pingTabDots(); } }
-function _connectCard(kind, subject) {
+// v2.74.2043 — origin awaiting post–Sign-in canary (F5 Checking lifecycle). Cleared on re-render after check.
+let _connectCheckingOrigin = null;
+let _connectCheckTimer = null;
+function _connectCard(item) {
+  const kind = (item && item.kind) || 'signedout';
+  const label = String((item && item.label) || (item && item.origin) || 'A connection');
+  const origin = String((item && item.origin) || '');
   const card = document.createElement('div');
   card.className = `connect-card connect-card-${kind}`;
   const head = document.createElement('div'); head.className = 'connect-card-head';
   if (kind === 'reconnect') {
-    head.textContent = `${subject} needs reconnecting`;   // §8.2 — the un-auto-healable edge; no self-serve action in V1
+    head.textContent = `${label} needs reconnecting`;   // §8.2 — the un-auto-healable edge; no self-serve action in V1
     const sub = document.createElement('div'); sub.className = 'connect-card-sub';
-    sub.textContent = 'Contact your system administrator.';
+    sub.textContent = 'Orchard could not heal this automatically — open Studio to review the recipe, or contact your administrator.';
     card.appendChild(head); card.appendChild(sub);
     return card;
   }
-  head.textContent = `${subject} — signed out`;
+  if (kind === 'wrongaccount') head.textContent = `${label} — signed in as the wrong account`;
+  else head.textContent = `${label} — signed out`;
+  card.appendChild(head);
+  if (item && item.since) {
+    try {
+      const sub = document.createElement('div'); sub.className = 'connect-card-sub';
+      sub.textContent = `last verified ${clockWord(item.since, Date.now())}`;
+      card.appendChild(sub);
+    } catch { /* */ }
+  }
+  if (item && item.checking) {
+    const sub = document.createElement('div'); sub.className = 'connect-card-sub connect-checking';
+    sub.textContent = `Checking ${label}…`;
+    card.appendChild(sub);
+  }
   const acts = document.createElement('div'); acts.className = 'connect-card-actions';
-  acts.appendChild(_mkBtn('Sign in', async () => { try { await _orchReq('CONN_FOCUS', { origin: subject }); } catch { /* */ } }));   // opens the site to authenticate
-  card.appendChild(head); card.appendChild(acts);
+  const btnLabel = kind === 'wrongaccount' ? 'Switch account' : 'Sign in';
+  acts.appendChild(_mkBtn(btnLabel, async () => {
+    // §8.2 — focus for auth (never create credentials); then auto canary so the card clears on OUTCOME, not click.
+    _connectCheckingOrigin = origin;
+    try { await _orchReq('CONN_FOCUS', { origin }); } catch { /* */ }
+    void _renderConnect();
+    if (_connectCheckTimer) clearTimeout(_connectCheckTimer);
+    _connectCheckTimer = setTimeout(async () => {
+      _connectCheckTimer = null;
+      try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
+      _connectCheckingOrigin = null;
+      if (_railTab === 'connect') void _renderConnect();
+      else void _updateTabDots();
+    }, 2500);
+  }));
+  card.appendChild(acts);
   return card;
 }
 async function _renderConnect() {
@@ -741,19 +787,22 @@ async function _renderConnect() {
     const el = document.createElement('div'); el.className = 'connect-empty';
     el.textContent = 'Connection status is unavailable right now.'; panel.appendChild(el); return;
   }
-  const registry = r.registry || {};
-  const attention = attentionOrigins(registry, Object.keys(registry)) || [];   // origins the user must sign in to
-  const reconnect = (Array.isArray(r.incidents) ? r.incidents : []).filter((x) => x && x.status === 'open' && x.cls !== 'presence');
-  let n = 0;
-  for (const a of attention) { panel.appendChild(_connectCard('signedout', String((a && a.origin) || 'A connection'))); n++; }
-  for (const inc of reconnect) { panel.appendChild(_connectCard('reconnect', String((inc && inc.subject) || 'A connection').slice(0, 60))); n++; }
-  if (!n) {
+  // v2.74.2043 — desk+preset scoped cards (not Object.keys(registry)); wrong-account distinct; badge matches total.
+  const model = connectPanelModel({
+    registry: r.registry || {},
+    incidents: r.incidents || [],
+    scopeOrigins: connectScopeOrigins(_connScopeBook, _boundConnections()),
+    checkingOrigin: _connectCheckingOrigin,
+  });
+  for (const item of model.cards) panel.appendChild(_connectCard(item));
+  if (!model.total) {
     const el = document.createElement('div'); el.className = 'connect-empty ok'; el.textContent = 'All connections active.'; panel.appendChild(el);
   } else {
     // CS-1 outcome test: after the user signs in, re-check — the card clears on a PASS, never on the sign-in event.
     const recheck = _mkBtn('Recheck', async () => {
       panel.querySelectorAll('.connect-checking').forEach((e) => e.remove());
       const note = document.createElement('div'); note.className = 'connect-empty connect-checking'; note.textContent = 'Checking…'; panel.prepend(note);
+      _connectCheckingOrigin = null;
       try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
       void _renderConnect();
     });
@@ -5282,13 +5331,64 @@ function _branchScopeFor(item) {
 // The resolver is what makes §10.4's distinction enforceable: a clause that is ABSENT falls back to text
 // (expected for a record banked before pinning), while a clause that is PRESENT and no longer resolves STOPS
 // the run. Reusing the fallback for both would be a fail-open of exactly the v1639 kind.
-function _wfReplayPlan(wf) {
-  const _known = new Set();
-  try { for (const l of _boundConnections()) { if (l && l.key) _known.add(String(l.key)); } } catch { /* */ }
+// v2.74.2044 — the drift gate's KNOWN set, from what pins actually BANK. _boundConnections() entries are
+// {origin, label} only (Core/connectionScope.js) — they never carried .key, so the old set stayed empty, the
+// empty-set fallback approved every pin, and both _wfReplayStopped call sites were dead code. Read the armed
+// grounds' recipe stores through the 60s _rideScanCache (invariant #4 — no fresh probe per replay) and bank BOTH
+// key shapes the run-time matchers accept (_chainConnectorRun's pinned lookups): the bare recipeId (v2037 pins)
+// and the prefixed leg.key (older pins). This sweep is a PREFILTER for _wfReplayPlan's per-pin own-ground check —
+// it saves the per-pin roundtrip in the common case; it never declares drift by itself.
+async function _wfKnownPinKeys() {
+  const known = new Set();
+  try {
+    for (const g of (await _cachedArmedGrounds())) {
+      if (!g || !g.host || !g.gid) continue;
+      const { recipes } = await _cachedHostRecipes(g.host, { groundId: g.gid });
+      for (const l of harvestedRecipeLegs(recipes || [], { host: g.host, groundId: g.gid })) {
+        if (!l) continue;
+        if (l.key) known.add(String(l.key));
+        if (l.tool && l.tool.recipeId) known.add(String(l.tool.recipeId));
+        if (l.tool && l.tool.id) known.add(String(l.tool.id));
+      }
+    }
+  } catch { /* fall through with what accumulated — the size check below decides */ }
+  return known;
+}
+async function _wfReplayPlan(wf) {
+  // v2.74.2044 — plan-time drift asks the RUN-TIME question, precomputed (replayPlan's predicate stays sync).
+  // Membership is meaningful only for connector/ride pins (the _pinConn door) — page/sg, write-target and broker
+  // pins never live in a ride store, so testing them against it would stop live workflows. And the authoritative
+  // answer for a connector/ride pin is its OWN ground's recipe store — the same GET_RIDE_RECIPES +
+  // harvestedRecipeLegs read the run-time fast path does, armed or not, so a lapsed session surfaces as an auth
+  // outcome at run time, never as plan-time drift. An unreadable store or a groundless pin fails OPEN (run-time
+  // pinnedStale enforces); only a ground that ANSWERS "gone" is drift.
+  const _known = await _wfKnownPinKeys();
+  const _stale = new Set();
+  try {
+    const _byGround = new Map();   // groundId → legs (null = unreadable, fail open)
+    for (const s of (Array.isArray(wf && wf.steps) ? wf.steps : [])) {
+      const c = s && s.clause;
+      if (!c || !c.capabilityId || !(c.kind === 'connector' || c.kind === 'ride') || !c.groundId) continue;
+      const key = String(c.capabilityId);
+      if (_known.has(key) || _stale.has(key)) continue;
+      let legs = _byGround.get(c.groundId);
+      if (legs === undefined) {
+        try {
+          const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: c.groundId });
+          legs = harvestedRecipeLegs((rr && rr.recipes) || [], { host: key.split('@')[1] || '', groundId: c.groundId });
+        } catch { legs = null; }
+        _byGround.set(c.groundId, legs);
+      }
+      if (!legs) continue;
+      if (legs.some((l) => l && (l.key === key || (l.tool && (l.tool.recipeId === key || l.tool.id === key))))) _known.add(key);
+      else _stale.add(key);
+    }
+  } catch { /* fail open — run time enforces */ }
   const plan = replayPlan(wf, (c) => {
     if (!c) return false;
     if (!c.capabilityId) return true;              // a kind-only pin (map/fieldRead/branch) needs no leg
-    return _known.size ? _known.has(String(c.capabilityId)) : true;   // no palette read → do not manufacture drift
+    if (!(c.kind === 'connector' || c.kind === 'ride')) return true;   // page/write/broker pins — run-time enforced
+    return !_stale.has(String(c.capabilityId));    // only a ground that answered "gone" is drift
   });
   try { _orchLog(replayLine(plan)); } catch { /* */ }
   return plan;
@@ -6172,7 +6272,28 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
         try { _orchLog(`MAP ▸ no collection — "${_scrubHead(readAsk, 40)}" didn't resolve to a read and no prior list was piped`); } catch { /* */ }
         return { ok: false };
       }
-    } else { rows = rowsFromValue(cr.value); srcLeg = cr.leg || null; }
+    } else {
+      rows = rowsFromValue(cr.value); srcLeg = cr.leg || null;
+      // v2.74.2046 — a re-derived collection that resolves but returns NOTHING loses to a piped prior: "for each
+      // task" means the rows the previous step just produced. Live 14:24Z (pinned map replay): the readAsk
+      // re-resolved to the leg's DEFAULT scope (one division, 0 rows) while st.lastValue held the each-sweep's
+      // 22 rows — the map died "Nothing to map over" with its real collection in hand. Same rationale as the
+      // v1630 fallback (an invented read that FAILS); an invented read that succeeds EMPTY is the same wrong
+      // answer wearing ok:true.
+      if (!rows.length && priorValue != null) {
+        const _prior = rowsFromValue(priorValue);
+        if (_prior.length) {
+          rows = _prior; srcLeg = priorLeg || null;
+          const uw = unwrapMapPrior(rows, { targetSystem: system, itemField: map.itemField });
+          if (uw.mode !== 'plain') {
+            rows = uw.rows; _priorMode = uw.mode;
+            if (uw.mode === 'match') srcLeg = null;
+            try { _orchLog(`MAP ▸ unwrapped prior join → ${uw.mode} (${rows.length} row(s)${uw.priorSystem ? `, was ${uw.priorSystem}` : ''})`); } catch { /* */ }
+          }
+          try { _orchLog(`MAP ▸ collection "${_scrubHead((map.collection && map.collection.readAsk) || goal, 40)}" returned 0 row(s) → fell back to the prior read (${rows.length} row(s))`); } catch { /* */ }
+        }
+      }
+    }
   }
   if (!rows.length) { _setMessageBody(msg, 'Nothing to map over — the list came back empty. If a filter got guessed wrong, name it.'); _orchFinalize(msg); return { ok: false }; }
   // 2) the FIELD — deterministic path resolution; a miss asks honestly (never a per-row guess).
@@ -7551,7 +7672,12 @@ function _wfFreshChainState() {
   return { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, lastLeg: null, lastReadoutIdx: null, policyConfig: _currentConversationConfig };
 }
 const _wfActive = () => !!_wfWizard;
-const _wfAwaitingInput = () => !!(_wfWizard && (_wfWizard.phase === 'await-step' || _wfWizard.phase === 'await-name'));
+// v2.74.2044 — 'plan' is a TYPING phase too: the plan gate UNLOCKS the composer ("Type a step to add it to the
+// plan…", the v1671 contract), so its typing must reach _wfConsumeInput's plan branch — absent here, a typed step
+// skipped the intercept at sendChatMessage and dispatched through the front door as an organic ask (echoed +
+// persisted + run) while the wizard sat stranded at 'plan'. 'running'/'ran'/'banked'/'cadence' stay out — the
+// composer LOCKS there (the v1622 list in _wfRenderPage), so nothing can be typed to consume.
+const _wfAwaitingInput = () => !!(_wfWizard && (_wfWizard.phase === 'plan' || _wfWizard.phase === 'await-step' || _wfWizard.phase === 'await-name'));
 // v2.74.1618 — the wizard is PINNED to its birth desk (live: delete-all / a Rail hop nulled or switched the
 // current conversation mid-wizard; the input intercept + v1615's surface re-assert then resurrected the page over
 // the NEW surface, and step 2's case fan-out ran with no desk under it — "Open a desk first" inside a desk's own
@@ -9663,11 +9789,18 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
     // for a connector pin (no ORCH_MATCH either — a page HIT would detour the step away from its pin), and the
     // miss-branch's connector door below receives the pin to ENFORCE.
     const _pinConn = !!(_pin && _pin.capabilityId && (_pin.kind === 'connector' || _pin.kind === 'ride'));
-    const m = _pinConn ? null
+    // v2.74.2045 — a MAP/WRITE pin falls to the MISS branch the same way: those executors live behind the
+    // connector door (cr.map / cr.write below), and v2037's bare-recipeId map pins made the fabrication treat
+    // them as PAGE capabilities — step 2 of a pinned Warranty replay dispatched down REPLAY_SG_CAPABILITY
+    // (a channel that cannot run a map), the run ended partial 1/N, the map ranStep never re-banked valueParam,
+    // and PINBANK refused map-fields — the tier could never reach sw (live 2026-08-06 14:01Z). Same rule as
+    // _pinConn: no ORCH_MATCH either — a page HIT would detour the step away from its pin.
+    const _pinDoor = !!(_pin && _pin.capabilityId && (_pin.kind === 'map' || _pin.kind === 'write'));
+    const m = (_pinConn || _pinDoor) ? null
       : (_pin && _pin.capabilityId
         ? { capabilityId: _pin.capabilityId, decision: 'pinned', groundId: _pin.groundId || null, bindings: {}, candidate: { kind: _pin.kind || null, intent: clause.text } }
         : ((i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text })));
-    if (_pin && _pin.capabilityId) { try { _orchLog(`WORKFLOW ▸ step ${i + 1} PINNED → ${_pin.capabilityId} (${_pinConn ? 'connector door' : 'not re-interpreted'})`); } catch { /* */ } }
+    if (_pin && _pin.capabilityId) { try { _orchLog(`WORKFLOW ▸ step ${i + 1} PINNED → ${_pin.capabilityId} (${_pinConn ? 'connector door' : _pinDoor ? 'map/write door' : 'not re-interpreted'})`); } catch { /* */ } }
     if (!m || !m.capabilityId || m.decision === 'miss') {
       // CX-4d (Slice A) — a grounded MISS may still be a CONNECTED session-ride read ("get my open tickets") that
       // doesn't live on the active tab — it rides the app's OWN logged-in origin. Try the app's connectors before
@@ -10152,7 +10285,8 @@ function _declaredLegNames() {
 // "Warranty task contacts".
 //
 // RETIRING THE DOOR, NOT THE FEATURE. Workflows stay fully runnable deliberately — the Rail workflow card calls
-// `_wfReplayPlan` directly (chat.js:8780) and never routes through here; `_matchWorkflow` has exactly one caller.
+// `_wfReplayPlan` directly (chat.js:5358 as of v2044 — grep for it, the line drifts) and never routes through
+// here; `_matchWorkflow` has exactly one caller.
 // What is switched off is the automatic interception of ordinary asks. Flip this back to `true` to restore, and
 // re-read the guard first: the door is only safe when a "none of these — this isn't a workflow ask" answer is
 // reachable, which is what the class-blind matcher structurally cannot say.
@@ -10199,7 +10333,7 @@ function _offerWorkflowReplay(goal, wf) {
     try { await bumpWorkflowRun(wf.appId || _memoryId(), wf.id); } catch { /* */ }   // corroboration — the record's OWN key (DK-8k merged reads can surface the other key's record)
     const tab = await _orchActiveTab();
     const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
-    const _plan = _wfReplayPlan(wf);
+    const _plan = await _wfReplayPlan(wf);   // v2.74.2044 — async: the drift gate precomputes its known set
     if (!_plan.runnable) { _wfReplayStopped(m, wf, _plan); return; }
     const _stR = _wfFreshChainState(); const _tR = Date.now();   // §6.5 (v1746) — recall replays write history too
     _stR.wfRunId = mintRunId({ now: _tR, rand: Math.random() });
@@ -10421,7 +10555,7 @@ function _railWorkflowRow(row, parentConv) {
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
       bumpWorkflowRun(wfKey, wf.id).catch(() => {});
       if (_due) { _orchReq('WORKFLOW_MARK_RAN', { appId: wfKey, workflowId: wf.id }).catch(() => {}); }   // CD-1a — a due tier-'panel' run fulfills the schedule
-      const _p2 = _wfReplayPlan(wf);
+      const _p2 = await _wfReplayPlan(wf);   // v2.74.2044 — async: the drift gate precomputes its known set
       if (!_p2.runnable) {
         // bcp v1825 — the stop must be VISIBLE: wf-run-live was hiding the body _wfReplayStopped writes into,
         // the observer stayed attached, and chip 0 glowed forever.
@@ -10578,12 +10712,18 @@ function _railWorkflowRow(row, parentConv) {
 // the run reached a write on a schedule and stopped. Approve re-fires from the parked step (one approval per
 // write — a later write re-parks); Cancel drops it. Actions are always visible (it needs a human).
 function _railParkedRow(p) {
-  const prev = (p.preview && typeof p.preview === 'object') ? p.preview : {};
-  const what = prev.recipe || prev.step || 'a write step';
+  // v2.74.2043 — read BOTH park shapes. A ride-kind write (Core/rideStep.js:99) banks {recipe, step}; a headless
+  // map→write (Core/headlessWrite.js) banks {targetId, recipe, count}. This read the ride shape only, so every
+  // pipeline park rendered as the bare fallback. Unwrap one legacy `{preview:{…}}` nesting too — parks banked
+  // before the shape fix are still sitting in chrome.storage and must not render nameless forever.
+  let prev = (p.preview && typeof p.preview === 'object') ? p.preview : {};
+  if (prev.preview && typeof prev.preview === 'object') prev = prev.preview;
+  const what = prev.recipe || prev.step || prev.targetId || 'a write step';
+  const scale = Number(prev.count) > 0 ? ` (${prev.count} row${Number(prev.count) === 1 ? '' : 's'})` : '';
   const item = document.createElement('div');
   item.className = 'rail-item is-subtask is-parked';
   item.innerHTML = '<div class="rail-item-title"><span class="rail-item-badge parked">✋</span>' + escHtml(p.name || p.workflowId || 'scheduled run') + '</div>'
-    + '<div class="rail-item-meta">stopped at ' + escHtml(String(what)) + ' — a write that needs your approval</div>';
+    + '<div class="rail-item-meta">stopped at ' + escHtml(String(what)) + escHtml(scale) + ' — a write that needs your approval</div>';
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions rail-static';
   acts.dataset.rowAction = '';
@@ -10982,13 +11122,27 @@ async function _wfSetSchedule(wf, wfKey, minutes) {
   // scanner's desk-liveness check auto-disarms any trigger living on a dead key, so a schedule set there would
   // silently die on the next tick. Re-key to THIS desk first (surrogate id preserved → history travels; the
   // orphan tag drops); everything else (run/history/delete) works fine against the old bank and never re-keys.
+  // v2.74.2044 — orphanhood is the RECORD's stamp (orphanedFrom), never bank-vs-current-desk membership: the
+  // v1934 Automations tab is CROSS-DESK, so its rows carry the OWNING desk's live key — the old _workflowKeys()
+  // test re-keyed those into whatever desk happened to be current (silent ownership theft), and with no
+  // conversation open saveWorkflow('') is a silent no-op (WorkflowStore.js:46 returns []) that left
+  // deleteWorkflow to destroy the only copy. Even set(0) ran the re-key first. A genuine orphan re-keys onto a
+  // real class key only; a same-key orphan unstamps IN PLACE (save+delete would contentId-dedup the save into a
+  // no-op, then delete the only copy); no class key at all leaves the bank untouched.
   try {
-    if (!_workflowKeys().includes(String(wfKey))) {
+    if (wf && wf.orphanedFrom) {
       const dest = _workflowClassKey();   // v1780 — re-keys land on the CLASS, never the instance
-      await saveWorkflow(dest, { ...wf, orphanedFrom: undefined });
-      await deleteWorkflow(wfKey, wf.id);
-      wfKey = dest; wf.orphanedFrom = undefined;
-      try { _orchLog(`WORKFLOW ▸ re-keyed "${String(wf.name || wf.ask).slice(0, 40)}" to this desk (scheduled from an orphaned bank)`); } catch { /* */ }
+      if (dest && dest !== String(wfKey)) {
+        await saveWorkflow(dest, { ...wf, orphanedFrom: undefined });
+        await deleteWorkflow(wfKey, wf.id);
+        wfKey = dest; wf.orphanedFrom = undefined;
+        try { _orchLog(`WORKFLOW ▸ re-keyed "${String(wf.name || wf.ask).slice(0, 40)}" to this desk (scheduled from an orphaned bank)`); } catch { /* */ }
+      } else if (dest) {
+        // the stamped bank's key IS this desk's class key (a recreated desk): the stamp alone still trips the
+        // scanner's orphan check (cadence.js check 4 auto-disarms on raw.orphanedFrom), so drop it in place.
+        await updateWorkflow(wfKey, wf.id, { orphanedFrom: undefined });
+        wf.orphanedFrom = undefined;
+      }
     }
   } catch { /* a failed re-key falls through — the set below still applies to the old key */ }
   try { const r = await _orchReq('WORKFLOW_TRIGGER_SET', { appId: wfKey, workflowId: wf.id, trigger }); ok = !!(r && r.success !== false); wf.trigger = r && r.trigger ? r.trigger : (trigger || undefined); } catch { /* */ }
@@ -17629,18 +17783,30 @@ async function _maybeRenderConnCard() {
   // never-updating report — upsert it into a tombstone pointer (persisted, so the heal sticks).
   try {
     const old = document.querySelector('#messages .message[data-message-id="conn_status"]');
-    if (old && !/moved to the Admin view/.test(old.textContent || '')) {
-      _setMessageBody(old, 'Connections status moved to the Admin view.');
+    if (old && !/moved to the Connect tab/.test(old.textContent || '') && !/moved to the Admin view/.test(old.textContent || '')) {
+      _setMessageBody(old, 'Connections status moved to the Connect tab.');
       try { old.querySelectorAll('.orch-actions').forEach((b) => b.remove()); } catch { /* */ }
+      _orchFinalize(old);
+    } else if (old && /moved to the Admin view/.test(old.textContent || '')) {
+      _setMessageBody(old, 'Connections status moved to the Connect tab.');   // v2.74.2043 — heal Admin tombstone → Connect
       _orchFinalize(old);
     }
   } catch { /* best-effort */ }
-  let r = null;
-  try { r = await _orchReq('VITALS_BADGE', {}); } catch { return; }
-  const open = (r && r.success !== false && Number(r.open)) || 0;
+  // v2.74.2043 — chip count matches Connect cards (scoped), not raw open-incident total.
+  let open = 0;
+  try {
+    const r = await _orchReq('VITALS_STATUS', {});
+    if (r && r.success !== false) {
+      open = connectPanelModel({
+        registry: r.registry || {},
+        incidents: r.incidents || [],
+        scopeOrigins: connectScopeOrigins(_connScopeBook, _boundConnections()),
+      }).total;
+    }
+  } catch { return; }
   const existing = document.querySelector('#messages .message[data-vt-chip]');
   if (!open) { try { if (existing) existing.remove(); } catch { /* */ } return; }
-  const body = `⚠ ${open} thing${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention (sign-ins) — see Connect.`;   // CN-2 — re-pointed from the Admin desk to the Connect tab (drifted-reads wording dropped — that's dev-only now)
+  const body = `⚠ ${open} connection${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention — see Connect.`;
   if (existing) { _setMessageBody(existing, body); return; }
   // DL-1 (v2.74.1607, user directive) — the LAUNCH PAGE carries no attention chip: while the empty state is
   // showing (Front page / gallery / dev hint), the chip WAITS — the Rail's Admin ⚠ badge is the ambient signal.
@@ -17841,10 +18007,12 @@ async function _maybeRenderIncidentCase() {
 // heartbeat ticks). VT-2b (v2.74.1587) — the transition lands in its CASE (the incident's own timeline carries
 // the story + the sign-in bar), never as a line in the Admin desk thread (live 1586: the requirement was a case).
 // The current surface refreshes: Admin desk re-renders its card, an open case re-renders itself, Front its chip.
+// v2.74.2043 — when Connect is open, re-render the panel (was stale until Recheck / tab re-entry).
 try {
   chrome.runtime.onMessage.addListener((m) => {
     if (!m || (m.type !== 'CONN_STATUS_CHANGED' && m.type !== 'VITALS_CHANGED')) return;
     void _syncIncidentCases();
+    if (_railTab === 'connect') void _renderConnect();
     if (_currentConversationId === ADMIN_ID) void _maybeRenderAdminDesk();
     else if (String(_currentConversationId || '').startsWith('vtc_')) void _maybeRenderIncidentCase();
     else if (_currentConversationId === OVERVIEW_ID) void _maybeRenderConnCard();

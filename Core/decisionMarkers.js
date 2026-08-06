@@ -101,6 +101,10 @@ export const DECISION_MARKERS = [
   { key: 'pinbank', src: "PINBANK ▸" },
   { key: 'cadence', src: "CADENCE ▸", metric: true, metricPattern: ['CADENCE ▸ fired', 'CADENCE ▸ auto-disarmed'] },
   { key: 'trigger', src: "TRIGGER ▸" },
+  // v2.74.2043 — WHY a workflow is tier-'panel' (Core/workflowTier.explainTier). A demotion is the single most
+  // consequential silent decision in the cadence path: it is the difference between "runs while you're away" and
+  // "waits for you", and four diagnostic passes (v2038–2042) mistook one for a pin-bank bug because nothing said it.
+  { key: 'tier', src: "TIER ▸" },
   { key: 'ride-write', src: "RIDE_WRITE ▸" },
   { key: 'ride-resolve', src: "RIDE_RESOLVE ▸" },
   { key: 'ride-drill', src: "RIDE_DRILL ▸" },

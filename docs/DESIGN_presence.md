@@ -1,5 +1,9 @@
 # DESIGN_presence.md — session presence: one belief, event-invalidated, checked where it matters
 
+**Companion (2026-08-06):** unattended **heal + resume** after presence failure is owned by
+`DESIGN_session_governor.md` v1.12 (SGV) — not Connect chores and not cadence write-park. This doc remains
+the belief/gate model (`PRESENCE_CHECK`, registry); SGV consumes those signals.
+
 **Status:** BUILT v2.74.1837–1839 except PR-4's predictive half. PR-0 ✓ (v1837, superseded by PR-5's gate) ·
 model ✓ (`Core/presence.js`, 13 tests, v1838) · PR-1 ✓ (`_wireCookieInvalidate`, connections.js — removal
 direction only, envelope only, hands off to the probe funnel) · PR-2 ✓ (`PRESENCE_CHECK`, connections.js —

@@ -124,9 +124,9 @@ over a `wfp_` Rail case (below) as the low-risk way to make a silently-parked ru
 
 **Progress (v2.74.1711) — CD-1a step 1: the SHARED ride-step primitive.** `Core/rideStep.js` (+12 tests) now owns
 the pinned-ride / nav step execution — resolve → armable-check → write-gate (park vs proceed, §8) → leg →
-INVOKE_SESSION — as ONE injected-IO implementation. `background/handlers/cadence.js` `_runStep`/`_canResolve` are
-now thin wrappers over `runRideStep`/`rideStepResolvable` (identical behavior; recipeToLeg/planExec/armable imports
-moved into rideStep). This is the §9.4 "one module" for the subset the SW and panel both execute.
+INVOKE_SESSION — as ONE injected-IO implementation. `background/handlers/cadence.js` `_runStep`/`_resolveDrift`
+(né `_canResolve` — renamed v2.74.2044 when the drift check became pre-awaited) are now thin wrappers over
+`runRideStep`/`rideStepResolvable` (identical behavior; recipeToLeg/planExec/armable imports moved into rideStep). This is the §9.4 "one module" for the subset the SW and panel both execute.
 
 **On the full CD-1a "one loop" (inspection finding, IMPORTANT for the next builder).** After reading
 `_orchRunChain` (chat.js:7024, ~300 lines) end-to-end: it is NOT a clean mechanical extraction. The panel loop

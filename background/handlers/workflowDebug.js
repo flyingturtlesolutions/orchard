@@ -8,8 +8,10 @@
 // (the tri-label breakpoint case branches on msg.type, which the registry doesn't pass; the `msg` shim
 // preserves that without rewriting the body). The registry sees 12 thin keys. ctx supplies the two
 // background-locals: invokeSgHandler (the CR-X3b bridge — the executor's runObservation/runCapability
-// handoffs) and ensureContentScript. The keep-alive set is NOT here — invocation lifecycle is tracked
-// globally by background's CapabilityAPI subscriber, exactly as before.
+// handoffs) and ensureContentScript. Keep-alive: background's CapabilityAPI subscriber does NOT cover
+// this path — INVOKE_WORKFLOW awaits executeWorkflow directly, so no INVOCATION_STARTED ever fires for
+// it and `__activeInvocations` stays empty. This module holds its OWN refcounted keep-alive around each
+// run (v2.74.2044, `_workflowKeepAlive` below).
 //
 // Logger tags stay 'background' DELIBERATELY — trace/`gl` continuity.
 
@@ -55,6 +57,30 @@ const _workflowDebugStates = new Map();
 // v2.74.812 — short per-run id for the gl-trace START/FOOTER frame. A counter (not the scrubbed invocation UUID),
 // so it stays legible in a shared trace. Resets on SW restart; timestamps disambiguate across restarts.
 let _runSeq = 0;
+
+// v2.74.2044 — refcounted SW keep-alive for workflow runs. INVOKE_WORKFLOW awaits executeWorkflow
+// DIRECTLY (never through CapabilityAPI), so background's INVOCATION_STARTED/COMPLETED subscriber —
+// the global keep-alive — never arms for this path, and all three pause parks (_yieldIfPaused +
+// the two ExecutionEngine gates) are bare setTimeout loops, which don't reset MV3's idle timer:
+// pausing to inspect for >~30s got the SW reaped mid-park — module Maps evaporated, no terminal
+// event fired, the panel showed 'paused' forever. Same idiom as background's __startKeepAlive/
+// __stopKeepAlive: a 20s getPlatformInfo ping (comfortably under Chrome's 30s idle threshold),
+// started by the first in-flight run, cleared when the last settles (the INVOKE finally).
+let _kaRuns = 0;
+let _kaInterval = null;
+function _workflowKeepAlive(delta) {
+  _kaRuns = Math.max(0, _kaRuns + delta);
+  if (_kaRuns > 0 && !_kaInterval) {
+    _kaInterval = setInterval(() => {
+      try { chrome.runtime.getPlatformInfo(() => { /* return value unused — call alone resets idle */ }); } catch { /* */ }
+    }, 20_000);
+    Logger.debug('background', 'workflow keep-alive started');
+  } else if (_kaRuns === 0 && _kaInterval) {
+    clearInterval(_kaInterval);
+    _kaInterval = null;
+    Logger.debug('background', 'workflow keep-alive stopped');
+  }
+}
 
 function _getWorkflowDebugState(invId) {
   let s = _workflowDebugStates.get(invId);
@@ -304,6 +330,7 @@ export function createWorkflowDebugHandlers(ctx) {
           // run settles in the finally below.
           const _busyTabs = new Set();
           const _markResolved = (tid) => { if (typeof tid === 'number' && !_busyTabs.has(tid)) { _busyTabs.add(tid); markEngineBusy(tid, true); } };
+          _workflowKeepAlive(+1);   // v2.74.2044 — arm before the await; a paused park must outlive MV3's 30s idle reap
           try {
             const result = await executeWorkflow(workflow, paramValues ?? {}, {
               onProgress,
@@ -353,6 +380,7 @@ export function createWorkflowDebugHandlers(ctx) {
           } finally {
             // Always cleanup — leaving stale ids in either map would
             // silently poison the next invocation that recycles the id.
+            _workflowKeepAlive(-1);   // v2.74.2044 — last run out clears the ping (refcounted)
             for (const tid of _busyTabs) markEngineBusy(tid, false);   // v2.74.967 — release every driven tab (refcounted)
             _workflowCancellations.delete(invId);
             _workflowDebugStates.delete(invId);

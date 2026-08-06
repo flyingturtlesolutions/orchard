@@ -173,6 +173,13 @@ toggle.
 
 ## 8. The surface — the Connect tab
 
+**Supersede (Session Governor, 2026-08-06):** user-facing connection *chores* (badge/cards/Recheck/Open Connect)
+are an attention sink — rejected. Session health is owned by **`DESIGN_session_governor.md` v1.12 (SGV)**:
+invisible heal loop + in-task secret interrupt + auto-resume (fail→block→heal→ack; origin-scoped fire-hold;
+`PresenceCtx` / fire `presenceStop`). §8.2 CN-1 remains the historical user-render ship; SGV-4 retires it from
+the user path. §8.3 dev console stays the maximal operator surface. Engine layers (§2–§4) are unchanged; SGV
+commands heals on the same `vitals:tick` (tickLedger — no second clock). See SGV §9 migration / §12 revisions.
+
 **Supersede (Connect, 2026-08): the operator surface is a RAIL TAB, not a desk.** The original §8 "Admin desk"
 was a category error — system STATE wearing a conversation costume so it could live in the Conversations tab
 (its own seed had to open with *"you are NOT a website desk"*). It graduates to the third Rail tab, completing

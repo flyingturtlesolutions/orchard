@@ -643,6 +643,11 @@ function _onProgress(event) {
   // executor (this build) carry both stepIndex AND stepPath; events from
   // the inner Workflow runtime only have stepIndex. We prefer stepPath
   // when present; fall back to String(stepIndex) for back-compat.
+  // v2.74.2044 — the executor now stamps stepPath on EVERY step-level
+  // emission (pre-fix only strategy_breakpoint_hit carried it, so a
+  // nested body step's events fell back to the LOCAL index and marked
+  // the wrong top-level row / let Step Over escape the body). The
+  // fallback stays for older executors and stray inner events only.
   const evPath = typeof event.stepPath === 'string'
     ? event.stepPath
     : (Number.isFinite(event.stepIndex) ? String(event.stepIndex) : null);

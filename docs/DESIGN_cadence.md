@@ -394,6 +394,10 @@ no schedule.
 
 ## 8. Parked writes — the gate, unchanged
 
+**Presence is not this park.** Auth / signed-out stops are **fail→block** under
+`DESIGN_session_governor.md` (`sgv:blocked`, origin-scoped fire-hold, `SGV_NUDGE_DUE`) — never
+`cadence:parked:*` / `WORKFLOW_PARKED_CHANGED` / write `makeResumeReporter`. Write-approval HITL stays here.
+
 **This is the decision that shapes the record, and it comes first.**
 
 `writePolicy` on the app record remains `gated` | `never`. **(Amended v2.74.2036 — product ruling 2026-08-05.)**

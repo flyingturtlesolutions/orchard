@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeTrigger, armTrigger, isDue, coalescedCount, advanceTrigger,
-  recordFailure, disarm, setEnabled, describeMinutes, describeTrigger, TRIGGER_LIMITS,
+  recordFailure, disarm, setEnabled, describeMinutes, describeTrigger, TRIGGER_LIMITS, isTransientFailure,
 } from './trigger.js';
 
 const MIN = 60_000;
@@ -99,6 +99,53 @@ describe('trigger — failure → auto-disarm (§7.2)', () => {
     for (let i = 0; i < TRIGGER_LIMITS.MAX_FAILURES; i++) { t = recordFailure(t, { now }); now = t.nextDue; }
     assert.equal(t.failures, TRIGGER_LIMITS.MAX_FAILURES);
     assert.equal(t.enabled, false, 'disarmed after N consecutive failures');
+  });
+
+  // v2.74.2043 — being signed out is not route drift. Adding `headless:true` to the cadence invoke turns a
+  // signed-out ground into a fast failure instead of a focused login tab; without this rule a week away from the
+  // machine would auto-disarm every armed trigger and tell the user their routes had drifted.
+  it('a TRANSIENT failure advances the clock without burning a disarm strike', () => {
+    const t = armTrigger(60, 0);
+    const f1 = recordFailure(t, { now: t.nextDue, transient: true });
+    assert.equal(f1.failures, 0, 'no strike');
+    assert.equal(f1.enabled, true);
+    assert.ok(f1.nextDue > t.nextDue, 'but the clock still advances — no tight retry loop');
+  });
+
+  it('never auto-disarms on transient failures alone, however many', () => {
+    let t = armTrigger(60, 0);
+    let now = t.nextDue;
+    for (let i = 0; i < TRIGGER_LIMITS.MAX_FAILURES * 5; i++) { t = recordFailure(t, { now, transient: true }); now = t.nextDue; }
+    assert.equal(t.enabled, true, 'a signed-out week must not switch the automation off');
+    assert.equal(t.failures, 0);
+  });
+
+  it('does not RESET a real failure count — drift interleaved with auth blips still disarms', () => {
+    let t = armTrigger(60, 0);
+    let now = t.nextDue;
+    for (let i = 0; i < TRIGGER_LIMITS.MAX_FAILURES; i++) {
+      t = recordFailure(t, { now, transient: false }); now = t.nextDue;
+      t = recordFailure(t, { now, transient: true }); now = t.nextDue;
+    }
+    assert.equal(t.enabled, false, 'the transient failures did not launder the real ones');
+  });
+});
+
+describe('isTransientFailure — conservative by design (v2.74.2043)', () => {
+  it('classes signed-out / unreachable errors as transient', () => {
+    for (const e of ['not-logged-in', 'no-authenticated-tab', 'no-content-script', 'http-401', 'http-403',
+                     'reauth-timeout', 'Failed to fetch', 'network error']) {
+      assert.equal(isTransientFailure(e), true, e);
+    }
+  });
+  it('a wholesale map lookup failure is the environment, not the route (v2.74.2044)', () => {
+    assert.equal(isTransientFailure('lookup-failed'), true);
+  });
+  it('everything else counts toward disarm — a drifting route must still stop itself', () => {
+    for (const e of ['recipe-gone', 'not-armed', 'unpinned-step', 'no-plan', 'write-needs-confirm',
+                     'map-not-banked', 'http-404', 'http-500', '', null, undefined]) {
+      assert.equal(isTransientFailure(e), false, String(e));
+    }
   });
 });
 

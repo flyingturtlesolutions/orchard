@@ -41,15 +41,27 @@ const _clearTimer = (rec) => { if (rec && rec.timer) { clearTimeout(rec.timer); 
 async function _tabAlive(tabId) { try { const t = await chrome.tabs.get(tabId); return !!(t && t.id != null); } catch { return false; } }
 
 // Reuse a still-open managed tab for the origin, else open a fresh BACKGROUND one. → { tabId, opened }.
-async function _acquireEphemeralTab(origin) {
-  const rec = _managed.get(origin);
-  if (rec && await _tabAlive(rec.tabId)) { _clearTimer(rec); return { tabId: rec.tabId, opened: false }; }
-  if (rec) _managed.delete(origin);
-  const created = await chrome.tabs.create({ url: `https://${origin}/`, active: false });
-  const tabId = created && created.id;
-  if (tabId == null) throw new Error('ephemeral-tab-open-failed');
-  _managed.set(origin, { tabId, timer: null });
-  return { tabId, opened: true };
+// v2.74.2047 — SINGLE-FLIGHT per origin: the SW each sweep runs 8 concurrent per-item invokes, and `_managed`
+// is only set AFTER tabs.create resolves — un-serialized, a cold burst opened several tabs for one origin, all
+// but the last unregistered and never auto-closed. Concurrent callers now await the same acquire.
+const _acquiring = new Map();   // origin → in-flight acquire promise
+function _acquireEphemeralTab(origin) {
+  const inflight = _acquiring.get(origin);
+  if (inflight) return inflight;
+  const p = (async () => {
+    try {
+      const rec = _managed.get(origin);
+      if (rec && await _tabAlive(rec.tabId)) { _clearTimer(rec); return { tabId: rec.tabId, opened: false }; }
+      if (rec) _managed.delete(origin);
+      const created = await chrome.tabs.create({ url: `https://${origin}/`, active: false });
+      const tabId = created && created.id;
+      if (tabId == null) throw new Error('ephemeral-tab-open-failed');
+      _managed.set(origin, { tabId, timer: null });
+      return { tabId, opened: true };
+    } finally { _acquiring.delete(origin); }
+  })();
+  _acquiring.set(origin, p);
+  return p;
 }
 
 // Schedule the managed tab to close after the idle window; a later ride to the same origin cancels it (reuse).
@@ -840,7 +852,18 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // already used). The lint's first ritual catch (gl 103120, 74 min after Experiment B landed): a
           // dispatch died in one of these bare sendResponses and the trace could not say WHICH — an exit that
           // doesn't say its name is the receipts-stage defect class itself.
-          if (isWrite && !(payload && payload.confirmed === true)) { try { Logger.info('ride', `INVOKE ▸ blocked write-needs-confirm [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
+          // v2.74.2043 — the belt now accepts TWO authorities and NAMES which one cleared each write.
+          // `confirmed` (a person clicked) is unchanged. `gateCleared` is Core/pipelineGate returning `auto` for
+          // this leg — internal, reversible, declared, and curated — stamped in exactly one place
+          // (Core/rideStep.stampWriteAuthority), which strips both fields before setting at most one. Before this,
+          // §8's "internal+reversible completes unattended" ruling was unreachable: every scheduled create died
+          // here as `write-needs-confirm` and was tallied as a failure. The belt still fails CLOSED — a payload
+          // carrying neither authority is refused exactly as before, and `gateCleared` can only originate from a
+          // gate verdict, never from a caller's opinion.
+          const clearedBy = (payload && payload.confirmed === true) ? 'human'
+            : ((payload && payload.gateCleared === true) ? 'gate' : '');
+          if (isWrite && !clearedBy) { try { Logger.info('ride', `INVOKE ▸ blocked write-needs-confirm [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
+          if (isWrite) { try { Logger.info('ride', `INVOKE ▸ write cleared by ${clearedBy} [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } }
 
           let origin = fillEndpoint(String((payload && payload.origin) || ''), args).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const appHost = String((payload && payload.appHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
@@ -856,6 +879,15 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           let tab = pickRideTab(tabs, { urlParam: (payload && payload.urlParam) || null });
           _mark('tabs');
           let ephemeral = false;
+          // v2.74.2047 — SLIDE the idle window when the query path picks the MANAGED tab: the timer armed at a
+          // previous ride's exit kept running through this reuse, so any >8s burst in the no-open-tab case (a
+          // headless each sweep's 121 calls — THE common case now) had its tab closed mid-flight. Borrowing
+          // cancels the pending close here and the exit below re-arms it — idle-close measures from the LAST
+          // ride, not the first. Deliberately not `ephemeral = true`: that flag carries identity semantics.
+          if (tab && origin) {
+            const _mrec = _managed.get(origin);
+            if (_mrec && _mrec.tabId === tab.id) { _clearTimer(_mrec); ephemeralOrigin = origin; }
+          }
 
           // 2) Cold start (§16): no open tab → open an ephemeral managed tab — IF we know a concrete origin to open.
           //    appHost-only with no remembered instance can't guess the subdomain → the classic no-tab surface.
@@ -1514,7 +1546,14 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // CX-6 (v2.74.1303) — FAIL-CLOSED write gate: a header-replay WRITE fires ONLY with explicit confirmation
           // (the panel's HITL confirm passes confirmed:true). A write can NEVER run unattended or without the user
           // approving THIS exact request — the execution boundary itself refuses it, independent of any caller.
-          if (isWrite && !(payload && payload.confirmed === true)) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → BLOCKED (write, not confirmed)`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
+          // v2.74.2043 — the SAME two authorities as INVOKE_SESSION. The rule stated a few lines above is that the
+          // two executors "must never disagree about what a write is"; the identical rule has to hold for what
+          // CLEARS one, or the seeded path silently becomes the strict one and a headless write works or fails
+          // depending on which executor the leg happened to plan to. Fails closed identically when neither is set.
+          const clearedBy = (payload && payload.confirmed === true) ? 'human'
+            : ((payload && payload.gateCleared === true) ? 'gate' : '');
+          if (isWrite && !clearedBy) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → BLOCKED (write, not confirmed)`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
+          if (isWrite) { try { Logger.info('ride', `SESSION_REPLAY ▸ write cleared by ${clearedBy}${_rid}`); } catch { /* */ } }
           const args = { ...((payload && typeof payload.params === 'object' && payload.params) || {}) };
           if (!sessionHost || !apiHost || !(payload && payload.endpoint)) { sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
           let tabs = []; try { tabs = await chrome.tabs.query({ url: `*://${sessionHost}/*` }); } catch { tabs = []; }

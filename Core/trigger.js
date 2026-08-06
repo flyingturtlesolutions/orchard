@@ -105,14 +105,36 @@ export function advanceTrigger(trigger, now = 0) {
  * advances so a re-arm doesn't immediately re-fire the same backlog. PURE. The disarm is the only place a person
  * learns their automation stopped, so the caller writes a history entry when `enabled` flips false.
  */
-export function recordFailure(trigger, { max = MAX_FAILURES, now = 0 } = {}) {
+export function recordFailure(trigger, { max = MAX_FAILURES, now = 0, transient = false } = {}) {
   const t = normalizeTrigger(trigger);
   if (!t) return undefined;
   if (!_isCadence(t)) return t;   // pass through — see advanceTrigger
   const base = Number.isFinite(now) ? now : 0;
-  const failures = t.failures + 1;
+  // v2.74.2043 — a TRANSIENT failure advances the clock but does NOT count toward auto-disarm. The disarm rule
+  // exists to stop a workflow whose ROUTE has drifted ("its route may have drifted" is what the user is told), and
+  // three consecutive drift failures is good evidence of that. Being signed out is not drift. Before this, the
+  // headless path had no way to say so — and v2.74.2043 makes it matter, because adding `headless:true` to the
+  // cadence invoke converts a signed-out ground from "focus a login tab and block" into a fast `not-logged-in`
+  // failure. Every 3 ticks of a closed laptop would then silently disarm every armed trigger, and the user would
+  // return to automations that are not merely behind but SWITCHED OFF, told their routes had drifted. `failures`
+  // is deliberately left UNCHANGED rather than reset: a real drift interleaved with auth blips still accumulates.
+  const failures = transient ? t.failures : t.failures + 1;
   const disarmed = failures >= max;
   return { ...t, failures, nextDue: _nextDueAfter(t, base), lastFiredAt: base, enabled: disarmed ? false : t.enabled };
+}
+
+/**
+ * Is this failure the environment's fault rather than the workflow's? PURE. v2.74.2043 — the input is a step error
+ * string from the executor (`not-logged-in`, `no-authenticated-tab`, `write-needs-confirm`, http-401/403, …).
+ * Conservative BY DESIGN: only errors that name a signed-out/absent session are transient. Anything unrecognized
+ * counts toward disarm, so a genuinely drifting route still stops itself. v2.74.2044 adds `lookup-failed` (a map
+ * step whose lookups ALL errored with no completed verdict — rate limit/auth/network wholesale, not the route:
+ * a drifted lookup route surfaces as `recipe-gone`/`not-armed` at resolve time and still disarms).
+ */
+export function isTransientFailure(error) {
+  const e = String(error || '').toLowerCase();
+  if (!e) return false;
+  return /not-logged-in|no-authenticated-tab|no-content-script|reauth|unauthori[sz]ed|http-401|http-403|offline|network|failed to fetch|lookup-failed/.test(e);
 }
 
 /** Disable a trigger (manual pause / orphaned desk), preserving cadence + counters. PURE. */
