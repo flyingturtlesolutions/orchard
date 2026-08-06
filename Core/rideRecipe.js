@@ -250,7 +250,17 @@ export function bareOrigin(s) {
 }
 
 /**
- * Partition a ground's stored records into OWN (bare(record.origin) === bare(host)) and FOREIGN. PURE.
+ * Partition a ground's stored records into OWN and FOREIGN. PURE.
+ *
+ * A record is OWN when bare(record.origin) === bare(host) OR bare(record.appHost) === bare(host).
+ * v2.74.2053 — the appHost side is LOAD-BEARING, not a courtesy (review defect, confirmed): HARVESTED cross-host
+ * records store the CAPTURED API host in `origin` (recipeFromHarvest — the §20 deakoapi class, deliberately
+ * preserved since v1291) with the PAGE host in `appHost` — the INVERSE of the curated convention (origin=page,
+ * apiHost=sibling). An origin-only compare partitioned every accepted cross-origin harvested read as foreign
+ * and filtered the "show me my schedules" class from palette/vocab/sweeps/vitals while misreporting it as
+ * pollution. Genuine pollution matches on NEITHER side (vs_state under the Shopify ground: origin AND appHost
+ * both vendorsuite). `apiHost` still never enters the compare — executor transport only.
+ *
  * `foreignOrigins` = the distinct BARE foreign origins (empty origin → '(no origin)'), for the caller's one
  * diagnosability line (`RIDE_RESOLVE ▸ N foreign recipe(s) stored under <host> (<origins>) — filtered …`).
  * An EMPTY anchor host returns everything as own — no anchor, no verdict (the caller has nothing to compare to).
@@ -262,7 +272,7 @@ export function partitionRecipesByOrigin(recipes, host) {
   if (!hb) return { own: list, foreign: [], foreignOrigins: [] };
   const own = []; const foreign = []; const names = new Set();
   for (const r of list) {
-    if (r && bareOrigin(r.origin) === hb) own.push(r);
+    if (r && (bareOrigin(r.origin) === hb || bareOrigin(r.appHost) === hb)) own.push(r);
     else { foreign.push(r); names.add(bareOrigin(r && r.origin) || '(no origin)'); }
   }
   return { own, foreign, foreignOrigins: [...names] };

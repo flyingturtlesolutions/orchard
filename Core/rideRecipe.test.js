@@ -289,6 +289,27 @@ describe('PP-4 (v2.74.1680) — the pipeline-gate axes ride the SEEDED path (Inv
   });
 });
 
+// ── v2.74.2053 — the appHost side of the compare (review defect, confirmed): harvested cross-host records
+// store the CAPTURED API host in `origin` with the PAGE host in `appHost` — the INVERSE of the curated
+// convention. An origin-only door dropped the §20 deakoapi class as pollution.
+describe('own-origin partition — harvested cross-host records stay OWN (v2053)', () => {
+  const harvested = { id: 'h1', origin: 'deakoapi.deako.com', appHost: 'app.deako.com', provenance: 'harvested', method: 'GET' };
+  it('a record whose appHost matches the anchor is OWN even when its origin is the captured API host', () => {
+    const p = partitionRecipesByOrigin([harvested], 'app.deako.com');
+    assert.equal(p.own.length, 1, 'the §20 class must not read as pollution');
+    assert.equal(p.foreign.length, 0);
+  });
+  it('and it is still FOREIGN under a ground that owns neither host — true pollution keeps partitioning out', () => {
+    const q = partitionRecipesByOrigin([harvested], 'admin.shopify.com');
+    assert.equal(q.foreign.length, 1);
+    assert.deepEqual(q.foreignOrigins, ['deakoapi.deako.com']);
+  });
+  it('an appHost-only record (empty origin — the manual-recipe shape) is OWN under its appHost', () => {
+    const p = partitionRecipesByOrigin([{ id: 'm1', origin: '', appHost: 'zendesk.com' }], 'zendesk.com');
+    assert.equal(p.own.length, 1);
+  });
+});
+
 describe('own-origin partition — the SW read-door filter (v2.74.2052, the v1937 panel semantics)', () => {
   const UPS_OWN = [
     // legitimate UPS rows: origin www.ups.com, API on a SIBLING host — apiHost must never enter the compare

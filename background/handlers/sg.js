@@ -945,8 +945,15 @@ export function createSgMessageHandlers(ctx) {
   // The merged read + the own-origin door in one call — what every PROJECTION/vocabulary reader consumes
   // (palette, sweep offer, unconnected detection, answer, target-resolve). The write-back inside
   // _readRideRecipesMerged stays FULL — filter-at-read must never become delete-at-write.
+  // v2.74.2053 — the ANCHOR is the ground's OWN identity (primaryHost), never the caller's origin (review
+  // defect, confirmed): gid resolution is urlPatterns-AWARE, so the caller's origin may be a merged SIBLING
+  // host (an app.notion.com URL on the www.notion.so ground) — anchoring on it partitioned every own row
+  // foreign, emptied the reader, and logged false pollution. The caller's origin is only the fallback when the
+  // ground yields no primaryHost.
   async function _readRideRecipesOwn(groundId, origin) {
-    return _ownRideRecords(await _readRideRecipesMerged(groundId, origin), origin, groundId);
+    let anchor = '';
+    try { anchor = String(primaryHost(await StorageManager.getGround(groundId)) || ''); } catch { anchor = ''; }
+    return _ownRideRecords(await _readRideRecipesMerged(groundId, origin), anchor || origin, groundId);
   }
 
   // HL-1 (v2.74.1454) — the drive twin of _readRideRecipesMerged: read the Ground's drive-artifact collection,
@@ -2939,9 +2946,13 @@ export function createSgMessageHandlers(ctx) {
         let ride = [];   // §18 — the RIDE class (harvested/curated ride-recipes); buildIntentMenu shows armable run-now + a pending summary
         try {
           ride = (await ctx.readRideRecipes(gid)) || [];
-          // v2052 — own-origin: the menu must not count/name foreign legs. Anchor = the tab URL's host (the
-          // exact identity gid was resolved from above).
-          try { ride = _ownRideRecords(ride, new URL(url).host, gid); } catch { /* no parseable url → unfiltered */ }
+          // v2.74.2053 — anchor on the GROUND's identity, not the tab host (review defect: gid resolution is
+          // sibling-aware, so the tab may be a merged sibling of every own row — a tab-host anchor emptied the
+          // menu and logged false pollution). Tab host only as the no-primaryHost fallback.
+          try {
+            let _anchor = ''; try { _anchor = String(primaryHost(await StorageManager.getGround(gid)) || ''); } catch { _anchor = ''; }
+            ride = _ownRideRecords(ride, _anchor || new URL(url).host, gid);
+          } catch { /* no anchor → unfiltered */ }
         } catch { /* */ }
         const menu = buildIntentMenu({ caps, goals, siteCatalog, ride, readiness, limit });
         Logger.info('background', `INTENT_MENU ▸ ${menu.entries.length} entr${menu.entries.length === 1 ? 'y' : 'ies'} (${menu.counts.taught} taught, ${menu.counts.teachable} teachable, ${menu.counts.goals} goal(s); readiness=${readiness || '—'}) [${String(gid).slice(-6)}]`);
@@ -2999,7 +3010,7 @@ export function createSgMessageHandlers(ctx) {
           // ground (the RIDE_RESOLVE ▸ log keeps the pollution visible; EDIT_RIDE_RECIPE still reads raw, so a
           // foreign row remains deletable by id). Only filter when the ground has a real origin — the g.name
           // fallback label is not a host and must not empty the list (_ownRideRecords bares scheme/www itself).
-          try { if (origin) recipes = _ownRideRecords(recipes, origin, gid); } catch { /* keep unfiltered */ }
+          try { const _anchor = String(primaryHost(g) || '') || origin; if (_anchor) recipes = _ownRideRecords(recipes, _anchor, gid); } catch { /* keep unfiltered */ }   // v2.74.2053 — ground identity first
           let caps = []; try { caps = ((await ctx.readSgCapabilities(gid)) || []).filter((c) => isActiveCapability(c)); } catch { caps = []; }
           if (!recipes.length && !caps.length) continue;   // skip empty Grounds — the workbench lists only sites with legs
           const driveSections = caps.length

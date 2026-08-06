@@ -907,16 +907,21 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // disarm strike; connectionPresence → signed-out registry; the panel's auth branches). Interactive
           // invokes keep today's behavior end to end — the identity gate has no interactive cookie flow to
           // mirror, so the belt's verdict remains theirs.
+          // v2.74.2053 — DEMOTED from a refusal to a diagnostic (review defect, confirmed-plausible): an
+          // anti-forgery cookie like X-XSRF-TOKEN-ST is PAGE-MINTED and often session-lifetime — after a browser
+          // restart it is absent on a ground the user is genuinely signed into, and the very ephemeral-tab load
+          // this gate ran ahead of is what mints it. Refusing (and booking a signed-out auth signal) on mere
+          // absence marked signed-in grounds signed-out in the registry, deferred their sweeps, and raised false
+          // presence incidents. Absence of a page-minted cookie is NOT evidence of absence of a session — only
+          // the page (belt / http-401, both already honest-transient downstream) can say. So: presence is a
+          // fast-path confirmation; absence logs one line and falls through to the normal tab path.
           if (payload && payload.headless === true && payload.csrfCookie) {
             const _ckHost = origin || appHost;
             if (_ckHost) {
               let _ck = null;
               try { _ck = await chrome.cookies.get({ url: `https://${_ckHost}/`, name: String(payload.csrfCookie) }); } catch { _ck = null; }
               if (!_ck || !_ck.value) {
-                void reportAuthSignal({ origin: _ckHost, status: 'signed-out', cause: 'not-logged-in', source: 'ride' });
-                try { Logger.info('ride', `INVOKE ▸ blocked not-logged-in (headless) @${_ckHost} [${(payload && payload.recipeId) || '?'}] — no ${payload.csrfCookie} cookie`); } catch { /* */ }
-                sendResponse({ success: false, error: 'not-logged-in', origin: _ckHost, hint: `sign in to ${_ckHost} to continue` });
-                return;
+                try { Logger.info('ride', `INVOKE ▸ csrf cookie absent @${_ckHost} [${(payload && payload.recipeId) || '?'}] (headless) — page load mints it or the belt answers`); } catch { /* */ }
               }
             }
             _mark('cookie-gate');
