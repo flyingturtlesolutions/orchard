@@ -18,7 +18,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const { parseDoc, leaseState } = require('./testbus.cjs');
-const { parseTicks, dutyCycle, scoreboard, waitingHuman, TICKS_FILE } = require('./report.cjs');
+const { parseTicks, dutyCycle, scoreboard, waitingHuman, admissibility, TICKS_FILE } = require('./report.cjs');
 const { GAP_MIN } = require('./tick.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -44,6 +44,29 @@ function chipClass(verdict) {
   const v = String(verdict || '').toUpperCase();
   return ['PASS', 'FAIL', 'INCONCLUSIVE', 'UNMAPPED', 'ORPHANED'].includes(v) ? v.toLowerCase() : 'other';
 }
+
+/** F6b — the starvation ramp: an age's urgency class. fresh <6h · ok <24h · warn <72h · late beyond.
+ *  The census is a queue whose whole point is WHICH item is rotting; identical-looking ages hid that. PURE. */
+function ageClass(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return 'age-ok';
+  const h = ms / 3600000;
+  return h < 6 ? 'age-fresh' : h < 24 ? 'age-ok' : h < 72 ? 'age-warn' : 'age-late';
+}
+
+/** F6b — run-length compress a verdict chain: the PATTERN is the signal, not the repetition.
+ *  ['INC','INC','INC','PASS'] → [{v:'INC',n:3},{v:'PASS',n:1}]. PURE. */
+function compressChain(chain) {
+  const out = [];
+  for (const v of chain || []) {
+    if (out.length && out[out.length - 1].v === v) out[out.length - 1].n++;
+    else out.push({ v, n: 1 });
+  }
+  return out;
+}
+
+/** F6b — chip label abbreviations (full verdict survives in the title attr — honesty by hover). PURE. */
+const VERDICT_ABBREV = { INCONCLUSIVE: 'INC', UNMAPPED: 'UNM', ORPHANED: 'ORPH' };
+const chipLabel = (v) => VERDICT_ABBREV[String(v || '').toUpperCase()] || String(v || '').toUpperCase();
 
 /** Tick intervals → an SVG polyline path over a fixed viewbox; values capped so one monster gap doesn't flatten
  *  the rest. PURE. */
@@ -80,7 +103,13 @@ function renderMd(m) {
   L.push(`## 🧍 Waiting on a human (${m.census.length})`);
   if (!m.census.length) L.push('nothing — the loop owes you no steps.');
   for (const r of m.census) {
-    L.push(`- **[${r.id}](../tests/${r.id}.md)** (${r.owner}) — waiting **${ageOf(m.nowIso, r.since)}** (since ${r.since})`);
+    if (r.onYou === false) {
+      L.push(`- ⏸ **[${r.id}](../tests/${r.id}.md)** — **blocked: ${r.state}** (owner ${r.owner} must rearm; your actions are invisible until then) — waiting ${ageOf(m.nowIso, r.since)}`);
+      if (r.note) L.push(`  - last grade: ${r.note}`);
+      continue;
+    }
+    L.push(`- **[${r.id}](../tests/${r.id}.md)** — **on you** — waiting **${ageOf(m.nowIso, r.since)}** (since ${r.since})`);
+    if (r.note) L.push(`  - last grade: ${r.note}`);
     if (!r.actions.length) L.push(`  - [ ] (no [human] lines parsed — see the test file)`);
     for (const a of r.actions) L.push(`  - [ ] ${a}`);
   }
@@ -107,22 +136,34 @@ const AGE_SCRIPT = "(function(){var b=document.body;var t=Date.parse(b.getAttrib
 
 function renderHtml(m) {
   const scriptHash = crypto.createHash('sha256').update(AGE_SCRIPT).digest('base64');
-  const chips = (chain) => chain.map((v) => `<span class="chip ${chipClass(v)}">${esc(v)}</span>`).join('');
+  const chips = (chain) => compressChain(chain).map(({ v, n }) => `<span class="chip ${chipClass(v)}" title="${esc(v)}${n > 1 ? ` ×${n}` : ''}">${esc(chipLabel(v))}${n > 1 ? ` ×${n}` : ''}</span>`).join('');
   const testLink = (id) => { const u = fileUrl(m.busRootPath, `tests/${id}.md`); return u ? `<a href="${esc(u)}">${esc(id)}</a>` : esc(id); };
-  const censusRows = m.census.map((r) => `
-    <div class="test"><b>${testLink(r.id)}</b> <span class="dim">(${esc(r.owner)}) — waiting <b title="${esc(r.since)}">${esc(ageOf(m.nowIso, r.since))}</b></span>
-      <ul>${r.actions.length ? r.actions.map((a) => `<li>${esc(a)}</li>`).join('') : '<li class="dim">(no [human] lines parsed — see the test file)</li>'}</ul></div>`).join('') || '<p class="ok">nothing — the loop owes you no steps.</p>';
+  const censusRows = m.census.map((r) => {
+    const head = `<b>${testLink(r.id)}</b> <span class="dim">— waiting <b class="${ageClass(Date.parse(m.nowIso) - Date.parse(r.since))}" title="${esc(r.since)} · owner ${esc(r.owner)}">${esc(ageOf(m.nowIso, r.since))}</b></span>`;
+    const note = r.note ? `<div class="dim" style="font-size:12px;margin-left:2px">last grade: ${esc(r.note)}</div>` : '';
+    // Census honesty — a STALE test's checklist is unactionable: the loop cannot see anything the human does
+    // until its OWNER rearms. Label the real blocker instead of re-nagging done steps.
+    if (r.onYou === false) return `
+    <div class="test">${head} <span class="pill warn">⏸ blocked: ${esc(r.state || '?')} — owner ${esc(r.owner)} must rearm; not on you</span>${note}</div>`;
+    return `
+    <div class="test">${head} <span class="pill ok">on you</span>${note}
+      <ul class="todo">${r.actions.length ? r.actions.map((a) => `<li>${esc(a)}</li>`).join('') : '<li class="dim">(no [human] lines parsed — see the test file)</li>'}</ul></div>`;
+  }).join('') || '<p class="ok">nothing — the loop owes you no steps.</p>';
   const openFirst = [...m.board.rows].sort((a, b) => (a.status === b.status ? 0 : a.status === 'open' ? -1 : 1));
-  const boardRows = openFirst.map((r) => `
+  const rowHtml = (r) => `
     <tr class="${esc(r.status)}"><td>${testLink(r.id)}</td><td>${esc(r.owner)}</td>
       <td>${r.chain.length ? chips(r.chain) : '<span class="dim">ungraded</span>'}</td>
-      <td>${r.firstGradeH != null ? esc(r.firstGradeH) + 'h' : '—'}</td><td class="dim" title="${esc(r.lastGraded || '')}">${r.lastGraded ? esc(ageOf(m.nowIso, r.lastGraded)) + ' ago' : '—'}</td></tr>`).join('');
+      <td>${r.firstGradeH != null ? esc(r.firstGradeH) + 'h' : '—'}</td><td class="dim ${r.lastGraded ? ageClass(Date.parse(m.nowIso) - Date.parse(r.lastGraded)) : ''}" title="${esc(r.lastGraded || '')}">${r.lastGraded ? esc(ageOf(m.nowIso, r.lastGraded)) + ' ago' : '—'}</td></tr>`;
+  const openRows = openFirst.filter((r) => r.status === 'open').map(rowHtml).join('');
+  const retired = openFirst.filter((r) => r.status !== 'open');
+  const retiredRows = retired.map(rowHtml).join('');
+  const thead = '<tr><th>test</th><th>owner</th><th>verdicts</th><th>1st grade</th><th>last graded</th></tr>';
   const recent = m.recent.map((r) => {
     const u = r.file ? fileUrl(m.busRootPath, `results/${r.file}`) : null;
     return `
     <li><span class="chip ${chipClass(r.verdict)}">${esc(r.verdict)}</span> ${u ? `<a href="${esc(u)}">${esc(r.test)}</a>` : esc(r.test)} <span class="dim" title="${esc(r.graded)}">${esc(ageOf(m.nowIso, r.graded))} ago by ${esc(r.grader)}${r.selfGraded ? ' (self)' : ''}</span>${r.note ? `<div class="note">${esc(r.note)}</div>` : ''}</li>`;
   }).join('');
-  const leaseTxt = m.leaseSt === 'free' ? 'lease free' : `lease ${m.leaseSt}: ${m.lease.lane} (renewed ${ageOf(m.nowIso, m.lease.ts)} ago)`;
+  const leasePill = m.leaseSt === 'free' ? 'LEASE free' : `LEASE ${m.leaseSt} · ${m.lease.lane} · ${ageOf(m.nowIso, m.lease.ts)}`;
   const leaseBad = m.leaseSt !== 'live';
   // Review fix #4 — with N sessions ticking one shared ledger, the interval series shows CONTENTION, not cadence;
   // rendering it under a >100% duty would be a healthy-looking lie. Suppress and say why.
@@ -133,7 +174,7 @@ function renderHtml(m) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="60">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${scriptHash}'">
 <title>glf dashboard</title><style>
-:root{color-scheme:light dark;--bg:#fff;--fg:#1a1a1a;--dim:#777;--card:#f5f5f7;--line:#e2e2e6}
+:root{color-scheme:light dark;--bg:#fff;--fg:#1a1a1a;--dim:#6b6b6b;--card:#f5f5f7;--line:#e2e2e6}
 @media(prefers-color-scheme:dark){:root{--bg:#131417;--fg:#e8e8ea;--dim:#9a9aa2;--card:#1d1f24;--line:#2a2d33}}
 body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif;margin:0;padding:18px;max-width:980px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
@@ -144,28 +185,37 @@ body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif;mar
 table{border-collapse:collapse;width:100%}td,th{padding:4px 8px;text-align:left;border-top:1px solid var(--line);vertical-align:top}
 tr.retired td{opacity:.55}.test{margin:8px 0}
 .note{color:var(--dim);font-size:12px;margin-left:26px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-h2{font-size:15px;margin:4px 0 8px}ul{margin:4px 0 4px 20px}svg{display:block}a{color:inherit}
-.strip{display:flex;gap:18px;flex-wrap:wrap;align-items:baseline}
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:2px 0 8px}
+ul{margin:4px 0 4px 20px}svg{display:block}
+a{color:inherit;text-decoration:underline dotted;text-underline-offset:2px}a:hover{text-decoration:underline solid}
+.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:1px 10px;font-size:12px}
+.pill.ok{color:#2e9e44;border-color:#2e9e4455}.pill.bad{color:#d64545;border-color:#d64545;font-weight:600}
+.pill.warn{color:#c9922a;border-color:#c9922a88}
+.age-fresh{color:var(--dim)}.age-ok{}.age-warn{color:#c9922a}.age-late{color:#d64545}
+ul.todo{list-style:none;margin-left:4px;padding-left:0}ul.todo li::before{content:"☐ ";opacity:.6}
+details{margin-top:8px}summary{cursor:pointer}
+.strip{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}
 .strip.stale{border-color:#d64545;background:rgba(214,69,69,.08)}
 .strip.stale::after{content:"⚠ STALE — the generator has stopped; this page is a snapshot";color:#d64545;font-weight:600;width:100%}</style></head><body data-asof="${esc(m.nowIso)}">
 <div class="card strip" id="strip">
-  <b>glf dashboard</b><span class="dim">as of ${esc(m.nowIso)} · ${esc(m.host)}</span><span id="age" class="dim"></span>
-  <span>build <code>${esc(m.build)}</code></span>
-  <span class="${leaseBad ? 'bad' : 'ok'}">${esc(leaseTxt)}</span>
-  <span class="${m.busDirtyN ? 'bad' : 'ok'}">${m.busDirtyN ? `${m.busDirtyN} UNDELIVERED` : 'bus delivered'}</span>
+  <b>glf dashboard</b><span class="dim" title="${esc(m.host)}">as of ${esc(m.nowIso)}</span><span id="age" class="dim"></span>
+  <span class="pill" title="${esc(m.host)}">BUILD <code>${esc(m.build)}</code></span>
+  <span class="pill ${leaseBad ? 'bad' : 'ok'}">${esc(leasePill)}</span>
+  <span class="pill ${m.busDirtyN ? 'bad' : 'ok'}">BUS ${m.busDirtyN ? `${m.busDirtyN} UNDELIVERED` : '✓ delivered'}</span>
 </div>
 <div class="card"><h2>🧍 Waiting on a human (${m.census.length})</h2>${censusRows}</div>
 <div class="card"><h2>Duty — last 24h</h2>
-  <p>${m.duty.fired}/${m.duty.expected} tick(s)${m.duty.dutyPct != null ? ` = <b>${m.duty.dutyPct}%</b>` : ''}${m.duty.dutyPct > 100 ? ' <span class="dim">(>100% = multiple ticking sessions)</span>' : ''} · ${m.duty.gaps.length} gap(s) &gt;${GAP_MIN}min · ${m.duty.lostMin}min lost · max ${m.duty.maxGapMin}min</p>
+  <p title="${m.duty.fired}/${m.duty.expected} tick(s) in the window · gaps are >${GAP_MIN}min">duty <b>${m.duty.dutyPct != null ? `${m.duty.dutyPct}%` : '—'}</b>${m.duty.dutyPct > 100 ? ' <span class="dim">(>100% = multiple ticking sessions)</span>' : ''} · gaps ${m.duty.gaps.length} · lost ${m.duty.lostMin}m · worst ${m.duty.maxGapMin}m</p>
   ${spark}</div>
 <div class="card"><h2>Scoreboard (${openFirst.filter((r) => r.status === 'open').length} open / ${m.board.rows.length})</h2>
-  <div style="overflow-x:auto"><table><tr><th>test</th><th>owner</th><th>verdicts</th><th>1st grade</th><th>last graded</th></tr>${boardRows}</table></div></div>
+  <div style="overflow-x:auto"><table>${thead}${openRows}</table></div>
+  ${retired.length ? `<details><summary class="dim">${retired.length} retired</summary><div style="overflow-x:auto"><table>${thead}${retiredRows}</table></div></details>` : ''}</div>
 <div class="card"><h2>Recent results</h2><ul style="list-style:none;margin:0;padding:0">${recent || '<li class="dim">none yet</li>'}</ul></div>
 <script>${AGE_SCRIPT}</script>
 </body></html>`;
 }
 
-module.exports = { esc, fmtAge, ageOf, fileUrl, chipClass, sparklinePath, renderMd, renderHtml, model, AGE_SCRIPT, HTML_OUT, MD_REL };
+module.exports = { esc, fmtAge, ageOf, fileUrl, chipClass, ageClass, compressChain, chipLabel, sparklinePath, renderMd, renderHtml, model, AGE_SCRIPT, HTML_OUT, MD_REL };
 
 // ── impure ──────────────────────────────────────────────────────────────────────────────────────────────────
 function busRoot() { return process.env.ORCHARD_LOGS || path.resolve(REPO_ROOT, '..', 'orchard-logs'); }
@@ -199,7 +249,7 @@ function gather() {
     host: (process.env.COMPUTERNAME || process.env.HOSTNAME || 'local'),
     build: last ? last.build : '?',
     lease, leaseSt: leaseState(nowIso, lease),
-    duty, board: scoreboard(tests, results), census: waitingHuman(tests, results),
+    duty, board: scoreboard(tests, results), census: waitingHuman(tests, results, admissibility(tests)),
     busDirtyN: busDirty ? busDirty.split('\n').filter(Boolean).length : 0,
     recent, tickIntervals, busRootPath: busRoot(),
   });

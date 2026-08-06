@@ -106,8 +106,12 @@ function humanActions(body) {
 }
 
 /** Open tests whose LATEST grade is INCONCLUSIVE and marked waiting-human (note or evidence body). PURE.
- *  results here carry {meta, body}. */
-function waitingHuman(tests, results) {
+ *  results carry {meta, body}. `states` (optional Map id→LIVE|LIVE*|STALE) labels the ACTUAL blocker:
+ *  a STALE waiting-human test is blocked on its OWNER's rearm, not on the human — the census used to nag for
+ *  steps already done that no human action could advance (live: v2.74.2026, 16 rearms of chat.js churn). The
+ *  latest grade's `note` rides along because it names what is MISSING ("open history for VALUE") — more
+ *  actionable than re-printing the original checklist. */
+function waitingHuman(tests, results, states = null) {
   const latest = new Map();
   for (const r of results || []) {
     const id = r.meta && r.meta.test; if (!id) continue;
@@ -122,17 +126,52 @@ function waitingHuman(tests, results) {
     if (!last || (last.meta.verdict || '') !== 'INCONCLUSIVE') continue;
     const marked = /waiting-human/i.test(`${last.meta.note || ''}\n${last.body || ''}`);
     if (!marked) continue;
-    rows.push({ id: m.id, owner: m.owner || '?', since: last.meta.graded || '', actions: humanActions(t.body) });
+    const state = states ? (states.get(m.id) || '?') : null;
+    rows.push({
+      id: m.id, owner: m.owner || '?', since: last.meta.graded || '',
+      note: last.meta.note || '',
+      state,
+      onYou: state == null ? true : (state === 'LIVE' || state === 'LIVE*'),   // STALE/?: nothing you do is visible to the loop
+      actions: humanActions(t.body),
+    });
   }
   rows.sort((a, b) => String(a.since).localeCompare(String(b.since)));
   return rows;
 }
 
-module.exports = { parseTicks, dutyCycle, scoreboard, humanActions, waitingHuman, TICK_MIN, TICKS_FILE };
+module.exports = { parseTicks, dutyCycle, scoreboard, humanActions, waitingHuman, admissibility, TICK_MIN, TICKS_FILE };
 
 // ── impure ──────────────────────────────────────────────────────────────────────────────────────────────────
 function busRoot() {
   return process.env.ORCHARD_LOGS || path.resolve(REPO_ROOT, '..', 'orchard-logs');
+}
+
+/** id → LIVE | LIVE* | STALE for the given tests, against the CURRENT working tree — the same admissibility
+ *  grade-pending computes, exported so the census (here and in dashboard.cjs) can label the actual blocker.
+ *  IMPURE (git + file reads); built from the PURE exports (tick.fingerprint, testbus.filesPaths/filesFingerprint)
+ *  so there stays exactly one definition of each identity. */
+function admissibility(tests) {
+  const { filesPaths, filesFingerprint } = require('./testbus.cjs');
+  const { fingerprint } = require('./tick.cjs');
+  const { execFileSync } = require('child_process');
+  const git = (a) => { try { return execFileSync('git', a, { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n+$/, ''); } catch { return ''; } };
+  let mv = '?'; try { mv = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'manifest.json'), 'utf8')).version; } catch { /* */ }
+  const fp = fingerprint(git(['rev-parse', 'HEAD']), git(['diff']), mv);
+  const map = new Map();
+  for (const t of tests || []) {
+    const m = t.meta || {};
+    if (m.build === fp) { map.set(m.id, 'LIVE'); continue; }
+    const paths = filesPaths(m.files);
+    if (m['files-fp'] && paths.length) {
+      const cur = filesFingerprint(paths.map((p) => {
+        let text = null; try { text = fs.readFileSync(path.resolve(REPO_ROOT, p), 'utf8'); } catch { /* missing hashes as its own marker */ }
+        return { path: p, text };
+      }));
+      if (cur === m['files-fp']) { map.set(m.id, 'LIVE*'); continue; }
+    }
+    map.set(m.id, 'STALE');
+  }
+  return map;
 }
 function readDir(dir, withBody) {
   if (!fs.existsSync(dir)) return [];
@@ -167,11 +206,18 @@ function printScoreboard(tests, results) {
 }
 
 function printCensus(tests, results) {
-  const rows = waitingHuman(tests, results);
+  const rows = waitingHuman(tests, results, admissibility(tests));
   if (!rows.length) { console.log('CENSUS ▸ nothing waiting on a human'); return; }
-  console.log(`CENSUS ▸ ${rows.length} test(s) waiting on a [human] step — this is the to-do list:`);
+  const onYou = rows.filter((r) => r.onYou);
+  console.log(`CENSUS ▸ ${rows.length} waiting — ${onYou.length} on you, ${rows.length - onYou.length} blocked on a rearm (not on you):`);
   for (const r of rows) {
-    console.log(`  ${r.id} (${r.owner}) — waiting since ${r.since}`);
+    if (!r.onYou) {
+      console.log(`  [blocked: ${r.state} — owner ${r.owner} must rearm; your actions are invisible to the loop until then] ${r.id} — waiting since ${r.since}`);
+      if (r.note) console.log(`    last grade: ${r.note}`);
+      continue;   // don't re-print a checklist nothing can advance
+    }
+    console.log(`  [on you] ${r.id} — waiting since ${r.since}`);
+    if (r.note) console.log(`    last grade: ${r.note}`);
     if (!r.actions.length) console.log('    (no [human] lines parsed — the checklist is in the test file on the bus)');
     for (const a of r.actions) console.log(`    [human] ${a}`);
   }

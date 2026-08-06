@@ -124,6 +124,24 @@ it('census = open tests whose LATEST grade is INCONCLUSIVE and marked waiting-hu
   assert.deepEqual(rows[0].actions, ['send the ask']);
 });
 
+it('a states map labels the ACTUAL blocker: STALE → not on you; LIVE*/LIVE → on you; note rides along', () => {
+  const tests = [
+    { meta: { id: 'stale-one', status: 'open', owner: 'l' }, body: '- [human] a\n' },
+    { meta: { id: 'live-one', status: 'open', owner: 'l' }, body: '- [human] b\n' },
+  ];
+  const results = [
+    { meta: { test: 'stale-one', verdict: 'INCONCLUSIVE', graded: '2026-08-06T09:00:00Z', note: 'open history for VALUE' }, body: 'waiting-human' },
+    { meta: { test: 'live-one', verdict: 'INCONCLUSIVE', graded: '2026-08-06T10:00:00Z' }, body: 'waiting-human' },
+  ];
+  const states = new Map([['stale-one', 'STALE'], ['live-one', 'LIVE*']]);
+  const rows = waitingHuman(tests, results, states);
+  assert.equal(rows[0].onYou, false, 'STALE is blocked on the owner, not the human');
+  assert.equal(rows[0].note, 'open history for VALUE', 'the latest grade note (the actionable part) rides along');
+  assert.equal(rows[1].onYou, true);
+  // backward compat: no states map → everything reads on-you (the old behavior)
+  assert.equal(waitingHuman(tests, results)[0].onYou, true);
+});
+
 it('census rows sort oldest-first — the longest-starved ask leads', () => {
   const tests = [
     { meta: { id: 'old', status: 'open', owner: 'l' }, body: '- [human] a\n' },

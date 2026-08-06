@@ -4,7 +4,7 @@
 
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const { esc, fmtAge, ageOf, fileUrl, chipClass, sparklinePath, renderMd, renderHtml, model, AGE_SCRIPT } = require('./dashboard.cjs');
+const { esc, fmtAge, ageOf, fileUrl, chipClass, ageClass, compressChain, chipLabel, sparklinePath, renderMd, renderHtml, model, AGE_SCRIPT } = require('./dashboard.cjs');
 
 let pass = 0;
 // Tally on EXIT — a fixed print line under-reported twice when tests were appended below it.
@@ -90,11 +90,11 @@ it('renderHtml escapes the scoreboard STATUS attribute — the front-matter fiel
   assert.ok(html.includes('open&quot;&gt;'), 'escaped status present in the attribute');
 });
 
-it('renderHtml: open rows before retired, chips per verdict, lease going non-live turns bad', () => {
+it('renderHtml: open rows before retired, chips per verdict, lease going non-live turns the pill bad', () => {
   const html = renderHtml(M({ leaseSt: 'expired' }));
   assert.ok(html.indexOf('t-open') < html.indexOf('t-retired'), 'open sorts first');
   assert.match(html, /class="chip unmapped"/);
-  assert.match(html, /class="bad">lease expired/);
+  assert.match(html, /class="pill bad">LEASE expired/);
   assert.match(html, /http-equiv="refresh"/, 'the tab keeps itself current');
 });
 
@@ -121,10 +121,64 @@ it('the CSP pins exactly the embedded script by hash — an injected script cann
   assert.match(html, /default-src 'none'/);
 });
 
-it('ages replace raw ISO in the html (lease renewal age, census waiting age); ISO survives as title hover', () => {
+it('ages replace raw ISO in the html (lease pill age, census waiting age); ISO+owner survive as title hover', () => {
   const html = renderHtml(M());
-  assert.match(html, /lease live: lane-cron \(renewed 2m ago\)/);
-  assert.match(html, /waiting <b title="2026-08-06T10:00:00Z">5h<\/b>/);
+  assert.match(html, /class="pill ok">LEASE live · lane-cron · 2m</);
+  assert.match(html, /waiting <b class="age-fresh" title="2026-08-06T10:00:00Z · owner lane-1">5h<\/b>/);
+  assert.ok(!/\(lane-1\)/.test(html.split('Scoreboard')[0]), 'owner lane demoted out of the visible census');
+});
+
+// ── F6b — the polish pass ───────────────────────────────────────────────────────────────────────────────────
+it('ageClass ramps: fresh <6h · ok <24h · warn <72h · late beyond; garbage → ok', () => {
+  const H = 3600000;
+  assert.equal(ageClass(2 * H), 'age-fresh');
+  assert.equal(ageClass(12 * H), 'age-ok');
+  assert.equal(ageClass(48 * H), 'age-warn');
+  assert.equal(ageClass(100 * H), 'age-late');
+  assert.equal(ageClass(NaN), 'age-ok');
+});
+
+it('compressChain run-length encodes; chipLabel abbreviates the long verdicts only', () => {
+  assert.deepEqual(compressChain(['INCONCLUSIVE', 'INCONCLUSIVE', 'INCONCLUSIVE', 'PASS']), [{ v: 'INCONCLUSIVE', n: 3 }, { v: 'PASS', n: 1 }]);
+  assert.deepEqual(compressChain([]), []);
+  assert.equal(chipLabel('INCONCLUSIVE'), 'INC');
+  assert.equal(chipLabel('UNMAPPED'), 'UNM');
+  assert.equal(chipLabel('PASS'), 'PASS');
+});
+
+it('a repeated-verdict chain renders ONE chip with ×n; the full verdict survives in the title', () => {
+  const m = M({ board: { rows: [{ id: 't', status: 'open', owner: 'l', chain: ['INCONCLUSIVE', 'INCONCLUSIVE', 'INCONCLUSIVE'], firstGradeH: 1, lastVerdict: 'INCONCLUSIVE', lastGraded: '2026-08-06T14:00:00Z' }], totals: {}, ungraded: [] } });
+  const html = renderHtml(m);
+  assert.match(html, /title="INCONCLUSIVE ×3">INC ×3</);
+  assert.equal((html.match(/chip inconclusive/g) || []).length, 1, 'one chip, not three');
+});
+
+it('retired rows collapse behind <details>; open rows stay in the main table', () => {
+  const html = renderHtml(M());
+  assert.match(html, /<details><summary class="dim">1 retired<\/summary>/);
+  assert.ok(html.indexOf('t-retired') > html.indexOf('<details>'), 'retired row lives inside the details block');
+  assert.ok(html.indexOf('t-open') < html.indexOf('<details>'), 'open row precedes the details block');
+});
+
+it('census checklist carries the todo affordance; links are visibly links (dotted underline rule present)', () => {
+  const html = renderHtml(M());
+  assert.match(html, /<ul class="todo">/);
+  assert.match(html, /ul\.todo li::before\{content:"☐ "/);
+  assert.match(html, /text-decoration:underline dotted/);
+});
+
+it('a BLOCKED census row shows the stale pill + note and suppresses its unactionable checklist', () => {
+  const html = renderHtml(M({ census: [{ id: 't-open', owner: 'lane-1', since: '2026-08-06T10:00:00Z', actions: ['do the thing'], note: 'open history for VALUE', state: 'STALE', onYou: false }] }));
+  assert.match(html, /class="pill warn">⏸ blocked: STALE — owner lane-1 must rearm; not on you/);
+  assert.match(html, /last grade: open history for VALUE/);
+  assert.ok(!html.includes('do the thing'), 'a checklist nothing can advance is not re-nagged');
+});
+
+it('an ON-YOU census row keeps its checklist and carries the latest grade note', () => {
+  const html = renderHtml(M({ census: [{ id: 't-open', owner: 'lane-1', since: '2026-08-06T10:00:00Z', actions: ['do the thing'], note: 'seed landed; run still owed', state: 'LIVE*', onYou: true }] }));
+  assert.match(html, /class="pill ok">on you/);
+  assert.match(html, /last grade: seed landed; run still owed/);
+  assert.match(html, /do the thing/);
 });
 
 it('an empty census checklist gets the see-the-test-file fallback, never a bare empty list', () => {
