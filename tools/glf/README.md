@@ -48,9 +48,15 @@ session that owns it.
 **3. Read the dashboard occasionally.**
 
 ```
-node tools/glf/report.cjs          # duty cycle · scoreboard · census · bus-delivery check
+node tools/glf/report.cjs          # terminal: duty cycle · scoreboard · census · bus-delivery check
 node tools/glf/report.cjs duty     # just "is the loop actually firing"
 ```
+
+Or the **web dashboard** (regenerated every 5 min by the `orchard-glf-dashboard` task, plain node, no claude):
+- **At the machine:** open `logs/run/glf-dashboard.html` in a browser tab — it keeps itself current.
+- **From anywhere:** open `state/dashboard.md` in the private `orchard-logs` repo on GitHub (renders natively;
+  repo auth is the access model). Its `as of` age doubles as the remote **liveness signal** — if it stops
+  regenerating, the machine or the loop is down. Generator: `tools/glf/dashboard.cjs` (`--push` delivers the md).
 
 ## The two rules that keep it honest
 

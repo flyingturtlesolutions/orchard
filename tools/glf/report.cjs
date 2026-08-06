@@ -82,10 +82,26 @@ function scoreboard(tests, results) {
   return { rows: rowsOut, totals, ungraded: rowsOut.filter((r) => r.status === 'open' && !r.chain.length).map((r) => r.id) };
 }
 
-/** The `[human]` ACTION lines of a test body — the steps a person still owes. PURE. */
+/** The `[human]` ACTION lines of a test body — the steps a person still owes. PURE.
+ *  Review fix (v2.74.2046): a step WRAPPED across lines lost its continuation, so the census served
+ *  half-instructions ("…(matched / no-match /" — live). Indented non-bullet lines now join their step. */
 function humanActions(body) {
+  const lines = String(body || '').split('\n');
   const out = [];
-  for (const m of String(body || '').matchAll(/^\s*[-*]\s*\[human\]\s*(.+)$/gim)) out.push(m[1].trim());
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*[-*]\s*\[human\]\s*(.+)$/i.exec(lines[i]);
+    if (!m) continue;
+    let step = m[1].trim();
+    for (let j = i + 1; j < lines.length; j++) {
+      const l = lines[j];
+      if (!l.trim()) break;                 // blank ends the step
+      if (/^\s*[-*]\s*\[/.test(l)) break;   // next checklist bullet
+      if (/^\S/.test(l)) break;             // dedented section head (PREDICT: …)
+      step += ' ' + l.trim();
+      i = j;
+    }
+    out.push(step);
+  }
   return out;
 }
 
@@ -156,6 +172,7 @@ function printCensus(tests, results) {
   console.log(`CENSUS ▸ ${rows.length} test(s) waiting on a [human] step — this is the to-do list:`);
   for (const r of rows) {
     console.log(`  ${r.id} (${r.owner}) — waiting since ${r.since}`);
+    if (!r.actions.length) console.log('    (no [human] lines parsed — the checklist is in the test file on the bus)');
     for (const a of r.actions) console.log(`    [human] ${a}`);
   }
 }

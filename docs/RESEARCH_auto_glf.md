@@ -204,6 +204,25 @@ loop's behavior (CRON_PROMPT edits bump, per the v2024 precedent).
 
 ---
 
+## 8b. F6 — the dashboard (built 2026-08-06, v2.74.2046)
+
+Two surfaces from one gather (`tools/glf/dashboard.cjs`, pure renderers + standalone tests; regenerated every
+5 min by the `orchard-glf-dashboard` schtasks task via `dashboard-tick.cmd`, plain node, ~zero cost):
+
+- **Local HTML** — `logs/run/glf-dashboard.html` (git-ignored): status strip (build · lease+age · bus delivery),
+  the waiting-human census promoted to the top card, duty + tick-interval sparkline (inline SVG), verdict-chip
+  scoreboard (open-first), recent-results feed. Self-contained, zero external requests, auto-refreshing,
+  light/dark. Everything HTML-escaped (bus text is scrubbed but still untrusted-ish strings).
+- **Bus markdown** — `orchard-logs/state/dashboard.md`, committed+pushed each regeneration (bus discipline:
+  commit first, then pull --rebase, then push; scrub + residual-REFUSE like every bus write). GitHub renders it,
+  so the private repo is the **review-from-anywhere** surface with repo auth as the entire access model — and the
+  file's own `as of` age doubles as a REMOTE LIVENESS SIGNAL: a dashboard that stops regenerating is itself the
+  "machine asleep / loop down" indicator, visible from a phone. Deliberately NOT GitHub Pages (a published page
+  would perforate the private-repo access model) and NOT a local server (a second long-running process is a
+  second liveness problem — the failure class this toolchain exists to end).
+- v1 is **read-only** by design: mutations (ack/retire/rearm) stay with the owner-lane discipline on the bus, not
+  behind a browser tab.
+
 ## 9. Parked decisions + owed verification (as-built addendum, 2026-08-06)
 
 Two capabilities were **deliberately not built** at v2.74.2044, and one claim is **not yet proven**. Each parked

@@ -92,6 +92,19 @@ it('extracts [human] steps only, case-insensitive, - or * bullets', () => {
   assert.deepEqual(humanActions(body), ['reload the extension', 'make a field ask on the case']);
 });
 
+it('a step wrapped across lines keeps its continuation — the census served half-instructions live', () => {
+  const body = 'ACTION:\n  - [human] Open its Run history. Expect outcomes (matched / no-match /\n    failed) named on the newest row.\n  - [human] second step\nPREDICT:\n  MECH = grep: `X`\n';
+  assert.deepEqual(humanActions(body), [
+    'Open its Run history. Expect outcomes (matched / no-match / failed) named on the newest row.',
+    'second step',
+  ]);
+});
+
+it('continuation stops at a blank line, a new bullet, or a dedented section head', () => {
+  const body = '  - [human] step one\n    still step one\n\n    orphaned indent after blank\n  - [auto] not ours\nPREDICT:\n';
+  assert.deepEqual(humanActions(body), ['step one still step one']);
+});
+
 it('census = open tests whose LATEST grade is INCONCLUSIVE and marked waiting-human', () => {
   const tests = [
     { meta: { id: 'wh', status: 'open', owner: 'lane-1' }, body: 'ACTION:\n  - [human] send the ask\n' },
