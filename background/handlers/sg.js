@@ -19,7 +19,7 @@ import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
 import { CONNECTOR_RECIPES, fillEndpoint, isReadOnlyGql } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection; CX-9o — fillEndpoint derives the section-nav pages; RH-1c — the heal apply re-validates a gql recipe's document is a READ
 import { absentTargetLegs } from '../../Core/unconnectedCapability.js';   // UC-1 (v2.74.1957) — the target ground has armed legs this conversation cannot see
-import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads, armable as rideArmable, curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI); CX-9r — catalog-armed origins from open tabs
+import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads, armable as rideArmable, curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries, partitionRecipesByOrigin as ridePartitionByOrigin } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI); CX-9r — catalog-armed origins from open tabs; v2.74.2052 — the OWN-ORIGIN read door
 import { groundVocabIndex } from '../../Core/rideVocab.js';   // CX-9q (v1462) — DOMAIN-MATCH vocab with HOST-level distinctiveness (a dup ground reinforces, never annihilates)
 import { DRIVE_ARTIFACTS, seedFromCatalog as seedDriveFromCatalog, mergeArtifacts as driveMergeArtifacts, seededDriveLegs, buildDriveFragment, buildDriveStrategy } from '../../Core/driveArtifacts.js';   // HL-1 (v2.74.1454) — the BUILT-IN DRIVE catalog (heterogeneous legs: ride answers, drive shows) + hydrate-on-first-use builders
 import { buildLegOverview } from '../../Core/legOverview.js';   // OV-1 (DESIGN_overview.md) — the cross-Ground leg inventory + work queue for the Overview workbench
@@ -876,8 +876,17 @@ export function createSgMessageHandlers(ctx) {
       for (const g of (Array.isArray(grounds) ? grounds : [])) {
         const gid = g && (g.id || g.groundId); if (!gid) continue;
         let recs = []; try { recs = (await ctx.readRideRecipes(gid)) || []; } catch { recs = []; }
-        const armedRecs = recs.filter((r) => r && rideArmable(r) && r.origin);
+        let armedRecs = recs.filter((r) => r && rideArmable(r) && r.origin);
         if (!armedRecs.length) continue;
+        // v2.74.2052 — OWN-ORIGIN rows only, anchored to the GROUND's identity (primaryHost — the
+        // TARGET_RESOLVE derivation), never armedRecs[0].origin: a foreign FIRST row mislabeled the ground and
+        // its foreign name/does poisoned the DOMAIN-MATCH vocab + the panel's GET_RIDE_ARMED_GROUNDS. The host
+        // keeps the own rows' stored form (byte-identical on clean grounds); no primaryHost → pre-2052 shape.
+        let anchor = ''; try { anchor = String(primaryHost(g) || '').toLowerCase(); } catch { anchor = ''; }
+        if (anchor) {
+          armedRecs = _ownRideRecords(armedRecs, anchor, gid);
+          if (!armedRecs.length) continue;   // pure pollution — nothing of the ground's own to offer
+        }
         // CX-9m (v2.74.1450) — each ground's DOMAIN VOCABULARY: the significant words of its armable recipes'
         // name+does ("warranty", "division", "announcements"…). An ask using a ground's distinctive vocabulary is
         // an IMPLICIT site naming ("pull up the warranty task…" without "on vendorsuite") — the DOMAIN-MATCH tier.
@@ -907,6 +916,37 @@ export function createSgMessageHandlers(ctx) {
       if (JSON.stringify(merged) !== JSON.stringify(recipes)) { await ctx.writeRideRecipes(groundId, merged); _bustRideArmedCache(); return merged; }
     } catch { /* the merge is an enhancement — never blocks a read */ }
     return recipes;
+  }
+
+  // v2.74.2052 — the OWN-ORIGIN read door (the panel's v1937 filter, chat.js _cachedHostRecipes, now mirrored
+  // SW-side): curated pollution is born armable (trust 1/enabled/accepted) and merges never delete, so a foreign
+  // row stored under a ground steered every raw reader — the live incident elected vendorsuite's vs_state as the
+  // Shopify ground's daily canary. Contract: compare the RECORD's own `origin` against the ground's host, BOTH
+  // sides bared (partitionRecipesByOrigin — scheme/www/slash stripped; apiHost NEVER enters the compare); the
+  // filter lives at the READ, the store keeps the rows (diagnosable — the one throttled log line below names
+  // them). NOT filtered on purpose: GET_RIDE_RECIPES (the Studio/Ground-panel MANAGEMENT door — the surface
+  // where a user can still see/disable/delete foreign rows) and the id-keyed pin/arm-guard lookups (an existing
+  // workflow pin bound to a foreign row would flip to 'recipe-gone' and 3-strike-disarm — a policy change, not
+  // a hygiene fix; the panel's own consuming reads already filter their side).
+  const _foreignLogAt = new Map();   // gid → last log ms (60s ≈ the panel's cache-fill cadence; palette loops would flood unthrottled)
+  function _ownRideRecords(recipes, host, gid) {
+    const h = String(host || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+    if (!h) return Array.isArray(recipes) ? recipes : [];   // no anchor, no verdict
+    const part = ridePartitionByOrigin(recipes, h);
+    if (part.foreign.length) {
+      const last = _foreignLogAt.get(gid || h) || 0;
+      if (Date.now() - last > 60000) {
+        _foreignLogAt.set(gid || h, Date.now());
+        try { Logger.info('ride', `RIDE_RESOLVE ▸ ${part.foreign.length} foreign recipe(s) stored under ${h} (${part.foreignOrigins.slice(0, 3).join(', ')}) — filtered from every reader`); } catch { /* */ }
+      }
+    }
+    return part.own;
+  }
+  // The merged read + the own-origin door in one call — what every PROJECTION/vocabulary reader consumes
+  // (palette, sweep offer, unconnected detection, answer, target-resolve). The write-back inside
+  // _readRideRecipesMerged stays FULL — filter-at-read must never become delete-at-write.
+  async function _readRideRecipesOwn(groundId, origin) {
+    return _ownRideRecords(await _readRideRecipesMerged(groundId, origin), origin, groundId);
   }
 
   // HL-1 (v2.74.1454) — the drive twin of _readRideRecipesMerged: read the Ground's drive-artifact collection,
@@ -1227,6 +1267,10 @@ export function createSgMessageHandlers(ctx) {
         // v2.74.1432 seed-into-forged → v2.74.1435 FULL merge-on-read: _readRideRecipesMerged (defined above) refreshes
         // existing records' mechanical fields from the catalog (the stale-record fix), preserves user state + harvested
         // records, and re-adds a hard-deleted curated id (disable/reject a curated leg you don't want — don't delete it).
+        // v2.74.2052 — deliberately NOT own-origin-filtered: this is the MANAGEMENT door (Studio + Ground panel +
+        // ground-view render the full collection with enable/reject/delete controls), so foreign rows must stay
+        // visible here for the user to act on; the panel's CONSUMING read (chat.js _cachedHostRecipes) filters
+        // its own side, and every SW projection reads through _readRideRecipesOwn instead.
         const recipes = await _readRideRecipesMerged(groundId, origin);
         sendResponse({ success: true, recipes });
       } catch (err) {
@@ -1634,7 +1678,7 @@ export function createSgMessageHandlers(ctx) {
               const _allG = await StorageManager.getAllGrounds();
               for (const c of connections) {
                 const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
-                const recs = await _readRideRecipesMerged(gid, c.origin);   // v1435 — merged read: the palette never projects a stale stored shape
+                const recs = await _readRideRecipesOwn(gid, c.origin);   // v1435 — merged read: the palette never projects a stale stored shape; v2052 — own-origin (a foreign row projects a split-identity leg: target = the foreign site, sessionHost = this ground)
                 const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
                 harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));   // v1340 (review A/§18) — carry the Ground for the run-time arm guard
                 // HL-1 (v2.74.1454) — the Ground's built-in DRIVE legs ride along (heterogeneous legs: the data
@@ -1716,7 +1760,7 @@ export function createSgMessageHandlers(ctx) {
                 // CX-9r — a virtual (catalog-armed, gid:null) origin projects the curated records directly; a real
                 // Ground reads merged storage (v1435) so user edits/harvested legs ride. Same records shape either way.
                 const recs = (gid != null)
-                  ? await _readRideRecipesMerged(gid, host)   // v1435 — merged read (catalog upgrades reach every projection)
+                  ? await _readRideRecipesOwn(gid, host)   // v1435 — merged read (catalog upgrades reach every projection); v2052 — own-origin
                   : curatedRidesForConnections([{ origin: host }], CONNECTOR_RECIPES);
                 const legs = harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid });
                 const scope = targets.length ? 'target' : (host === vocabHost ? 'vocab' : (host === activeHost ? 'tab' : 'global'));
@@ -1888,7 +1932,7 @@ export function createSgMessageHandlers(ctx) {
             // Cheap-first: the membership scan uses data already in hand, and the storage read only happens when
             // the TARGET ground contributed nothing at all — the rare case, not every turn (UC-1's fatal flaw).
             if (_gid && !retrieved.some((l) => String((l && (l.groundId || (l.tool && l.tool.groundId))) || '') === _gid)) {
-              const _recs = await _readRideRecipesMerged(_gid, _tOrigin);
+              const _recs = await _readRideRecipesOwn(_gid, _tOrigin);   // v2052 — own-origin: foreign rows must not inflate the "armed legs you cannot see" count
               unconnected = absentTargetLegs({ groundId: _gid, paletteLegs: retrieved, armedRecipes: (_recs || []).filter((r) => r && rideArmable(r)) });
               if (unconnected) {
                 unconnected.host = _tOrigin;   // the panel names the SITE — a gnd_ hash means nothing to a reader
@@ -1971,7 +2015,7 @@ export function createSgMessageHandlers(ctx) {
             const _seen = new Set(curated.map((l) => legRef(l)).filter(Boolean));
             for (const c of connections) {
               const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
-              const recs = await _readRideRecipesMerged(gid, c.origin);   // v1435 — merged read (the sweep projects fresh catalog shapes too)
+              const recs = await _readRideRecipesOwn(gid, c.origin);   // v1435 — merged read (the sweep projects fresh catalog shapes too); v2052 — own-origin (no foreign-leg offers to the fleet model)
               const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
               harvested.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));
             }
@@ -2169,10 +2213,14 @@ export function createSgMessageHandlers(ctx) {
             const allG = await StorageManager.getAllGrounds();
             for (const c of connections) {
               const gid = _groundIdForUrl(c.origin, allG); if (!gid) continue;
-              storedRide.push(...((await _readRideRecipesMerged(gid, c.origin)) || []));
+              storedRide.push(...((await _readRideRecipesOwn(gid, c.origin)) || []));   // v2052 — own-origin ("what can you do" must not claim foreign capabilities)
             }
           } else if (groundId && typeof ctx.readRideRecipes === 'function') {
-            storedRide.push(...((await ctx.readRideRecipes(groundId)) || []));
+            // v2052 — own-origin on the raw branch too; anchor = the ground's own identity (primaryHost).
+            const _raw = (await ctx.readRideRecipes(groundId)) || [];
+            let _gHost = '';
+            try { const _g = ((await StorageManager.getAllGrounds()) || []).find((x) => x && (x.id === groundId || x.groundId === groundId)); _gHost = String(primaryHost(_g) || ''); } catch { /* */ }
+            storedRide.push(..._ownRideRecords(_raw, _gHost, groundId));
           }
         } catch { /* best-effort — curated connection rides still list */ }
         try { ride = mergeRideCatalogForAnswer(ride, storedRide); } catch { /* */ }
@@ -2889,7 +2937,12 @@ export function createSgMessageHandlers(ctx) {
         let readiness = null;
         try { readiness = (await _readinessForGround(ctx, gid)).state; } catch { /* */ }
         let ride = [];   // §18 — the RIDE class (harvested/curated ride-recipes); buildIntentMenu shows armable run-now + a pending summary
-        try { ride = (await ctx.readRideRecipes(gid)) || []; } catch { /* */ }
+        try {
+          ride = (await ctx.readRideRecipes(gid)) || [];
+          // v2052 — own-origin: the menu must not count/name foreign legs. Anchor = the tab URL's host (the
+          // exact identity gid was resolved from above).
+          try { ride = _ownRideRecords(ride, new URL(url).host, gid); } catch { /* no parseable url → unfiltered */ }
+        } catch { /* */ }
         const menu = buildIntentMenu({ caps, goals, siteCatalog, ride, readiness, limit });
         Logger.info('background', `INTENT_MENU ▸ ${menu.entries.length} entr${menu.entries.length === 1 ? 'y' : 'ies'} (${menu.counts.taught} taught, ${menu.counts.teachable} teachable, ${menu.counts.goals} goal(s); readiness=${readiness || '—'}) [${String(gid).slice(-6)}]`);
         sendResponse({ success: true, groundId: gid, menu });
@@ -2942,6 +2995,11 @@ export function createSgMessageHandlers(ctx) {
           let origin = null; try { origin = g.url ? new URL(g.url).origin : (g.origin || null); } catch { origin = g.origin || null; }
           let host = g.name || String(gid); try { if (origin) host = new URL(origin).host; } catch { /* */ }
           let recipes = []; try { recipes = (await ctx.readRideRecipes(gid)) || []; } catch { recipes = []; }
+          // v2052 — own-origin: the workbench's per-ground counts/queue must not book foreign legs under this
+          // ground (the RIDE_RESOLVE ▸ log keeps the pollution visible; EDIT_RIDE_RECIPE still reads raw, so a
+          // foreign row remains deletable by id). Only filter when the ground has a real origin — the g.name
+          // fallback label is not a host and must not empty the list (_ownRideRecords bares scheme/www itself).
+          try { if (origin) recipes = _ownRideRecords(recipes, origin, gid); } catch { /* keep unfiltered */ }
           let caps = []; try { caps = ((await ctx.readSgCapabilities(gid)) || []).filter((c) => isActiveCapability(c)); } catch { caps = []; }
           if (!recipes.length && !caps.length) continue;   // skip empty Grounds — the workbench lists only sites with legs
           const driveSections = caps.length
@@ -3528,7 +3586,7 @@ export function createSgMessageHandlers(ctx) {
         for (const g of grounds) {
           if (!nearHosts.has(String(g.host).toLowerCase())) continue;
           try {
-            const recipes = await _readRideRecipesMerged(g.groundId, g.host);
+            const recipes = await _readRideRecipesOwn(g.groundId, g.host);   // v2052 — own-origin: foreign vocabulary must not join a near ground's fingerprint
             const legFp = vocabularyFingerprint({ legs: (recipes || []).map((r) => ({ name: r.name, does: r.does, params: r.params })) });
             const mine = fingerprints.find((f) => f.groundId === g.groundId);
             if (mine) { const merged = { ...mine.fp }; for (const [t, n] of Object.entries(legFp)) merged[t] = (merged[t] || 0) + n; mine.fp = merged; }

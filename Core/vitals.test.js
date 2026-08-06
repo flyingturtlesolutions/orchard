@@ -186,6 +186,29 @@ describe('vitals — pickCanary LEG-1 widening (v2.74.1593: gql reads + banked u
   });
 });
 
+describe('vitals — pickCanary declared-read widening (v2.74.2052: the v1936 plain-JSON-POST-read class)', () => {
+  // the live shape this closes: ups_recent — curated, POST, explicit write:false, contentType json,
+  // pulse:{kind:'liveness'}, params:[] — declared canary duty pickCanary could never elect (POST, no gql).
+  const UPS = { id: 'ups_recent', enabled: true, reviewState: 'accepted', provenance: 'curated', method: 'POST',
+    write: false, contentType: 'application/json', origin: 'www.ups.com', apiHost: 'webapis.ups.com',
+    endpoint: '/track/api/RecentlyTrackedData/GetRecentlyTrackedData?loc=en_US', pulse: { kind: 'liveness' }, params: [] };
+  it('a CURATED explicit write:false POST read now qualifies — and its pulse wins the score', () => {
+    const picked = pickCanary([UPS, { id: 'plain', enabled: true, reviewState: 'accepted', provenance: 'curated', method: 'GET', origin: 'www.ups.com', endpoint: '/x', params: [] }]);
+    assert.equal(picked.id, 'ups_recent', 'the declared liveness read is the ground’s canary, as the catalog says');
+  });
+  it('the widening is CURATED-only: a harvested/demonstrated write:false POST cannot self-declare into candidacy', () => {
+    assert.equal(pickCanary([{ ...UPS, provenance: 'harvested', lastOkAt: NOW }]), null, 'proven-but-harvested POST read stays out (no independent re-validation at this altitude)');
+    assert.equal(pickCanary([{ ...UPS, provenance: 'demonstrated', lastOkAt: NOW }]), null);
+  });
+  it('an ABSENT write declaration on a POST still fails the line (the fail-safe governs the undeclared)', () => {
+    const undeclared = { ...UPS }; delete undeclared.write;
+    assert.equal(pickCanary([undeclared]), null);
+  });
+  it('required params still disqualify the declared-read class (ups_track shape)', () => {
+    assert.equal(pickCanary([{ ...UPS, id: 'ups_track', pulse: undefined, params: [{ name: 'tracking', required: true }] }]), null);
+  });
+});
+
 describe('vitals — KA-0/KA-1 (v2.74.1599): learned idle windows + the keep-alive plan', () => {
   const H = 3600e3, M = 60e3;
   it('kaSetOptIn toggles; re-enabling clears futility (the site policy may have changed)', () => {

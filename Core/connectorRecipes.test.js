@@ -861,3 +861,18 @@ describe('drillTargetRedirect (v2.74.1863) — the door a user-named identifier 
     assert.equal(drillTargetRedirect('x', [{ id: 'x', drill: { via: 'x', param: 'p', matchOn: 'm' } }]), null);
   });
 });
+
+// ── v2.74.2051 — the NAME-rung ban (user ruling, live 22:45Z run: 2 of 3 "matched" rows were name-rung false
+// positives — a Shopify name search matches *a* person, not *the* homeowner; email/phone/address identify, a
+// name only resembles). Catalog-wide ratchet: a contact-name rung must never return to ANY joinKey ladder.
+describe('catalog — joinKey ladders carry no contact-NAME rungs', () => {
+  it('every declared ladder identifies by email/phone/field, never by name', () => {
+    for (const r of CONNECTOR_RECIPES.filter((x) => Array.isArray(x.joinKey))) {
+      for (const rung of r.joinKey) {
+        if (rung && typeof rung === 'object') {
+          assert.notEqual(rung.type, 'name', `${r.id}: a contact-name joinKey rung is a false-positive machine`);
+        }
+      }
+    }
+  });
+});

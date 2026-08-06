@@ -542,7 +542,17 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     _shopLive.set(origin, { name, at: Date.now() });
     return { live: true, name };
   }
-  async function _acquireSniffedCsrf(tabId, origin, { force = false, wake = false } = {}) {
+  // v2.74.2049 — SINGLE-FLIGHT per origin: the vitals tick and a concurrent caller raced one tab (live 18:53:14 —
+  // two simultaneous soft-wakes), each paying its own wake + 8s poll. Concurrent acquires now share one attempt.
+  const _csrfAcquiring = new Map();   // origin → in-flight acquire promise
+  function _acquireSniffedCsrf(tabId, origin, opts = {}) {
+    const inflight = _csrfAcquiring.get(origin);
+    if (inflight) return inflight;
+    const p = _acquireSniffedCsrfInner(tabId, origin, opts).finally(() => _csrfAcquiring.delete(origin));
+    _csrfAcquiring.set(origin, p);
+    return p;
+  }
+  async function _acquireSniffedCsrfInner(tabId, origin, { force = false, wake = false } = {}) {
     let c = _sniffedCsrf.get(origin);
     // v1401 — seed the in-memory cache from the PERSISTED bank when memory is cold/stale (SW restart cleared it): a
     // token captured during an earlier admin interaction is reused, so an idle tab needn't re-fire a request first.
@@ -637,10 +647,21 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     for (const host of hosts) {
       try {
         if (await _bankedCsrf(host)) { summary.push(`${host}:banked`); continue; }
+        const rec = recipeForOrigin(host);
+        // v2.74.2049 — a COOKIE-class host (csrfCookie declared) is healthy iff the cookie exists: its working
+        // auth is the in-page cookie read at invoke time, and an idle SPA never echoes the header — so the sniff
+        // bank is a PERMANENT false negative here (a full day of ':miss' + ~57 soft-wake tab activations measured
+        // against a leg that was never broken). chrome.cookies is already granted: probe the declared cookie, no
+        // wake, no tab touch. ':no-cookie' is the honest signed-out/cleared signal the old ':miss' impersonated.
+        if (rec && rec.csrfCookie) {
+          let hit = null;
+          try { hit = await chrome.cookies.get({ url: `https://${host}/`, name: String(rec.csrfCookie) }); } catch { hit = null; }
+          summary.push(`${host}:${hit && hit.value ? 'cookie' : 'no-cookie'}`);
+          continue;
+        }
         const last = _prewarmAt.get(host) || 0;
         if (Date.now() - last < PREWARM_GAP_MS) { summary.push(`${host}:throttled`); continue; }
         _prewarmAt.set(host, Date.now());
-        const rec = recipeForOrigin(host);
         const patterns = rideTabUrlPatterns(host, (rec && rec.appHost) || host);
         let tabs = [];
         try { tabs = await chrome.tabs.query({ url: patterns }); } catch { tabs = []; }
@@ -871,6 +892,35 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const urlPatterns = rideTabUrlPatterns(origin, appHost);
           if (!urlPatterns.length) { try { Logger.info('ride', `INVOKE ▸ blocked session-no-recipe (no url patterns) [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const expectedAccount = (payload && payload.account) || null;
+
+          // v2.74.2052 — the COOKIE-CLASS signed-out fail-fast, HEADLESS only, BEFORE any tab is touched. A
+          // cookie-class leg (csrfCookie declared — UPS) has no verifyIdentity probe, so a signed-out headless
+          // invoke used to march all the way to the content-script belt and die 'no-csrf' — which
+          // Core/trigger.isTransientFailure does NOT recognize, so the clock counted a closed laptop toward the
+          // 3-strike auto-disarm. The session cookie itself is the honest pre-flight signal: probe it from the
+          // SW (chrome.cookies is granted; precedent = the v2049 prewarm above, `:no-cookie` — no wake, no tab).
+          // Probe the ride PAGE host (origin || appHost), NEVER apiHost — the cookie lives on www.ups.com while
+          // the API is webapis.ups.com. Only ABSENCE is decisive: chrome.cookies sees HttpOnly cookies the
+          // belt's document.cookie cannot, so presence proves nothing and falls through to the normal path (a
+          // present-but-stale token still surfaces via the belt / http-401 — the belt stays the last-resort
+          // backstop). The error string is a CONTRACT: exactly 'not-logged-in' (trigger.js transient — no
+          // disarm strike; connectionPresence → signed-out registry; the panel's auth branches). Interactive
+          // invokes keep today's behavior end to end — the identity gate has no interactive cookie flow to
+          // mirror, so the belt's verdict remains theirs.
+          if (payload && payload.headless === true && payload.csrfCookie) {
+            const _ckHost = origin || appHost;
+            if (_ckHost) {
+              let _ck = null;
+              try { _ck = await chrome.cookies.get({ url: `https://${_ckHost}/`, name: String(payload.csrfCookie) }); } catch { _ck = null; }
+              if (!_ck || !_ck.value) {
+                void reportAuthSignal({ origin: _ckHost, status: 'signed-out', cause: 'not-logged-in', source: 'ride' });
+                try { Logger.info('ride', `INVOKE ▸ blocked not-logged-in (headless) @${_ckHost} [${(payload && payload.recipeId) || '?'}] — no ${payload.csrfCookie} cookie`); } catch { /* */ }
+                sendResponse({ success: false, error: 'not-logged-in', origin: _ckHost, hint: `sign in to ${_ckHost} to continue` });
+                return;
+              }
+            }
+            _mark('cookie-gate');
+          }
 
           // 1) Prefer an already-open, live, logged-in tab (the user's real context) — §16 default path.
           //    Prefer a tab whose URL already carries urlParam (e.g. /store/<handle>/) over a bare admin root.

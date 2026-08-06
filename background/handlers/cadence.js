@@ -41,6 +41,20 @@ const RUN_MARKER_REFRESH_MS = 60_000;
 
 let _ctx = null;
 
+// v2.74.2052 — the SW reads MERGED records, never the raw store. The raw store freezes mechanical fields at
+// seed-time shape until a PANEL read happens to trigger the v1435 catalog merge (GET_RIDE_RECIPES) — so a
+// catalog upgrade (live: the v2051 joinKey ladder dropping its name rungs) reached the panel immediately but the
+// scheduled path only after someone opened a desk — the user as state manager, the exact iron-principle failure.
+// ONE merge implementation (the handler), never a second copy here; the raw store is the offline fallback
+// (stale beats none — the run must not die because a merge read failed).
+async function _mergedReadRecipes(groundId) {
+  try {
+    const r = await _ctx.invokeSgHandler('GET_RIDE_RECIPES', { groundId });
+    if (r && r.success !== false && Array.isArray(r.recipes)) return r.recipes;
+  } catch { /* fall through */ }
+  try { return (await _ctx.readRideRecipes(groundId)) || []; } catch { return []; }
+}
+
 // ── registration — copy vitals.js: alarms are durable across SW restarts, only the LISTENER re-registers ──────────
 export function initCadence(ctx) {
   _ctx = (ctx && typeof ctx === 'object') ? ctx : null;
@@ -421,7 +435,7 @@ async function _runStepInner(clause, ctx) {
   // worker waiting for a human who isn't there. With the flag the same verdict fails fast as `not-logged-in`,
   // which Core/trigger.isTransientFailure then keeps out of the auto-disarm count.
   const invoke = (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...payload, headless: true });
-  const readRecipes = _ctx.readRideRecipes;
+  const readRecipes = _mergedReadRecipes;   // v2.74.2052 — merged, never raw (see the helper)
   // v2.74.2047 — keep the in-flight marker ALIVE across every long step (see RUN_MARKER_REFRESH_MS): each
   // completion beat re-stamps `cadence:run:<wfId>` at most once a minute, so priorRunVerdict's 5-min window
   // measures from the last life-sign and a slow run — a 121-invoke EACH sweep, a 121-row map lookup chain, a
@@ -533,7 +547,7 @@ async function _resolveDrift(wf) {
   }
   await Promise.all(pins.map(async (pin) => {
     let ok = false;
-    try { ok = (await rideStepResolvable({ pinned: pin }, { readRecipes: _ctx.readRideRecipes })) === true; } catch { ok = false; }
+    try { ok = (await rideStepResolvable({ pinned: pin }, { readRecipes: _mergedReadRecipes })) === true; } catch { ok = false; }
     out.set(pin, ok);
   }));
   return out;

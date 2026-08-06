@@ -731,12 +731,14 @@ export const CONNECTOR_RECIPES = [
     },
     joinKey: [
       'AddressLine1',                          // 1. the warranty SHIPPING address - stable across systems
-      { contact: 'primary', type: 'email' },   // 2-4. the PRIMARY homeowner contact
+      { contact: 'primary', type: 'email' },   // 2-3. the PRIMARY homeowner contact
       { contact: 'primary', type: 'phone' },
-      { contact: 'primary', type: 'name' },
-      { contact: 'other', type: 'email' },     // 5-7. the OTHER homeowner contact (a different person on the task)
+      { contact: 'other', type: 'email' },     // 4-5. the OTHER homeowner contact (a different person on the task)
       { contact: 'other', type: 'phone' },
-      { contact: 'other', type: 'name' },
+      // v2.74.2051 — NAME rungs REMOVED (user ruling, live 22:45Z run): a Shopify name search matches *a* person,
+      // not *the* homeowner — 2 of 3 "matched" rows were name-rung false positives (same/similar names are
+      // common; the by-name leg's own `does` already carries that warning). Email/phone/address identify; a name
+      // only resembles. An unmatched row is an honest miss → the create path, never a wrong join.
     ],
     // v2.74.1519 — TicketId/TaskId join the drill match (the live miss: "ticket 4867009" bound cleanly but the
     // match fields were address-shaped only, so a warranty-ticket ask could never find its row).
@@ -783,12 +785,11 @@ export const CONNECTOR_RECIPES = [
     },
     joinKey: [
       'AddressLine1',                          // 1. the warranty SHIPPING address - stable across systems
-      { contact: 'primary', type: 'email' },   // 2-4. the PRIMARY homeowner contact
+      { contact: 'primary', type: 'email' },   // 2-3. the PRIMARY homeowner contact
       { contact: 'primary', type: 'phone' },
-      { contact: 'primary', type: 'name' },
-      { contact: 'other', type: 'email' },     // 5-7. the OTHER homeowner contact (a different person on the task)
+      { contact: 'other', type: 'email' },     // 4-5. the OTHER homeowner contact (a different person on the task)
       { contact: 'other', type: 'phone' },
-      { contact: 'other', type: 'name' },
+      // v2.74.2051 — name rungs removed (false positives — see vs_warranty_tasks' ladder note)
     ],   // PM-7 (v1634) — same ladder on the detail read
     // v2.74.1860 (live 155750: THREE http-500s in a row) — the `does` is now a REFUSAL, not a preference. Every
     // number a person can SEE is the wrong one: the list renders `#<TicketId>` and this endpoint takes the

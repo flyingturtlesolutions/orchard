@@ -45,12 +45,22 @@ export function canaryPlaceholdersFillable(r) {
  * (none, or the banked urlParam — LEG-1), no required params, PROVEN (curated or ever-succeeded). Preference:
  * `pulse`-marked (the digest legs are exactly canary-shaped) > curated > freshest lastOkAt. Null when the ground
  * has no safe canary — the sweep says so honestly rather than improvising params.
+ *
+ * v2.74.2052 — the DECLARED-READ class joins candidacy: a CURATED record with an explicit `write: false` (the
+ * v1936 plain-JSON-POST-read shape — UPS's `ups_recent`, `pulse:{kind:'liveness'}`, params:[], the catalog's own
+ * comment calls it "the ground's CANARY") was structurally excluded by the GET/HEAD-or-gql line, so its declared
+ * canary duty was unservable and the ground sat 'no-canary' forever. The §9 story is unchanged: recipeToLeg
+ * projects `write:false` as mode 'ask' → planExec stamps `readOnly:true` → BOTH executor belts ride the v1941
+ * readOnly carve-out (belt #2's re-validation is declarative for this class, which is why candidacy here demands
+ * the CURATED provenance — a harvested/demonstrated record cannot self-declare its way into unattended runs;
+ * an ABSENT `write` on a non-GET still fails the line exactly as before (the fail-safe governs the undeclared).
  */
 export function pickCanary(recipes) {
   const cands = (Array.isArray(recipes) ? recipes : []).filter((r) => r
     && armable(r)
     && r.write !== true
-    && (['GET', 'HEAD'].includes(String(r.method || 'GET').toUpperCase()) || r.gql === true)
+    && (['GET', 'HEAD'].includes(String(r.method || 'GET').toUpperCase()) || r.gql === true
+      || (r.write === false && r.provenance === 'curated'))
     && canaryPlaceholdersFillable(r)
     && !(Array.isArray(r.params) && r.params.some((p) => p && p.required))
     && (r.provenance === 'curated' || r.lastOkAt));

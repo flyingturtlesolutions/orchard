@@ -19,7 +19,8 @@ import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveInc
 import { buildAdminDashboardSpec, buildDeskDashboardSpec, buildFrontDashboardSpec, ageWord } from '../../Core/vitalsDashboard.js';
 import { tickOk, tickRouteMiss } from '../../Core/routeHeal.js';
 import { heartbeatTargets } from '../../Core/connectionPresence.js';
-import { armable } from '../../Core/rideRecipe.js';
+import { armable, partitionRecipesByOrigin } from '../../Core/rideRecipe.js';   // v2.74.2052 — the OWN-ORIGIN read door (the vs_state-as-shopify-canary incident)
+import { primaryHost } from '../../Core/groundDedup.js';   // v2.74.2052 — the ground's OWN identity anchors the filter (never the modal-of-records host)
 import { invokeRideRecipe } from '../../Core/rideStep.js';   // DESIGN_cadence.md §12 (v1715) — share the RUNNER: one resolve→plan→invoke for the canary AND the workflow step
 
 const TICK_ALARM = 'vitals:tick';
@@ -289,7 +290,30 @@ async function _presenceSweep(s) {
   } catch { /* */ }
 }
 
-/** Every ground holding ≥1 armable ride recipe, with its (modal) host + the armable set. */
+// v2.74.2052 — one throttled diagnosability line per polluted ground (the panel's shape, chat.js v1937/v2049):
+// the filter hides foreign rows from every reader, so the LOG is what keeps the pollution visible. 60s per
+// ground matches the panel's cache-fill cadence; _vitalsGrounds runs inside per-entry sweep loops, so unthrottled
+// it would flood a single keepalive pass.
+const _foreignLogAt = new Map();
+function _logForeignRows(gid, host, part) {
+  try {
+    const last = _foreignLogAt.get(gid) || 0;
+    if (Date.now() - last < 60_000) return;
+    _foreignLogAt.set(gid, Date.now());
+    Logger.info('conn', `RIDE_RESOLVE ▸ ${part.foreign.length} foreign recipe(s) stored under ${host} (${part.foreignOrigins.slice(0, 3).join(', ')}) — filtered from every reader`);
+  } catch { /* the line must never break the read */ }
+}
+
+/** Every ground holding ≥1 armable OWN-ORIGIN ride recipe, with its host + the armable set.
+ * v2.74.2052 — the armed set is filtered to the ground's OWN origin before anything reads it: this ONE build
+ * site feeds pickCanary (the vs_state-as-shopify-canary incident), dueForDaily (foreign lastOkAt marked a
+ * ground 'fresh'), the presence gate, catch-up matching, keepalive, VITALS_STATUS and VITALS_DASHBOARD.
+ * The anchor is the ground's OWN identity (primaryHost — the TARGET_RESOLVE/discovery derivation), NEVER the
+ * modal-of-records host: on a majority-foreign store (UPS: 33 foreign vs 2 own) the modal anchor keeps the
+ * pollution and drops the real legs, and also mis-names the sweep's log/presence/freshness host. A ground whose
+ * shape yields no primaryHost falls back to the pre-2052 modal election, unfiltered (no anchor, no verdict).
+ * The exposed `host` keeps the OWN rows' stored form (what the registry/tab layer keys on) — byte-identical to
+ * the modal host on every clean ground. */
 async function _vitalsGrounds() {
   const out = [];
   try {
@@ -297,8 +321,15 @@ async function _vitalsGrounds() {
     for (const g of (Array.isArray(grounds) ? grounds : [])) {
       const gid = g && (g.id || g.groundId); if (!gid) continue;
       let recs = []; try { recs = (await _ctx.readRideRecipes(gid)) || []; } catch { recs = []; }
-      const armed = recs.filter((r) => r && armable(r) && r.origin);
+      let armed = recs.filter((r) => r && armable(r) && r.origin);
       if (!armed.length) continue;
+      let anchor = ''; try { anchor = String(primaryHost(g) || '').toLowerCase(); } catch { anchor = ''; }
+      if (anchor) {
+        const part = partitionRecipesByOrigin(armed, anchor);
+        if (part.foreign.length) _logForeignRows(gid, anchor, part);
+        armed = part.own;
+        if (!armed.length) continue;   // pure pollution — nothing of the ground's own to visit (the log line says why)
+      }
       const counts = {};
       for (const r of armed) { const o = String(r.origin).toLowerCase(); counts[o] = (counts[o] || 0) + 1; }
       const host = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
@@ -320,7 +351,12 @@ async function _runCanary(groundId, rec) {
     // §12 (v1715) — the canary rides the SHARED runner (Core/rideStep.invokeRideRecipe), not its own copy of
     // recipeToLeg→planExec→INVOKE_SESSION. Contract preserved: unresolvable (no leg / no plan) → null, exactly
     // as before; an invoke reply maps to the {success, error, status} shape the sweep callers read.
-    const r = await invokeRideRecipe(rec, groundId, { invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', payload) });
+    // v2.74.2052 — `headless: true`, matching cadence.js:437 / fleet.js:42 (the H-1a/v2043 precedent): every
+    // canary here is CLOCK-driven (daily sweep, keepalive, confirm, catch-up), so the executor must take its
+    // headless branches — the identity gate fails fast `not-logged-in` instead of _focusTab+_waitForReauth
+    // (a sweep must never steal the screen), and the new cookie-class gate can answer an honest signed-out
+    // BEFORE any tab is touched (the `no-csrf`-instead-of-`not-logged-in` incident).
+    const r = await invokeRideRecipe(rec, groundId, { invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...payload, headless: true }) });
     if (r.error === 'no-leg' || r.error === 'no-plan') return null;
     return { success: r.ok, error: r.ok ? null : (r.error || null), status: r.status || null };
   } catch { return null; }
@@ -396,7 +432,18 @@ async function _confirmFire(groundId) {
     if (!_ctx) return;
     const s = await _settings(); if (!s.enabled) return;
     let recs = []; try { recs = (await _ctx.readRideRecipes(groundId)) || []; } catch { return; }
-    const armed = recs.filter((r) => r && armable(r) && r.origin);
+    let armed = recs.filter((r) => r && armable(r) && r.origin);
+    // v2.74.2052 — this reader bypasses _vitalsGrounds (raw read by groundId), so it needs its own own-origin
+    // door: same anchor rule (the ground's identity; no anchor → unfiltered, the pre-2052 shape).
+    try {
+      const g = ((await StorageManager.getAllGrounds()) || []).find((x) => x && (x.id === groundId || x.groundId === groundId));
+      const anchor = String(primaryHost(g) || '').toLowerCase();
+      if (anchor) {
+        const part = partitionRecipesByOrigin(armed, anchor);
+        if (part.foreign.length) _logForeignRows(groundId, anchor, part);
+        armed = part.own;
+      }
+    } catch { /* best-effort — the confirm still runs on the unfiltered set rather than dying */ }
     const canary = pickCanary(armed); if (!canary) return;
     const host = String(canary.origin || '').toLowerCase();
     const ps = await _presenceStatus(host);

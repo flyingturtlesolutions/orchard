@@ -96,6 +96,9 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   if (e.gql === true) rec.gql = true;
   if (e.shopProbe === true) rec.shopProbe = true;
   if (e.verifyIdentity === true) rec.verifyIdentity = true;
+  // v2.74.2049 — an explicit NO survives hop 1 too (the v1936 write:false class: absent ≠ declared-off; UPS
+  // declares verifyIdentity:false and the seeded record must say so, not merely omit it).
+  else if (e.verifyIdentity === false) rec.verifyIdentity = false;
   if (e.urlParam && typeof e.urlParam === 'object') rec.urlParam = e.urlParam;
   if (e.pulse != null) rec.pulse = e.pulse;
   if (e.drill && typeof e.drill === 'object') rec.drill = e.drill;
@@ -227,6 +230,46 @@ export function editMeta(recipe, { name, does } = {}) {
 export function armable(recipe) {
   return !!(recipe && recipe.enabled && recipe.reviewState === 'accepted');
 }
+
+// ── v2.74.2052 — the OWN-ORIGIN read door (the SW mirror of the panel's v1937 filter, chat.js _cachedHostRecipes) ──
+// Curated-provenance pollution is born armable (trust 1 / enabled / accepted — see recipeFromCatalogEntry), and
+// merges never delete, so a foreign row stored under a ground steers EVERY reader that consumes the store raw
+// (live: the Shopify ground's daily canary elected vendorsuite's vs_state — `VITALS ▸ visit admin.shopify.com
+// canary [vs_state] → FAIL no-reply`). The contract, from the panel precedent:
+//   · compare the RECORD's own `origin` against the ground's host, BOTH sides bared (v1937: baring only the
+//     record side dropped both legitimate legs on the first www ground and reported them as the pollution);
+//   · `apiHost` / endpoint hosts NEVER enter the compare — they are executor transport fields (UPS's legitimate
+//     rows are origin www.ups.com with apiHost webapis.ups.com);
+//   · the anchor must be the ground's OWN identity (ground.url / primaryHost), never the modal-of-records host —
+//     on a majority-foreign store the modal anchor KEEPS the pollution and DROPS the real legs;
+//   · the filter lives at the READ, never the write: storage keeps the foreign rows (diagnosable, deliberate).
+
+/** Bare a host/origin for the own-origin compare: lowercase; strip scheme, ONE leading `www.`, trailing slashes. PURE. */
+export function bareOrigin(s) {
+  return String(s || '').toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+}
+
+/**
+ * Partition a ground's stored records into OWN (bare(record.origin) === bare(host)) and FOREIGN. PURE.
+ * `foreignOrigins` = the distinct BARE foreign origins (empty origin → '(no origin)'), for the caller's one
+ * diagnosability line (`RIDE_RESOLVE ▸ N foreign recipe(s) stored under <host> (<origins>) — filtered …`).
+ * An EMPTY anchor host returns everything as own — no anchor, no verdict (the caller has nothing to compare to).
+ * @returns {{ own: Array, foreign: Array, foreignOrigins: string[] }}
+ */
+export function partitionRecipesByOrigin(recipes, host) {
+  const list = Array.isArray(recipes) ? recipes : [];
+  const hb = bareOrigin(host);
+  if (!hb) return { own: list, foreign: [], foreignOrigins: [] };
+  const own = []; const foreign = []; const names = new Set();
+  for (const r of list) {
+    if (r && bareOrigin(r.origin) === hb) own.push(r);
+    else { foreign.push(r); names.add(bareOrigin(r && r.origin) || '(no origin)'); }
+  }
+  return { own, foreign, foreignOrigins: [...names] };
+}
+
+/** The own-origin subset alone (the common reader shape). PURE. */
+export function ownOriginRecipes(recipes, host) { return partitionRecipesByOrigin(recipes, host).own; }
 
 /**
  * BULK-accept every PENDING READ recipe (safetyClass 'auto' = a GET, the §9 unattended-safe class) in one pass. PURE.

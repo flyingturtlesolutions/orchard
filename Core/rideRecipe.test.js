@@ -8,6 +8,7 @@ import {
   seedFromCatalog, mergeRecipes, setEnabled, review, downgradeSafety, editMeta, armable, acceptPendingReads,
   curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries,
   hostRideInventory, formatHostRideInventory,
+  bareOrigin, partitionRecipesByOrigin, ownOriginRecipes,
 } from './rideRecipe.js';
 import { recipeToLeg } from './connectorLeg.js';   // PP-3 (v1661) — hop 3, so the Invariant-#3 test can assert on the LEG rather than the record
 
@@ -88,6 +89,11 @@ describe('rideRecipe — seed from catalog', () => {
     for (const k of ['itemUrl', 'listUrl', 'write', 'gql', 'csrf', 'bodyType', 'verifyIdentity', 'persistedOp', 'shopProbe', 'pulse', 'drill', 'urlParam', 'resolve']) {
       assert.equal(k in plain, false, `plain read must not carry ${k}`);
     }
+  });
+  it('an explicit verifyIdentity:false survives hop 1 — declared-off is a declaration, not an absence (v2049)', () => {
+    const rec = recipeFromCatalogEntry({ id: 'u', method: 'POST', endpoint: '/t', appHost: 'www.ups.com', verifyIdentity: false, write: false }, { origin: 'www.ups.com' });
+    assert.equal(rec.verifyIdentity, false, 'the declared NO must be stored, not dropped (the v1936 write:false class)');
+    assert.equal(rec.write, false);
   });
 });
 
@@ -280,6 +286,72 @@ describe('PP-4 (v2.74.1680) — the pipeline-gate axes ride the SEEDED path (Inv
     assert.equal(leg.tool.reversible, true);
     assert.equal(leg.tool.outward, false);
     assert.equal(leg.safety, 'confirm', 'the pipeline axes must NOT relax the ordinary write gate');
+  });
+});
+
+describe('own-origin partition — the SW read-door filter (v2.74.2052, the v1937 panel semantics)', () => {
+  const UPS_OWN = [
+    // legitimate UPS rows: origin www.ups.com, API on a SIBLING host — apiHost must never enter the compare
+    { id: 'ups_recent', origin: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', write: false },
+    { id: 'ups_track', origin: 'www.ups.com', apiHost: 'webapis.ups.com', method: 'POST', write: false },
+  ];
+  const FOREIGN = [
+    { id: 'vs_state', origin: 'vendorsuite.drhorton.com', method: 'GET' },
+    { id: 'sh_pulse', origin: 'admin.shopify.com', method: 'POST', gql: true },
+    { id: 'no_origin', method: 'GET' },   // empty origin — dropped, named '(no origin)'
+  ];
+
+  it('bareOrigin: lowercase; strips scheme, ONE leading www., trailing slashes', () => {
+    assert.equal(bareOrigin('https://www.ups.com/'), 'ups.com');
+    assert.equal(bareOrigin('WWW.UPS.COM'), 'ups.com');
+    assert.equal(bareOrigin('admin.shopify.com'), 'admin.shopify.com');
+    assert.equal(bareOrigin('http://x.test///'), 'x.test');
+    assert.equal(bareOrigin(''), '');
+    assert.equal(bareOrigin(null), '');
+  });
+
+  it('THE WWW-GROUND CASE (the v1937 lesson): a www ground KEEPS its own records — bare BOTH sides', () => {
+    // v1919-b bare'd only the record side and dropped both legitimate UPS legs on the first www ground,
+    // reporting the ground's own rows as pollution. The compare must be bare-to-bare.
+    const p = partitionRecipesByOrigin(UPS_OWN, 'www.ups.com');
+    assert.equal(p.own.length, 2, 'both legitimate rows kept on the www ground');
+    assert.equal(p.foreign.length, 0);
+    // and the same records against the bare form of the host — subdomain-free equivalence, both directions
+    assert.equal(partitionRecipesByOrigin(UPS_OWN, 'ups.com').own.length, 2);
+    assert.equal(partitionRecipesByOrigin([{ id: 'a', origin: 'ups.com' }], 'www.ups.com').own.length, 1);
+  });
+
+  it('foreign rows drop; foreignOrigins are BARE names (the v2.74.2049 names-list fix), empty origin → (no origin)', () => {
+    const p = partitionRecipesByOrigin([...UPS_OWN, ...FOREIGN], 'www.ups.com');
+    assert.deepEqual(p.own.map((r) => r.id), ['ups_recent', 'ups_track']);
+    assert.equal(p.foreign.length, 3);
+    assert.deepEqual([...p.foreignOrigins].sort(), ['(no origin)', 'admin.shopify.com', 'vendorsuite.drhorton.com']);
+  });
+
+  it('apiHost NEVER enters the compare — a differing apiHost must not mark a record foreign', () => {
+    // the exact inversion hazard: an apiHost-aware compare silently kills the UPS ground's only legs
+    assert.equal(ownOriginRecipes(UPS_OWN, 'www.ups.com').length, 2);
+  });
+
+  it('the anchor is the GROUND host, so a majority-foreign store still keeps only the own rows', () => {
+    // UPS live shape: 33 foreign vs 2 own — a modal-of-records anchor would invert the fix
+    const store = [...FOREIGN, ...FOREIGN, ...FOREIGN, ...UPS_OWN];
+    const p = partitionRecipesByOrigin(store, 'www.ups.com');
+    assert.deepEqual(p.own.map((r) => r.id), ['ups_recent', 'ups_track']);
+  });
+
+  it('an EMPTY anchor host filters nothing (no anchor, no verdict); scheme/slash on the anchor is tolerated', () => {
+    const p = partitionRecipesByOrigin([...UPS_OWN, ...FOREIGN], '');
+    assert.equal(p.own.length, 5, 'no anchor → everything passes through');
+    assert.equal(p.foreign.length, 0);
+    assert.equal(ownOriginRecipes(UPS_OWN, 'https://www.ups.com/').length, 2);
+  });
+
+  it('malformed input: non-array recipes → empty own; null rows land in foreign as (no origin)', () => {
+    assert.deepEqual(partitionRecipesByOrigin(null, 'x.test'), { own: [], foreign: [], foreignOrigins: [] });
+    const p = partitionRecipesByOrigin([null, { id: 'a', origin: 'x.test' }], 'x.test');
+    assert.equal(p.own.length, 1);
+    assert.deepEqual(p.foreignOrigins, ['(no origin)']);
   });
 });
 
