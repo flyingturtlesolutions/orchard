@@ -4,7 +4,7 @@
 
 const assert = require('node:assert/strict');
 const {
-  parseDoc, formatDoc, leaseState, isOrphan, resultFileName,
+  parseDoc, formatDoc, leaseState, isOrphan, resultFileName, dedupeName,
   ackedSet, inboxRows, ackRow, NEXT_BY_VERDICT, filesFingerprint, filesPaths,
   LEASE_TTL_MIN, ORPHAN_H,
 } = require('./testbus.cjs');
@@ -227,6 +227,32 @@ it('never yields a path containing a separator — the bug was one impossible fi
 
 it('an empty / absent files: yields no paths (caller treats that as "no claim")', () => {
   for (const s of ['', '   ', ',', ' , ,', null, undefined]) assert.deepEqual(filesPaths(s), []);
+});
+
+// ── dedupeName — append-only survives the same-minute collision (v2.74.2044, glf F2) ─────────────────────────────
+//
+// resultFileName is minute-precision, so a second attempt at the same test+verdict inside one minute produced the
+// SAME basename and scrubbedWrite overwrote the first — the one edge where "two attempts that disagree are DATA"
+// silently lost an attempt. dedupeName suffixes -2, -3, … until free; the ack basename regex accepts the suffix.
+
+it('no collision → the name passes through untouched', () => {
+  assert.equal(dedupeName('t--20260806T1300Z--PASS.md', () => false), 't--20260806T1300Z--PASS.md');
+});
+
+it('a collision suffixes -2, then -3 — never overwrites, never skips', () => {
+  const taken = new Set(['t--20260806T1300Z--PASS.md']);
+  assert.equal(dedupeName('t--20260806T1300Z--PASS.md', (b) => taken.has(b)), 't--20260806T1300Z--PASS-2.md');
+  taken.add('t--20260806T1300Z--PASS-2.md');
+  assert.equal(dedupeName('t--20260806T1300Z--PASS.md', (b) => taken.has(b)), 't--20260806T1300Z--PASS-3.md');
+});
+
+it('a deduped basename still parses in the ack fallback regex (test id + verdict recoverable)', () => {
+  // the CLI's pruned-file fallback: ^(.+)--\d{8}T\d{4}Z--([A-Z]+)(?:-\d+)?\.md$
+  const re = /^(.+)--\d{8}T\d{4}Z--([A-Z]+)(?:-\d+)?\.md$/;
+  const m = re.exec('v2.74.2036-sw-headless-map-write--20260806T1300Z--INCONCLUSIVE-2.md');
+  assert.ok(m, 'suffixed name must parse');
+  assert.equal(m[1], 'v2.74.2036-sw-headless-map-write');
+  assert.equal(m[2], 'INCONCLUSIVE');
 });
 
 it('a comma-form claim now produces a fingerprint that MOVES when a claimed file changes', () => {

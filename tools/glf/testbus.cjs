@@ -39,8 +39,12 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
-const LEASE_FILE = 'logs/run/grader.lease';
-const ACK_FILE = 'logs/run/builder-ack.jsonl';
+// v2.74.2044 (glf F3) — every repo-relative path anchors to the EXTENSION REPO ROOT (tools/glf/../..), never
+// process.cwd(): run from any directory, `logs/run/*` no longer forks a parallel lease/ack ledger, and a claimed
+// file no longer reads <MISSING> just because the cwd was wrong (which silently STALEd every open test).
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
+const LEASE_FILE = path.join(REPO_ROOT, 'logs', 'run', 'grader.lease');
+const ACK_FILE = path.join(REPO_ROOT, 'logs', 'run', 'builder-ack.jsonl');
 const LEASE_TTL_MIN = 15;          // 3 missed 5-minute ticks; below this a live grader would have renewed
 const ORPHAN_H = 24;               // stale build + this much silence â†’ the owner is presumed gone
 const RESULT_VERDICTS = /^(PASS|FAIL|INCONCLUSIVE|UNMAPPED|ORPHANED)$/;
@@ -181,15 +185,28 @@ function filesPaths(filesStr) {
   return String(filesStr || '').split(/[\s,]+/).filter(Boolean);
 }
 
+/** v2.74.2044 (glf F2) — append-only means NEVER overwrite. resultFileName is minute-precision, so a second
+ * attempt at the same test+verdict inside one minute produced the SAME name and scrubbedWrite overwrote the
+ * first — the one edge where "two attempts that disagree are DATA" silently lost an attempt. Suffix -2, -3, …
+ * until free. `exists` is a predicate so the rule stays pure. */
+function dedupeName(basename, exists) {
+  if (!exists(basename)) return basename;
+  const stem = basename.replace(/\.md$/, '');
+  for (let n = 2; ; n++) {
+    const cand = `${stem}-${n}.md`;
+    if (!exists(cand)) return cand;
+  }
+}
+
 module.exports = {
-  parseDoc, formatDoc, leaseState, isOrphan, resultFileName,
+  parseDoc, formatDoc, leaseState, isOrphan, resultFileName, dedupeName,
   ackedSet, inboxRows, ackRow, NEXT_BY_VERDICT, filesFingerprint, filesPaths,
   LEASE_TTL_MIN, ORPHAN_H, ACK_FILE, ACK_DISPOSITIONS,
 };
 
 // â”€â”€ impure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function busRoot() {
-  const root = process.env.ORCHARD_LOGS || path.resolve(process.cwd(), '..', 'orchard-logs');
+  const root = process.env.ORCHARD_LOGS || path.resolve(REPO_ROOT, '..', 'orchard-logs');
   if (!fs.existsSync(root)) { console.error(`testbus â–¸ bus repo not found at ${root} (set ORCHARD_LOGS)`); process.exit(2); }
   return root;
 }
@@ -198,9 +215,14 @@ const resultsDir = () => path.join(busRoot(), 'results');
 
 function currentFingerprint() {
   const { fingerprint } = require('./tick.cjs');
-  const git = (a) => { try { return execFileSync('git', a, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).replace(/\n+$/, ''); } catch { return ''; } };
-  let mv = '?'; try { mv = JSON.parse(fs.readFileSync('manifest.json', 'utf8')).version; } catch { /* */ }
-  return fingerprint(git(['rev-parse', 'HEAD']), git(['diff']), mv);
+  const git = (a) => { try { return execFileSync('git', a, { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n+$/, ''); } catch { return ''; } };   // stderr ignored — see tick.cjs git()
+  let mv = '?'; try { mv = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'manifest.json'), 'utf8')).version; } catch { /* */ }
+  const head = git(['rev-parse', 'HEAD']);
+  // v2.74.2044 (glf F3) — a git failure used to fingerprint as `?+clean@…` with no warning, a fake identity that
+  // could be graded against. Degradation is now VISIBLE; the caller still gets a fingerprint (fail-safe), but no
+  // one can mistake it for a build identity.
+  if (!head) console.error('testbus ▸ FP DEGRADED — git unavailable; this fingerprint is NOT a build identity');
+  return fingerprint(head, git(['diff']), mv);
 }
 
 // v2.74.2022 â€” the working-tree contents of a test's declared files (extension-repo cwd, the tree Chrome loads).
@@ -224,8 +246,8 @@ function currentFilesFp(filesStr) {
   const paths = filesPaths(filesStr);
   if (!paths.length) return null;
   return filesFingerprint(paths.map((p) => {
-    let text = null; try { text = fs.readFileSync(p, 'utf8'); } catch { /* missing hashes as its own marker */ }
-    return { path: p, text };
+    let text = null; try { text = fs.readFileSync(path.resolve(REPO_ROOT, p), 'utf8'); } catch { /* missing hashes as its own marker */ }
+    return { path: p, text };   // v2.74.2044 — anchored to REPO_ROOT: a wrong cwd read EVERY file as <MISSING>
   }));
 }
 
@@ -307,7 +329,21 @@ if (require.main === module) {
         process.exit(1);
       }
       fs.mkdirSync(path.dirname(LEASE_FILE), { recursive: true });
-      fs.writeFileSync(LEASE_FILE, JSON.stringify({ lane, ts: nowIso }));
+      // v2.74.2044 (glf F3) — CAS-verify. The old read-then-write left a whole-tick window where two same-instant
+      // claimers both proceeded as grader (duplicate result files). Write via tmp+rename (readers never see a torn
+      // file), settle briefly, then RE-READ: whoever the file actually names IS the grader; the loser refuses
+      // exactly as if the winner had claimed first. Narrows the race from a tick to <100ms — not eliminated
+      // (rename is last-writer-wins), but at a 5-minute cadence that is effectively zero.
+      const tmp = `${LEASE_FILE}.${lane}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ lane, ts: nowIso }));
+      fs.renameSync(tmp, LEASE_FILE);
+      try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80); } catch { /* settle is best-effort */ }
+      let winner = null;
+      try { winner = JSON.parse(fs.readFileSync(LEASE_FILE, 'utf8')); } catch { /* torn read → treat as lost */ }
+      if (!winner || winner.lane !== lane) {
+        console.log(`LEASE â–¸ REFUSED â€” lost the claim race to ${winner && winner.lane ? winner.lane : '?'}. This session is builder-only.`);
+        process.exit(1);
+      }
       console.log(`LEASE â–¸ claimed by ${lane}${state === 'expired' ? ` (previous holder ${lease.lane} expired)` : ''}`);
       process.exit(0);
     }
@@ -392,7 +428,8 @@ if (require.main === module) {
     // v2.74.2022 â€” the audit line for a LIVE* grade: whether the test's claimed files still matched at grade time.
     if (t.meta['files-fp']) meta['files-match'] = String(currentFilesFp(t.meta.files) === t.meta['files-fp']);
     const body = evidence ? `EVIDENCE (scrubbed, quoted from the window graded):\n\n${evidence}` : '(no evidence quoted)';
-    const basename = resultFileName(id, nowIso, verdict);
+    // v2.74.2044 (glf F2) — same test+verdict+minute used to collide and OVERWRITE the earlier attempt.
+    const basename = dedupeName(resultFileName(id, nowIso, verdict), (b) => fs.existsSync(path.join(resultsDir(), b)));
     const file = path.join(resultsDir(), basename);
     scrubbedWrite(file, formatDoc(meta, body));
     console.log(`TESTBUS â–¸ result ${verdict} â†’ results/${basename}${meta['self-graded'] === 'true' ? ' (self-graded)' : ''}`);
@@ -442,7 +479,7 @@ if (require.main === module) {
       test = meta.test || '?';
       verdict = meta.verdict || '?';
     } else {
-      const m = /^(.+)--\d{8}T\d{4}Z--([A-Z]+)\.md$/.exec(basename);
+      const m = /^(.+)--\d{8}T\d{4}Z--([A-Z]+)(?:-\d+)?\.md$/.exec(basename);   // v2.74.2044 — a deduped -2/-3 name still parses
       if (m) { test = m[1]; verdict = m[2]; }
     }
     appendAck(ackRow({ ts: nowIso, lane: owner, result: basename, test, verdict, disposition }));

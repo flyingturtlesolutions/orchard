@@ -20,7 +20,7 @@ Alias (deprecated): `run auto glf` → same as `run glf grader`.
 
 ## Expansion — `run glf builder`
 
-1. Mint a **fresh** lane (`node tools/glf/testbus.cjs lane`). Never reuse another chat's lane (including `lane-8289`).
+1. Mint a **fresh** lane (`node tools/glf/testbus.cjs lane`). Never reuse another chat's lane (including `lane-8289`, and never `lane-cron` — that is the scheduled headless grader's fixed identity).
 2. Arm the same 5-minute job as above (point at `CRON_PROMPT.md`).
 3. Run once now. Expect `LEASE ▸ REFUSED` → STEP 0b → `inbox --owner <lane>`.
 4. Do not grade and do not write `results/` while refused. Act only on inbox items for tests this lane owns (or adopt/write new ones).

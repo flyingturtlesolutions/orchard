@@ -21,7 +21,10 @@ Run first, before reading anything:
 node tools/glf/tick.cjs
 ```
 
-It appends one row to `logs/run/loop-ticks.jsonl` and prints two lines. **Quote both in the reply.**
+It appends one row to `logs/run/loop-ticks.jsonl` and prints two lines. **Quote both in the reply.** *(v2.74.2044:
+it may print two more — `BUS UNDELIVERED ▸` (a previous tick's tests/results sit uncommitted in orchard-logs; the
+push IS the delivery, so finish it this tick) and `FP DEGRADED ▸` (git was unreachable — the fingerprint is NOT a
+build identity; do not grade against it). Quote those too when present.)*
 
 - `LOOP GAP <n>min` â€” **a first-class verdict, not a preamble.** The loop was not running. That is a different
   fact from QUIET and must never be reported as one. Measured before this existed: 91 firings against 257
@@ -90,7 +93,10 @@ changing, and old files retro-truncate (one sweep deleted 243 lines from a 48-ho
 13,169 â†’ 12,047 overnight). So mtime and "which files changed" are useless freshness tests, and **any window you
 intend to cite must be copied to `logs/run/` in the same tick or it may not exist at the next one.**
 
-**QUIET** (nothing new, or only SyncEngine/heartbeat/boot/already-explained lines): reply with ONE line â€”
+**QUIET** (nothing new, or only SyncEngine/heartbeat/boot/already-explained lines): run
+`node tools/glf/report.cjs census` and quote any waiting-human rows it prints *(v2.74.2044 — the census turns dead
+air into the human's to-do list: 8 of the first 18 INCONCLUSIVE grades were waiting on a `[human]` ACTION step that
+nothing ever surfaced)*, then reply with ONE line â€”
 `glf tick <HH:MM CDT> â€” no new events since <last stamp>` â€” and STOP.
 
 ## STEP 2 â€” GRADE AGAINST THE DECLARED CRITERIA, NOT AGAINST MEMORY
@@ -236,15 +242,16 @@ Push the rearms with the commit's orchard-logs sync.
 
 ## Still owed (audit items not yet built)
 
-- **Item 1, second half** â€” the schedule lives inside one interactive session (`.claude/scheduled_tasks.lock`),
-  so it dies with the laptop. That is the cause of the two largest gaps, both of which sit exactly on the human's
-  absence. Move it to an OS-level task running headless `claude -p`:
-
-  ```powershell
-  schtasks /create /tn "orchard-auto-glf" /sc minute /mo 5 /ru "$env:USERNAME" /tr "cmd /c cd /d C:\Users\Divine\Documents\2026_projects\apps\chrome-sidepanel-tester && claude -p @tools\glf\CRON_PROMPT.md >> logs\run\cron.out 2>&1"
-  ```
-
-  Not run automatically â€” it changes machine configuration and is the user's call.
+- **Item 1, second half â€” BUILT (v2.74.2044, glf F5, user-authorized 2026-08-06): the `orchard-auto-glf` OS task.**
+  `schtasks` fires `tools/glf/headless-tick.cmd` every 5 minutes; the cmd (config-in-repo â€” edit IT, never the
+  task) runs headless `claude -p` against `tools/glf/HEADLESS_PROMPT.md`, the **grade-only** variant: fixed lane
+  `lane-cron` (claim-is-renewal needs a stable identity; never reuse it interactively), a scoped `--allowedTools`
+  list whose only git-mutation prefix is `git -C ../orchard-logs` (the extension repo is structurally
+  un-committable from that session), writes confined to `logs/run/`, STEP 3A ends at the delivered FAIL result
+  (the owner fixes interactively), STEP 3B never applies. Output appends to `logs/run/cron.out` (rotated at 5MB).
+  Interactive sessions keep working exactly as before: they out-claim nothing â€” the headless grader holds the
+  lease when no one else does, and lands in a one-line refused tick when an interactive grader is live. The
+  full-rights variant (headless landing code on `main`) stays NOT built â€” that grant is the user's call.
 - **Item 5** â€” `EXERCISE` is in the template but nothing consumes it yet. `tools/exercise/exercise.cjs` exists,
   drove 4 of 4 historical drains to a graded PASS, and is documented in no file the loop reads.
 - **Item 3â€²** â€” the journal still has one copy and no history. It must NOT be committed here (bundle exposure);

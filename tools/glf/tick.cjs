@@ -26,6 +26,10 @@ const { execFileSync } = require('child_process');
 
 const LOG = 'logs/run/loop-ticks.jsonl';
 const GAP_MIN = 15;   // > one missed 5-minute tick plus slack; below this, jitter is not news.
+// v2.74.2044 (glf F3) — anchor to the EXTENSION REPO ROOT (tools/glf/../..), never process.cwd(): run from any
+// other directory, the old cwd-relative LOG silently created a PARALLEL tick ledger (and graded gaps against an
+// empty history — every gap read LOOP FIRST).
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 // ── pure ────────────────────────────────────────────────────────────────────────────────────────────────────
 function gapMinutes(nowIso, lastIso) {
@@ -54,7 +58,9 @@ function contended(dirtyFiles, claimedFiles) {
 // (" M Core/x.js" -> "M Core/x.js"), which shifts every subsequent column by one and silently renames the first
 // dirty file — caught on this tool's own first live run, which reported `ore/decisionMarkers.js`.
 function git(args, cwd) {
-  try { return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).replace(/\n+$/, ''); }
+  // stderr ignored (v2.74.2044): a degraded-git tick used to dump `fatal: …` + git's usage screen into cron.out
+  // every 5 minutes, burying the one-line FP DEGRADED verdict the failure is supposed to surface.
+  try { return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n+$/, ''); }
   catch { return ''; }
 }
 
@@ -78,7 +84,7 @@ function lastRow(file) {
 }
 
 function main() {
-  const repo = process.cwd();
+  const repo = REPO_ROOT;   // v2.74.2044 — was process.cwd(); see the anchor note above
   const nowIso = new Date().toISOString();
   const file = path.join(repo, LOG);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -102,6 +108,15 @@ function main() {
   else console.log(`LOOP OK ▸ ${gap}min since previous tick`);
   console.log(`BUILD ▸ ${fp}${dirty.length ? ` · dirty: ${dirty.join(' ')}` : ' · tree clean'}`);
   if (dirty.length) console.log('BUILD ▸ uncommitted files are LIVE (Chrome loads the repo root) — grade the FINGERPRINT, not the manifest number');
+  // v2.74.2044 (glf F3) — a git failure used to fingerprint as `?+clean@…` silently: a fake identity a tick could
+  // grade against. Degradation is now a first-class printed fact, like LOOP GAP.
+  if (!headSha) console.log('FP DEGRADED ▸ git unavailable — this fingerprint is NOT a build identity; do not grade against it');
+  // v2.74.2044 (glf F1) — "the push is the delivery" was policed by memory and broke within a day of the bus
+  // going live (10 rearmed tests sat uncommitted overnight). The tick runs BEFORE any writes of its own, so
+  // anything dirty under the bus's tests/ or results/ at tick time is a PREVIOUS tick's undelivered work.
+  const busRoot = process.env.ORCHARD_LOGS || path.resolve(repo, '..', 'orchard-logs');
+  const busDirty = dirtyPaths(git(['status', '--porcelain', '--', 'tests', 'results'], busRoot));
+  if (busDirty.length) console.log(`BUS UNDELIVERED ▸ ${busDirty.length} file(s) in orchard-logs (${busDirty.slice(0, 5).join(' ')}${busDirty.length > 5 ? ' …' : ''}) — commit FIRST, then pull --rebase, then push; the push IS the delivery`);
 }
 
 module.exports = { gapMinutes, fingerprint, contended, dirtyPaths, GAP_MIN, LOG };
