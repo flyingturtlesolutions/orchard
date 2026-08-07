@@ -683,11 +683,12 @@ async function _renderActiveRailTab(opts = {}) {
   // RB (rail review, fetch-reuse) — each tab renderer refreshes the dots ITSELF at the end of its render,
   // passing the counts it already fetched (_updateTabDots(pre)) — the blanket call here doubled every scan.
   if (_railTab === 'automations') return _renderRailAutomations(opts);   // RB-5 hotfix — opts (force) must reach the fence
+  if (_railTab === 'records') return _renderRailRecords(opts);   // AU-8 — the creates-audit ledger tab
   if (_railTab === 'connect') return _renderConnect();   // CN-1 — the Connect tab (login/connection status)
   return _renderRailList(opts);
 }
 function _switchRailTab(tab) {
-  if (tab !== 'conversations' && tab !== 'automations' && tab !== 'connect') return;   // CN-1 — + connect
+  if (tab !== 'conversations' && tab !== 'automations' && tab !== 'records' && tab !== 'connect') return;   // CN-1 — + connect; AU-8 — + records
   if (tab === 'connect' && !_devModeEnabled) tab = 'conversations';   // SGV-4 — Connect is dev-only; stale callers (_openAdminDesk, restored state) land safely
   _railTab = tab;
   try {
@@ -698,6 +699,7 @@ function _switchRailTab(tab) {
     });
     $('rail-list').hidden = tab !== 'conversations';
     $('rail-automations').hidden = tab !== 'automations';
+    const _rx = $('rail-records'); if (_rx) _rx.hidden = tab !== 'records';   // AU-8 — the Records panel
     const _cx = $('rail-connect'); if (_cx) _cx.hidden = tab !== 'connect';   // CN-1 — the Connect panel
   } catch { /* */ }
   void _renderActiveRailTab({ force: true });
@@ -11291,6 +11293,60 @@ function _railWfAddRow(desk, opts = {}) {
   });
   _wireRowKeyboard(add, () => add.click(), 'New workflow in ' + String(desk.title || 'this view'));
   return add;
+}
+
+// AU-8 (DESIGN_audit.md §6.1/§11) — the RECORDS tab: the persistent, card-themed read surface for the creates-audit
+// ledger. Reads the LOCAL `audit:creates` book (the same chrome.storage the SW `recordCreate` hook writes) and
+// renders one card per created record — newest first, each drillable to its id/recipe. A pull surface (renders on
+// open); a quiet count in the header, never an urgency badge (§10.6).
+async function _renderRailRecords(opts = {}) {
+  const live = $('rail-records'); if (!live) return;
+  const container = document.createElement('div');
+  let items = [], total = 0, notice = '';
+  try { const r = await loadCreates(); items = Array.isArray(r.items) ? r.items : []; total = r.total || 0; notice = r.notice || ''; } catch { /* fail-safe */ }
+  const creates = items.filter((e) => e && e.verb === 'create');
+  if (!creates.length) {
+    const empty = document.createElement('div');
+    empty.className = 'rail-automations-empty';
+    empty.textContent = 'Nothing created yet. When Orchard creates a record for you — a draft order, a customer, a ticket — it appears here.';
+    container.appendChild(empty);
+    if (!live.isConnected) return;
+    live.replaceChildren(...container.childNodes);
+    return;
+  }
+  const head = document.createElement('div');
+  head.className = 'rail-auto-group';
+  head.textContent = notice ? `Records · ${notice}` : `Records · ${creates.length}`;   // quiet count (§10.6)
+  container.appendChild(head);
+  const fmtTime = (at) => { try { return at ? new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''; } catch { return ''; } };
+  for (const e of creates.slice().reverse()) container.appendChild(_railRecordCard(e, fmtTime));   // newest first
+  if (!live.isConnected) return;
+  live.replaceChildren(...container.childNodes);
+}
+
+// One record card (drill = toggle a self-contained details row; no catalog lookup, no round-trip). PURE DOM.
+function _railRecordCard(e, fmtTime) {
+  const card = document.createElement('div');
+  card.className = 'rail-record-card';
+  card.setAttribute('role', 'button');
+  card.setAttribute('tabindex', '0');
+  const top = document.createElement('div'); top.className = 'rail-record-top';
+  const kind = document.createElement('span'); kind.className = 'rail-record-kind'; kind.textContent = e.kind || 'record';
+  const label = document.createElement('span'); label.className = 'rail-record-label'; label.textContent = e.label || e.id || '';
+  top.append(kind, label); card.appendChild(top);
+  const meta = document.createElement('div'); meta.className = 'rail-record-meta';
+  meta.textContent = [e.system, fmtTime(e.at), e.who === 'human' ? 'you' : 'auto'].filter(Boolean).join(' · ');
+  card.appendChild(meta);
+  const det = document.createElement('div'); det.className = 'rail-record-detail'; det.hidden = true;
+  const bits = [];
+  if (e.id) bits.push(`id ${e.id}`);
+  if (e.recipeId) bits.push(`via ${e.recipeId}`);
+  det.textContent = bits.join(' · ') || 'no further detail';
+  card.appendChild(det);
+  const toggle = () => { det.hidden = !det.hidden; card.classList.toggle('open', !det.hidden); };
+  card.addEventListener('click', toggle);
+  card.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
+  return card;
 }
 
 async function _renderRailAutomations(opts = {}) {

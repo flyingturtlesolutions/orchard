@@ -81,6 +81,9 @@
       <div class="rail-tabs" role="tablist" aria-label="Rail sections">
         <button class="rail-tab active" id="rail-tab-conversations" data-tab="conversations" role="tab" aria-controls="rail-list" aria-selected="true" type="button">Chat</button>
         <button class="rail-tab" id="rail-tab-automations" data-tab="automations" role="tab" aria-selected="false" aria-controls="rail-automations" type="button">Automate</button>
+        <!-- AU-8 (DESIGN_audit.md §6.1/§11) — the RECORDS tab: a persistent, card-themed log of everything Orchard
+             creates (customers, orders, tickets), drillable like workflow history. The read surface for the audit ledger. -->
+        <button class="rail-tab" id="rail-tab-records" data-tab="records" role="tab" aria-selected="false" aria-controls="rail-records" type="button">Records</button>
         <!-- CN-1 (DESIGN_vitals.md §8) — the Connect tab: login/connection status, the trifecta's third seat (Chat · Automate · Connect). -->
         <button class="rail-tab" id="rail-tab-connect" data-tab="connect" role="tab" aria-selected="false" aria-controls="rail-connect" type="button">Connect</button>
       </div>
@@ -117,6 +120,8 @@
     <!-- v2.74.1933 — the AUTOMATIONS tab: a cross-desk list of what runs on its own (scheduled workflows +
          parked runs). Hidden until its tab is selected; rendered by _renderRailAutomations. -->
     <div class="rail-list rail-automations" id="rail-automations" role="tabpanel" aria-labelledby="rail-tab-automations" hidden></div>
+    <!-- AU-8 (DESIGN_audit.md §6.1) — the Records tab panel: the creates-audit ledger, rendered by _renderRailRecords. -->
+    <div class="rail-list rail-records" id="rail-records" role="tabpanel" aria-labelledby="rail-tab-records" hidden></div>
     <!-- CN-1 (DESIGN_vitals.md §8.2) — the Connect tab panel: the login-only status board (user render). -->
     <div class="rail-list rail-connect" id="rail-connect" role="tabpanel" aria-labelledby="rail-tab-connect" hidden></div>
     <div class="rail-list" id="rail-list" role="tabpanel" aria-labelledby="rail-tab-conversations">
