@@ -609,6 +609,22 @@ async function _editDevConcern(convId, current) {
 // reads as broken every time"). Pinning is what NOT leaving does; closing is what the click does.
 let _railPeek = false;
 let _railPeekOpenT = null, _railPeekCloseT = null;
+// RB-6 (click-consumer review) — hover-peek is a MOUSE affordance: on touch, a slow tap fired pointerenter at
+// contact, the peek opened mid-press, and the release's click saw an open rail and closed it — a dead-click on
+// every touchscreen. matchMedia gates the peek to devices that actually hover.
+const _railCanHover = (() => { try { return window.matchMedia('(hover: hover)').matches; } catch { return true; } })();
+// RB-6 — ONE close-grace implementation, and it re-checks ENGAGEMENT at fire time: Chrome dispatches no
+// pointerenter when the rail slides open UNDER a stationary pointer (the layout-hover gap this file documents at
+// the section fences), so the corridor alone could close a rail the pointer was sitting inside — the exact WCAG
+// 1.4.13 violation it exists to prevent. :focus-within also holds it open for a keyboard user who tabbed in.
+const _armRailPeekClose = () => {
+  clearTimeout(_railPeekCloseT);
+  _railPeekCloseT = setTimeout(() => {
+    if (!_railPeek) return;
+    try { if ($('rail').matches(':hover') || $('rail').matches(':focus-within')) return; } catch { /* */ }
+    _railPeek = false; _closeRail();
+  }, 300);
+};
 $('btn-rail').addEventListener('click', async () => {
   clearTimeout(_railPeekOpenT); clearTimeout(_railPeekCloseT);
   if ($('rail').classList.contains('open')) {
@@ -619,15 +635,20 @@ $('btn-rail').addEventListener('click', async () => {
   _railPeek = false;
   await _openRail();
 });
-$('btn-rail').addEventListener('pointerenter', () => {
+$('btn-rail').addEventListener('pointerenter', (e) => {
   clearTimeout(_railPeekCloseT);
+  if (!_railCanHover) return;
+  // Loop2 (independent review) — matchMedia reflects the PRIMARY pointer only: a hover-capable touchscreen
+  // laptop matches '(hover: hover)', so a touch press still fired pointerenter at contact and the RB-6 dead-click
+  // came back on hybrid hardware. Gate per EVENT: only a mouse-class pointer peeks.
+  if (e.pointerType && e.pointerType !== 'mouse') return;
   if ($('rail').classList.contains('open')) return;
   _railPeekOpenT = setTimeout(async () => { _railPeek = true; await _openRail(); }, 150);
 });
 $('btn-rail').addEventListener('pointerleave', () => {
   clearTimeout(_railPeekOpenT);
   if (!_railPeek) return;
-  _railPeekCloseT = setTimeout(() => { if (_railPeek) { _railPeek = false; _closeRail(); } }, 300);
+  _armRailPeekClose();
 });
 // RB-5 (rail review, WCAG 1.4.13) — the hover corridor for the RAIL itself: a hover-peeked rail must not close
 // while the pointer is INSIDE it. Entering the rail converts the grace timer; leaving re-arms it.
@@ -635,7 +656,7 @@ try {
   $('rail').addEventListener('pointerenter', () => { clearTimeout(_railPeekCloseT); });
   $('rail').addEventListener('pointerleave', () => {
     if (!_railPeek) return;
-    _railPeekCloseT = setTimeout(() => { if (_railPeek) { _railPeek = false; _closeRail(); } }, 300);
+    _armRailPeekClose();
   });
 } catch { /* */ }
 
@@ -652,8 +673,9 @@ try { if (!$('rail').classList.contains('open')) { $('rail').inert = true; } $('
 // parked runs, cross-desk). _railTab tracks which is showing; the open/refresh paths render the active one.
 let _railTab = 'conversations';
 async function _renderActiveRailTab(opts = {}) {
-  void _updateTabDots();   // CN-1.1 — refresh the unified tab attention dots on any rail render
-  if (_railTab === 'automations') return _renderRailAutomations();
+  // RB (rail review, fetch-reuse) — each tab renderer refreshes the dots ITSELF at the end of its render,
+  // passing the counts it already fetched (_updateTabDots(pre)) — the blanket call here doubled every scan.
+  if (_railTab === 'automations') return _renderRailAutomations(opts);   // RB-5 hotfix — opts (force) must reach the fence
   if (_railTab === 'connect') return _renderConnect();   // CN-1 — the Connect tab (login/connection status)
   return _renderRailList(opts);
 }
@@ -697,9 +719,11 @@ function _setTabDot(tabId, n, ariaLabel) {
     }
   } catch { /* */ }
 }
-async function _updateTabDots() {
+async function _updateTabDots(pre = {}) {
+  // RB (rail review, fetch-reuse) — `pre` carries counts a tab render already computed ({parked, pending});
+  // provided counts skip their fetch. No pre = the standalone refresh (funnels, boot, broadcasts).
   try {
-    let connectN = 0, parked = 0, pending = 0;
+    let connectN = 0, parked = Number.isFinite(pre.parked) ? pre.parked : 0, pending = Number.isFinite(pre.pending) ? pre.pending : 0;
     // v2.74.2043 — Connect badge = scoped panel cards (not raw VITALS_BADGE.open, which counted every incident).
     try {
       const r = await _orchReq('VITALS_STATUS', {});
@@ -712,13 +736,17 @@ async function _updateTabDots() {
         connectN = model.total;
       }
     } catch { /* */ }
-    try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = ((r && r.success !== false && Array.isArray(r.parked)) ? r.parked.length : 0) + ((r && Number(r.disarmedN)) || 0); } catch { /* */ }   // RB-2 — the dot covers auto-disarmed automations too (parked + stopped both need a decision)
-    try {
-      const all = await ConversationStore.list();
-      const insts = (all || []).filter((c) => c && c.kind !== 'dev' && c.instanceId).map((c) => c.instanceId);
-      const counts = insts.length ? await pendingCounts(insts) : {};
-      pending = Object.values(counts || {}).reduce((a, b) => a + (Number(b) || 0), 0);
-    } catch { /* */ }
+    if (!Number.isFinite(pre.parked)) {
+      try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = ((r && r.success !== false && Array.isArray(r.parked)) ? r.parked.length : 0) + ((r && Number(r.disarmedN)) || 0); } catch { /* */ }   // RB-2 — the dot covers auto-disarmed automations too (parked + stopped both need a decision)
+    }
+    if (!Number.isFinite(pre.pending)) {
+      try {
+        const all = await ConversationStore.list();
+        const insts = (all || []).filter((c) => c && c.kind !== 'dev' && c.instanceId).map((c) => c.instanceId);
+        const counts = insts.length ? await pendingCounts(insts) : {};
+        pending = Object.values(counts || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+      } catch { /* */ }
+    }
     _setTabDot('rail-tab-conversations', pending, `Chat — ${pending} pending review${pending === 1 ? '' : 's'}`);
     _setTabDot('rail-tab-automations', parked, `Automate — ${parked} run${parked === 1 ? '' : 's'} awaiting a decision (parked or stopped)`);
     _setTabDot('rail-tab-connect', connectN, `Connect — ${connectN} connection${connectN === 1 ? '' : 's'} need attention`);
@@ -841,6 +869,12 @@ async function _openRail() {
 }
 
 function _closeRail() {
+  // RB-6 (click-consumer review) — a close from ANY path resets the peek state (✕ left _railPeek=true, so the
+  // next programmatic open was mis-read as a peek and a pointer graze auto-closed it), and rescues keyboard
+  // focus BEFORE inert drops it to <body> (the next Tab restarted from the document top).
+  _railPeek = false;
+  try { clearTimeout(_railPeekOpenT); clearTimeout(_railPeekCloseT); } catch { /* */ }
+  try { if ($('rail').contains(document.activeElement)) $('btn-rail').focus(); } catch { /* */ }
   $('rail').classList.remove('open');
   try { $('rail').inert = true; $('btn-rail').setAttribute('aria-expanded', 'false'); } catch { /* */ }   // RB-3 — see _openRail
 }
@@ -952,6 +986,56 @@ let _expandedWfs = new Set();    // v2.74.1777 ("one class") — which desks' WO
 let _expandedWfDetails = new Set();   // v1804 — which workflow CARDS' details are pinned open (by wf.id)
 let _railBodyPinned = null;   // v1811 — which view/case card carries the body shift (conv id; click toggles it)
 let _railRunBusy = 0;         // v1822 — card-hosted workflow runs in flight; background renders hold off
+// RB-6b (live: "buttons still don't update") — the busy fence had NO WATCHDOG: one hung card run (a DOM wait
+// that never settles) left _railBusyHeld() forever, and the fence defers EVERY render — forced or not, by
+// design — so every card button stopped confirming while its write landed. The fence now expires after 5 min
+// of no fresh run activity: a genuinely live run re-stamps on start, and a stall is auto-cleared with a log line.
+let _railRunBusyAt = 0;
+// Loop2 (independent review, HIGH) — three watchdog hardenings:
+// (gen) the auto-clear ORPHANS the stalled run's decrement: without it, the zombie's eventual finally fired
+//       _railRunBusy-- against a NEW run's fence — the WFC-1 regression reborn (or an underflow to -1).
+// (touch) _railRunBusyAt re-stamps on run ACTIVITY (observer + step hook), so 5min means five minutes of
+//       SILENCE — a legitimately long multi-step run no longer false-stalls.
+// (abort) the auto-clear best-effort aborts the zombie (_walkAbortFlag + hook removal) instead of merely
+//       un-fencing it while a due auto-run starts a second chain over the same tab (§7.2 overlap).
+let _railBusyGen = 0;
+function _railBusyTouch() { _railRunBusyAt = Date.now(); }
+// Loop2 (independent review, MED) — deferral COALESCER + staleness ceiling for the Automate render.
+// (coalesce) each fence used to arm its own 700ms retry chain, so disengage fired N stacked full renders;
+//            latest-wins: one pending timer, force sticky (any deferred force survives the merge).
+// (ceiling)  `:focus-within` never decays — Chrome leaves focus on a clicked chip, so an unforced truth-repaint
+//            could defer FOREVER after one click (parked ✋ rows never surfacing, "due in Xm" frozen). The
+//            engagement fence yields after 30s of continuous deferral; the busy fence stays absolute.
+let _autoDeferT = null, _autoDeferForce = false, _autoDeferSince = 0;
+function _deferAutomationsRender(force) {
+  _autoDeferForce = _autoDeferForce || !!force;
+  if (_autoDeferT) clearTimeout(_autoDeferT);
+  _autoDeferT = setTimeout(() => {
+    _autoDeferT = null;
+    const f = _autoDeferForce; _autoDeferForce = false;
+    void _renderRailAutomations(f ? { force: true } : {});
+  }, 700);
+}
+function _autoEngagedDefer(force) {   // engagement-fence path only: true = deferred (caller returns), false = ceiling hit, land anyway
+  if (!_autoDeferSince) _autoDeferSince = Date.now();
+  if (Date.now() - _autoDeferSince >= 30000) return false;
+  _deferAutomationsRender(force);
+  return true;
+}
+function _autoDeferLanded() {   // a render REACHED the swap: clear the deferral clock + any stale pending retry
+  _autoDeferSince = 0;
+  if (_autoDeferT) { clearTimeout(_autoDeferT); _autoDeferT = null; _autoDeferForce = false; }
+}
+function _railBusyHeld() {
+  if (_railRunBusy <= 0) return false;
+  if (Date.now() - _railRunBusyAt < 5 * 60000) return true;
+  try { _orchLog('WORKFLOW ▸ rail busy fence auto-cleared after 5min of run silence (the run is presumed dead; abort requested)'); } catch { /* */ }
+  _railBusyGen++;
+  _railRunBusy = 0;
+  try { _walkAbortFlag.requested = true; } catch { /* */ }
+  try { window.__wfStepHook = null; } catch { /* */ }
+  return false;
+}
 
 // v2.74.1588 — COALESCE re-entrant renders: the body clears the container synchronously then awaits (list /
 // pending counts / alarms) before appending, so two OVERLAPPING calls each appended a full row set — the whole
@@ -986,7 +1070,7 @@ async function _renderRailListNow() {
   // forced rebuild (delete/schedule/parked on ANOTHER card, openRail) destroys the running card's <li> nodes —
   // the observer + step hook then write progress into detached elements while the visible card sits frozen.
   // Force overrides hover/peek (the user's click already spent that state), but never a run's DOM.
-  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }
+  if (_railBusyHeld()) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }
   if (!_force && _engaged()) {
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
@@ -1047,7 +1131,7 @@ async function _renderRailListNow() {
     const bar = document.createElement('div');
     bar.className = 'rail-preview-main';
     bar.innerHTML = '<button class="rail-preview-main-btn" title="Point the live build back at main (reloads the panel)">↩ Preview main</button>';
-    bar.querySelector('button').addEventListener('click', () => { try { _getDevBridge()?.previewMain?.(); } catch { /* */ } });
+    bar.querySelector('button').addEventListener('click', () => { try { _getDevBridge()?.previewMain?.()?.catch?.((e) => { try { toast('Preview main failed: ' + ((e && e.message) || 'error'), 'err'); } catch { /* */ } }); } catch { /* */ } });   // RB-6 — an async rejection escaped the sync catch: a failed redeploy gave ZERO feedback
     container.appendChild(bar);
   }
 
@@ -1161,7 +1245,7 @@ async function _renderRailListNow() {
   // moved nodes). No empty-await window, ever. v1815 — RE-CHECK before swapping: a render that passed the head
   // check while idle can arrive here mid-peek/mid-animation (the awaits take real time; the churn is constant)
   // and would destroy the animating node — the "animations no longer evident" regression.
-  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }   // WFC-1 — re-check at swap time too (the fetch awaits let a run start mid-build)
+  if (_railBusyHeld()) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }   // WFC-1 — re-check at swap time too (the fetch awaits let a run start mid-build)
   if (!_force && _engaged()) {
     setTimeout(() => { void _renderRailList(); }, 700);
     return;
@@ -1169,6 +1253,8 @@ async function _renderRailListNow() {
   live.replaceChildren(...container.childNodes);
   _updateRailActionDot();
   if (anyActive || live.querySelector('.rail-item[data-next-sweep]')) _startRailStatusTimer(); else _stopRailStatusTimer();
+  // RB (rail review, fetch-reuse) — refresh the dots with the pending sum THIS render already computed.
+  void _updateTabDots({ pending: Object.values(_pendingByInst || {}).reduce((a, b) => a + (Number(b) || 0), 0) });
 }
 
 // v2.74.1223 (message-input redesign) — a row's own action buttons; their handlers run instead of select/open.
@@ -1555,7 +1641,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   // previous pin and let a full re-render heal 'active' back to the real selection.
   const _revertOptimistic = (prevPinned) => {
     _railBodyPinned = prevPinned;
-    void _renderRailList();
+    void _renderRailList({ force: true });   // RB-6 — the truth-repaint must punch the hover fence, or the lie RB-1 fixed survives on a keyboard-dismissed confirm (pointer never left the rail)
   };
   item.addEventListener('click', (e) => {
     if (_isRowActionTarget(e)) return;
@@ -1594,7 +1680,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     const prompt = liveRun
       ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
       : childN
-        ? `Delete "${conv.title}" and its ${childN} case${childN === 1 ? '' : 's'}? This can't be undone.`
+        ? `Delete "${conv.title}" and its ${childN} case${childN === 1 ? '' : 's'}? This can't be undone. (Saved workflows are kept — they stay in Studio under this view's name.)`
         : `Delete "${conv.title}"?`;
     if (!confirm(prompt)) return;
     if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
@@ -1643,7 +1729,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
       _resetConversation();
       await renderSuggestionCards();
     }
-    await _renderRailList();
+    await _renderRailList({ force: true });   // RB-6 — a DELETE is the v1816 doctrine's named force case: the desk row hid optimistically but its CASE rows stay until this truth-repaint, and a keyboard-dismissed confirm leaves the pointer in the rail (the hover fence would strand clickable ghost rows)
   });
 
   if (isDev) {
@@ -2124,6 +2210,7 @@ function focusForAssistant(cap) {
 // seed stays editable per-instance (`seed` to view, `seed: <instructions>` to change — syncs the durable def).
 function _renderAppGallery() {
   if (_wfWizard) releaseSurface('wizard');   // WFG-1 transition-fix — a page-show path must EVICT a parked/live wizard's page slot (only _wfEnterPage claims 'page', so no other show does); keeps _wfWizard alive to revive on its desk's reopen
+  _cancelOpenParamForms();   // RB-6 (click-consumer review) — the v2.74.107 rule: cancel open param forms BEFORE wiping #messages, or their awaiters hang on detached buttons forever and _activeInvocations nags every later row select
   $('messages').innerHTML = '';
   $('messages').classList.add('hidden');
   $('empty-state').classList.remove('hidden');
@@ -2183,6 +2270,7 @@ function _wfSuitsLine(suits) {
 
 async function _renderWorkflowGallery(opts = {}) {
   if (_wfWizard) releaseSurface('wizard');   // WFG-1 transition-fix — evict a parked/live wizard's page slot before showing the gallery (same class as _renderAppGallery; only _wfEnterPage claims 'page')
+  _cancelOpenParamForms();   // Loop1 (critical review) — the SAME v107 rule as _renderAppGallery: cancel before the #messages wipe, or form awaiters hang forever (this door was missed when the other was fixed)
   const scopeDesk = opts.scopeDesk || null;
   const gen = ++_wfGalleryGen;    // this render's generation; a later re-render invalidates its pending async appends
   try { $('messages').innerHTML = ''; $('messages').classList.add('hidden'); $('empty-state').classList.remove('hidden'); } catch { /* */ }
@@ -2394,7 +2482,7 @@ async function _appendUserApps(container) {
     });
     card.appendChild(del);
     card.addEventListener('click', () => { void _createAppConversation(def); });
-    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void _createAppConversation(def); } });
+    card.addEventListener('keydown', (e) => { if (e.target !== card) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void _createAppConversation(def); } });   // RB-6 — the target guard (the _wireRowKeyboard pattern): Enter on the nested ✕ delete was cancelled here and OPENED the view instead — a keyboard user could not delete, and the delete key instantiated
     container.appendChild(card);
   }
 }
@@ -7673,7 +7761,7 @@ function openPanelOverlay({ id, title = '', titleMeta = '', render = null, onClo
   const close = () => {
     try { ov.classList.remove('open'); setTimeout(() => { try { ov.remove(); } catch { /* */ } }, 200); } catch { try { ov.remove(); } catch { /* */ } }
     if (typeof onClose === 'function') { try { onClose(); } catch { /* */ } }
-    try { if (opener && opener.isConnected) opener.focus(); else $('chat-input').focus(); } catch { /* */ }
+    try { if (opener && opener.isConnected && opener !== document.body && !opener.closest('[inert]')) opener.focus(); else $('chat-input').focus(); } catch { /* */ }   // RB-6 — the rail chip path blurs the opener to body BEFORE capture (closeRail inerts), so body/inert openers fall through to the composer instead of stranding focus at the document root
   };
   ov.querySelector('.wf-history-close').addEventListener('click', () => releaseSurface(id));
   host.appendChild(ov);
@@ -8245,7 +8333,10 @@ async function _addWorkflowFromPreset(preset, desk) {
   if (!ok) { _fail('Couldn’t add the template — try again.'); return; }
   // WFG-2b — the landing surface IS the confirmation: return to the Automate tab showing what was added (the
   // chat-tab pattern), instead of a thread sentence in a view the user never asked to open.
-  try { _switchRailTab('automations'); $('rail').classList.add('open'); } catch { /* */ }
+  // RB-6 (click-consumer review) — open via _openRail, NEVER a bare classList.add: only _openRail clears
+  // rail.inert (set on every close), so the bare add showed the new row in a rail that was dead to every click
+  // and focus — visible but inoperable, recoverable only by toggling ☰ twice.
+  try { _switchRailTab('automations'); await _openRail(); } catch { /* */ }
 }
 
 // Run the current step through the NORMAL front door, sharing the chain st; re-parent the result into the page.
@@ -9012,7 +9103,7 @@ async function _maybeFireDueRoutine() {
 // so _renderRailAutomations → _maybeAutoRunDueWorkflowCard can fulfill a stuck "due now" without a manual ▶.
 async function _maybeFireDuePanelWorkflows() {
   try {
-    if (_railRunBusy > 0) return;
+    if (_railBusyHeld()) return;
     const banks = await listAllWorkflows();
     const now = Date.now();
     let due = false;
@@ -10450,12 +10541,46 @@ function _wfScheduleInline(row, wf, wfKey, rerender) {
   pick.className = 'wf-sched-pick';
   pick.setAttribute('role', 'group');
   pick.setAttribute('aria-label', 'Schedule interval');
-  const set = (minutes) => { void _wfSetSchedule(wf, wfKey, minutes).then(rerender); };
+  // RB-6c (live: "clicking 4h should enable 4h — instead buttons are dismissed") — REALTIME, IN PLACE: the
+  // write confirms WHERE THE USER CLICKED — the chips re-light, the picker STAYS OPEN, the card's schedule
+  // chrome updates in place — and the full truth re-render is deferred UNFORCED, so the engagement fence holds
+  // it until the user disengages (that deferral is the fence's actual job). The previous forced immediate
+  // re-render "worked" by destroying the interaction context: picker swallowed, card reset under the pointer.
+  const set = (minutes) => {
+    void _wfSetSchedule(wf, wfKey, minutes).then(({ ok } = {}) => {
+      // Loop2 (independent review) — the card can be REBUILT during the ~100ms write (a forced render from a
+      // tab switch / due-broadcast): syncing detached chips would show the pre-write snapshot on the new card.
+      // Repaint the truth instead.
+      if (!pick.isConnected) { void _renderActiveRailTab({ force: true }); return; }
+      // Loop1 — a FAILED write confirms honestly too: chips re-sync from the (unmutated) trigger, and the picker
+      // says so instead of lighting a schedule the store never accepted.
+      if (ok === false) {
+        let err = pick.querySelector('.wf-sched-err');
+        if (!err) { err = document.createElement('span'); err.className = 'wf-sched-err'; err.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--c-danger,#b4402f)'; pick.appendChild(err); }
+        err.textContent = 'couldn’t save — try again';
+        setTimeout(() => { try { err.remove(); } catch { /* */ } }, 4000);
+      }
+      const cur2 = (wf.trigger && wf.trigger.enabled && wf.trigger.minutes) ? wf.trigger.minutes : 0;
+      pick.querySelectorAll('.wf-sched-chip').forEach((c) => {
+        const on = (c._mins != null) ? c._mins === cur2 : !cur2;
+        c.classList.toggle('is-on', on);
+        c.setAttribute('aria-pressed', String(on));
+        if (c._isOff) c.textContent = cur2 ? 'Off' : 'None';
+      });
+      const armed = !!(wf.trigger && wf.trigger.minutes && wf.trigger.enabled);
+      const hasCad = !!(wf.trigger && wf.trigger.minutes);
+      row.dataset.sched = armed ? 'armed' : (hasCad ? 'paused' : 'none');
+      const clock = row.querySelector('[data-icon="schedule"]');
+      if (clock) { if (armed) clock.dataset.sched = 'armed'; else if (hasCad) clock.dataset.sched = 'paused'; else delete clock.dataset.sched; }
+      void _renderActiveRailTab();   // unforced — the truth repaint lands when the user leaves the card
+    });
+  };
   for (const [label, mins] of [['5m', 5], ['30m', 30], ['1h', 60], ['4h', 240], ['1d', 1440]]) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'wf-sched-chip' + (cur === mins ? ' is-on' : '');
     b.textContent = label;
+    b._mins = mins;
     b.setAttribute('aria-pressed', cur === mins ? 'true' : 'false');
     b.addEventListener('click', (e) => { e.stopPropagation(); set(mins); });
     pick.appendChild(b);
@@ -10464,6 +10589,7 @@ function _wfScheduleInline(row, wf, wfKey, rerender) {
   off.type = 'button';
   off.className = 'wf-sched-chip' + (!cur ? ' is-on' : '');
   off.textContent = cur ? 'Off' : 'None';
+  off._isOff = true;
   off.setAttribute('aria-pressed', !cur ? 'true' : 'false');
   off.addEventListener('click', (e) => { e.stopPropagation(); set(0); });
   pick.appendChild(off);
@@ -10482,6 +10608,7 @@ function _railWorkflowRow(row, parentConv) {
   const wfKey = (wf.appId ? String(wf.appId) : '') || row.wfKey || (parentConv && parentConv.instanceId) || _memoryId();   // DK-8k — the record's OWN key first
   const item = document.createElement('div');
   item.className = 'rail-item is-subtask is-workflow';
+  item.setAttribute('aria-expanded', 'false');   // RB — the pinnable card announces its state from birth, not only after the first toggle
   const _sched = _wfScheduleLabel(wf);
   const _t = workflowTier(wf);
   // v2.74.2032 — card background encodes schedule state (armed / paused / none); the clock chip alone was too quiet.
@@ -10495,8 +10622,14 @@ function _railWorkflowRow(row, parentConv) {
   const meta = steps + ' step' + (steps === 1 ? '' : 's') + (wf.runs ? ' · run ' + wf.runs + '×' : '') + (_sched ? ' · ' + _sched : '') + (_due ? ' · due now' : '') + _from;
   // v2.74.1781 (user directive) — the hover-expand theme continues INTO the card: hovering a workflow row
   // slides open its detail (the itemized steps + the schedule), same grid animation, intent delay in CSS.
+  // RB (rail review) — 'in 20m' is the decision-relevant form for a short cadence; absolute dates stay for far-off.
   const nextDue = (wf.trigger && wf.trigger.enabled && wf.trigger.nextDue > 0)
-    ? new Date(wf.trigger.nextDue).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+    ? (() => {
+      const ms = wf.trigger.nextDue - Date.now();
+      if (ms <= 0) return 'now (due)';
+      if (ms < 2 * 3600000) return 'in ' + (ms < 3600000 ? Math.max(1, Math.round(ms / 60000)) + 'm' : (Math.round(ms / 360000) / 10) + 'h');
+      return new Date(wf.trigger.nextDue).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    })() : '';
   const schedLine = _sched ? ('⏱ ' + _sched + (nextDue ? ' · next ' + nextDue : '')) : 'no schedule — the clock chip arms one';
   const stepsList = (Array.isArray(wf.subAsks) ? wf.subAsks : []).map((t) => '<li>' + escHtml(String(t)) + '</li>').join('');
   item.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">•</span><span class="rail-item-badge wf" aria-label="a workflow under ' + escHtml((parentConv && parentConv.title) || '') + '">workflow</span>' + escHtml(wf.name || wf.ask || '') + '</div>'
@@ -10515,7 +10648,7 @@ function _railWorkflowRow(row, parentConv) {
     // (_walkAbortFlag), and the chain state are shared GLOBALS — a second concurrent run overwrites the
     // first's hook (its receipts render on the wrong card) and stomps the abort flag. Refuse politely,
     // re-enable this button (the once-guard disabled it on click), and point at the run already going.
-    if (_railRunBusy > 0) {
+    if (_railBusyHeld()) {
       if (btn) btn.disabled = false;
       try {
         const active = document.querySelector('#rail-list .wf-card-run.wf-run-live, #rail-automations .wf-card-run.wf-run-live')?.closest('.rail-item');
@@ -10562,6 +10695,7 @@ function _railWorkflowRow(row, parentConv) {
     let _echo = false;
     let _lastAct = '';
     const _mo = new MutationObserver(() => {
+      _railBusyTouch();   // Loop2 — prose activity is run activity; the stall clock measures SILENCE
       if (_echo) return;
       const t = (host.querySelector('.message-body')?.textContent || '').trim();
       const m = t.match(/Step (\d+)/);
@@ -10575,11 +10709,11 @@ function _railWorkflowRow(row, parentConv) {
       }
     });
     try { _mo.observe(host, { childList: true, subtree: true, characterData: true }); } catch { /* */ }
-    _railRunBusy++;
+    _railRunBusy++; _railRunBusyAt = Date.now(); const _busyGen = _railBusyGen;   // Loop2 — orphan guard: a watchdog clear invalidates THIS run's decrement
     // WC-3 (v2.74.1847) — the COLLAPSED row says a run is happening: _railRunBusy always knew, the row never
     // showed it, so a closed detail looked idle mid-run. An inset accent bar (inline, CSS var, both modes) —
     // cleared on every exit below. No stylesheet dependency, no animation, nothing for the observer to see.
-    try { item.style.boxShadow = 'inset 2px 0 0 var(--fill-accent, #378ADD)'; } catch { /* cosmetic */ }
+    try { item.style.boxShadow = 'inset 2px 0 0 var(--c-accent, #378ADD)'; } catch { /* cosmetic */ }   // RB — --fill-accent was never defined; the fallback did all the work
     try {
       const tab = await _orchActiveTab();
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
@@ -10593,7 +10727,7 @@ function _railWorkflowRow(row, parentConv) {
         host.classList.remove('wf-run-live');
         _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.remove('step-done'); });
         _wfReplayStopped(host, wf, _p2);
-        _railRunBusy--;
+        if (_busyGen === _railBusyGen) _railRunBusy--;
         if (btn) btn.disabled = false;   // RB-1 — a stopped run must not brick the ▶
         try { item.style.boxShadow = ''; } catch { /* */ }
         return;
@@ -10611,6 +10745,7 @@ function _railWorkflowRow(row, parentConv) {
       // LESSON[silence-is-not-success] — a checkmark that is identical for "did the work" and "did nothing"
       // lies in pixels). The observer stays for prose activity; receipts win when both fire.
       window.__wfStepHook = (r) => { try {
+        _railBusyTouch();   // Loop2 — a receipt is run activity; the stall clock measures SILENCE
         if (r && Number.isFinite(Number(r.index))) _markStep(Number(r.index) - (r.outcome === 'ok' ? 0 : 1));
         const bits = [];
         if (r.rowsIn != null || r.rowsOut != null) bits.push(`rows ${r.rowsIn == null ? '' : r.rowsIn}→${r.rowsOut == null ? '?' : r.rowsOut}`);
@@ -10641,21 +10776,27 @@ function _railWorkflowRow(row, parentConv) {
         .catch(() => { /* */ })
         .finally(() => {
           try { _mo.disconnect(); } catch { /* */ }
-          window.__wfStepHook = null;   // WC-1 — the hook dies with the run; a stale hook must not tick a dead card
+          // WC-1 — the hook dies with the run; a stale hook must not tick a dead card. Loop3 — gen-guarded like
+          // the decrement: a watchdog-cleared zombie's finally must not null a SUCCESSOR run's hook.
+          if (_busyGen === _railBusyGen) window.__wfStepHook = null;
           _chips.forEach((c) => c.classList.remove('step-running'));   // a failed run keeps its ✓s honest — only finished steps stay marked
           host.classList.remove('wf-run-live');   // the body now shows the RESULT
-          _pb2.done(); _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } if (_detail) _slideOpen(_detail);
+          _pb2.done(); if (_busyGen === _railBusyGen) _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } if (_detail) _slideOpen(_detail);
         });
-    } catch { _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
+    } catch { if (_busyGen === _railBusyGen) _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
   }, { once: true }));
   if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
     _closeRail();
-    const _mh = appendMessage({ role: 'assistant', body: '' });
-    _setMessageBody(_mh, 'Running “' + (wf.name || wf.ask) + '” in the background…', { markdown: true });   // RB-4 — no escHtml before a markdown render (renderMarkdown escapes; doubling turned & into &amp;amp;)
+    // RB (rail review, receipt-to-owner) — the receipt bubble renders ONLY in a conversation that owns this
+    // workflow's class; appended to whatever happened to be open, it was a foreign transcript's noise. When
+    // foreign, run silently — run history + the ✋ parked flow carry the outcome to their own surfaces.
+    const _own = String(_currentConversationAppId || '') === String(wf.appId || wfKey || '') || String(_currentConversationInstanceId || '') === String(wf.appId || wfKey || '');
+    const _mh = _own ? appendMessage({ role: 'assistant', body: '' }) : null;
+    if (_mh) _setMessageBody(_mh, 'Running “' + (wf.name || wf.ask) + '” in the background…', { markdown: true });   // RB-4 — no escHtml before a markdown render (renderMarkdown escapes)
     let res = null;
     try { res = await _orchReq('WORKFLOW_RUN_FIRE', { appId: wfKey, workflowId: wf.id }); } catch { /* */ }
     const v = res && res.verdict;
-    _setMessageBody(_mh, (res && res.success !== false)
+    if (_mh) _setMessageBody(_mh, (res && res.success !== false)
       ? (v === 'parked' ? '⚠ Stopped at a write — the ✋ row in the Rail approves it.' : 'Ran headless → ' + (v === 'complete' ? 'completed' : (v || 'finished')) + '. Its run shows in the workflow’s history.')
       : 'Couldn’t run headless — ' + _errWord(res && res.error) + '.', { markdown: true });
   }, { once: true }));
@@ -10675,8 +10816,22 @@ function _railWorkflowRow(row, parentConv) {
   acts.appendChild(_mkIconBtn('history', 'Run history', () => { _closeRail(); void _renderWorkflowRuns(wf); }));   // the rail (z20) would cover the overlay (z18)
   acts.appendChild(_mkIconBtn('trash', 'Delete this workflow', async () => {
     if (!confirm('Delete “' + (wf.name || wf.ask) + '”? This can’t be undone.')) return;   // §5 — confirmation required
-    try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
-    rerender();
+    // Loop2 (independent review, MED) — HONEST in-place removal: the row leaves only if the store CONFIRMS the
+    // workflow is gone (deleteWorkflow returns the post-delete list; a null wfKey or a storage throw used to be
+    // swallowed and the row vanished anyway — the same lie class the schedule chips had). Failure keeps the row
+    // and says so in its meta line.
+    let _gone = false;
+    try {
+      if (wfKey) { const _left = await deleteWorkflow(wfKey, wf.id); _gone = !(_left || []).some((x) => x && x.id === wf.id); }
+    } catch { /* _gone stays false */ }
+    if (_gone) {
+      // RB-6c — realtime: the row leaves NOW, in place; the truth re-render is unforced and lands on disengage.
+      try { item.remove(); } catch { /* */ }
+    } else {
+      const _m = item.querySelector('.rail-item-meta');
+      if (_m) _m.textContent = 'couldn’t delete — try again';
+    }
+    void _renderActiveRailTab();
   }));
   item.appendChild(acts);
   // v1799 — the detail's height slides via the measured-height helpers (the grid close snapped); the same
@@ -10758,9 +10913,16 @@ function _railParkedRow(p, ownerTitle) {
   const age = Number(p.at) > 0 ? `stopped ${relTime(Number(p.at))} at ` : 'stopped at ';
   const item = document.createElement('div');
   item.className = 'rail-item is-subtask is-parked';
+  // RB-2 continued — the banked field-level sample renders as "will write:" lines (capped at park time).
+  const _sample = Array.isArray(prev.sample) ? prev.sample.slice(0, 3) : [];
+  const _sampleHtml = _sample.length
+    ? '<div class="rail-item-meta">' + _sample.map((f) => 'will write: ' + escHtml(Object.entries(f).map(([k, v]) => `${k}=${v}`).join(' · '))).join('<br>')
+      + (Number(prev.count) > _sample.length ? escHtml(` (+${Number(prev.count) - _sample.length} more)`) : '') + '</div>'
+    : '';
   item.innerHTML = '<div class="rail-item-title"><span class="rail-item-badge parked">✋</span>' + escHtml(p.name || p.workflowId || 'scheduled run')
     + (ownerTitle ? ' <span class="rail-item-badge">' + escHtml(ownerTitle) + '</span>' : '') + '</div>'
-    + '<div class="rail-item-meta">' + escHtml(age) + escHtml(String(what)) + escHtml(scale) + escHtml(why) + '</div>';
+    + '<div class="rail-item-meta">' + escHtml(age) + escHtml(String(what)) + escHtml(scale) + escHtml(why) + '</div>'
+    + _sampleHtml;
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions rail-static';
   acts.dataset.rowAction = '';
@@ -10776,7 +10938,7 @@ function _railParkedRow(p, ownerTitle) {
     if (meta) meta.textContent = (res && res.success !== false)
       ? (v === 'parked' ? 'sent — the run continued and stopped at the NEXT write' : 'done — the run ' + (v === 'complete' ? 'completed' : (v || 'finished')))
       : 'couldn’t resume — ' + _errWord(res && res.error);
-    setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1400);
+    setTimeout(() => { void _renderActiveRailTab(); }, 1400);
   }));
   acts.appendChild(_mkBtn('✕ Cancel', async () => {
     _lockPair();
@@ -10785,10 +10947,12 @@ function _railParkedRow(p, ownerTitle) {
     const meta = item.querySelector('.rail-item-meta');
     // Honest outcome: found:false means the park marker was already consumed (approved/finished) — say so,
     // never claim a stop that did not happen.
-    if (meta) meta.textContent = (res && res.found === false)
-      ? 'already resumed or finished — nothing left to cancel'
-      : 'cancelled — the write was not sent';
-    setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1400);
+    // RB-6 (click-consumer review) — transport-null and handler-failure must NOT claim a cancel: _orchReq
+    // resolves null on port errors (never throws), and the old ternary folded both into "cancelled".
+    if (meta) meta.textContent = (!res || res.success === false)
+      ? ('couldn’t cancel — ' + _errWord(res && res.error))
+      : (res.found === false ? 'already resumed or finished — nothing left to cancel' : 'cancelled — the write was not sent');
+    setTimeout(() => { void _renderActiveRailTab(); }, 1400);
   }));
   item.appendChild(acts);
   return item;
@@ -10817,11 +10981,15 @@ function _railWfAddRow(desk, opts = {}) {
   return add;
 }
 
-async function _renderRailAutomations() {
+async function _renderRailAutomations(opts = {}) {
   const live = $('rail-automations'); if (!live) return;
   // WFC-2 parity (v2.74.1934) — a live card RUN is an absolute fence: re-rendering would destroy the running
   // card's DOM (its observer + step hook then write into detached nodes). Defer like _renderRailListNow does.
-  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
+  if (_railBusyHeld()) { _deferAutomationsRender(opts.force); return; }
+  // Loop2 (critical review) — the ENGAGEMENT check runs at ENTRY too: a deferred unforced render used to re-run
+  // the whole build (three storage fetches) every 700ms just to rediscover the fence at the swap — a full-scan
+  // spin for as long as the pointer parked in the rail. The swap-time check below stays as the belt.
+  if (!opts.force && (live.matches(':hover') || live.matches(':focus-within')) && _autoEngagedDefer(opts.force)) return;
   const container = document.createElement('div');
   let all = [];
   try { all = await ConversationStore.list(); } catch { /* */ }
@@ -10863,9 +11031,11 @@ async function _renderRailAutomations() {
     for (const desk of desks.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) container.appendChild(_railWfAddRow(desk, { named: true }));
     // RB-1 (rail review) — swap-time fence: the awaits above let a run start after the entry check; swapping
     // now would destroy the live card's DOM (WFC-2). Same discipline as _renderRailListNow's second check.
-    if (_railRunBusy > 0) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
+    if (_railBusyHeld()) { _deferAutomationsRender(opts.force); return; }
     if (!live.isConnected) return;
     live.replaceChildren(...container.childNodes);
+    _autoDeferLanded();
+    void _updateTabDots({ parked: 0 });   // RB fetch-reuse — the empty branch KNOWS both counts are zero
     return;
   }
   if (parked.length) {
@@ -10893,11 +11063,24 @@ async function _renderRailAutomations() {
       const acts = document.createElement('div');
       acts.className = 'rail-item-actions rail-static';
       acts.dataset.rowAction = '';
-      acts.appendChild(_mkOnceBtn('↻ Re-arm', async () => {
-        try { await updateWorkflow(wf.appId, wf.id, { trigger: setEnabled(wf.trigger, true, Date.now()) }); } catch { /* */ }
+      acts.appendChild(_mkOnceBtn('↻ Re-arm', async (e) => {
+        const _btn = e && e.currentTarget;   // Loop3 — captured SYNC (currentTarget is null after an await)
+        // Loop2 (independent review, MED) — HONEST re-arm: claim success only when the returned list PROVES the
+        // trigger is enabled (updateWorkflow no-ops on a missing id and returns []; a throw was swallowed). The
+        // old unconditional claim was survivable when the 1.2s repaint was forced; now that it defers on
+        // engagement, a false "re-armed" would sit on screen indefinitely.
+        let _armed = false;
+        try {
+          const _list = await updateWorkflow(wf.appId, wf.id, { trigger: setEnabled(wf.trigger, true, Date.now()) });
+          const _rec = (_list || []).find((x) => x && x.id === wf.id);
+          _armed = !!(_rec && _rec.trigger && _rec.trigger.enabled === true);
+        } catch { /* _armed stays false */ }
         const meta = row.querySelector('.rail-item-meta');
-        if (meta) meta.textContent = 're-armed — next run one interval out';
-        setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 1200);
+        if (meta) meta.textContent = _armed ? 're-armed — next run one interval out' : 'couldn’t re-arm — try again';
+        // Loop3 — "try again" needs a LIVE button: _mkOnceBtn disables for good, and the truth-repaint that would
+        // rebuild the row is unforced — held off by this very click's :focus-within (up to the 30s ceiling).
+        if (!_armed && _btn) _btn.disabled = false;
+        setTimeout(() => { void _renderActiveRailTab(); }, 1200);
       }));
       row.appendChild(acts);
       container.appendChild(row);
@@ -10921,11 +11104,17 @@ async function _renderRailAutomations() {
   if (!live.isConnected) return;
   // RB-1 (rail review) — swap-time fence re-check: three awaits sit between the entry fence and this swap; a ▶
   // in that window (or a due auto-run from a concurrent render) would have its card destroyed mid-run.
-  if (_railRunBusy > 0) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
+  if (_railBusyHeld()) { _deferAutomationsRender(opts.force); return; }
   // RB-5 (rail review) — engagement fence (v1816 parity with Chat): never swap the DOM out from under the
-  // pointer or keyboard focus; defer exactly like the busy fence.
-  if (live.matches(':hover') || live.matches(':focus-within')) { setTimeout(() => { void _renderRailAutomations(); }, 700); return; }
+  // pointer or keyboard focus; defer exactly like the busy fence. RB-5 HOTFIX (live: "interval buttons do not
+  // respond") — an ACTION-triggered render (opts.force: the user clicked a chip and is WAITING for this render)
+  // must BYPASS the engagement fence, or it deadlocks on the user's own pointer/focus: the clicked chip holds
+  // :focus-within, so the schedule applied SW-side while the card deferred its own confirmation forever.
+  if (!opts.force && (live.matches(':hover') || live.matches(':focus-within')) && _autoEngagedDefer(opts.force)) return;
   live.replaceChildren(...container.childNodes);
+  _autoDeferLanded();
+  // RB (rail review, fetch-reuse) — refresh the dots with the counts THIS render already fetched.
+  void _updateTabDots({ parked: parked.length + stopped.length });
   // v2.74.2035 — CD-1a due-on-open: after the Automate cards land, fulfill ONE due panel-tier schedule.
   void _maybeAutoRunDueWorkflowCard();
 }
@@ -10935,7 +11124,7 @@ async function _renderRailAutomations() {
 // including WORKFLOW_MARK_RAN). One at a time (_railRunBusy); a standing due waits for the next render/wake.
 let _duePanelAutoAt = 0;
 function _maybeAutoRunDueWorkflowCard() {
-  if (_railRunBusy > 0) return;
+  if (_railBusyHeld()) return;
   if (Date.now() - _duePanelAutoAt < 4000) return;   // debounce render storms / WORKFLOW_DUE_CHANGED bursts
   const card = document.querySelector('#rail-automations .rail-item.is-workflow[data-due="1"]');
   if (!card) return;
@@ -11234,7 +11423,10 @@ async function _wfSetSchedule(wf, wfKey, minutes) {
       }
     }
   } catch { /* a failed re-key falls through — the set below still applies to the old key */ }
-  try { const r = await _orchReq('WORKFLOW_TRIGGER_SET', { appId: wfKey, workflowId: wf.id, trigger }); ok = !!(r && r.success !== false); wf.trigger = r && r.trigger ? r.trigger : (trigger || undefined); } catch { /* */ }
+  // Loop1 (critical review) — mutate wf.trigger ONLY on success: a transport-null/handler failure used to stamp
+  // the DESIRED trigger locally, and the in-place chip sync (RB-6c) would then light the new interval while the
+  // store still held the old schedule — the dishonest-confirmation class, in-place edition.
+  try { const r = await _orchReq('WORKFLOW_TRIGGER_SET', { appId: wfKey, workflowId: wf.id, trigger }); ok = !!(r && r.success !== false); if (ok) wf.trigger = r && r.trigger ? r.trigger : (trigger || undefined); } catch { /* */ }
   return { ok, wfKey };
 }
 

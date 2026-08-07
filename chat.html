@@ -79,10 +79,10 @@
     <div class="rail-inner">
     <div class="rail-header">
       <div class="rail-tabs" role="tablist" aria-label="Rail sections">
-        <button class="rail-tab active" id="rail-tab-conversations" data-tab="conversations" role="tab" aria-selected="true" type="button">Chat</button>
-        <button class="rail-tab" id="rail-tab-automations" data-tab="automations" role="tab" aria-selected="false" type="button">Automate</button>
+        <button class="rail-tab active" id="rail-tab-conversations" data-tab="conversations" role="tab" aria-controls="rail-list" aria-selected="true" type="button">Chat</button>
+        <button class="rail-tab" id="rail-tab-automations" data-tab="automations" role="tab" aria-selected="false" aria-controls="rail-automations" type="button">Automate</button>
         <!-- CN-1 (DESIGN_vitals.md §8) — the Connect tab: login/connection status, the trifecta's third seat (Chat · Automate · Connect). -->
-        <button class="rail-tab" id="rail-tab-connect" data-tab="connect" role="tab" aria-selected="false" type="button">Connect</button>
+        <button class="rail-tab" id="rail-tab-connect" data-tab="connect" role="tab" aria-selected="false" aria-controls="rail-connect" type="button">Connect</button>
       </div>
       <!-- v2.74.1999 — the "delete all conversations" trash icon was removed from the rail header (destructive
            bulk action didn't belong one click away in the header; per-row delete + Studio remain). -->

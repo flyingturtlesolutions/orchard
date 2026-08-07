@@ -124,7 +124,23 @@ export async function runWriteStep(clause, {
     // The fail-safe is UNCHANGED and still structural: no reporter, a throwing reporter, or ANY non-`true`
     // verdict parks. Only an explicit `true` — which only makeResumeReporter produces, and only once, after a
     // human clicked — proceeds.
-    const preview = { kind: 'write', targetId, recipe: rec.name || targetId, count: misses.length, why: gate.why };
+    // RB-2 continued (rail review) — DECISION MATERIAL: bank a capped field-level SAMPLE so the approval card
+    // can show WHAT will be written, not just a recipe name and a count (the panel's own HITL rule: previews
+    // show the request). Same fill machinery as the execution loop below; values truncated for the eye — the
+    // execution path refills from source rows, never from this sample.
+    const _pvDefs = legParamDefs(createLeg);
+    const _pvDecl = pf.declared || null;
+    const sample = misses.slice(0, 3).map((m) => {
+      const row = m && m.row; const fields = {};
+      for (const pd of _pvDefs) {
+        const pname = (pd && pd.name) || pd;
+        if (!pname) continue;
+        const v = resolveWriteValue(row, pname, _pvDecl);
+        if (v) fields[pname] = String(v).length > 60 ? String(v).slice(0, 60) + '…' : String(v);
+      }
+      return fields;
+    }).filter((f) => Object.keys(f).length);
+    const preview = { kind: 'write', targetId, recipe: rec.name || targetId, count: misses.length, why: gate.why, sample };
     let decision = 'park';
     try {
       decision = (reporter && typeof reporter.gate === 'function') ? await reporter.gate(preview) : 'park';

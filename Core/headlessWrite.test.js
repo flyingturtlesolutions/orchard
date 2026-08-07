@@ -43,6 +43,12 @@ describe('runWriteStep — gate + pin', () => {
     });
     // destructive → refused, or outward undeclared path → park; never auto-create
     assert.ok(r.park === true || (r.ok === false && /refused/.test(r.error || '')), JSON.stringify(r));
+    // RB-2 continued (rail review) — a PARKED write banks a field-level SAMPLE (decision material for the ✋
+    // card: what will be written, values truncated for the eye). Shape-guaranteed whenever the park path runs.
+    if (r.park === true) {
+      assert.ok(Array.isArray(r.value.sample), 'park preview carries a sample array');
+      for (const f of r.value.sample) for (const v of Object.values(f)) assert.ok(typeof v === 'string' && v.length <= 61, 'sample values are truncated strings');
+    }
   });
 
   // v2.74.2043 — `provenance: 'curated'` is NEW and load-bearing here. This test previously passed a recipe with no

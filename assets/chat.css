@@ -2043,11 +2043,10 @@ textarea {
   max-width: 100%;
   margin: 3px 0;
   padding: 3px 8px;
-  background: rgba(167, 139, 250, 0.10);   /* v1795 — a LIGHTER violet than the workflow badge (steps sit under it) */
+  background: color-mix(in srgb, var(--c-accent, #378ADD) 10%, transparent);   /* RB-6c (user directive) — steps wear the DEFAULT APP ACCENT, not violet */
   border-radius: var(--r-sm);
-  /* WFT-2 — the steps use the SOFT violet (matching the badge), not the bright --c-x-violet: the drill-down
-     content must sit BELOW the name and its type label, not outshine both. One violet, subordinate. */
-  color: var(--c-x-violet-soft);
+  /* WFT-2 principle preserved: subordinate to the name + type label — a light accent tint, not the bright accent. */
+  color: color-mix(in srgb, var(--c-accent, #378ADD) 80%, var(--c-text));
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2056,7 +2055,7 @@ textarea {
   opacity: 0;
   transition: transform 260ms cubic-bezier(0.45, 0, 0.2, 1) 40ms, opacity 240ms ease 40ms, margin 300ms cubic-bezier(0.22, 1, 0.36, 1), background var(--t-fast);   /* CLOSE lingers (v1797); margin rides the pin shift (v1805) */
 }
-.wf-row-steps li:hover { background: rgba(167, 139, 250, 0.18); }
+.wf-row-steps li:hover { background: color-mix(in srgb, var(--c-accent, #378ADD) 18%, transparent); }   /* RB-6c — accent, not violet */
 .rail-item.is-workflow:hover .wf-row-steps li,
 .rail-item.is-workflow.detail-pinned .wf-row-steps li,
 .rail-item.is-workflow:focus-within .wf-row-steps li {
@@ -2206,7 +2205,9 @@ textarea {
 
 /* WFC-1 (UI review #1) — a second card run is refused; the card already running briefly flashes to say "that one". */
 .rail-item.wf-run-blocked { animation: wf-blocked-flash 1.2s ease; }
-@keyframes wf-blocked-flash { 0%, 100% { box-shadow: inset 2px 0 0 var(--fill-accent, #378ADD); } 25%, 75% { box-shadow: inset 3px 0 0 var(--border-warning, #BA7517), 0 0 0 1px var(--border-warning, #BA7517); } }
+/* Loop2 (independent review) — the run bar moved to --c-accent (the app accent, per the step-recolor directive);
+   the flash's rest frames must match or the refusal flash "rests" in a color the live bar never shows. */
+@keyframes wf-blocked-flash { 0%, 100% { box-shadow: inset 2px 0 0 var(--c-accent, #378ADD); } 25%, 75% { box-shadow: inset 3px 0 0 var(--border-warning, #BA7517), 0 0 0 1px var(--border-warning, #BA7517); } }
 @media (prefers-reduced-motion: reduce) { .rail-item.wf-run-blocked { animation: none; outline: 2px solid var(--border-warning, #BA7517); } }
 
 /* the GROUP — an app/admin row + its case rows, one hover zone. Case rows are ALWAYS in the DOM; peek/pin

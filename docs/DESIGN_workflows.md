@@ -255,3 +255,46 @@ Mirror `Core/appCatalog.js` with a new pure module `Core/workflowCatalog.js`:
 - **C — how far to go now.** Recommended: **WFG-1 only** (delivers the request, zero data-model risk), then decide
   WFG-2/3 from live use. Full first-class independence (WFG-3) is worth committing to now **only if** cross-view /
   portable / shareable workflows are a near-term goal.
+
+---
+
+## 11. Editing after creation — WFG-1e (specced 2026-08-06, user: "workflows should be editable after creation")
+
+**The design law — the PROOF SPLIT.** A saved step is not text: schema-2 steps carry PINNED CLAUSES proven by
+run+approve (PP-0c — nothing banks unapproved). Every edit therefore classifies by what it does to proof, and the
+classification decides its SURFACE:
+
+| Edit | Proof | Surface |
+|---|---|---|
+| rename · description/ask | untouched | in place, on the card |
+| remove a step · reorder steps | pins ride their steps — preserved | in place, on the card |
+| **rephrase a step · add a step** | **broken/absent — must RE-PROVE** | **the builder** |
+
+The card must never be able to silently un-prove a step; the builder is where proof is made, so it is where
+proof-breaking edits go.
+
+**A — the backbone: ✎ Edit opens the BUILDER, pre-loaded.** The workflow card (and its "Your workflows" gallery
+twin) gains an ✎ chip → opens the step-by-step builder in the workflow's OWNING view, seeded with the saved
+record: `w.steps` = the proven steps, `w.draftId = wf.id`, name/ask/cadence carried. An added or rephrased step
+RUNS AND IS APPROVED exactly as wizard steps always are; Save flows through the wizard's existing
+`draftId → updateWorkflow` branch. Mechanically this is the WW-1b draft-resume path made explicit — the wizard
+learns nothing new.
+
+**B (slim) — proof-preserving edits stay in place** (the RB-6c realtime doctrine): inline RENAME on the title;
+✕ remove-step and ↑↓ reorder in the pinned detail — direct `updateWorkflow`, in-place confirmation, unforced
+truth-repaint on disengage. Text editing is deliberately NOT offered here.
+
+**Contract:**
+- `id` persists across every edit (`updateWorkflow`, WW-1 v1610) → schedule, run history, and bound routines
+  survive by construction; `contentId` recomputes at save (the edit-detector) — exactly the split the store was
+  built around.
+- **No edits while a run is parked or in flight.** A parked resume replays from `stepIndex` against the step list
+  it parked with; editing underneath corrupts the resume. The ✎ disables with an open ✋/live run (tooltip names
+  why); alternatively the edit flow offers to cancel the park first.
+- **Partial re-proof saves honestly:** `buildWorkflowSave`'s existing rule — `status:'ready'` only when ALL steps
+  are approved — makes an incompletely re-proven edit save as `draft`, visibly.
+- Deferred by name: conversational editing ("swap step 2 for…" — reachability/ambiguity, its own pass) and any
+  step-level re-pin without a re-run (a PP-0c breach, never).
+
+**Status:** SPECCED, not built. Cost at build time: A ≈ ½ day (seed function + ✎ chip + parked-guard) · slim-B ≈
+½ day (three in-place ops + tests) · no storage or schema change.

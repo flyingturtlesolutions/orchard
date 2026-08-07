@@ -677,6 +677,10 @@ export function createCadenceHandlers() {
           try {
             for (const g of await listAllWorkflows()) {
               for (const w of (g.items || [])) {
+                // Loop2 (independent review) — ONE dot formula: the Automate render counts OWNED banks only (an
+                // orphaned bank draws no "Stopped" row), so an orphan-stamped disarm here made the dot show a
+                // count the tab could never explain — N closed, drop on render, bounce back on the next funnel.
+                if (w && w.orphanedFrom) continue;
                 const t = w && w.trigger;
                 if (t && t.enabled === false && t.disarmedWhy) disarmedN++;
               }
