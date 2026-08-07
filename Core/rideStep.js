@@ -14,6 +14,7 @@ import { canonicalAppForHost } from './connectorRecipes.js';
 import { planExec } from './execPlan.js';
 import { armable } from './rideRecipe.js';
 import { eachSweptParam, hasEachSentinel, runEachSweep } from './rideEach.js';   // v2.74.2047 — the SW-side EACH sweep
+import { isResolvedEnvelope } from './lookupResolve.js';   // v2.74.2064 RC-0 — the resolved-envelope the literal-safe strip passes by provenance
 
 // v2.74.2045 — hop-2 parity for the DIRECT projection. A seeded per-Ground record (recipeFromCatalogEntry)
 // stores no `app`, and recipeToLeg — the single field-reader — refuses a record without one. The panel never
@@ -218,8 +219,19 @@ export async function invokeRideRecipe(rec, groundId, { invoke, params = null, l
   // this filter remains the belt for every OTHER caller — headless map lookups, the vitals canary, writes.)
   let p = (params && typeof params === 'object' && !Array.isArray(params)) ? { ...params } : {};
   if (literalSafeParams) {
-    const marked = (leg.tool.resolve && typeof leg.tool.resolve === 'object') ? new Set(Object.keys(leg.tool.resolve)) : new Set();
-    for (const k of Object.keys(p)) { if (p[k] === 'each' || marked.has(k)) delete p[k]; }
+    // v2.74.2064 RC-0 — the strip also covers `lookup` destinations (the SW has no resolve layer, so an
+    // unresolved lookup phrase would ride to the URL/body verbatim, same DK-8b class as a `resolve` key). BUT a
+    // recalled/confirmed pick rides as a `__resolved` envelope (Core/lookupResolve.js, §6): PASS it by PROVENANCE
+    // (the shape), never a gid-looking value — only the recall path reading a confirmed belief mints `__resolved`,
+    // a model/pin binding never can. fillBody/coerceParams unwrap it at assembly (RC-1+). Dormant until RC-4/RC-6.
+    const marked = new Set([
+      ...(leg.tool.resolve && typeof leg.tool.resolve === 'object' ? Object.keys(leg.tool.resolve) : []),
+      ...(leg.tool.lookup && typeof leg.tool.lookup === 'object' ? Object.keys(leg.tool.lookup) : []),
+    ]);
+    for (const k of Object.keys(p)) {
+      if (isResolvedEnvelope(p[k])) continue;   // a confirmed pick survives the strip (provenance-based, not value-shape)
+      if (p[k] === 'each' || marked.has(k)) delete p[k];
+    }
   }
   // v2.74.2055 — REQUIRED params gate the headless invoke (review: an approved scheduled draft-order replay
   // POSTed with no line_items — fillBody drops unfilled members, pins bank primitives only, and NOTHING on this

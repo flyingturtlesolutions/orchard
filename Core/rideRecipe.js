@@ -103,6 +103,7 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   if (e.pulse != null) rec.pulse = e.pulse;
   if (e.drill && typeof e.drill === 'object') rec.drill = e.drill;
   if (e.resolve && typeof e.resolve === 'object') rec.resolve = e.resolve;   // CX-9b (v1434) — per-param resolve specs
+  if (e.lookup && typeof e.lookup === 'object') rec.lookup = e.lookup;   // v2.74.2064 RC-0 — per-destination-param lookup specs (search→rank→gid); hop 1 of 3 (invariant #3), rides seeded like `resolve`
   if (e.identityGql && typeof e.identityGql === 'object') rec.identityGql = e.identityGql;   // v1479 — {me} from a GraphQL identity read (endpoint/body/idPath) when the REST probe can't (agent-id vs user-id)
   // v2.74.1936 — `apiHost` (the API lives on a SIBLING host of the ride tab — UPS: page www.ups.com, API
   // webapis.ups.com) and `csrfHeader` (the token's header NAME differs per site — UPS sends x-xsrf-token).

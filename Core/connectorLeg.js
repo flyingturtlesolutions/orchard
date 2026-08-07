@@ -382,6 +382,10 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       // CX-9b (v2.74.1434) — per-param `resolve` specs (human value → canonical id via one of the app's own reads;
       // Core/rideParamResolve.js). The panel dispatch resolves BEFORE the executor, so both transports benefit.
       resolve: (r.resolve && typeof r.resolve === 'object') ? r.resolve : null,
+      // v2.74.2064 RC-0 — the `lookup` marker (per-destination-param search→rank→gid specs; Core/lookupResolve.js).
+      // Hop 3 of 3 (invariant #3): unread here = dropped on the SEEDED path while the curated twin keeps working —
+      // the exact "works curated, dies seeded" class this file's `drill` comment (v1928) warns about.
+      lookup: (r.lookup && typeof r.lookup === 'object' && !Array.isArray(r.lookup)) ? r.lookup : null,
       autoRequires: _str(r.autoRequires) || null,
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
       // CX-7 — a GraphQL READ is a POST with a body (the query document), so the body threads for gql recipes too
