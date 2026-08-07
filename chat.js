@@ -53,6 +53,7 @@ import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/p
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg, missingRequiredParams, inventedIdentifierParams, legParamDefs } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`); v2.74.1854 — the pre-flight required-param gate; v1911 — the identifier-provenance gate; v2021 — legParamDefs for write fill
+import { resolveLookupParams } from './Core/lookupRun.js';   // v2.74.2067 RC-1 — resolve a `lookup` destination (email→Customer, name/sku→Variant) by invoking a search leg
 import { misboundIdentifierParams, shapesForOwner } from './Core/identifierShapes.js';   // SG-1 (v2.74.1947) — the any-slot shape guard: a UPS 1Z must not bind a Shopify order slot
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
 import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs, opCaptureHint, askNamesOtherSystem, drillTargetRedirect, CONNECTOR_RECIPES } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport); LEG-2a (v1594) — the ops checklist's by-hand coaching; v1597 — the named-system fence; v1761 — CONNECTOR_RECIPES for TR-1 inventory
@@ -6830,7 +6831,7 @@ function _mapMatchLabel(match, leg = null) {
 // same abort latch, merged group-tagged rows as ONE value — the next chain step / reduce consumes it), and turn
 // an ambiguous/unknown value into an honest structured error instead of a silent wrong-scope read.
 async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, onEach = null, derived = false } = {}) {
-  if (leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve) {
+  if (leg && leg.domain === 'connector' && leg.tool && (leg.tool.resolve || leg.tool.lookup)) {   // v2.74.2067 RC-1 — lookup resolves on the chain path too
     const rp = await _resolveRideParamsCore(leg, params, { tabId, groundId });
     if (rp.needs) {
       const cands = (rp.needs.candidates || []).map((c) => `${c.label} (#${c.value})`).join(' · ');
@@ -13086,7 +13087,8 @@ async function _warmResolveVia(host, tabId) {
 // ({param, noun, raw, reason, candidates}); the interpret wrapper renders it, the chain path returns it as an error.
 async function _resolveRideParamsCore(leg, params, { tabId, groundId } = {}) {
   const specs = (leg && leg.tool && leg.tool.resolve && typeof leg.tool.resolve === 'object') ? leg.tool.resolve : null;
-  if (!specs) return { params, labels: {}, each: null, needs: null };
+  const lookupMap = (leg && leg.tool && leg.tool.lookup && typeof leg.tool.lookup === 'object') ? leg.tool.lookup : null;   // v2.74.2067 RC-1 — search-leg gid resolution
+  if (!specs && !lookupMap) return { params, labels: {}, each: null, needs: null };
   const out = { ...(params || {}) }; const labels = {};
   // v2.74.1884 — which params came from `defaultPath` rather than from the ask. "Blank" is not one thing: it means
   // "no scope named", and an existential ask ("get ANY open warranty request") means "and I mean anywhere". Without
@@ -13095,7 +13097,7 @@ async function _resolveRideParamsCore(leg, params, { tabId, groundId } = {}) {
   let eachPlan = null;   // DK-7 (v2.74.1488) — an each-mode enumeration ({name, values, total, capped}); first wins
   const _normEq = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
   const mo = (leg.tool && leg.tool.drill && leg.tool.drill.matchOn) || null;   // the drill's free-text filter slot (e.g. address)
-  for (const [name, spec] of Object.entries(specs)) {
+  for (const [name, spec] of Object.entries(specs || {})) {
     if (!spec || typeof spec !== 'object' || !spec.via) continue;
     const state = await _rideResolveVia(leg, String(spec.via), { tabId, groundId });
     if (!state) continue;   // no state → leave as-is; the executor's needs-param guard answers honestly
@@ -13188,6 +13190,39 @@ async function _resolveRideParamsCore(leg, params, { tabId, groundId } = {}) {
         try { _orchLog(`RIDE_RESOLVE ▸ ${mo} "${out[mo]}" dropped (echoes ${name})`); } catch { /* */ }
         delete out[mo];
       }
+    }
+  }
+  // v2.74.2067 RC-1/RC-2 — LOOKUP: resolve destination gids from human phrases (email → Customer, name/sku →
+  // ProductVariant) by invoking a SEARCH leg among this ground's legs, ranking under `require` (Core/lookupRun.js),
+  // and filling in place. A value already `gid://` passes through untouched. ambiguous / none / out-of-stock →
+  // `needs` (the same ask-back shape as `resolve`), NEVER a guessed write. The exact-match + require gate live in
+  // the pure ranker; this seam only supplies the injected search-leg invoke.
+  if (lookupMap) {
+    const _lkHost = String((leg.tool && (leg.tool.origin || leg.tool.appHost)) || '').toLowerCase();
+    const _invokeSearch = async (viaLegId, sp) => {
+      try {
+        const { groundId: _gid, recipes } = await _cachedHostRecipes(_lkHost);
+        if (!recipes || !recipes.length) return null;
+        const _sl = harvestedRecipeLegs(recipes, { host: _lkHost, mode: 'ask', groundId: _gid || groundId }).find((l) => l && l.tool && l.tool.recipeId === viaLegId);
+        if (!_sl) return null;
+        const _pl = planExec(_sl, sp, { tabId, groundId: _gid || groundId });
+        if (!_pl || !_pl.ok || !_pl.channel) return null;
+        const _r = await _orchReq(_pl.channel, _pl.payload);
+        return (_r && _r.success !== false && _r.value != null) ? _r.value : null;
+      } catch { return null; }
+    };
+    const _lr = await resolveLookupParams(lookupMap, out, { invokeSearch: _invokeSearch });
+    Object.assign(out, _lr.params || {});
+    Object.assign(labels, _lr.labels || {});
+    for (const [k, v] of Object.entries(_lr.labels || {})) { try { _orchLog(`RIDE_LOOKUP ▸ ${k} → ${v}`); } catch { /* */ } }
+    if (_lr.needs) {
+      const _nd = _lr.needs;
+      try { _orchLog(`RIDE_LOOKUP ▸ ${_nd.param}${_nd.index != null ? `[${_nd.index}]` : ''} "${String(_nd.raw).slice(0, 40)}" → ${_nd.reason} (needs ask)`); } catch { /* */ }
+      return { params: out, labels, each: eachPlan, needs: {
+        param: _nd.param, noun: _nd.noun, raw: _nd.raw,
+        reason: _nd.reason === 'ambiguous' ? 'ambiguous' : 'unknown',
+        candidates: (_nd.candidates || []).slice(0, 5).map((c) => ({ value: c.id, label: c.label })),
+      } };
     }
   }
   return { params: out, labels, each: eachPlan, needs: null, defaulted };
@@ -14510,7 +14545,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
   // transport (replay read/write, cookie-ride write, the planExec tail) dispatches canonical ids — and a write's
   // HITL preview shows the real request. On ambiguity/unknown the honest ask-back is already rendered.
   let _resolvedLabels = {};
-  if (leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve) {
+  if (leg && leg.domain === 'connector' && leg.tool && (leg.tool.resolve || leg.tool.lookup)) {   // v2.74.2067 RC-1 — lookup resolves at the interpret door too
     const rp = await _resolveRideParams(msg, leg, params, { tabId, groundId });
     if (rp.error) return false;
     params = rp.params; _resolvedLabels = rp.labels || {}; _resolvedDefaulted = rp.defaulted || {};

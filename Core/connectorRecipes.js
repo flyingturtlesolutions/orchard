@@ -668,6 +668,20 @@ export const CONNECTOR_RECIPES = [
   // placeholders → native value; unfilled → dropped), so an ordinary paid draft omits them cleanly.
   { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, gql: false, persistedOp: 'DraftOrderCreate',
     does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
+    // v2.74.2067 RC-1/RC-2 — LOOKUP resolution (Core/lookupRun.js): users type a customer EMAIL and a product
+    // NAME, never gids. IN-PLACE: an email in `customer_gid` resolves via shopify_customer_by_email; a name/sku in
+    // each line_items[].variantId resolves via by-SKU-then-search. A value already a `gid://` passes through. The
+    // panel resolve seam invokes the search legs, ranks under `require` (Core/lookupResolve.rankLookupCandidates),
+    // fills the gid, and shows the resolution in the HITL confirm; ambiguous/none/out-of-stock ASK, never guess.
+    lookup: {
+      customer_gid: { viaLeg: 'shopify_customer_by_email', valueParam: 'email', rows: 'data.customers.edges[].node',
+        match: ['email'], id: 'id', label: ['firstName', 'lastName', 'email'], exact: true },
+      line_items: { each: true, elementKey: 'variantId', from: 'product',
+        viaLeg: ['shopify_product_by_sku', 'shopify_search_products'], valueParam: ['sku', 'query'],
+        rows: 'data.products.edges[].node', pick: 'variants.edges[].node', id: 'id', match: ['sku', 'title'],
+        label: ['title', 'sku', 'price'],
+        require: [{ field: 'status', equals: 'ACTIVE', fail: 'inactive' }, { field: 'inventoryQuantity', op: '>', value: 0, fail: 'outOfStock' }] },
+    },
     endpoint: '/api/operations/{op_sha}/DraftOrderCreate/shopify/{handle}', itemUrl: '/store/{handle}/draft_orders/{id}',   // CX-7f — "show order" after a create opens the draft
     body: { operationName: 'DraftOrderCreate', variables: {
       input: { purchasingEntity: { customerId: '{customer_gid}' }, lineItems: '{line_items}', useCustomerDefaultAddress: true, note: '{note}', poNumber: '{po_number}', tags: '{tags}', appliedDiscount: '{applied_discount}', shippingLine: '{shipping_line}' },
@@ -678,9 +692,10 @@ export const CONNECTOR_RECIPES = [
     // v2.74.2055 — the three nested params carry HINTS (the CX-9f rule applied: shapes lived only in JS comments
     // the binder never sees) + `elementGid` (nested identifier members were unreachable by param-level `gid`).
     params: [
-      { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },   // purchasingEntity.customerId — the customer's id from a lookup
+      { name: 'customer_gid', type: 'string', required: true, gid: 'Customer',
+        hint: 'the customer — their EMAIL (e.g. jane@acme.com) is resolved to the Customer id for you; a gid:// is also accepted' },   // purchasingEntity.customerId — RC-1 resolves email → id via the `lookup` marker
       { name: 'line_items', type: 'array', required: true, elementGid: { variantId: 'ProductVariant' },
-        hint: 'array of {variantId, quantity} — variantId is the product VARIANT id from a product lookup (bare numeric id ok, it is gid-coerced); quantity an integer ≥1' },
+        hint: 'array of {variantId, quantity} — variantId is the product by NAME or SKU (e.g. "Smart Dimmer" or DK-SW-02), resolved to the variant id for you (a gid:// is also accepted); quantity an integer ≥1' },
       { name: 'note', type: 'string', required: false },
       { name: 'po_number', type: 'string', required: false },
       { name: 'tags', type: 'array', required: false },

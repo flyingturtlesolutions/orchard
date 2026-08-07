@@ -107,6 +107,7 @@ export const DECISION_MARKERS = [
   { key: 'tier', src: "TIER ▸" },
   { key: 'ride-write', src: "RIDE_WRITE ▸" },
   { key: 'ride-resolve', src: "RIDE_RESOLVE ▸" },
+  { key: 'ride-lookup', src: "RIDE_LOOKUP ▸" },   // v2.74.2067 RC-1 — email/name → gid resolution via a search leg
   { key: 'ride-drill', src: "RIDE_DRILL ▸" },
   { key: 'ride-each', src: "RIDE_EACH ▸" },
   { key: 'routine', src: "ROUTINE ▸" },
