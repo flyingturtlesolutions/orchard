@@ -504,6 +504,12 @@ primary surface. Attention = a quiet count, never a badge.
 
 ## 11. Build arc — the execution-ready v1 (AU-0 → AU-3), file-grounded
 
+**STATUS: v1 BUILT (2026-08-07).** AU-0 + AU-1 landed at v2.74.2079 (f1cdd03), AU-3 at v2.74.2080 (2c068e7) —
+`Core/audit.js` (pure, 37 tests), `Services/Storage/AuditCreateStore.js` (6 tests), `background/handlers/audit.js`
+(the hook), the two connector.js wire points, the `AUDIT ▸` marker, and the chat.js "what have I created?" intercept.
+`npm test` green (4407 passing); live eyeball owed (bus tests v2.74.2079/2080). AU-2 was folded into AU-3's render
+(see below), not shipped as a separate fill-at-capture rung. AU-4..AU-8 stay deferred (§7/§10).
+
 §7 is the full AU-0..8 ladder; this section is the **buildable v1 only** (creates → durable link → read), each rung
 independently landable, `npm test`-green, and bump-per-rung. It names the exact new files, the function signatures,
 the wire points (file:line as of v2.74.2076), and the per-rung test — so each build turn is mechanical, not a
@@ -565,11 +571,14 @@ gate — `node --check` + `npm run undef` + a **live eyeball**: a create banks e
 failed write, AND a nested-`userErrors` reject each bank nothing. The unit-gated slice is AU-0 (`auditSucceeded`
 included) + the store I/O. *First durable capture of an ad-hoc chat create — closes the §1 primary gap.*
 
-### AU-2 — the durable link (`itemUrl` filled once at the seam)
-Thread the leg's `itemUrl` template to `recordCreate` and fill it once: `fillEndpoint(leg.tool.itemUrl,
-{...urlArgs, id})` (connectorRecipes.js:625/:689; `urlArgs` already ride the outcome, vitals.js:177), store the
-filled string on the entry. **Test:** the banked row carries a fillable `itemUrl` that survives a reload (a stored
-string, not the reload-volatile `_lastGroundedRead`, chat.js:7074).
+### AU-2 — the durable link — VARIANCE (BUILT as store-ingredients + resolve-at-render, not fill-at-capture)
+The seam does NOT carry the leg's `itemUrl` template — the `{handle}` lives on the ride tab, not the record
+(connector.js:1297), so fill-at-capture would need the template threaded through the executor, which it isn't. The
+built approach is strictly more robust: `recordCreate` stores `recipeId` + a capped `urlArgs` snapshot on the entry
+(a small string-valued bag — `_capUrlArgs`, Core/audit.js), and the **surface resolves the durable link at render**
+via `fillEndpoint(catalogItemUrl(recipeId), {...urlArgs, id})`. This survives reload (the pieces are stored, not the
+reload-volatile `_lastGroundedRead`, chat.js:7074) AND lets a catalog `itemUrl` upgrade reach already-banked rows.
+*(v1's AU-3 answer lists rows without the inline link yet; the render-time resolution is the small remaining rung.)*
 
 ### AU-3 — the surface (read): the "what have I created" ask → flat table
 An ask parser (sibling to `parseDashboardAsk`, `Core/vitalsDashboard.js`) matches "what have I created / …this week"
