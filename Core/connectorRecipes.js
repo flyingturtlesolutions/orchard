@@ -722,7 +722,10 @@ export const CONNECTOR_RECIPES = [
   { ...SH, id: 'shopify_draft_orders', name: 'Search Shopify draft orders', method: 'GET', gql: false, persistedOp: 'DraftOrderList',
     listUrl: '/store/{handle}/draft_orders', displayId: ['name'], joinKey: ['customer.email'], coverage: 'selection',
     does: 'search DRAFT orders — open/pending drafts not yet completed: number (#D…), status, customer, total; blank = the most recent drafts — riding your admin login. First use may need the Drafts list opened by hand once to bank the operation',
-    endpoint: '/api/operations/{op_sha}/DraftOrderList/shopify/{handle}?operationName=DraftOrderList&variables=%7B%22draftOrdersFirst%22%3A50%2C%22draftOrdersLast%22%3Anull%2C%22before%22%3Anull%2C%22after%22%3Anull%2C%22query%22%3A%22{query}%22%2C%22sortKey%22%3A%22UPDATED_AT%22%2C%22reverse%22%3Atrue%2C%22savedViewId%22%3Anull%7D',
+    // v2.74.2070 — LIVE FIX (18:00Z): the connection errored `you must provide one of first or last` — the
+    // best-guess var names draftOrdersFirst/draftOrdersLast left the standard Relay $first/$last unbound. Use the
+    // standard first/last (query executed, so the op/sha bank + endpoint are correct; only the pagination var names were wrong).
+    endpoint: '/api/operations/{op_sha}/DraftOrderList/shopify/{handle}?operationName=DraftOrderList&variables=%7B%22first%22%3A50%2C%22last%22%3Anull%2C%22before%22%3Anull%2C%22after%22%3Anull%2C%22query%22%3A%22{query}%22%2C%22sortKey%22%3A%22UPDATED_AT%22%2C%22reverse%22%3Atrue%2C%22savedViewId%22%3Anull%7D',
     params: [{ name: 'query', type: 'string', required: false, hint: 'Shopify draft search syntax (status:open) or a draft number like #D1023, or blank for the most recent drafts' }] },
   // v2.74.2069 — DELETE a Shopify DRAFT order (persisted op DeleteDraftOrder, already banked live). The
   // DESTRUCTIVE-write template (delete_ticket's safety axes: write:true, reversible:false, destructive:true) on the
