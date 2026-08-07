@@ -116,7 +116,7 @@ wall — ONE blocked case, held schedule, no failure strike, no OS spam; sign ba
 ## Rung 6+ — SGV-1b → 2 → 3 → 4, each gated on the previous rung's live pass
 
 ChainPark (SGV-1b) · interrupts+pulse (SGV-2, presence-gated, quiet-hours) · drive assist + UrlClass + fenced
-LLM pack (SGV-3) · **SGV-4: retire the Connect chore** — the scoped teardown (R3 inventory) that deletes the
+LLM pack (SGV-3) · **SGV-4: retire the Connect chore** *(user-facing half LANDED EARLY at v2.74.2076/e21da47 by user direction — dev render retained; pulses re-point waits on SGV-2)* — the scoped teardown (R3 inventory) that deletes the
 user-facing state-manager surface. The arc's finish line.
 
 ---

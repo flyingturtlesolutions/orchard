@@ -257,6 +257,7 @@ sleeping human; otherwise hold for the toolbar badge at next panel-open (quiet h
 | **SGV-2** | Interrupt + pulse |
 | **SGV-3** | Drive + UrlClass + LLM |
 | **SGV-4** | Retire Connect chore — **scoped teardown (R3, the §8.4-style inventory rule applied to removal):** chat.js `_updateTabDots`' Connect leg (`VITALS_BADGE`-driven dot, CN-1.1) dies; `_tabAttention` roll-up keeps pending+parked only; `_renderConnect`/`_connectCard` fold to dev render; desk chips re-point (pulses go toolbar/OS, never Connect) |
+| | **USER-FACING HALF LANDED EARLY** (e21da47, v2.74.2076, 2026-08-07, user-directed): tab dev-gated · non-dev coercion to conversations · dots leg dev-only · honest chip variant. Dev render whole (interim heal surface). Remaining at SGV-2+: pulses re-point; §8.3 F1–F5 console absorption. |
 
 Interim: Connect = dev/debug only.
 
