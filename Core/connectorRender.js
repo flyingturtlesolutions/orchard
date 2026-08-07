@@ -148,6 +148,32 @@ export function createdRecordId(value) {
   return null;
 }
 
+/** v2.74.2073 — the HUMAN LABEL of the record a write created, for the "Done — created it (…)" message. Users
+ * think in the user-facing NUMBER (a draft is `#D29684`, an order `#1001`), not the internal gid tail. The created
+ * entity carries that as `name` (or `title`) beside its `id` — prefer it; fall back to the numeric id (createdRecordId's
+ * value) when the entity has no human name (e.g. a customer). The itemUrl navigation still uses createdRecordId (the
+ * internal id) — this is the DISPLAY only. Same dig as createdRecordId. PURE. */
+export function createdRecordLabel(value) {
+  const data = (value && typeof value === 'object' && value.data && typeof value.data === 'object') ? value.data : null;
+  if (!data) return null;
+  for (const op of Object.values(data)) {
+    if (!op || typeof op !== 'object' || Array.isArray(op)) continue;
+    for (const [k, v] of Object.entries(op)) {
+      if (k === 'userErrors') continue;
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        for (const f of ['name', 'title']) {                                                   // the human-facing number/label
+          const nm = v[f];
+          if (typeof nm === 'string' && nm.trim() && nm.trim().length <= 40) return nm.trim();
+        }
+        if (v.id != null) { let id = v.id; if (typeof id === 'string' && /^gid:\/\/shopify\//i.test(id)) id = id.split('/').pop(); return String(id); }
+      } else if (k === 'id' && v != null) {
+        let id = v; if (typeof id === 'string' && /^gid:\/\/shopify\//i.test(id)) id = id.split('/').pop(); return String(id);
+      }
+    }
+  }
+  return null;
+}
+
 /** The primary single OBJECT (a wrapper like {ticket:{…}}, or the value itself when id/name-shaped). PURE.
  * CX-7 — unwraps a GraphQL `{data:{<root>:{…}}}` envelope to the inner object. */
 export function primaryObject(value, _depth = 0) {

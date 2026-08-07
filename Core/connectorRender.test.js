@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems, normalizeDisplay, mapMatchLabel } from './connectorRender.js';
+import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, itemFields, recordDetails, toWorkItem, toWorkItems, normalizeDisplay, mapMatchLabel } from './connectorRender.js';
 import { renderMarkdown } from '../markdown.js';   // v1949 — assert the RENDERED HTML, not eyeball the panel
 
 describe('primaryList — find the data array', () => {
@@ -90,6 +90,18 @@ describe('createdRecordId — the record a WRITE created (CX-7f, for "show it" a
     assert.equal(createdRecordId({ data: { customerCreate: { customer: null, userErrors: [{ message: 'x' }] } } }), null);  // no record (only userErrors) → null
     assert.equal(createdRecordId({ data: { customers: { edges: [] } } }), null);       // a READ envelope isn't a create → null
     assert.equal(createdRecordId(null), null);
+  });
+
+  it('createdRecordLabel — the HUMAN number (name), not the gid tail; falls back to the id (v2.74.2073)', () => {
+    const draft = { data: { draftOrderCreate: { draftOrder: { id: 'gid://shopify/DraftOrder/1144249286790', name: '#D29684' }, userErrors: [] } } };
+    assert.equal(createdRecordLabel(draft), '#D29684');                                 // the user-facing number, NOT 1144249286790
+    assert.equal(createdRecordId(draft), '1144249286790');                              // …while the id (for /draft_orders/{id}) is unchanged
+    const cust = { data: { customerCreate: { customer: { id: 'gid://shopify/Customer/778899', firstName: 'Divine' }, userErrors: [] } } };
+    assert.equal(createdRecordLabel(cust), '778899');                                   // no name → falls back to the id (a customer has no #-number)
+    const prod = { data: { productCreate: { product: { id: 'gid://shopify/Product/5', title: 'Smart Plug' }, userErrors: [] } } };
+    assert.equal(createdRecordLabel(prod), 'Smart Plug');                               // title when there's no name
+    assert.equal(createdRecordLabel({ data: { draftOrderCreate: { draftOrder: { id: 'gid://shopify/DraftOrder/9', name: '   ' }, userErrors: [] } } }), '9');  // blank name → id
+    assert.equal(createdRecordLabel(null), null);
   });
 });
 
