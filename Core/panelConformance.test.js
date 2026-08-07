@@ -50,6 +50,18 @@ describe('panelConformance — §4 the composer is claimed, never hand-locked', 
     // _wfRenderPage etc. must go through claimComposer — a new direct write is the anonymous-lock bug (§13 r6)
     assert.equal(writes, inClaim, `found ${writes - inClaim} chat-input.disabled write(s) outside claim/releaseComposer`);
   });
+  // CF-3.11 (chat-tab review) — PLACEHOLDER writes are claim-owned too: the wizard's direct writes made the
+  // claim record and the visible placeholder diverge (invisible to the disabled-only test), and focusForAssistant's
+  // raw write shipped a mode with no chip and no escape. Both spellings the codebase has used are covered;
+  // `inp.placeholder` on OTHER created inputs is out of scope by the distinct `$('chat-input')`/`_inp` prefixes.
+  // KNOWN GAP (CF verify): the sanctioned writer's own idiom — `const inp = $('chat-input'); inp.placeholder =` —
+  // is uncountable at text level (created-<input> locals named `inp` write placeholders legitimately), so a future
+  // raw write copying THAT spelling slips this gate. Binding-aware coverage would need the undef-checker's parser.
+  it('chat-input.placeholder is written ONLY by claimComposer/releaseComposer', () => {
+    const direct = [...chat.matchAll(/\$\('chat-input'\)\.placeholder\s*=/g)].length
+      + [...chat.matchAll(/_inp\.placeholder\s*=/g)].length;
+    assert.equal(direct, 0, `found ${direct} raw chat-input placeholder write(s) — route them through claimComposer (placeholder option) or releaseComposer`);
+  });
 });
 
 describe('panelConformance — §5 icon buttons carry labels', () => {

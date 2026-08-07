@@ -177,8 +177,11 @@ async function _executeHeadless(instanceId, p, { invokeSgHandler, runId }) {
 // so the freshest report sat buried mid-thread while the user watched the bottom ("sweep runs, nothing happens").
 async function _note(convId, id, body) {
   try {
-    if (id === 'sweep_status' || id === 'sweep_idle') await ConversationStore.rollMessage(convId, id, { role: 'assistant', body });
-    else await ConversationStore.updateMessage(convId, id, { role: 'assistant', body }, { upsert: true });
+    // CF-1.4 (chat-tab review) — notes STAMP their render flag: the panel's live listener and the rehydrate path
+    // both honor the persisted `markdown`, and un-stamped notes rendered as raw backticks after reload (the
+    // listener's old hardcoded true only masked it live).
+    if (id === 'sweep_status' || id === 'sweep_idle') await ConversationStore.rollMessage(convId, id, { role: 'assistant', body, markdown: true });
+    else await ConversationStore.updateMessage(convId, id, { role: 'assistant', body, markdown: true }, { upsert: true });
   } catch { /* */ }
 }
 const _hhmm = () => { try { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };

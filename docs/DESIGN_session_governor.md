@@ -338,9 +338,11 @@ artifacts, not the source of truth.
 | v1.12 | 08-06 | Loop5 B1–B3 fire `presenceStop`, `_orchRunChain` return, origin-scoped hold |
 | v1.13 | 08-06 | **Review pass** R1 watching≠steal-override · R2 pack fenced + relink gated · R3 SGV-4 teardown scoped (CN-1.1 sites) · R4 expansion-pass prerequisite · R5 pulses presence-gated · R6 dev-scoped visits metric · R7 burst dedup (review: lane-663f; full text in that session's transcript) |
 | **v1.14** | **08-07** | **Observability addendum** O1 tick heartbeat · O2 denominators + sgv:baseline at SGV-0 · O3 steal-refused/suppressed witnesses · O4 soak arms · O5 block-opened + verify ok|fail|timeout · O6 pulse-response (gap analysis: lane-663f) |
+| **v1.15** | **08-07** | **Connect-repurpose ruling** (4-lens panel, lane-663f): builder-surface repurpose of the Connect tab REJECTED — the tab dies at SGV-4 as ruled; builder offers become a FUTURE SGV demand class (`builderOffers≤1`, presence-gated, quiet-hours) triggered by repeated USE (the membrane's adopt-on-2nd counter, predicate = used host with NO ARMED LEGS via the cached scan) minted on the proposals spine (card → add-leg wizard → §17 pipeline); leg suggestions = RIDE recipes only (network-layer identity/postcondition — the PS-3/4 DOM park holds); dev-maximalist builder inventory may live in the post-SGV-4 dev render (§8.1 law). |
 
 ### 12b. Non-goals (frozen)
 
+- Connect tab as a BUILDER/suggestion surface (ruled 2026-08-07: builder offers ride the proposals spine as an SGV demand class; a browsable suggestion tab has no zero state and re-creates the chore).
 - Connect tab as user heal surface (dev/debug until SGV-4).  
 - Orchard inventing passwords/OTP.  
 - SGV calling the run engine (`nudge_due` / `SGV_CHAIN_RESUME` only).  

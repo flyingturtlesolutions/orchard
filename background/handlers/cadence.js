@@ -501,20 +501,38 @@ async function _runStepInner(clause, ctx) {
 
 // v2.74.2036 — toolbar presence when the panel is closed (DESIGN_panel_surfaces §7 standing channel).
 let _cadenceDoneSinceOpen = 0;
+// CF-2.6 (chat-tab review) — TWO toolbar-badge writers exist (this one + background.js's invocation badge) and
+// they clobbered each other: an invocation completing after a park WIPED the standing "Needs you" with no
+// re-assert. The arbiter: cadence RECORDS its standing state in chrome.storage.session ('badge:cadence' —
+// survives SW teardown, dies with the browser session, exactly the badge's lifetime) and defers the PAINT while
+// invocations are live ('badge:invocations' > 0); the invocation writer restores the recorded state when its
+// set empties. Channel priority: invocations-active > cadence standing > empty.
+function _paintCadenceBadge(rec) {
+  try {
+    chrome.action.setBadgeText({ text: rec.text || '' });
+    if (rec.color) chrome.action.setBadgeBackgroundColor({ color: rec.color });
+    chrome.action.setTitle({ title: rec.title || 'Orchard' });
+  } catch { /* */ }
+}
+function _cadenceBadge(rec) {
+  (async () => {
+    try { await chrome.storage.session.set({ 'badge:cadence': rec }); } catch { /* */ }
+    let invN = 0;
+    try { invN = Number((await chrome.storage.session.get('badge:invocations'))?.['badge:invocations']) || 0; } catch { /* */ }
+    if (invN > 0) return;   // an invocation owns the badge right now; the recorded state restores on its exit
+    _paintCadenceBadge(rec);
+  })();
+}
 function _cadencePresence(phase, { name = '', verdict = '' } = {}) {
   try {
     if (phase === 'running') {
-      chrome.action.setTitle({ title: `Running: ${String(name).slice(0, 80)}` });
-      chrome.action.setBadgeText({ text: '…' });
-      chrome.action.setBadgeBackgroundColor({ color: '#d97757' });
+      _cadenceBadge({ text: '…', color: '#d97757', title: `Running: ${String(name).slice(0, 80)}` });
       try { if (_ctx && typeof _ctx.startPulse === 'function') _ctx.startPulse(); } catch { /* */ }
       return;
     }
     try { if (_ctx && typeof _ctx.stopPulse === 'function') _ctx.stopPulse(); } catch { /* */ }
     if (phase === 'parked' || phase === 'failed') {
-      chrome.action.setBadgeText({ text: '!' });
-      chrome.action.setBadgeBackgroundColor({ color: phase === 'failed' ? '#c25a5a' : '#c8954a' });
-      chrome.action.setTitle({ title: phase === 'failed'
+      _cadenceBadge({ text: '!', color: phase === 'failed' ? '#c25a5a' : '#c8954a', title: phase === 'failed'
         ? `Failed: ${String(name).slice(0, 60)}`
         : `Needs you: ${String(name).slice(0, 60)}` });
       try {
@@ -529,19 +547,26 @@ function _cadencePresence(phase, { name = '', verdict = '' } = {}) {
     }
     // done
     _cadenceDoneSinceOpen = Math.min(99, _cadenceDoneSinceOpen + 1);
-    chrome.action.setBadgeText({ text: _cadenceDoneSinceOpen > 1 ? String(_cadenceDoneSinceOpen) : '✓' });
-    chrome.action.setBadgeBackgroundColor({ color: '#6b9e5c' });
-    chrome.action.setTitle({ title: `Done: ${String(name).slice(0, 60)}${verdict ? ` (${verdict})` : ''}` });
+    _cadenceBadge({ text: _cadenceDoneSinceOpen > 1 ? String(_cadenceDoneSinceOpen) : '✓', color: '#6b9e5c', title: `Done: ${String(name).slice(0, 60)}${verdict ? ` (${verdict})` : ''}` });
   } catch { /* badge best-effort */ }
 }
 
-/** Panel open clears the "done while closed" standing badge. */
+/** The outcome surface rendering clears the "done while closed" standing badge. CF verify — phase-aware:
+ * a RUNNING '…' badge is mid-story (its own terminal phase repaints it); clearing it here erased the live
+ * signal and its arbiter record, so the invocation-exit restore then restored nothing. Standing states
+ * (✓/count/'!') clear — the surface the user is looking at now tells that story. */
 export function clearCadenceDoneBadge() {
   _cadenceDoneSinceOpen = 0;
-  try {
-    chrome.action.setBadgeText({ text: '' });
-    chrome.action.setTitle({ title: 'Orchard' });
-  } catch { /* */ }
+  (async () => {
+    let rec = null;
+    try { rec = (await chrome.storage.session.get('badge:cadence'))?.['badge:cadence'] || null; } catch { rec = null; }
+    if (rec && rec.text === '…') return;
+    try { await chrome.storage.session.remove('badge:cadence'); } catch { /* CF-2.6 — the record clears WITH the badge, else it resurrects on the next invocation exit */ }
+    try {
+      chrome.action.setBadgeText({ text: '' });
+      chrome.action.setTitle({ title: 'Orchard' });
+    } catch { /* */ }
+  })();
 }
 
 // The drift check (§2.1), via the same shared primitive — PRE-resolved (v2.74.2044). rideStepResolvable is

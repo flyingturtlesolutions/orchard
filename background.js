@@ -1070,9 +1070,24 @@ function __stopPulse() {
 
 function __updateToolbarBadge() {
   const count = __activeInvocations.size;
+  try { chrome.storage.session.set({ 'badge:invocations': count }).catch?.(() => {}); } catch { /* CF-2.6 — cadence defers its paint while this is >0 */ }
   try {
     if (count === 0) {
-      chrome.action.setBadgeText({ text: '' });
+      // CF-2.6 (chat-tab review) — the empty-set clear used to WIPE cadence's standing '!'/'✓' badge with no
+      // re-assert; now the recorded cadence state (chrome.storage.session, SW-teardown-proof) restores instead.
+      (async () => {
+        let rec = null;
+        try { rec = (await chrome.storage.session.get('badge:cadence'))?.['badge:cadence'] || null; } catch { /* */ }
+        try {
+          if (rec && rec.text) {
+            chrome.action.setBadgeText({ text: rec.text });
+            if (rec.color) chrome.action.setBadgeBackgroundColor({ color: rec.color });
+            if (rec.title) chrome.action.setTitle({ title: rec.title });
+          } else {
+            chrome.action.setBadgeText({ text: '' });
+          }
+        } catch { /* */ }
+      })();
       __stopPulse();
     } else {
       // Show count badge only when >1 invocation. Single invocation gets

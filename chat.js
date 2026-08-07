@@ -362,6 +362,9 @@ async function _loadDevMode() {
   catch { _devModeEnabled = false; }
   _applyDevModeVisibility();
 }
+// CF-4.18 — messageId → last self-persisted body. MODULE scope: _persistMessageUpdate records here and the
+// storage listener below skips the matching echo; a listener-local map would be reborn empty every event.
+const _selfWrites = new Map();
 // FL-6e (v2.74.1367) — SW-persisted messages (the scheduled sweep's notes) appear in the OPEN thread LIVE. The
 // headless run writes to the conversation RECORD; without this the results were invisible until reopen — the
 // first live clock test read as "timer resets but nothing prints". Diff-by-messageId: bubbles the panel itself
@@ -381,16 +384,24 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   for (const m of conv.messages) {
     if (!m || !m.id || m.role !== 'assistant' || typeof m.body !== 'string' || !m.body.trim()) continue;
+    // CF-1.4 — html bubbles (strategy cards) are NEVER rewritten in place here: their srcText is unstashed by
+    // design, so the diff guard always fired and clobbered the rendered card with re-markdowned raw markup.
+    if (m.html) continue;
+    // CF-1.4 — a self-written message whose body matches what this panel just persisted needs no O(n) rewrite.
+    if (_selfWrites.get(String(m.id)) === m.body) { _selfWrites.delete(String(m.id)); continue; }
     let el = null;
     try { el = document.querySelector(`[data-message-id="${CSS.escape(String(m.id))}"]`); } catch { el = null; }
+    // CF-1.4 — honor the PERSISTED flag (write sites now stamp it); legacy un-stamped notes default to markdown
+    // (`!== false`), matching the old hardcoded behavior for stored history.
+    const _md = m.markdown !== false;
     if (el) {
       // v1381 — an UPSERTED stable-id note (sweep_idle / sweep_status) changes body in storage; without this the
       // open thread kept showing the old text ("timer expires, nothing happens" while the note updated silently).
-      if (el.dataset.srcText !== m.body) _setMessageBody(el, m.body, { markdown: true });
+      if (el.dataset.srcText !== m.body) _setMessageBody(el, m.body, { markdown: _md });
       continue;
     }
     const added = appendMessage({ role: 'assistant', body: '', id: `msg-${m.id}`, skipPersist: true });
-    _setMessageBody(added, m.body, { markdown: true });
+    _setMessageBody(added, m.body, { markdown: _md });
   }
 });
 
@@ -402,6 +413,11 @@ let _railChangeTimer = null;
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (!Object.keys(changes).some((k) => k === 'conv:index' || k.startsWith('proposals:') || k.startsWith('ledger:'))) return;   // ledger: (v1361) — every sweep fire writes steps, so the countdown re-reads the alarm's NEW time
+  // CF-2.5 (chat-tab review) — the DOT rides this SAME signal: SW sweeps mint/decide proposals through the raw
+  // store (no panel wrapper, no broadcast), and a closed rail only refreshed on unrelated events — the Chat dot
+  // slept through every headless sweep. This one line covers ALL writers incl. post-mint transitions (the
+  // mint-only-broadcast alternative re-creates the stuck-dot class the wrapper comment warns about).
+  if (Object.keys(changes).some((k) => k.startsWith('proposals:'))) _pingTabDots();
   if (_railChangeTimer) return;
   _railChangeTimer = setTimeout(() => { _railChangeTimer = null; _refreshRailIfOpen().catch(() => {}); }, 200);
 });
@@ -720,9 +736,11 @@ function _setTabDot(tabId, n, ariaLabel) {
     }
   } catch { /* */ }
 }
+let _dotsEpoch = 0;   // CF-2.8 — concurrent refreshes: only the NEWEST invocation's counts may land
 async function _updateTabDots(pre = {}) {
   // RB (rail review, fetch-reuse) — `pre` carries counts a tab render already computed ({parked, pending});
   // provided counts skip their fetch. No pre = the standalone refresh (funnels, boot, broadcasts).
+  const _ep = ++_dotsEpoch;
   try {
     let connectN = 0, parked = Number.isFinite(pre.parked) ? pre.parked : 0, pending = Number.isFinite(pre.pending) ? pre.pending : 0;
     // v2.74.2043 — Connect badge = scoped panel cards (not raw VITALS_BADGE.open, which counted every incident).
@@ -748,6 +766,7 @@ async function _updateTabDots(pre = {}) {
         pending = Object.values(counts || {}).reduce((a, b) => a + (Number(b) || 0), 0);
       } catch { /* */ }
     }
+    if (_ep !== _dotsEpoch) return;   // CF-2.8 — a newer refresh started while this one awaited: its counts win, ours are stale
     _setTabDot('rail-tab-conversations', pending, `Chat — ${pending} pending review${pending === 1 ? '' : 's'}`);
     _setTabDot('rail-tab-automations', parked, `Automate — ${parked} run${parked === 1 ? '' : 's'} awaiting a decision (parked or stopped)`);
     _setTabDot('rail-tab-connect', connectN, `Connect — ${connectN} connection${connectN === 1 ? '' : 's'} need attention`);
@@ -866,7 +885,8 @@ async function _openRail() {
   // invisible tab stops; Enter on an unseen row silently retargeted the composer). inert is the section fix
   // (v1809) applied to the whole drawer.
   try { $('rail').inert = false; $('btn-rail').setAttribute('aria-expanded', 'true'); } catch { /* */ }
-  try { _orchReq('CADENCE_PRESENCE_CLEAR', {}).catch(() => {}); } catch { /* */ }   // v2.74.2036 — clear closed-panel done badge
+  // CF-4.16 — the presence clear moved to the Automate tab's landed render (the badge's OUTCOME surface);
+  // clearing on mere rail-open ended the story before any surface told it.
 }
 
 function _closeRail() {
@@ -1008,6 +1028,29 @@ function _railBusyTouch() { _railRunBusyAt = Date.now(); }
 //            could defer FOREVER after one click (parked ✋ rows never surfacing, "due in Xm" frozen). The
 //            engagement fence yields after 30s of continuous deferral; the busy fence stays absolute.
 let _autoDeferT = null, _autoDeferForce = false, _autoDeferSince = 0;
+// CF-4.13 (chat-tab review) — the CONVERSATIONS tab's twin of the trio below (the parity the review sized
+// honestly: this tab had bare 700ms retries with no coalescer, no ceiling, no :focus-within — one focused row
+// could defer truth forever, and disengage fired N stacked renders).
+let _convDeferT = null, _convDeferForce = false, _convDeferSince = 0;
+function _deferConvRender(force) {
+  _convDeferForce = _convDeferForce || !!force;
+  if (_convDeferT) clearTimeout(_convDeferT);
+  _convDeferT = setTimeout(() => {
+    _convDeferT = null;
+    const f = _convDeferForce; _convDeferForce = false;
+    void _renderRailList(f ? { force: true } : {});
+  }, 700);
+}
+function _convEngagedDefer(force) {   // true = deferred (caller returns); false = 30s ceiling hit, land anyway
+  if (!_convDeferSince) _convDeferSince = Date.now();
+  if (Date.now() - _convDeferSince >= 30000) return false;
+  _deferConvRender(force);
+  return true;
+}
+function _convDeferLanded() {
+  _convDeferSince = 0;
+  if (_convDeferT) { clearTimeout(_convDeferT); _convDeferT = null; _convDeferForce = false; }
+}
 function _deferAutomationsRender(force) {
   _autoDeferForce = _autoDeferForce || !!force;
   if (_autoDeferT) clearTimeout(_autoDeferT);
@@ -1066,16 +1109,17 @@ async function _renderRailListNow() {
   // wiggle ("cards appear and disappear"). Defer while the pointer is anywhere inside the rail, or while a
   // peek/height-animation is live. USER-ACTION renders (force) land regardless — the click already spent the
   // hover state they cared about.
-  const _engaged = () => { try { return live.matches(':hover') || !!live.querySelector('.rail-section.peek, .sliding'); } catch { return false; } };
+  // CF-4.13 (chat-tab review) — fence PARITY with Automate, honestly built: `:focus-within` joins the engagement
+  // test (RB-3's keyboard case, missed on this tab), the deferral gains the same coalescer + 30s ceiling trio
+  // (`:focus-within` never decays — without a ceiling one focused row deferred truth forever), and the swap
+  // preserves keyboard focus by row identity.
+  const _engaged = () => { try { return live.matches(':hover') || live.matches(':focus-within') || !!live.querySelector('.rail-section.peek, .sliding'); } catch { return false; } };
   // v2.74.WFC-1 (UI review #2) — a live card RUN is an ABSOLUTE fence: even a force render yields to it. A
   // forced rebuild (delete/schedule/parked on ANOTHER card, openRail) destroys the running card's <li> nodes —
   // the observer + step hook then write progress into detached elements while the visible card sits frozen.
   // Force overrides hover/peek (the user's click already spent that state), but never a run's DOM.
-  if (_railBusyHeld()) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }
-  if (!_force && _engaged()) {
-    setTimeout(() => { void _renderRailList(); }, 700);
-    return;
-  }
+  if (_railBusyHeld()) { _deferConvRender(_force); return; }
+  if (!_force && _engaged() && _convEngagedDefer(false)) return;
   // v1803 (fix 2) — BUILD-THEN-SWAP: the old body cleared the live list FIRST and then awaited four fetches,
   // leaving a visibly EMPTY rail for the whole await window on every background refresh. Build into a
   // detached container, swap once at the end.
@@ -1113,8 +1157,15 @@ async function _renderRailListNow() {
     _wfNoteOpenParks(_pk);   // WFP-5 — the ▶ handler + due auto-runner read this map on whichever tab renders
     for (const p of _pk) {
       if (p && p.appId) {
-        _parkedByInst[p.appId] = (_parkedByInst[p.appId] || 0) + 1;
-        (_parkedFull[p.appId] = _parkedFull[p.appId] || []).push(p);
+        // CF-2.7 (chat-tab review) — each park resolves to ONE owner desk (find-first, the Automate tab's
+        // predicate order: instanceId then class appId), keyed by the OWNER'S instanceId so the row lookup
+        // hits. Workflows bank to the CLASS key, so a naive appId-fallback fan-out would badge every preset
+        // sibling with the same park and the chips would sum past the Automate dot.
+        const owner = all.find((c) => c && String(c.instanceId) === String(p.appId))
+          || all.find((c) => c && String(c.appId) === String(p.appId) && c.instanceId);
+        const key = owner ? owner.instanceId : p.appId;
+        _parkedByInst[key] = (_parkedByInst[key] || 0) + 1;
+        (_parkedFull[key] = _parkedFull[key] || []).push(p);
       }
     }
   } catch { /* badge-only — never blocks the Rail */ }
@@ -1248,12 +1299,14 @@ async function _renderRailListNow() {
   // moved nodes). No empty-await window, ever. v1815 — RE-CHECK before swapping: a render that passed the head
   // check while idle can arrive here mid-peek/mid-animation (the awaits take real time; the churn is constant)
   // and would destroy the animating node — the "animations no longer evident" regression.
-  if (_railBusyHeld()) { setTimeout(() => { void _renderRailList(_force ? { force: true } : {}); }, 700); return; }   // WFC-1 — re-check at swap time too (the fetch awaits let a run start mid-build)
-  if (!_force && _engaged()) {
-    setTimeout(() => { void _renderRailList(); }, 700);
-    return;
-  }
+  if (_railBusyHeld()) { _deferConvRender(_force); return; }   // WFC-1 — re-check at swap time too (the fetch awaits let a run start mid-build)
+  if (!_force && _engaged() && _convEngagedDefer(false)) return;
+  // CF-4.13 — focus-preserving swap: replaceChildren destroys a keyboard-focused row (focus fell to <body>, Tab
+  // restarted from the document top — the RB-3 failure on the tab it missed). Re-focus the same row by identity.
+  const _focusId = (() => { try { const r = document.activeElement && document.activeElement.closest && document.activeElement.closest('#rail-list [data-conversation-id]'); return r ? r.dataset.conversationId : ''; } catch { return ''; } })();
   live.replaceChildren(...container.childNodes);
+  _convDeferLanded();
+  if (_focusId) { try { const r = live.querySelector(`[data-conversation-id="${(window.CSS && CSS.escape) ? CSS.escape(_focusId) : _focusId}"]`); if (r) r.focus(); } catch { /* */ } }
   _updateRailActionDot();
   if (anyActive || live.querySelector('.rail-item[data-next-sweep]')) _startRailStatusTimer(); else _stopRailStatusTimer();
   // RB (rail review, fetch-reuse) — refresh the dots with the pending sum THIS render already computed.
@@ -1392,10 +1445,22 @@ async function _dismissWizardToDesk() {
 async function _selectConvForInput(conv) {
   if (!conv) return true;
   if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); return true; }   // the builder covers the current desk → selecting it reveals the desk
-  if (conv.id === _currentConversationId) return true;
+  if (conv.id === _currentConversationId) {
+    // PT-3 (page-transition research) — same-id is a no-op ONLY while the thread pane is the live surface. A
+    // gallery (＋ view / ＋ Workflow) WIPES + hides #messages without changing the conversation, which left both
+    // rail doors dead for the current desk — the one gesture a stranded user actually tries. Surface mismatch →
+    // repaint instead of no-op (an empty conv repaints its own empty state; the wizard case returned above).
+    if (!$('messages').classList.contains('hidden')) return true;
+    const full = await ConversationStore.load(conv.id);
+    if (!full) { await _renderRailList(); return false; }
+    await _rehydrateConversation(full); await _resumeRunningInvocations();
+    await _renderRailList();
+    return true;
+  }
   if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch the input target anyway?')) return false;
   const full = await ConversationStore.load(conv.id);
-  if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
+  if (!full) { await _renderRailList(); return false; }   // CF-4.14 — a failed load (deleted-by-race) is FALSE: the caller's revert runs instead of the optimistic highlight lying
+  await _rehydrateConversation(full); await _resumeRunningInvocations();
   await _renderRailList();   // re-highlight the selected row; the drawer STAYS open
   return true;
 }
@@ -1406,6 +1471,21 @@ async function _openConvFullTimeline(conv) {
   if (_wfWizard && !_wfForeign() && String(conv.id) === String(_currentConversationId)) { await _dismissWizardToDesk(); await _renderRailList(); _closeRail(); return true; }   // the builder covers the current desk → selecting it reveals the desk
   if (conv.id !== _currentConversationId) {
     if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return false;
+    const full = await ConversationStore.load(conv.id);
+    if (!full) { await _renderRailList(); return false; }   // CF-4.14 — same honesty on the double-click door
+    // PT-1 (page-transition research) — the PARKED case: dblclicking the builder's BIRTH desk from ELSEWHERE. The
+    // same-desk guard at the top is unsatisfiable while parked (current is another conv → _wfForeign() true AND
+    // same-id false), so this rehydrate painted the timeline and the v1623 tail revive immediately re-covered it —
+    // the live "double-click still shows the builder" repro. Double-click's contract IS the full timeline (v1223):
+    // dismiss-to-draft (the same _wfAbandon the same-desk door uses — draft-keep ≥2 proven steps, WW-1b resume via
+    // ＋ Workflow) so the rehydrate tail finds no wizard to revive. The SINGLE-click door keeps the v1623 revival.
+    // Placed AFTER the confirm + successful load (PT verify): a declined switch or failed load leaves the parked
+    // builder alive — only a switch that actually happens dismisses it.
+    if (_wfWizard && String(_wfWizard.convId) === String(conv.id)) _wfAbandon();
+    await _rehydrateConversation(full); await _resumeRunningInvocations();
+  } else if ($('messages').classList.contains('hidden')) {
+    // PT-3 (page-transition research) — the same-id heal (see _selectConvForInput): a gallery wiped + hid the
+    // current desk's thread; "open full timeline" must repaint it, not just close the rail over a dead surface.
     const full = await ConversationStore.load(conv.id);
     if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
   }
@@ -1721,9 +1801,15 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
     // committed to; the authoritative _renderRailList() below repaints truth (including the children). If the
     // cascade THROWS, the row is restored before rethrowing — a failed delete must not fake success.
     try { item.style.display = 'none'; } catch { /* cosmetic */ }
+    // CF-4.15 (chat-tab review) — the desk's SECTION (its case/workflow child rows) hides with it: the forced
+    // truth-repaint below yields to the busy fence for up to 5 min, and orphaned child rows stayed clickable
+    // ghosts selecting deleted conversations. Hide (never remove — different subtree from any live run card),
+    // restore alongside the desk row on a failed cascade.
+    const _sec = (item.parentElement && item.parentElement.classList && item.parentElement.classList.contains('rail-group')) ? item.parentElement : null;
+    try { if (_sec) _sec.style.display = 'none'; } catch { /* cosmetic — hiding the GROUP hides row + case section together */ }
     try {
       await ConversationStore.delete(conv.id);
-    } catch (e) { try { item.style.display = ''; } catch { /* */ } throw e; }
+    } catch (e) { try { item.style.display = ''; if (_sec) _sec.style.display = ''; } catch { /* */ } throw e; }
     _expandedApps.delete(conv.id);
     // AP-3 fix (v2.74.1220) — the cascade also removed this app's sub-conversations, so reset the panel if the ACTIVE
     // conversation was the app OR one of its now-deleted children (else you'd be left viewing a conversation that's gone).
@@ -1938,6 +2024,10 @@ function appendMessage({ role, body, attribution, id, skipPersist = false, convI
   const bodyEl = document.createElement('div');
   bodyEl.className = 'message-body';
   bodyEl.textContent = body;
+  // CF-1.4 — stash the SOURCE like _setMessageBody does: bubbles finalized without a later body-set used to fall
+  // back to DOM textContent, which _revealLines' span re-wrap strips of newlines (run-on persists), and the
+  // storage listener's diff guard mis-fired against them.
+  try { if (body) { msg.dataset.srcText = String(body); msg.dataset.srcMd = ''; } } catch { /* */ }
   content.appendChild(bodyEl);
 
   msg.appendChild(avatar);
@@ -2004,9 +2094,15 @@ async function _persistMessageUpdate(msgEl, fields) {
   if (fields.outcome)     existing.outcome     = fields.outcome;
   if (fields.invocationId) existing.invocationId = fields.invocationId;
   if (fields.devBridge)   existing.devBridge   = true;   // v2.74.987 — dev-bridge bubble: rehydrate restores amber identity + keeps it plain-text
+  if (fields.offer !== undefined) existing.offer = fields.offer;   // CF-4.17 — a compact serializable offer ({kind,payload}|null) survives reload; null clears
 
   // Track ts on the DOM so subsequent updates don't bump it
   if (!msgEl.dataset.ts) msgEl.dataset.ts = existing.ts;
+
+  // CF-4.18 (chat-tab review) — record the self-write PER MESSAGE-ID (never per-record/event: the store's
+  // read-modify-write carries record-level markers into SW writes, and event-counters race — either shape
+  // silently suppresses the sweep-note delivery the storage listener exists for). Capped so it can't grow.
+  try { _selfWrites.set(String(messageId).replace(/^msg-/, ''), existing.body); if (_selfWrites.size > 200) { const k = _selfWrites.keys().next().value; _selfWrites.delete(k); } } catch { /* */ }
 
   try {
     // v2.74.970 — declared upsert: the CR-U1 finalize (.938) persists assistant bubbles only at their
@@ -2192,17 +2288,26 @@ async function renderSuggestionCards() {
     mkCard(d.title || 'View', `${d.pinned ? 'pinned · ' : ''}${relTime(d.updatedAt)}`, () => { void _openConvFullTimeline(d); });
   }
   for (const a of asks) {
-    mkCard(`“${a.ask}”`, `tested${a.host ? ` · ${a.host}` : ''}`, () => { input.value = a.ask; void sendChatMessage(); });
+    mkCard(`“${a.ask}”`, `tested${a.host ? ` · ${a.host}` : ''}`, () => { void sendChatMessage(a.ask); });   // CF-3.9 — draft survives
   }
   mkCard('＋ New view', 'set up a role on its sites', () => { _renderAppGallery(); });
 }
 
 function focusForAssistant(cap) {
-  $('chat-input').placeholder = `Ask ${cap.name}…`;
+  // CF-1.2 (chat-tab review) — targeted-assistant is a FIRST-CLASS COMPOSER CLAIM, not a raw placeholder write:
+  // the mode is now visible (chip), escapable (the §6.1 ladder releases it), and survives housekeeping turns by
+  // design — it is consumed one-shot at the targeted DISPATCH, never at entry (an intercepted or lock-blocked
+  // turn must not silently drop a mode the user chose).
+  claimComposer('assistant', { placeholder: `Ask ${cap.name}…`, chip: `Ask ${cap.name}` });
   $('chat-input').focus();
   // Stash the assistant id so the next send routes to it directly
   $('chat-input').dataset.targetCapabilityId = cap.id;
   $('chat-input').dataset.targetCapabilityName = cap.name;
+}
+function _releaseAssistantTarget() {
+  const inp = $('chat-input');
+  if (inp) { delete inp.dataset.targetCapabilityId; delete inp.dataset.targetCapabilityName; }
+  releaseComposer('assistant');
 }
 
 // ─── Desk gallery (DK-6 · flat, v2.74.1486; replaced the CV-3b/OM two-level type menu) ────────────────────────
@@ -2212,7 +2317,12 @@ function focusForAssistant(cap) {
 // type/archetype persist internally as loop-shape fields on defs, never as a user choice. A preconfigured desk's
 // seed stays editable per-instance (`seed` to view, `seed: <instructions>` to change — syncs the durable def).
 function _renderAppGallery() {
-  if (_wfWizard) releaseSurface('wizard');   // WFG-1 transition-fix — a page-show path must EVICT a parked/live wizard's page slot (only _wfEnterPage claims 'page', so no other show does); keeps _wfWizard alive to revive on its desk's reopen
+  // PT-4 (live repro: the workflow-history overlay stayed over "＋ view") — galleries are PAGE surfaces: CLAIM
+  // the page slot instead of hand-evicting the wizard. The registry's own rules then do BOTH teardowns — a page
+  // claim closes any live overlay (the rule the wizard already relied on) and kills a live wizard's page claim
+  // via its registered release (the PARK — _wfWizard stays alive to revive on its desk's reopen; subsumes the
+  // WFG-1 evict this line replaces, which handled the wizard but left overlays standing).
+  claimSurface('page', 'gallery');
   _cancelOpenParamForms();   // RB-6 (click-consumer review) — the v2.74.107 rule: cancel open param forms BEFORE wiping #messages, or their awaiters hang on detached buttons forever and _activeInvocations nags every later row select
   $('messages').innerHTML = '';
   $('messages').classList.add('hidden');
@@ -2272,7 +2382,7 @@ function _wfSuitsLine(suits) {
 }
 
 async function _renderWorkflowGallery(opts = {}) {
-  if (_wfWizard) releaseSurface('wizard');   // WFG-1 transition-fix — evict a parked/live wizard's page slot before showing the gallery (same class as _renderAppGallery; only _wfEnterPage claims 'page')
+  claimSurface('page', 'gallery');   // PT-4 — same as _renderAppGallery: the page claim closes overlays AND parks a live wizard (replaces the WFG-1 hand-evict)
   _cancelOpenParamForms();   // Loop1 (critical review) — the SAME v107 rule as _renderAppGallery: cancel before the #messages wipe, or form awaiters hang forever (this door was missed when the other was fixed)
   const scopeDesk = opts.scopeDesk || null;
   const gen = ++_wfGalleryGen;    // this render's generation; a later re-render invalidates its pending async appends
@@ -2579,14 +2689,14 @@ async function _createAppConversation(def, { setup = false } = {}) {
         const setupBtn = document.createElement('button');
         setupBtn.className = 'suggestion-card';
         setupBtn.innerHTML = '<div class="suggestion-card-name">Set up — connect your site</div>';
-        setupBtn.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = 'setup'; sendChatMessage(); });
+        setupBtn.addEventListener('click', () => { sendChatMessage('setup'); });   // CF-3.9
         cards.appendChild(setupBtn);
       }
       for (const s of (Array.isArray(def.starters) ? def.starters : [])) {
         const card = document.createElement('button');
         card.className = 'suggestion-card';
         card.innerHTML = `<div class="suggestion-card-name">${escHtml(s)}</div>`;
-        card.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = s; sendChatMessage(); });
+        card.addEventListener('click', () => { sendChatMessage(s); });   // CF-3.9
         cards.appendChild(card);
       }
     }
@@ -7706,7 +7816,7 @@ function releaseSurface(owner) {
 // PS-5 (v2.74.1767, DESIGN_panel_surfaces.md §4) — the COMPOSER claim: whoever repurposes the input (wizard
 // stages, the intent prompt) must LABEL it — a mode chip above the input row — and restore it through ONE
 // release. A locked composer without a visible mode read as "the panel is broken" (§13 report 6).
-const _COMPOSER_DEFAULT_PH = 'Message Orchard…  (type / for capabilities)';
+const _COMPOSER_DEFAULT_PH = 'Message Orchard…  (type / for capabilities, or 📎 to upload a file)';   // CF-3.11 — ONE source, parity with chat.html (the 📎 hint was permanently lost after the first claim/release)
 let _composerClaim = null;   // { owner } | null
 function _composerChip(show, text = '') {
   try {
@@ -7742,6 +7852,8 @@ try {
     if (e.key !== 'Escape') return;
     try { if (document.querySelector('.param-modal-overlay')) return; } catch { /* */ }
     if (_surfaces.overlay) { e.preventDefault(); _releaseSlot('overlay'); return; }
+    // CF-1.2 — the assistant-target mode is escapable: one Escape releases the claim + binding.
+    try { if (_composerClaim && _composerClaim.owner === 'assistant') { e.preventDefault(); _releaseAssistantTarget(); return; } } catch { /* */ }
     try { if ($('rail').classList.contains('open')) { e.preventDefault(); _closeRail(); } } catch { /* */ }
   });
 } catch { /* */ }
@@ -7760,7 +7872,9 @@ function openPanelOverlay({ id, title = '', titleMeta = '', render = null, onClo
   const ov = document.createElement('div');
   ov.className = 'wf-history-overlay';
   ov.dataset.overlayId = id;
-  ov.innerHTML = `<div class="wf-history-head"><div class="wf-history-title">${title}${titleMeta ? ` <span class="wf-history-sched">${titleMeta}</span>` : ''}</div><button class="wf-history-close" type="button" title="Close" aria-label="Close ${id}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="5 12 12 19 19 12"/></svg></button></div><div class="wf-history-list"></div>`;
+  // CF-4.19 (chat-tab review) — the helper ESCAPES its own inputs (the caller-must-escape contract was
+  // unenforced and one workflow-name away from XSS); the one pre-escaping caller was de-escaped in this change.
+  ov.innerHTML = `<div class="wf-history-head"><div class="wf-history-title">${escHtml(String(title))}${titleMeta ? ` <span class="wf-history-sched">${escHtml(String(titleMeta))}</span>` : ''}</div><button class="wf-history-close" type="button" title="Close" aria-label="Close ${escHtml(String(id))}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="5 12 12 19 19 12"/></svg></button></div><div class="wf-history-list"></div>`;
   const close = () => {
     try { ov.classList.remove('open'); setTimeout(() => { try { ov.remove(); } catch { /* */ } }, 200); } catch { try { ov.remove(); } catch { /* */ } }
     if (typeof onClose === 'function') { try { onClose(); } catch { /* */ } }
@@ -7956,9 +8070,14 @@ function _wfRenderPage() {
   claimComposer('wizard', {
     locked: _lock,
     chip: `Workflow setup — ${w.phase === 'running' ? 'step running' : (w.phase === 'ran' ? 'review the result' : (w.phase === 'cadence' ? 'pick a schedule' : (w.phase === 'banked' ? 'add a step or save' : 'type the next step')))}`,
+    // CF-3.11 (chat-tab review) — ALL wizard placeholders route THROUGH the claim (the plan/await-step phases
+    // used to overwrite it with direct writes after this call, so the claim record and the visible placeholder
+    // diverged — invisible to the conformance test, which now covers placeholder writes).
     placeholder: _lock
       ? (w.phase === 'running' ? 'Step running…' : (w.phase === 'ran' ? 'Review the result — use the buttons above' : (w.phase === 'cadence' ? 'Pick a schedule or save — buttons above' : 'Add the next step, save, or cancel — buttons above')))
-      : 'Type the step…',
+      : (w.phase === 'plan' ? 'Type a step to add it to the plan…'
+        : (w.phase === 'await-step' ? ((w.steps && w.steps.length) ? 'Type the next step…' : 'Type the first step…')
+          : 'Type the step…')),
   });
   // v2.74.1615 — the renderer ASSERTS its surface (the v1608 landing lesson): every appendMessage on the current
   // conversation calls _enterConversation(), which hides #empty-state — so a run's appendMessage flipped the user
@@ -8038,7 +8157,7 @@ function _wfRenderPage() {
 
     try {
       const _inp = $('chat-input');
-      if (_inp) { _inp.placeholder = 'Type a step to add it to the plan…'; _inp.value = ''; _inp.focus(); }
+      if (_inp) _inp.focus();   // CF-3.11 — placeholder rides the claim; the unconditional clear wiped a mid-typed draft on every row-drop re-render (the entry clear covers sends)
     } catch { /* */ }
 
     if (plan.length) mkPageBtn(`✓ Use these ${plan.length} step${plan.length === 1 ? '' : 's'}`, () => {
@@ -8072,7 +8191,7 @@ function _wfRenderPage() {
     try {
       const _inp = $('chat-input');
       if (_inp) {
-        _inp.placeholder = n ? 'Type the next step…' : 'Type the first step…';
+        // CF-3.11 — placeholder rides the claim now (next-vs-first computed there from w.steps.length).
         // v2.74.1674 — prefill when the composer is EMPTY **or** still holds the previous step's text.
         //
         // Reported live: "Add next step doesn't update to next step". The run button calls `_wfRunStep` directly
@@ -8352,6 +8471,15 @@ async function _addWorkflowFromPreset(preset, desk) {
   // rail.inert (set on every close), so the bare add showed the new row in a rail that was dead to every click
   // and focus — visible but inoperable, recoverable only by toggling ☰ twice.
   try { _switchRailTab('automations'); await _openRail(); } catch { /* */ }
+  // PT-3c (page-transition research) — the gallery must not remain the UNDER-surface: it wiped + hid #messages,
+  // so closing the rail landed back on a stuck gallery whose same-desk rail doors were dead no-ops (pre-PT-3).
+  // Repaint the current conversation's real surface beneath the rail; the Automate tab stays the confirmation.
+  try {
+    if (_currentConversationId) {
+      const c = await ConversationStore.load(_currentConversationId);
+      if (c) { await _rehydrateConversation(c); await _resumeRunningInvocations(); }   // PT verify — pair them like every other call site (a live invocation keeps its running bubble)
+    }
+  } catch { /* the under-surface heal is best-effort */ }
 }
 
 // Run the current step through the NORMAL front door, sharing the chain st; re-parent the result into the page.
@@ -9102,7 +9230,7 @@ async function _fireRoutine(rec, { manual = false } = {}) {
   try { await _orchReq('FLEET_ROUTINE', { instanceId: inst, fired: true }); } catch { /* */ }
   try { _orchLog(`ROUTINE ▸ fire${manual ? ' (manual)' : ' (due)'} — "${_scrubHead(rec.ask, 60)}"`); } catch { /* */ }
   if (!manual) _orchFinalize(appendMessage({ role: 'assistant', body: `Routine due — running: “${rec.ask}”` }));
-  const inp = $('chat-input'); if (inp) { inp.value = rec.ask; sendChatMessage(); }
+  sendChatMessage(rec.ask);   // CF-3.9 — draft survives
 }
 
 // DK-8 — the v1 fire model: the alarm marked the record DUE (SW); the run happens when the desk is next OPEN —
@@ -10336,15 +10464,13 @@ function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null 
 // even after 'remember this workflow' is selected" — the live nag). If the ask is content-identical to a banked
 // record (the replay) or would RECALL one (workflowMatch — the same matcher the front door suggests with), the
 // flywheel is already closed → no offer. Load failure → offer anyway (saveWorkflow dedups by content id regardless).
-async function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
-  const appId = _workflowClassKey();   // v1780 — banks to the CLASS
-  const autonomous = Array.isArray(steps) && steps.some((s) => s && (s.kind === 'connector' || s.kind === 'fanout'));
-  const subAsks = (Array.isArray(clauses) ? clauses : []).map((c) => c && c.text).filter(Boolean);
-  if (!appId || !autonomous || subAsks.length < 2 || !String(ask || '').trim()) return;
-  try {
-    const wfs = await _loadWorkflowsMerged();   // DK-8k — the gate sweeps every candidate key, same as recall
-    if (wfs.some((w) => w && w.id === workflowId(ask, subAsks)) || workflowMatch(ask, wfs)) return;   // already banked / recallable
-  } catch { /* offer anyway */ }
+// CF-4.17 (chat-tab review) — the bar renderer is REUSABLE by rehydrate: an un-clicked "Remember this workflow"
+// used to vanish on reload with no re-offer path. The offer persists as a compact serializable field on the
+// terminal message ({kind, ask, subAsks} — no closures, no tabId) and CLEARS with an explicit offer:null write
+// on click (the store's merge semantics keep the field forever otherwise — the DK-8j nag class).
+function _renderWorkflowSaveOffer(msg, { ask, subAsks }) {
+  const appId = _workflowClassKey();
+  if (!appId) return;
   const bar = _orchActionBar(msg);
   const name = document.createElement('input');   // WF-2 — an optional short alias to invoke it by ("standup")
   name.type = 'text'; name.placeholder = 'name it (optional, e.g. standup)'; name.style.cssText = 'width:13em;margin-right:6px;';
@@ -10358,11 +10484,24 @@ async function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
       saved = list.some((w) => w && w.ask === ask);
       if (saved) { try { _orchLog(`WORKFLOW ▸ banked "${_scrubHead(ask, 40)}" key=${appId} (${list.length} saved)`); } catch { /* */ } }   // DK-8k — the save is now diagnosable against a later recall miss
     } catch { /* */ }
+    try { void _persistMessageUpdate(msg, { role: 'assistant', body: msg.dataset.srcText || '', markdown: msg.dataset.srcMd === '1', offer: null }); } catch { /* */ }   // CF-4.17 — acted offers never re-offer
     const note = appendMessage({ role: 'assistant', body: saved
       ? (nm ? `Saved as “${nm}”. Say “${nm}” any time to run it.` : `Saved. Next time you ask something like “${_scrubHead(ask, 60)}…”, I’ll offer to run the whole workflow.`)
       : 'Couldn’t save that workflow.' });
     _orchFinalize(note);
   }));
+}
+async function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
+  const appId = _workflowClassKey();   // v1780 — banks to the CLASS
+  const autonomous = Array.isArray(steps) && steps.some((s) => s && (s.kind === 'connector' || s.kind === 'fanout'));
+  const subAsks = (Array.isArray(clauses) ? clauses : []).map((c) => c && c.text).filter(Boolean);
+  if (!appId || !autonomous || subAsks.length < 2 || !String(ask || '').trim()) return;
+  try {
+    const wfs = await _loadWorkflowsMerged();   // DK-8k — the gate sweeps every candidate key, same as recall
+    if (wfs.some((w) => w && w.id === workflowId(ask, subAsks)) || workflowMatch(ask, wfs)) return;   // already banked / recallable
+  } catch { /* offer anyway */ }
+  try { void _persistMessageUpdate(msg, { role: 'assistant', body: msg.dataset.srcText || '', markdown: msg.dataset.srcMd === '1', offer: { kind: 'workflow-save', ask, subAsks } }); } catch { /* */ }
+  _renderWorkflowSaveOffer(msg, { ask, subAsks });
 }
 
 // Recall: the saved workflow (if any) the ask matches, scoped to THIS instance. Null off-app / no match. A CASCADE:
@@ -11429,6 +11568,12 @@ async function _renderRailAutomations(opts = {}) {
   if (!opts.force && (live.matches(':hover') || live.matches(':focus-within')) && _autoEngagedDefer(opts.force)) return;
   live.replaceChildren(...container.childNodes);
   _autoDeferLanded();
+  // CF-4.16 (chat-tab review) — the "done while closed" toolbar badge clears when its OUTCOME SURFACE renders
+  // (this tab shows the run history counts), not merely when the rail opens — matching cadence.js's stated
+  // "panel open clears" intent without ending the story before any surface tells it. CF verify — USER-initiated
+  // renders only (opts.force): with the rail idling on this tab, every debounced background repaint landed here
+  // and re-fired the clear, wiping a live run's badge + arbiter record mid-phase.
+  if (opts.force) _orchReq('CADENCE_PRESENCE_CLEAR', {}).catch(() => {});
   // RB (rail review, fetch-reuse) — refresh the dots with the counts THIS render already fetched.
   void _updateTabDots({ parked: parked.length + stopped.length });
   // v2.74.2035 — CD-1a due-on-open: after the Automate cards land, fulfill ONE due panel-tier schedule.
@@ -11475,8 +11620,8 @@ async function _renderWorkflowRuns(wf) {
   const sched = _wfScheduleLabel(wf);
   const ov = openPanelOverlay({
     id: 'wf-history',
-    title: `Run history — “${escHtml(wf.name || wf.ask)}”`,
-    titleMeta: sched ? `(${escHtml(sched)})` : '',
+    title: `Run history — “${wf.name || wf.ask}”`,   // CF-4.19 — the helper escapes now; pre-escaping here double-escaped & < > in names
+    titleMeta: sched ? `(${sched})` : '',
   });
   if (!ov) return;
   ov.body.textContent = 'Loading…';
@@ -11824,6 +11969,7 @@ async function _tryGlobalMatch(ask, existingMsg = null, excludeGroundId = null) 
     const h = hits[0];
     const name = h.groundName || 'another site';
     _setMessageBody(probe, `Not on this page — but I can do that on ${name}. Run it there?`);
+    _orchFinalize(probe);   // CF-1.1 — finalize at bar-mint (same lock-leak + vanishing-question family as TR-1, one tier down)
     const bar = _orchActionBar(probe);
     bar.appendChild(_mkBtn(`▶ Run on ${name}`, () => { bar.remove(); _orchRunOnGround(appendMessage({ role: 'assistant', body: '' }), { ask, hit: h }); }));
     bar.appendChild(_mkBtn('Not now', () => { bar.remove(); }));
@@ -11831,6 +11977,7 @@ async function _tryGlobalMatch(ask, existingMsg = null, excludeGroundId = null) 
   }
   // ≥2 — SAY SO (per the interim spec: surface the ambiguity, don't pick). One button per site → run on the chosen one.
   _setMessageBody(probe, `That works on a few of your sites — ${hits.map((h) => h.groundName).join(', ')}. Which one?`);
+  _orchFinalize(probe);   // CF-1.1 — the picker question persists + the turn lock releases while it waits
   const bar = _orchActionBar(probe);
   for (const h of hits) bar.appendChild(_mkBtn(h.groundName || 'that site', () => { bar.remove(); _orchRunOnGround(appendMessage({ role: 'assistant', body: '' }), { ask, hit: h }); }));
   return true;
@@ -15666,10 +15813,21 @@ function _getDevBridge() {
   return _devBridgeInstance;
 }
 
-async function sendChatMessage() {
+async function sendChatMessage(textOverride = null) {
   const input    = $('chat-input');
-  let text       = input.value.trim();   // v2.74.1166 — `let` so the routing inversion can strip a `tool:` prefix
+  // CF-3.9 (chat-tab review) — bars/cards that re-send programmatically pass their text HERE instead of writing
+  // input.value: the user's mid-typed draft survives a retry click. The two entry clears below are gated on the
+  // argumentless (typed) call for the same reason. The exerciser's prefill paths deliberately keep writing the
+  // composer ("an exercised ask is INDISTINGUISHABLE from a typed one" — their contract, unchanged).
+  const _fromArg = typeof textOverride === 'string' && textOverride.trim().length > 0;
+  let text       = (_fromArg ? textOverride : input.value).trim();   // v2.74.1166 — `let` so the routing inversion can strip a `tool:` prefix
   if (!text) return;
+  // CF-3.12 — the ask was the ONE unclipped prompt input in the pipeline (history 300c, concern 280c, seed 4000c);
+  // clip in the send path (a textarea maxlength silently truncates drag-drops the paste toast can't see).
+  if (text.length > 32000) {
+    text = text.slice(0, 32000);
+    try { toast('Trimmed your message to 32,000 characters.', 'info'); } catch { /* */ }
+  }
   // v2.74.1882 — the field-miss fence is scoped to THE TURN, not to a stopwatch. My first draft used a 3s window and
   // would have been INERT on the very case it was built for: live 210342 the gap from `FIELD_FOLLOWUP ▸ no field
   // match` to the answer door was 3.77s for "ticket number" and 8.3s for "community", because an interpret round
@@ -15685,10 +15843,29 @@ async function sendChatMessage() {
     const now = Date.now();
     if (_lastSendStamp.key === k && (now - _lastSendStamp.at) < 3000) {
       try { _orchLog(`ROUTE ▸ duplicate send dropped ("${text.slice(0, 30)}" again ${now - _lastSendStamp.at}ms later)`); } catch { /* */ }
-      input.value = ''; _autosizeInput();
+      if (!_fromArg) { input.value = ''; _autosizeInput(); }   // CF-3.9 — a duplicate-dropped programmatic send must not wipe the draft
       return;
     }
     _lastSendStamp = { key: k, at: now };
+  }
+  // CF-1.3 (chat-tab review) — the STOP escape hatch OUTRANKS the turn lock: `stop` must halt a driven span even
+  // while a turn holds the lock (the slow intercepts below now arm it, which made this ordering load-bearing —
+  // the v907 stop contract, kept). Claims its own turn minimally (clear + echo) and never re-enters the cascade.
+  // CF verify — the hoist must NOT pre-empt the three consumers that owned these words in the old mid-cascade
+  // order: the wizard's typing phases (WW-1: a wizard answer is never a timeline bubble), a dev conversation
+  // (v1029: NOTHING else runs, stop included), and an active AS-2 setup (its own abort regex answers "Setup
+  // paused…"). When one of them holds the input, "stop" falls through to that consumer below unchanged.
+  if (_STOP_RE.test(text)) {
+    if (!_setupState) _adoptSetupStash();   // AS-2 survives reload — adopt BEFORE deciding who owns "stop"
+    const _stopClaimed = (_wfAwaitingInput() && !_wfForeign())
+      || _currentConversationKind === 'dev'
+      || (_setupState && _setupState.convId === _currentConversationId);
+    if (!_stopClaimed) {
+      if (!_fromArg) { input.value = ''; _autosizeInput(); }   // CF-3.9 — stop via argument leaves the draft alone
+      appendMessage({ role: 'user', body: text });
+      await _stopLongRunning();
+      return;
+    }
   }
   // v2.74.1993 (New #2) — TURN-IN-FLIGHT GUARD: block a SECOND reasoning turn while the first is still reasoning
   // (invariant #4 — interleaved reasoning corrupts each other's DOM waits; the DEFAULT interpret door re-enables Send
@@ -15707,7 +15884,7 @@ async function sendChatMessage() {
   // user message immediately (chat.js:1112 → Rail refresh), so the turn is visible everywhere the moment it's
   // sent. Intercepts add REPLIES — never the echo, never the clear. (The `seed:` flow deliberately REFILLS the
   // composer after this; the default door still owns its dataset/placeholder/button bookkeeping.)
-  input.value = ''; _autosizeInput();
+  if (!_fromArg) { input.value = ''; _autosizeInput(); }   // CF-3.9 — the claim clear is for TYPED turns; an argument send leaves the draft
   // WW-1 (v2.74.1611) — the ＋ Workflow wizard PAGE owns the input while awaiting a step / the name (the setup-flow
   // precedent). Consumed here, BEFORE the entry echo, so a step/name is NOT persisted as a conversation bubble
   // (the wizard is a page, not a timeline — user rule 1/3). The run it triggers renders inside the page.
@@ -16094,7 +16271,7 @@ async function sendChatMessage() {
         if (bound && bound.entry && bound.entry.kind === 'record') {
           // v2.74.1553/1554 — the turn was claimed AT ENTRY (invariant #4); the ~20s open runs under a visible
           // echo. A record-bind always claims the turn; an unopenable record says so honestly.
-          if (await _openFocusEntry(bound.entry, text)) return;
+          _turnLock(); try { if (await _openFocusEntry(bound.entry, text)) return; } finally { _turnUnlock(); }   // CF-1.3b — the ~20s open holds the in-flight guard; stop outranks it at entry
           const mF = appendMessage({ role: 'assistant', body: '' });
           _setMessageBody(mF, `Couldn’t open **${bound.entry.label}** on its site — no findable record number, or no site path is armed. Ask for a field instead, or say \`refresh\`.`, { markdown: true });
           _orchFinalize(mF);
@@ -16225,7 +16402,7 @@ async function sendChatMessage() {
     // below): live 1583 run — vendorsuite's literal "dashboard" section swallowed "show dashboard" here, and
     // "show admin dashboard" matched a zendesk section page. The site's OWN dashboard page stays reachable via
     // "go to dashboard" (parseDashboardAsk claims only show/open/display + the bare word).
-    if (mSectionShow && !parseDashboardAsk(text) && await _showSection(mSectionShow[1].trim())) return;
+    if (mSectionShow && !parseDashboardAsk(text)) { _turnLock(); try { if (await _showSection(mSectionShow[1].trim())) return; } finally { _turnUnlock(); } }   // CF-1.3b — slow intercept holds the guard
   }
   // v2.74.1533 — `re-teach` (also `reteach` / `show me again`): re-record the last on-site capability EVEN WHEN IT
   // WORKS. A successful walk shows no failure-only "● Show me" offer, so there was no way to improve it (e.g. add
@@ -16252,7 +16429,7 @@ async function sendChatMessage() {
   // matches the number, walks statuses, and the on-site phrase drives the open). No match shape → interpret.
   {
     const mOnSite = text.match(/^(?:show|open|view|pull\s+up|bring\s+up|go\s+to)\b[^\n]*?\b(\d{3,})\b[^\n]*\b(?:on|in)\s+(?:the\s+)?([a-z][\w.-]{2,})\s*$/i);
-    if (mOnSite && await _openRecordOnSite(text, mOnSite[1], mOnSite[2].toLowerCase())) return;
+    if (mOnSite) { _turnLock(); try { if (await _openRecordOnSite(text, mOnSite[1], mOnSite[2].toLowerCase())) return; } finally { _turnUnlock(); } }   // CF-1.3b — the LLM-match + walk replay span holds the guard
   }
   // P2.5 (v2.74.1983) — a data ask INSIDE A SHEET CASE answers over the grounded rows here, before the router can
   // TARGET-resolve to a live tab (the gl 08-03 finding). Fires only on a sheet case + a data-question shape.
@@ -16522,10 +16699,8 @@ async function sendChatMessage() {
 
   // v2.74.907 — STOP keyword: "stop"/"end"/"cancel" (full-match — a real ask like "stop showing ads on X"
   // falls through) halts the walk + cancels live invocations. Runs BEFORE any routing.
-  if (_STOP_RE.test(text)) {
-    await _stopLongRunning();
-    return;
-  }
+  // CF-1.3 — the STOP intercept moved ABOVE the turn lock at entry (it must outrank a held lock); this mid-cascade
+  // site is unreachable for stop texts and stays only as a comment-anchor for the ordering rationale.
 
   // v2.74.1013 — close-tabs commands (full-match, BEFORE routing). GLOBAL is destructive → confirm first;
   // SPECIFIC (this tab) closes the active tab immediately.
@@ -16573,9 +16748,9 @@ async function sendChatMessage() {
   const targetId   = input.dataset.targetCapabilityId;
   const targetName = input.dataset.targetCapabilityName;
 
-  delete input.dataset.targetCapabilityId;
-  delete input.dataset.targetCapabilityName;
-  input.placeholder = 'Message Orchard…  (type / for capabilities)';   // v2.74.1343 (review Batch 6) — keep the product name + the "/" hint (was "Message Agent HUB…", losing both)
+  // CF-1.2 — the one-shot consume of the assistant claim happens HERE, at dispatch (the claim's release
+  // restores the default placeholder — the old raw restore dropped the 📎 hint and bypassed the claim system).
+  _releaseAssistantTarget();
   _autosizeInput();
   $('btn-chat-send').disabled = true;
 
@@ -16633,9 +16808,14 @@ async function sendChatMessage() {
         if (em && em.success !== false && em.capabilityId && em.decision !== 'miss') {
           const msg = appendMessage({ role: 'assistant', body: '' });
           _setMessageBody(msg, `I can do that on ${_tgt.host}. Run it there?`);
+          // CF-1.1 (chat-tab review) — FINALIZE AT BAR-MINT: the leak's window is the await-click span — the
+          // turn lock (armed above for this door) stayed held while a QUESTION waited on the user, bouncing
+          // every send for 30s, and the unfinalized bubble vanished on reload. The button paths' later
+          // finalizes are safe upserts.
+          _orchFinalize(msg);
           const bar = _orchActionBar(msg);
           bar.appendChild(_mkBtn(`▶ Run on ${_tgt.host}`, () => { bar.remove(); _orchRunOnGround(appendMessage({ role: 'assistant', body: '' }), { ask, hit: { groundId: _tgt.groundId, capabilityId: em.capabilityId, groundName: _tgt.host } }); }));
-          bar.appendChild(_mkBtn('Not now', () => { bar.remove(); _setMessageBody(msg, 'Okay.'); }));
+          bar.appendChild(_mkBtn('Not now', () => { bar.remove(); delete msg.dataset.revealed; _setMessageBody(msg, 'Okay.'); _orchFinalize(msg); }));   // CF verify — the reveal is one-shot; un-mark so the swap animates
           return;
         }
         // v2.74.1761 — META: list armed rides for that host (deterministic). Teach only if inventory is empty.
@@ -17672,7 +17852,7 @@ async function _spawnSheetCase(filename, rows) {
   // NOT a row dump (the "blob"). The rows are grounded; the user asks to count / filter / see them. Markdown,
   // escape-first (untrusted name/headers/values neutralized in sheetBrief).
   const body = sheetBrief({ name: meta.name, count: meta.count, headers: meta.headers, rows });
-  try { await ConversationStore.updateMessage(conv.id, 'sheet_readout', { role: 'assistant', body }, { upsert: true }); } catch { /* the case still holds the sheet in focus + config */ }
+  try { await ConversationStore.updateMessage(conv.id, 'sheet_readout', { role: 'assistant', body, markdown: true }, { upsert: true }); } catch { /* the case still holds the sheet in focus + config */ }
   try { _orchLog(`SHEET ▸ loaded ${meta.count} row(s) from ${filename} → case ${conv.id}${parentId ? ` under ${parentId}` : ''}`); } catch { /* */ }
   try { await _selectConvForInput(conv); } catch { /* */ }                 // switch to the new case
   // SH-2 (v2.74.1986) — STAMP THE OWNING CONVERSATION. _lastGroundedRead is a module global assigned at
@@ -18057,6 +18237,17 @@ async function _rehydrateConversation(conv) {
   // body) also get cancelled since the awaiter callback would still try to
   // update the now-detached thinkingMsg.
   _cancelOpenParamForms();
+  // CF-3.10 (chat-tab review) — composer MODES don't cross conversations: a pending workflow-intent capture is
+  // CLEARED (not just claim-released — releasing alone leaves a chip-less silent capture on return, the PS-5
+  // anonymous-claim class inverted), and a targeted-assistant binding releases with its claim.
+  if (_wfIntentPending && _wfIntentPending !== String(conv && conv.id)) { _wfIntentPending = null; releaseComposer('workflow-intent'); }
+  try { if (_composerClaim && _composerClaim.owner === 'assistant') _releaseAssistantTarget(); } catch { /* */ }
+  // PT-2 (page-transition research) — OVERLAYS are conversation-scoped views: their buttons act on open-time or
+  // click-time desk state (the routines "Run now" re-derives _memoryId() at click, so one left open across a
+  // switch fired desk A's ask into desk B's thread and stamped B's record). The wizard is the file's ONLY page
+  // claimant, so no conversation entry ever released the overlay slot — every overlay survived every switch.
+  // Entering a conversation retires whatever overlay covered the previous one.
+  try { if (_surfaces.overlay) _releaseSlot('overlay'); } catch { /* */ }
   // v2.74.1623 — PARK-or-REVIVE (live 202445: the v1622 abandon killed the wizard when the user opened a spawned
   // case to REVIEW the open-case step — inspecting the result IS the review). Opening another conversation PARKS
   // the wizard (unlock the composer — the surface belongs to the conv being opened); opening the wizard's OWN
@@ -18157,6 +18348,21 @@ async function _rehydrateConversation(conv) {
     try { _getDevBridge()?.clearRunOutcome?.(conv.id); } catch { /* */ }   // v2.74.1096 — opening the conversation acks its "✓ done" marker → back to the timestamp
     try { _getDevBridge()?.reattachConversation?.(conv.id); } catch { /* */ }
   }
+  // CF-4.17 (chat-tab review) — re-offer the LAST persisted, un-acted offer (workflow-save is the one
+  // serializable kind persisted; acted offers cleared to null on click). The banked gate re-runs — a workflow
+  // saved since (or via another surface) must not re-nag (DK-8j).
+  try {
+    const _po = [...conv.messages].reverse().find((m) => m && m.offer && m.offer.kind === 'workflow-save');
+    if (_po && Array.isArray(_po.offer.subAsks) && _po.offer.subAsks.length >= 2) {
+      const el = document.querySelector(`[data-message-id="${CSS.escape(String(_po.id))}"]`);
+      if (el) {
+        const wfs = await _loadWorkflowsMerged().catch(() => []);
+        const banked = (wfs || []).some((w) => w && w.id === workflowId(_po.offer.ask, _po.offer.subAsks));
+        if (banked) void _persistMessageUpdate(el, { role: 'assistant', body: _po.body || '', markdown: _po.markdown !== false, offer: null });
+        else _renderWorkflowSaveOffer(el, { ask: _po.offer.ask, subAsks: _po.offer.subAsks });
+      }
+    }
+  } catch { /* the offer re-render is best-effort */ }
   // v2.74.1232 — ALWAYS land at the bottom (the most recent reply) when a timeline opens. The per-append scroll during
   // the loop is unreliable once bodies re-render (markdown/html/outcome cards change height), so snap explicitly after
   // the full timeline is laid out; the rAF covers async height settle. #conversation stays laid out behind the drawer
@@ -18292,7 +18498,7 @@ async function _renderDeskLanding(conv) {
             void _maybeRenderAdminDesk();
           } else {
             const inp = $('chat-input');
-            if (inp) { inp.value = c.command; void sendChatMessage(); }
+            void sendChatMessage(c.command);   // CF-3.9
           }
         });
         grid.appendChild(b);
@@ -18337,7 +18543,7 @@ function _connSignInBar(msg, origins, { retryAsk = null, onRetry = null } = {}) 
       // wizard); otherwise the routine-starter path re-dispatches the ask through the front door.
       if (onRetry) { try { onRetry(); } catch { /* */ } return; }
       const input = $('chat-input');
-      if (input) { input.value = retryAsk; sendChatMessage(); }   // the routine-starter path — every gate identical to typing it
+      sendChatMessage(retryAsk);   // CF-3.9 — the routine-starter path; every gate identical to typing it, the draft survives
     }));
   }
 }
@@ -18370,7 +18576,7 @@ function _csrfWarmBar(msg, { host = '', retryAsk = '', op = '' } = {}) {   // v1
     if (r.warmed === false) { btn.disabled = false; btn.textContent = `reloaded — still no token (are you signed in to ${host}?)`; return; }
     bar.remove();
     const input = $('chat-input');
-    if (retryAsk && input) { input.value = retryAsk; sendChatMessage(); }   // RH-1d — the retry IS a normal ask (same gates as typing it)
+    if (retryAsk) sendChatMessage(retryAsk);   // RH-1d + CF-3.9 — the retry IS a normal ask; the draft survives
   });
   bar.appendChild(btn);
 }
@@ -18426,7 +18632,7 @@ function _healRelearnBar(msg, { groundId, recipeId = '', host = '', name = 'that
             _setMessageBody(card, `✓ Applied the fix to **${rec.name || rec.id}** — re-running your ask to verify…`, { markdown: true });
             _orchFinalize(card);
             const input = $('chat-input');
-            if (input) { input.value = retryAsk; sendChatMessage(); }   // RH-1d — the next invoke IS the trial (same gates as typing it)
+            sendChatMessage(retryAsk);   // RH-1d + CF-3.9 — the next invoke IS the trial; the draft survives
           } else {
             _setMessageBody(card, `✓ Applied the fix to **${rec.name || rec.id}** — the next run verifies it.`, { markdown: true });
             _orchFinalize(card);
