@@ -72,7 +72,7 @@ import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 �
 import { stepReceiptLine, mayDeclareFilter, buildStepReceipt, renderStepReceipt } from './Core/stepReceipt.js';
 import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdict } from './Core/runLedger.js';   // OB-1 (v2.74.1831) — paired EXIT lines + the turn-level no-effect backstop   // v2.74.1828 receipt (STEP ▸); v1829 — mayDeclareFilter is a COST GATE for the branch consult, never a decider
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
 import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
@@ -14774,10 +14774,11 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // record (the write leg carries an itemUrl; createdRecordId digs the new id out of the mutation reply's
     // data.<op>.<entity>). Only when we actually have an id + itemUrl — else a plain "Done." (nothing to open).
     const _madeId = createdRecordId(sw && sw.value);
+    const _madeLabel = createdRecordLabel(sw && sw.value) || _madeId;   // v2.74.2073 — DISPLAY the human number (#D29684), not the internal gid tail; itemId below keeps the internal id for the itemUrl
     if (_madeId != null && leg.tool.itemUrl) {
       _lastGroundedRead = { leg, params, at: Date.now(), itemId: _madeId, urlArgs: (sw && sw.urlArgs) || null };
-      const _mSig = (/^[A-Za-z]*#?[\d-]+$/.test(String(_madeId)) && !String(_madeId).includes('#')) ? '#' : '';   // v1915-b — sixth sigil sibling (a created id can be a gid or carry its own #)
-      _setMessageBody(msg, `Done — created it (${_mSig}${_madeId}). Say “show it” to open the record.`);
+      const _mSig = (/^[A-Za-z]*#?[\d-]+$/.test(String(_madeLabel)) && !String(_madeLabel).includes('#')) ? '#' : '';   // v1915-b — sixth sigil sibling (add # only for a bare-numeric fallback id; a #D-name already carries its own)
+      _setMessageBody(msg, `Done — created it (${_mSig}${_madeLabel}). Say “show it” to open the record.`);
     } else {
       _setMessageBody(msg, 'Done.');
     }
