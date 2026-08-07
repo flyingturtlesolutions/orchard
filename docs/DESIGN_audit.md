@@ -502,6 +502,90 @@ primary surface. Attention = a quiet count, never a badge.
 
 ---
 
+## 11. Build arc — the execution-ready v1 (AU-0 → AU-3), file-grounded
+
+§7 is the full AU-0..8 ladder; this section is the **buildable v1 only** (creates → durable link → read), each rung
+independently landable, `npm test`-green, and bump-per-rung. It names the exact new files, the function signatures,
+the wire points (file:line as of v2.74.2076), and the per-rung test — so each build turn is mechanical, not a
+re-derivation. Land order is strict: a later rung imports the earlier one's pure core.
+
+### AU-0 — the pure core (`Core/audit.js` + `Core/audit.test.js`); NO behavior, unit-gated
+Mirrors `Core/runHistory.js` (pure, tested; the store in AU-1 is the I/O around it). Exports:
+
+- `AUDIT_VERBS = ['create']` (v1) · `AUDIT_KINDS = ['customer','order','draft','ticket','user','record']` — the
+  closed enums `classifyCreate` maps into; an unknown kind falls to `'record'`, never throws.
+- `auditEntry(fields) → {system, verb, kind, id, label, itemUrl, who, at, recipeId, groundId, origin}` — the
+  **field-whitelist normalizer** (the `runHistoryEntry` idiom, runHistory.js:148): drops unknown keys, coerces
+  types, defaults `verb='create'` / `who='gate'` / `at` from a passed-in clock (NEVER `Date.now()` inside — pass
+  `at` in, so the pure module and its test stay deterministic; the seam supplies `Date.now()`).
+- `classifyCreate(replyValue, recipeId, method) → {system, verb, kind}` — `verb` from the reply **data field key**
+  (`data.draftOrderCreate` → the op key names entity+verb, connectorRender.js:138), else create-only from the
+  recipeId (`create_ticket`→`ticket`); `kind` from the op key / recipeId; `system` from origin/apiHost. Never
+  invents — unknown ⇒ `kind='record'`.
+- `createRecordFrom(replyValue) → {id, label} | null` — wraps `createdRecordId` + `createdRecordLabel`
+  (**import from `Core/connectorRender.js:135/:156`**, GraphQL `{data:…}`-shaped) and **adds a non-`.data` REST
+  branch** (`{ticket:{id,subject}}` / `{user:{id,name}}` → id + label) so both transports extract an id.
+- `auditSucceeded(replyValue) → boolean` — **the phantom-row guard as a PURE function** (§10.1, the load-bearing
+  review fix). Returns false when: top-level `errors[]` non-empty, OR any `data.<op>.userErrors` non-empty (mirror
+  connector.js:1274-1278), OR `createRecordFrom` extracts no id. A rejected mutation banks NOTHING. This is the
+  screen SESSION_REPLAY-ok lacks upstream, lifted to where BOTH seams can call it.
+- `customerLabelFrom(inputParams) → string|null` — the §10.5 minimal label: first name, else email-local-part,
+  truncated ≤24. Fed the create INPUT (`shopify_create_customer` carries firstName/lastName/email), not the reply.
+- `appendCreate(prev, entry, {cap}) → items[]` + `truncationNotice(shown,total)` + `AUDIT_CAP=500` — reuse
+  runHistory.js's `appendRun`/`truncationNotice` verbatim if importable; else the same 3 lines.
+
+**Test** `Core/audit.test.js` (in the `Core/*.test.js` gate): `_GQL` fixtures `customerCreate`/`draftOrderCreate`
+→ id + `#D`/name label; a Zendesk REST `{ticket:{id,subject}}` → id, `kind='ticket'`; the **rejected** fixture
+`{data:{draftOrderCreate:{draftOrder:null,userErrors:[{message:'…'}]}}}` → `auditSucceeded=false`; a customer
+input → `customerLabelFrom` = first name; `auditEntry` drops an unknown field and defaults `at`. **Nothing wired —
+`npm test` is the whole gate for AU-0.**
+
+### AU-1 — the store + the hook (`Services/Storage/AuditCreateStore.js`, `recordCreate` at the two seams)
+Two pieces, one landable rung:
+
+1. **`Services/Storage/AuditCreateStore.js`** — mirrors `WorkflowRunStore.js` exactly, but a **single global key**
+   `'audit:creates'` (not per-id): `_chained` serialized RMW, `loadCreates() → {items,total,notice}`,
+   `appendCreateEntry(fields,{cap=AUDIT_CAP})` (normalize via `auditEntry`, `appendCreate`, bump lifetime `total`,
+   store `{items,total,updatedAt}`). **Test `AuditCreateStore.test.js`** (in the `Services/Storage/*.test.js`
+   gate): append banks a row; eviction past cap keeps `total` > `items.length` and a non-empty `notice`.
+2. **`recordCreate(evt)`** — a sibling to `reportLegOutcome`, in a NEW `background/handlers/audit.js` (keeps
+   connector.js's diff minimal; `reportLegOutcome` stays body-blind, §2). Body: `if (!auditSucceeded(evt.value))
+   return;` → `classifyCreate` + `createRecordFrom` (+ `customerLabelFrom(evt.inputParams)` when kind==='customer')
+   → `auditEntry` → `AuditCreateStore.appendCreateEntry` → `Logger.info('audit', 'AUDIT ▸ …')` **body-blind**
+   (system·kind·verb·who only — never the label/id in the marker text; §5/§7-7).
+3. **Wire at the TWO write branches** (guarded `if (isWrite)`, `try/void` so it never blocks the response):
+   - `connector.js:1393` (INVOKE_SESSION ok): `recordCreate({ ..._evtBase, value: reply.value, method, who: clearedBy, inputParams: (payload && payload.params) })` — `reply.value` already passed the :1263-1280 screen here, so `auditSucceeded` is belt-and-suspenders.
+   - `connector.js:1844` (SESSION_REPLAY ok): `recordCreate({ transport:'ride', origin: sessionHost, groundId, recipeId, value: r.body, method, who: clearedBy, inputParams: (payload && payload.params) })` — **here `auditSucceeded` is load-bearing** (no nested-userErrors screen upstream; §10.1).
+   - **NOT `:1819`** — reads-only retry-ok (§8.1).
+4. **Register `AUDIT ▸`** in `Core/decisionMarkers.js` `DECISION_MARKERS` with `metric: true` + a body-blind
+   `metricPattern` (Invariant #1 — else the marker is view-only and never reaches the CloudWatch count).
+
+**Verification honesty:** `recordCreate` + the two wire edits live in `background/handlers/*.js`, OUTSIDE the unit
+gate — `node --check` + `npm run undef` + a **live eyeball**: a create banks exactly one durable row; a read, a
+failed write, AND a nested-`userErrors` reject each bank nothing. The unit-gated slice is AU-0 (`auditSucceeded`
+included) + the store I/O. *First durable capture of an ad-hoc chat create — closes the §1 primary gap.*
+
+### AU-2 — the durable link (`itemUrl` filled once at the seam)
+Thread the leg's `itemUrl` template to `recordCreate` and fill it once: `fillEndpoint(leg.tool.itemUrl,
+{...urlArgs, id})` (connectorRecipes.js:625/:689; `urlArgs` already ride the outcome, vitals.js:177), store the
+filled string on the entry. **Test:** the banked row carries a fillable `itemUrl` that survives a reload (a stored
+string, not the reload-volatile `_lastGroundedRead`, chat.js:7074).
+
+### AU-3 — the surface (read): the "what have I created" ask → flat table
+An ask parser (sibling to `parseDashboardAsk`, `Core/vitalsDashboard.js`) matches "what have I created / …this week"
+→ `loadCreates()` → **filter `verb==='create'`** (§6.1-2: honest the moment writes are added) → a `CanvasSpec`
+table (system · kind · label · created-when · who). The Rail "Records" **section** (not tab) renders the same flat
+list. **Test:** the ask lists the AU-1 rows with link + who + when; a window with only reads/failed writes lists
+nothing. *First user-facing answer to the question.*
+
+### Land discipline (every rung)
+Bump `manifest.json` (behavior change from AU-1 on; AU-0 is pure but still bump on land). `node --check` every
+touched `background/handlers/*.js`; `npm test` green (AU-0 + store are IN the gate; the seam wiring is not). Stage
+**by name** (shared checkout). One bus test per rung (AU-0: the pure fixtures pass; AU-1: a live create banks a row
++ a rejected write banks nothing; AU-3: the ask answers). Deferred rungs AU-4..AU-8 stay as §7/§10 describe.
+
+---
+
 *Provenance: 2026-08-07 4-scout (write-funnel / stores / privacy-scope / reversibility-surface) + synthesizer pass.
 Every landmark re-verified against the code at v2.74.2073: the funnel (vitals.js:144, connector.js:1393/:1819/:1844),
 the extractors (connectorRender.js:135/:156), who-confirmed (rideStep.js:61, connector.js:884-885/:1655-1656), the
