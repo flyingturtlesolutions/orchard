@@ -680,7 +680,11 @@ export const CONNECTOR_RECIPES = [
         viaLeg: ['shopify_product_by_sku', 'shopify_search_products'], valueParam: ['sku', 'query'],
         rows: 'data.products.edges[].node', pick: 'variants.edges[].node', id: 'id', match: ['sku', 'title'],
         label: ['title', 'sku', 'price'],
-        require: [{ field: 'status', equals: 'ACTIVE', fail: 'inactive' }, { field: 'inventoryQuantity', op: '>', value: 0, fail: 'outOfStock' }] },
+        // v2.74.2068 — a DRAFT order is REVERSIBLE, so do NOT require in-stock: out-of-stock / pre-order /
+        // warranty-replacement drafts are normal, and a single-variant product often has UNTRACKED inventory
+        // (inventoryQuantity null → the >0 gate false-refused it as "out of stock", live 2026-08-07). Keep the
+        // ACTIVE gate so a genuinely archived/draft product is still refused before the wire.
+        require: [{ field: 'status', equals: 'ACTIVE', fail: 'inactive' }] },
     },
     endpoint: '/api/operations/{op_sha}/DraftOrderCreate/shopify/{handle}', itemUrl: '/store/{handle}/draft_orders/{id}',   // CX-7f — "show order" after a create opens the draft
     body: { operationName: 'DraftOrderCreate', variables: {
