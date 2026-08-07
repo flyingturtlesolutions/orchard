@@ -1,13 +1,17 @@
 # DESIGN — Creates-audit ledger: a durable, queryable record of everything Orchard makes
 
 **Status:** design note (2026-08-07). Not built. Produced by a 4-scout (write-funnel / stores / privacy-scope /
-reversibility-surface) + synthesizer + 2 adversarial-reviewer pass (both ok; grounding + design/scope). Their
-corrections are folded in-line, not footnoted: the seam is the two WRITE-capable branches only (:1819 is
-reads-only), `createdRecordId/Label` are GraphQL-shaped so AU-0 adds a REST extractor branch, a customer row is
-id-only (no `name`/`title`), the fleet marker needs `metric: true`, and the connector.js seam is node --check +
-live-eyeball (outside the unit gate). Every claim is file:line-grounded against the code as of v2.74.2073.
-The just-built Shopify draft-order write suite (create by email+name / discount / tags; delete-by-`#D` gated) is
-the first live write path this audits; the capability is transport-general.
+reversibility-surface) + synthesizer + 2 adversarial-reviewer pass, then **narrowed by a 3-critic adversarial
+review** (grounding / honesty / scope — all "flawed" on the first §10 draft, convergent recommendation: ship
+smaller). Their corrections are folded in-line, not footnoted: the seam is the two WRITE-capable branches only
+(:1819 is reads-only); `createdRecordId/Label` are GraphQL-shaped so AU-0 adds a REST extractor branch; **the hook
+gates on a real success predicate that rejects nested `userErrors`** (SESSION_REPLAY-ok would otherwise bank a
+phantom row for a vendor-rejected write — §10.1); the fleet marker needs `metric: true`; and the connector.js seam
+is node --check + live-eyeball (outside the unit gate). **v1 scope is deliberately narrow (§10.0): a flat,
+per-event, CREATES-only book + a flat table** — the per-record card, the update/delete writes-expansion, the `via`
+run-context, and the "check current" re-probe are sequenced later (AU-6/AU-8), not built now. Every claim is
+file:line-grounded against the code as of v2.74.2073. The just-built Shopify draft-order write suite (create by
+email+name / discount / tags; delete-by-`#D` gated) is the first live write path this audits; transport-general.
 
 **One-line problem:** ask "what have I created — customers, orders, tickets?" and there is **no store to read.**
 The ingredients to answer exist — every write funnels through one outcome seam, the created id/#label are dug out
@@ -142,13 +146,13 @@ on `runHistoryEntry` (runHistory.js:148 — whitelist, truncate, unknown enum �
 ```
 auditEntry({
   system,        // origin / apiHost  (e.g. "admin.shopify.com", "deako.zendesk.com")
-  verb,          // 'create' | 'update' | 'delete'         ← from method + reversible/destructive axis
+  verb,          // 'create' (v1) | 'update' | 'delete' (AU-6)   ← from the reply DATA FIELD KEY, not axes (§10.3)
   kind,          // 'customer' | 'order' | 'ticket' | 'draft' | 'user' | …   ← from the reply op key / recipeId
   id,            // createdRecordId(reply.value)   — internal id (gid → numeric tail)   (connectorRender.js:135)
   label,         // createdRecordLabel(reply.value): the entity's name/title — the HUMAN number "#D29684"/"#1001"
-                 //   for an order/draft; but a CUSTOMER has firstName/lastName (no name/title) so it falls back to
-                 //   the numeric id (connectorRender.js:156-175) — a customer row is id + itemUrl, resolvable but
-                 //   not name-at-a-glance unless AU-6 opts to capture a human customer label (raises §5 exposure)
+                 //   for an order/draft; a CUSTOMER has no name/title, so v1 captures a MINIMAL human label from
+                 //   the create INPUT (firstName or email-local-part, truncated — §10.5), same at-rest posture as
+                 //   the #D-number (§5), so "what customers did I create?" answers for real, not id-only
   itemUrl,       // FILLED ONCE: fillEndpoint(leg.tool.itemUrl, {...urlArgs, id})       (§ below; durable link)
   who,           // clearedBy: 'human' (a person clicked) | 'gate' (internal+reversible, no person)
   at,            // Date.now()
@@ -159,10 +163,12 @@ auditEntry({
 })
 ```
 
-- **`verb` (create/update/delete)** is derivable at the seam: the create/update/delete axis lives on the recipe
-  (`connectorRecipes.js` — `shopify_create_order` POST reversible:true outward:false :669; `shopify_update_customer`
-  PUT reversible:false :652; `shopify_delete_order` DELETE destructive:true :753), and the leg's `method` +
-  `reversible`/`destructive` flags are on the payload. A pure classifier reads them; it does not invent.
+- **`verb` — from the reply DATA FIELD KEY, not the axes** (a review correction, §10.3). Create and update are
+  BOTH `write:true` / `reversible` varies, so `reversible`/`destructive` do **not** separate create from update —
+  only `destructive:true` cleanly marks delete. The clean signal is the GraphQL reply's data field key
+  (`draftOrderCreate` vs `…Update` vs `draftOrderDelete`); for the ambiguous REST/POST case, an explicit per-leg
+  `verb` hint on the recipe. v1 is **create-only** and needs none of this — it fires only where a created id
+  extracts; the create-vs-update-vs-delete generalization is AU-6, added with a real per-leg `verb` field.
 - **`kind` / `system`** — the GraphQL reply names both: `createdRecordId` already iterates `data.<op>` (e.g.
   `customerCreate` / `draftOrderCreate`, connectorRender.js:138), so the op key *is* the entity+verb; for REST
   legs (Zendesk `create_ticket` :296, `create_user` :356) `kind` derives from the recipeId. Pure
@@ -228,8 +234,9 @@ global index (open question §9). Register the key as **local-only, never sync-r
 ## 5. Privacy + scope — local-only, un-redacted at rest, body-blind on any wire
 
 The audit store holds real identity (a `#D`-number, a created record's id + link; for an order/draft the human
-number — for a customer, id-only per §3) and must, or it cannot answer "what did we create?". That is safe
-**only** under a strict posture, all of it grounded in the existing boundary docs.
+number — for a customer, a **minimal human label**: the first name or email-local-part in the create input,
+§10.5, the same full-fidelity-at-rest treatment #D-numbers get) and must, or it cannot answer "what did we
+create?". That is safe **only** under a strict posture, all of it grounded in the existing boundary docs.
 
 - **Local-only, un-redacted at rest.** The reversible redactor (`Core/redact.js`) is the **device boundary** —
   it stops identity crossing into the `#call` model payload (redact.js:5-16), and its pseudonyms are "never
@@ -275,26 +282,36 @@ therefore honestly show "you approved these 3; the scheduler auto-created these 
 ## 6. Surfacing — the ask, the desk view, the link, the undo, the export
 
 Nothing surfaces created records today: there is no "what have I created" ask parser, no created-record card kind,
-no export (verified — grep across `*.js` finds none). Five surfaces, layered:
+no export (verified — grep across `*.js` finds none). The v1 **primary** surface is a persistent **Rail "Records"
+section** rendering a **flat per-event table** (1:1 with the store); the ask is its shortcut; link/undo ride
+alongside. The per-record card + CRUD-timeline drill is the surface's *destination*, sequenced as **AU-8** (§7,
+§10.6) once a per-entity index exists — never render-time grouping over a lossy `slice(-CAP)` window.
 
-1. **The ask.** "what have I created" / "what did you create this week" → a parser (sibling to
-   `parseDashboardAsk`, `Core/vitalsDashboard.js`) reads `loadCreates()` and renders a **canvas table** (columns:
-   system · kind · label · when · who · link) via a `RENDER_CANVAS` `CanvasSpec` (the table/cards/cells kinds the
-   vitals dashboard already added, `DESIGN_vitals.md` §VT-2d). This is the direct answer to the question — and the
-   iron-principle payoff: the user reads it instead of maintaining it.
-2. **The desk view.** A "Creations" card on the Admin/Connect surface (per-install), and a per-desk slice filtered
-   by `deskInstanceId` on a work desk — reusing the one-model-two-renderers scope resolution the dashboard already
-   does (Admin = all · desk = its slice · Front = overview, vitals.js `VITALS_DASHBOARD` :562).
-3. **Link to record.** Each row's stored `itemUrl` (§3) opens the live record via `SHOW_SOURCES` — the durable
-   version of today's session-only "show it" (chat.js:7730), now surviving reload because the link was filled once
-   at capture, not re-derived from a dead module var.
-4. **Link to undo.** Each row offers an inline "undo" that fires its `reversalLeg` **through the HITL gate** — for
-   a Shopify draft that is `shopify_delete_order`, which is `destructive:true` → `safety:'gated'` → `gateActionForLeg`
-   REFUSES unattended (pipelineGate.js:97) → a human-confirmed click (the delete-by-`#D` flow already exists,
-   chat.js:14921-14934). Money = human-click holds: the audit view *offers* the undo, the gate *requires* the
-   click. This depends on `reversalLeg` being a real field (AU-5 / PP-0d).
-5. **Export.** Download the book (gl-style local file) for an offline record. Local-only; no egress channel is
-   minted (§5).
+1. **The Rail "Records" section — the v1 surface (a flat creates table).** A persistent section in the
+   Conversations Rail accordion (`buildRailTree`, Core/railTree.js), **not a top-level tab** — a tab is too heavy
+   for a low-frequency read surface, and it sidesteps the dev-only Connect tab (SGV-4 retires Connect for non-dev,
+   `chat.js:359`, but dev keeps it — a *section* never collides). **The inversion still holds as narrative:** SGV-4
+   removes the surface that made you a *state manager* (managing connections); "Records" is its opposite — a
+   read-only surface where Orchard shows you *what it did*. **v1 row = one create EVENT** (system icon · kind ·
+   human label · created-when · `who` badge human/gate), newest-first, 1:1 with the flat store. Sectioned by system
+   (Shopify · Zendesk) or time; per-desk `.filter()`. The **per-RECORD card** (an entity's create→…→delete
+   timeline in the run-history overlay idiom `.wf-history-overlay`, chat.js:7888/11242 — a record → its events, as
+   a run → its items) is **AU-8**, gated on the per-entity index and the writes-expansion (§10.6). **Attention:
+   a quiet count on the header (N this week), never an unread/urgency badge** — an audit trail is a record to read,
+   not a to-do that nags (§10.6).
+2. **The ask (the shortcut).** "what have I created" / "…this week" → a parser (sibling to `parseDashboardAsk`,
+   `Core/vitalsDashboard.js`) reads `loadCreates()`, **filters to `verb==='create'`** (v1 stores creates only, but
+   the filter makes the ask honest the moment writes are added — §10.0), and renders the flat table as a canvas
+   list — the direct one-shot answer, the iron-principle payoff (read, not maintain).
+3. **Link to record — honest about removal.** A create card's stored `itemUrl` (§3) opens the record via
+   `SHOW_SOURCES` (durable, survives reload). Once deletes are captured (AU-6), a **deleted card does NOT offer a
+   live link** — it shows "deleted <when> by <who>" as a terminal event and the link is struck through, never a
+   404 (§10.2).
+4. **Link to undo.** A `live` card offers an inline "undo" firing its `reversalLeg` **through the HITL gate** — a
+   Shopify draft's `shopify_delete_order` is `destructive:true` → `safety:'gated'` → `gateActionForLeg` REFUSES
+   unattended (pipelineGate.js:97) → a human click (the delete-by-`#D` flow exists, chat.js:14921-14934). The view
+   *offers*; the gate *requires the click*. Needs `reversalLeg` real (AU-5 / PP-0d).
+5. **Export.** Download the book (local file). Local-only; no egress minted (§5).
 
 ---
 
@@ -309,15 +326,22 @@ no export (verified — grep across `*.js` finds none). Five surfaces, layered:
   from recipeId). Nothing wired.
 - **AU-1 (the universal hook — capture ad-hoc + workflow + headless at one seam).** Add `recordCreate(evt)` beside
   `reportLegOutcome` at the two WRITE-capable success branches (connector.js:1393 INVOKE_SESSION, :1844
-  SESSION_REPLAY-ok — **not** :1819, the reads-only retry-ok path); fire only on `ok && isWrite`; dig id/label
-  centrally (fixes the header-replay + headless dropped-id asymmetry); bank `{system, verb, kind, id, label,
-  who=clearedBy, at, recipeId, runId, convId}` to the new `audit:creates` store (WorkflowRunStore idiom: `_chained`
-  RMW + `total` + `truncationNotice`). Register `AUDIT ▸` with `metric: true` in `decisionMarkers.js` (Invariant
-  #1; body-blind). **Verification honesty:** `recordCreate` lives in `background/handlers/connector.js`, which
-  CLAUDE.md places OUTSIDE the unit gate (node --check + `npm run undef` only, never a unit test); the
-  unit-testable slice is the pure `auditEntry`/`classifyCreate` (AU-0) + the `AuditCreateStore` I/O — the seam
-  wiring itself is node --check + a **live eyeball** (a create round-trips one durable row; a read and a failed
-  write bank nothing). *First durable capture of an ad-hoc chat create* — closes the §1 primary gap.
+  SESSION_REPLAY-ok — **not** :1819, the reads-only retry-ok path). **Gate on a real success predicate, NOT bare
+  `ok && isWrite`** (§10.1): SESSION_REPLAY-ok reaches :1844 with `ok:true` for a 200-with-nested-`userErrors`
+  (:1802 screens only top-level `body.errors`), so a naive hook there banks a **phantom row for a vendor-REJECTED
+  create**. `recordCreate` must apply the same nested-`userErrors` rejection INVOKE_SESSION already does
+  (connector.js:1276) before it banks — a row is never born false. Dig id/label centrally (fixes the header-replay +
+  headless dropped-id asymmetry); bank `{system, verb, kind, id, label, who=clearedBy, at, recipeId, groundId,
+  origin}` — **only fields actually on the evt at the seam** (`_evtBase` carries groundId/recipeId/origin,
+  connector.js:1390; runId/convId are NOT threaded — deferred, §10.4). Store to the new `audit:creates` book
+  (WorkflowRunStore idiom: `_chained` RMW + `total` + `truncationNotice`). Register `AUDIT ▸` with `metric: true` in
+  `decisionMarkers.js` (Invariant #1; body-blind). **Verification honesty:** `recordCreate` lives in
+  `background/handlers/connector.js`, which CLAUDE.md places OUTSIDE the unit gate (node --check + `npm run undef`
+  only, never a unit test); the unit-testable slice is the pure `auditEntry`/`classifyCreate` (AU-0) + the
+  `AuditCreateStore` I/O + **the success predicate itself as a pure function** (a `{draftOrder:null,userErrors:[…]}`
+  fixture banks nothing) — the seam wiring is node --check + a **live eyeball** (a create round-trips one durable
+  row; a read, a failed write, AND a nested-userErrors reject all bank nothing). *First durable capture of an
+  ad-hoc chat create* — closes the §1 primary gap.
 - **AU-2 (the durable link).** Thread the leg's `itemUrl` template to the seam (or fill at the call site for the
   ad-hoc path and thread for headless); `recordCreate` fills it **once** via `fillEndpoint({...urlArgs, id})` and
   stores the filled string. Test: the banked row carries a fillable `itemUrl` that survives a reload.
@@ -328,21 +352,35 @@ no export (verified — grep across `*.js` finds none). Five surfaces, layered:
 - **AU-5 (reversal linkage — gated on PP-0d).** Populate `reversalLeg` (from `reversible:{by}` once PP-0d lands,
   `DESIGN_peritem_pipeline.md`; interim: a curated create→delete map); the surface offers the inline HITL "undo".
   Test: a draft row's undo routes through the gated delete (money = human-click; never auto).
-- **AU-6 (update/delete + broker coverage).** Extend `verb` to update/delete and bank them (so the gated
-  delete-by-`#D` and a create become one story); add the `INVOKE_CONNECTOR` broker success branch (chat.js:14912)
-  as a **second** hook so broker creates leave the §2 bypass. Test: create→delete of one `#D` reads as one entity's
-  history.
+- **AU-6 (the writes-expansion — update/delete + broker coverage).** Generalize `verb` from create-only to
+  update/delete: derive it from the **reply data field key** (`draftOrderCreate`/`…Update`/`draftOrderDelete`), NOT
+  the inconsistent `operationName` (§10.3), with a per-leg `verb` hint for the ambiguous POST/REST case (`verb` is
+  NOT derivable from axes — create and update are both `write:true`). Extend the extractor with a `deletedId`
+  branch that **normalizes gid→tail** (createdRecordId normalizes only `v.id`/`k==='id'`; a raw `deletedId` returns
+  the full gid and would NOT group with the create's stored tail — the live grouping bug). Verify the delete reply
+  shape `data.draftOrderDelete.deletedId` against a real delete first (the leg is LIVE-UNVERIFIED,
+  connectorRecipes.js:749) — never code it blind. Add the `INVOKE_CONNECTOR` broker success branch (chat.js:14912)
+  as a **third** hook so broker writes leave the §2 bypass. Test: create→delete of one `#D` banks two events keyed
+  to one entity; a nested-userErrors update banks nothing.
 - **AU-7 (cross-system correlation — optional).** Bank `corrKeys` (connectorRender.js:265, the read-side join
   already computed) against creations so a Shopify draft, a Zendesk ticket, and the source warranty item group as
   one issue (`toWorkItem`, connectorRender.js:290). Test: three creates sharing an email group.
+- **AU-8 (the per-record card — the surface's destination).** Once AU-6 supplies the write chain and a per-entity
+  index exists (§9 shard), render the per-RECORD card: one entity → its create→update→delete timeline in the
+  run-history overlay idiom (`.wf-history-overlay`). A partial history (create rolled past CAP) is **labeled**
+  "earlier history rolled off (of \<total\>)", never presented as complete (§4 visible-total). This is the Rail
+  card the surface (§6.1) is built toward — deferred here because grouping over a lossy `slice(-CAP)` window as the
+  *primary* surface would silently drop opening events; the flat AU-3 table is the honest v1.
 
 ---
 
 ## 8. Consolidations — what to reuse, not reinvent
 
-1. **Hook seam** — the two ride-executor success branches where `reportLegOutcome` already sits (connector.js:1393
-   / :1819 / :1844). A *sibling* `recordCreate`, not a widening of the body-blind funnel (§2). One seam, all four
-   ride paths.
+1. **Hook seam** — the two WRITE-capable ride-executor success branches where `reportLegOutcome` already sits
+   (connector.js:1393 INVOKE_SESSION / :1844 SESSION_REPLAY-ok). **NOT :1819** — that is the reads-only retry-ok
+   path (`reportLegOutcome` fires there for read vitals, but a write never lands on it), so a `recordCreate` there
+   would only ever see reads. A *sibling* `recordCreate`, not a widening of the body-blind funnel (§2) — one seam,
+   both write paths; the broker write path (chat.js:14912) is a third hook at AU-6.
 2. **Extractors** — `createdRecordId` (connectorRender.js:135) + `createdRecordLabel` (:156) verbatim for the
    GraphQL `{data:…}` shape, wrapped by a `createdRecordFrom` that adds a non-`.data` REST branch (Zendesk
    `{ticket:{id}}`), called once centrally.
@@ -387,6 +425,80 @@ no export (verified — grep across `*.js` finds none). Five surfaces, layered:
 - **Egress, if ever.** Local-only is the contract today. If an export-to-cloud is ever asked for, it needs
   `redactDeep` + an `identityValues` name-set (names/`#D` are not pattern-detected) and the fleet marker must stay
   body-blind — the `\d{8,}` LONGNUM floor lets `#D29684` through any scrub. Keep this a hard gate, not a default.
+
+---
+
+## 10. Post-critical-review scope + resolutions (the honest v1)
+
+A 3-critic adversarial pass (grounding / honesty / scope — 2026-08-07, all "flawed") found the first draft of this
+section **over-reached**: it turned a flat creates store into a per-record WRITES ledger with a re-probe and a
+`via` field the store, the extractors, and the executor payload cannot yet support, and left a creates-named ask
+over a writes-shaped store. The convergent recommendation was **narrow**. This section is the corrected, buildable
+v1; the deferred ambition (the per-record card, writes, `via`, re-probe) is sequenced, not dropped.
+
+### 10.0 Scope — ship the flat CREATES book; the per-record card is a later VIEW
+**v1 = a flat, per-EVENT, CREATES-only append book + a flat table**, 1:1 with the store (§4). The per-RECORD card
+(entity grouping + CRUD-timeline drill), the writes-expansion (update/delete), `via`, and the "check current"
+re-probe are **deferred** — each needs machinery v1 lacks (a per-entity index, threaded run context, a by-id read
+leg) and each earns its own rung (§7). This is not a retreat from the Rail card the surface wants — it is its
+correct sequencing: the flat book is the substrate the card is a later view over.
+
+### 10.1 A real bug the review caught — the seam must AGREE on "successful write"
+`recordCreate` fires on `ok && isWrite` at both branches, but they DISAGREE. INVOKE_SESSION converts a
+200-with-nested-`userErrors` into `reply.success=false` (connector.js:1263-1280), so its :1392 guard blocks a
+rejected write; **SESSION_REPLAY-ok (:1844) has no nested-userErrors screen** (:1802 checks only top-level
+`r.body.errors`), so a server-REJECTED mutation `{data:{draftOrderCreate:{draftOrder:null,userErrors:[…]}}}`
+reaches :1844 as `ok:true` — a naive hook there banks a **phantom "created" row for a create the vendor refused**
+(exactly the header-replay / workflow draft path §2 covers). **AU-1 must gate `recordCreate` on a real success
+predicate that also rejects nested `userErrors`** (mirror connector.js:1276), or apply the 200-not-ok conversion
+inside SESSION_REPLAY before the ok-hook. A row must never be born false at the seam — §10.2's after-the-fact
+honesty cannot rescue a phantom.
+
+### 10.2 Status — a create is "created \<when\>", never "live"
+v1 captures creates only, so a card is a **past-tense fact: "created \<when\> by \<who\>"** — NOT "live". "live"
+reads as a present-tense current-state claim Orchard never re-checked; a create it made and never looked at again
+is not known-live. `reversed`/`deleted` status arrives with the writes-expansion (AU-6), derived from the surviving
+event chain — `reversed` is honest ONLY for a delete whose matching create is in-window; a delete with no
+in-window create is "deleted", not "reversed" (never assume the create). The "check current" re-probe is deferred
+(§7), and when built reconciles by the stored **label** (the #D-number as `shopify_draft_orders` `query`, then
+match the returned row's id) via a declared create-leg→read-leg map — NOT "by id" (no read leg accepts the
+internal id; `shopify_draft_orders` matches on `name`).
+
+### 10.3 Extractors — CREATE-only in v1; the write-generalization is AU-6
+AU-0 ships a **create-only** extractor: `createdRecordId`/`createdRecordLabel` (GraphQL `{data:…}`) + a non-`.data`
+REST branch (`{ticket:{id}}`). The canonical key is the create's normalized id (`<system>:<gid-tail>`). The
+generalization to update/delete — a `deletedId` branch WITH its own gid→tail normalization (createdRecordId
+normalizes only `v.id`/`k==='id'`, so a raw `deletedId` returns the full gid and would NOT group with the create's
+stored tail), and `verb` from the **iterated reply data field key** (`draftOrderCreate`), NOT the `operationName`
+(inconsistent: `DraftOrderCreate` suffix vs `DeleteDraftOrder` prefix) — all move to **AU-6**, with the delete
+reply shape `data.draftOrderDelete.deletedId` a **first-live-delete assumption to verify** (the delete leg is
+itself LIVE-UNVERIFIED, connectorRecipes.js:749), never coded blind in the pure AU-0. `verb` is NOT derivable from
+axes alone (create and update are both `write:true`); a real per-leg `verb` field is added to the recipe before
+the ambiguous/REST case relies on it.
+
+### 10.4 who — the immediate authority is enough for v1; `via` is DEFERRED
+`who ∈ {human, gate}` (the `clearedBy` at the seam) already answers the load-bearing question — "you approved
+these 3; the scheduler auto-created these 12 (all reversible)". The two-level `via:{runId, workflowId}` story is
+**dropped from v1**: none of runId/workflowId/convId reaches the seam (the evt `_evtBase` carries only
+groundId/recipeId/origin, connector.js:1390), so it needs new payload threading through `_rideExecOnce` and
+`headlessWrite.invokeRideRecipe` — an unbudgeted rung. First thread runId/convId (a small rung under AU-1) only if
+a join key is needed; add `via`+workflowId only if the two-level story is actually asked for (matching §3's honest
+"(if on payload)" hedge, not an over-claim).
+
+### 10.5 Customer label — capture a MINIMAL human label (consistent with §5)
+The review caught an internal inconsistency: §5 stores #D-numbers + ids un-redacted at rest precisely because a
+pseudonymized audit "could not answer the question", yet an id-only customer is a **hollow answer** to the
+headline "what customers did I create?" (a bare internal Shopify id) AND the opposite treatment under the same
+logic. **Resolution: capture a minimal human customer label at the seam** — the create input carries
+firstName/lastName/email (`shopify_create_customer`), so store the first name or email-local-part (truncated),
+same full-fidelity-at-rest posture as §5 (local-only, never synced, never in a `#call` payload). The customer ask
+then answers for real, not link-only.
+
+### 10.6 Surface — flat table first (see §6.1)
+Rail **section, not tab** (never collides with the dev-only Connect tab); v1 is a **flat per-event table** (system
+· kind · label · created-when · who), 1:1 with the store. The **per-record card + CRUD-timeline drill is AU-8**,
+gated on the per-entity index (§9) — never render-time entity grouping over a lossy `slice(-CAP)` window as the
+primary surface. Attention = a quiet count, never a badge.
 
 ---
 
