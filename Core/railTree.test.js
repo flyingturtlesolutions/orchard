@@ -25,7 +25,7 @@ describe('railTree — buildRailTree', () => {
     assert.equal(rows[0].role, 'new-app');
   });
 
-  it('CN-2 — incident cases (vtc_, admin_desk children) render NOWHERE now the fixture is gone; other convs unaffected', () => {
+  it('v2.74.2078 (live: invisible zendesk case) — incident cases render as PLAIN top-level rows; no admin fixture', () => {
     const summaries = [
       { id: 'vtc_a', title: 'vendorsuite looks signed out', kind: 'agent', parentId: ADMIN_ID, updatedAt: 90 },
       { id: 'vtc_b', title: 'Read X may have drifted', kind: 'agent', parentId: ADMIN_ID, updatedAt: 95 },
@@ -33,7 +33,7 @@ describe('railTree — buildRailTree', () => {
     ];
     const rows = buildRailTree(summaries);
     assert.equal(rows.some((r) => r.role === 'admin'), false, 'no admin fixture');
-    assert.equal(rows.some((r) => String(r.id).startsWith('vtc_')), false, 'admin_desk-parented cases are excluded from top — never leak as rows');
+    assert.equal(rows.filter((r) => String(r.id).startsWith('vtc_') && r.role === 'plain').length, 2, 'an open incident always has a door — cases surface as plain rows (the CN-2 exclusion left a live producer with no surface)');
     assert.equal(rows.some((r) => r.id === 'chat' && r.role === 'plain'), true, 'ordinary conversations still render');
     assert.equal(rows[rows.length - 1].role, 'new-app', 'the constructor entry stays last');
   });

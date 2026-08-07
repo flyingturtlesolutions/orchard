@@ -65,10 +65,14 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
   const appIds = new Set(visible.filter(isApp).map((c) => c.id));
   // Top level = everything that isn't a sub-task of a PRESENT app (orphans fall through to plain → never lost).
   // v2.74.1234 — the Overview is a real persistent conversation now, but it's rendered as the reserved pin (below),
-  // so exclude it from the regular rows or it'd appear twice (pin + a plain row). VT-2b (v2.74.1587) — the Admin
-  // desk's children (incident CASES) attach under the fixture below, never as plain rows.
+  // so exclude it from the regular rows or it'd appear twice (pin + a plain row).
+  // v2.74.2078 (live: "the zendesk case isn't there") — incident CASES render as PLAIN top-level rows: CN-2
+  // removed the Admin fixture that used to hold them, and the old `parentId !== ADMIN_ID` exclusion left a LIVE
+  // producer (_syncIncidentCases) minting cases NO surface could show — an open incident with no door, and the
+  // Overview chip's "Show incidents" pointing at nothing. The orphan-fallthrough rule already covers them
+  // (their parent app is never present); §8.3's dev console takes them over when built.
   const top = visible.filter((c) => c.id !== OVERVIEW_ID && c.id !== ADMIN_ID
-    && (!isSub(c) || (!appIds.has(c.parentId) && c.parentId !== ADMIN_ID))).sort(byPinnedThenUpdated);
+    && (!isSub(c) || !appIds.has(c.parentId))).sort(byPinnedThenUpdated);
 
   const rows = [];
 
@@ -110,10 +114,9 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
   }
 
   // 3) CN-2 (DESIGN_vitals.md §8.4) — the Admin desk fixture is REMOVED. It was the Rail's home (v1942); home is
-  // now the launch page (activeId == null falls through to no active row → the empty state / gallery). Its incident
-  // CASES (subs parented to ADMIN_ID) are already excluded from `top` above, so with the fixture gone they no longer
-  // render — deferred to the §8.3 dev-mode Connect render. A stored admin_desk conversation stays excluded from
-  // `top`, so it is invisible (retained, not deleted). Nothing is pushed here.
+  // now the launch page (activeId == null falls through to no active row → the empty state / gallery). Its
+  // incident CASES render as plain top-level rows (v2.74.2078 — see the `top` filter above). A stored admin_desk
+  // conversation stays excluded from `top`, so it is invisible (retained, not deleted). Nothing is pushed here.
 
   // 4) New app — always last.
   rows.push({
