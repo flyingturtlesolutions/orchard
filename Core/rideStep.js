@@ -221,6 +221,16 @@ export async function invokeRideRecipe(rec, groundId, { invoke, params = null, l
     const marked = (leg.tool.resolve && typeof leg.tool.resolve === 'object') ? new Set(Object.keys(leg.tool.resolve)) : new Set();
     for (const k of Object.keys(p)) { if (p[k] === 'each' || marked.has(k)) delete p[k]; }
   }
+  // v2.74.2055 — REQUIRED params gate the headless invoke (review: an approved scheduled draft-order replay
+  // POSTed with no line_items — fillBody drops unfilled members, pins bank primitives only, and NOTHING on this
+  // path enforced paramSchema.required; the panel binder's enforcement never runs here). Same vocabulary as the
+  // executor's endpoint refusal (`needs <param>`); non-transient by design — a pin that lost a required binding
+  // is drift-shaped, not weather.
+  const _req = (leg.paramSchema && Array.isArray(leg.paramSchema.required)) ? leg.paramSchema.required : [];
+  for (const _name of _req) {
+    const _pv = p[_name];
+    if (_pv == null || _pv === '' || (Array.isArray(_pv) && _pv.length === 0)) return { ok: false, error: `needs-${_name}` };
+  }
   const plan = planExec(leg, p, {});
   if (!plan || plan.ok === false || plan.channel !== 'INVOKE_SESSION') return { ok: false, error: 'no-plan' };
   const payload = stampWriteAuthority(plan.payload, { gate, humanApproved });

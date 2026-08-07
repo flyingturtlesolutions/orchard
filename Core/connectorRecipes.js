@@ -667,14 +667,22 @@ export const CONNECTOR_RECIPES = [
     body: { operationName: 'DraftOrderCreate', variables: {
       input: { purchasingEntity: { customerId: '{customer_gid}' }, lineItems: '{line_items}', useCustomerDefaultAddress: true, note: '{note}', poNumber: '{po_number}', tags: '{tags}', appliedDiscount: '{applied_discount}', shippingLine: '{shipping_line}' },
       hasDiscountsPermission: true, hasVaultedPaymentPermissions: true, firstLineItems: 50 } },
+    // ⚠ LIVE-UNVERIFIED (v2.74.2055 review): this leg has NEVER executed against a live store — the persisted-op
+    // variables envelope (hasDiscountsPermission/…/firstLineItems) and input spellings are HAR-era hand-authoring
+    // the server alone can validate; first live run is the SH-T5-class proof still owed.
+    // v2.74.2055 — the three nested params carry HINTS (the CX-9f rule applied: shapes lived only in JS comments
+    // the binder never sees) + `elementGid` (nested identifier members were unreachable by param-level `gid`).
     params: [
       { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },   // purchasingEntity.customerId — the customer's id from a lookup
-      { name: 'line_items', type: 'array', required: true },   // [{ variantId: 'gid://shopify/ProductVariant/…', quantity: 1 }] — variant ids from a product search
+      { name: 'line_items', type: 'array', required: true, elementGid: { variantId: 'ProductVariant' },
+        hint: 'array of {variantId, quantity} — variantId is the product VARIANT id from a product lookup (bare numeric id ok, it is gid-coerced); quantity an integer ≥1' },
       { name: 'note', type: 'string', required: false },
       { name: 'po_number', type: 'string', required: false },
       { name: 'tags', type: 'array', required: false },
-      { name: 'applied_discount', type: 'object', required: false },   // { value, valueType: 'PERCENTAGE'|'FIXED_AMOUNT', title } — 100% PERCENTAGE for a warranty replacement
-      { name: 'shipping_line', type: 'object', required: false },       // { title, price } — { price: '0.00' } for free shipping
+      { name: 'applied_discount', type: 'object', required: false,
+        hint: 'object {value, valueType, title} — valueType PERCENTAGE or FIXED_AMOUNT; a free warranty replacement is {value:100, valueType:"PERCENTAGE", title:"Warranty replacement"}' },
+      { name: 'shipping_line', type: 'object', required: false,
+        hint: 'object {title, price} — free shipping is {title:"Free shipping", price:"0.00"}' },
     ] },
   // ── VendorSuite (CX-9) — the curated cookie-ride READS. {divisionId}/{status}/{taskId} are explicit params for now;
   // the convivial auto-fill of {divisionId} from VendorSuite/State (access.DefaultDivision.Id) is the next slice.
@@ -1119,11 +1127,71 @@ export function opCaptureHint(op) {
   return _OP_CAPTURE_HINTS[String(op || '')] || 'perform that action once by hand in the admin with this tab open';
 }
 
+// v2.74.2055 — NESTED sanitation (review: every protection stopped at the top level while the catalog's most
+// shape-demanding params are nested — a placeholder echo INSIDE line_items rode the wire verbatim, and
+// {value:100, valueType:''} was the v1403 'Phone is invalid' class rebuilt one level down). PURE: drop
+// placeholder-echo and empty-string members recursively; a fully-emptied container reads as unfilled.
+function _scrubNested(v) {
+  if (typeof v === 'string') return (v === '' || _PLACEHOLDER_VALUE.test(v.trim())) ? undefined : v;
+  if (Array.isArray(v)) { const a = v.map(_scrubNested).filter((x) => x !== undefined); return a.length ? a : undefined; }
+  if (v && typeof v === 'object') {
+    const o = {}; let kept = 0;
+    for (const [k, x] of Object.entries(v)) { const r = _scrubNested(x); if (r !== undefined) { o[k] = r; kept++; } }
+    return kept ? o : undefined;
+  }
+  return v;
+}
+
+/**
+ * v2.74.2055 — apply fillBody's DROP semantics to a PRE-FILLED JSON body string. The chat door fills via
+ * fillWriteBody, whose placeholder-INTACT contract is correct for its own observed-write context — but a
+ * catalog-templated write reaching the executor as a string then carried literal "{applied_discount}" members
+ * onto the wire (probe-verified; a paid draft deterministically failed GraphQL coercion post-confirm, and a
+ * succeeding warranty draft stored "{note}" garbage). One pass here makes the entry's 'unfilled → dropped'
+ * contract true for every door. Non-JSON strings return unchanged — the executor's other refusals own them. PURE.
+ */
+export function stripUnfilledJsonBody(text) {
+  const s = String(text || '');
+  if (!/^\s*[\[{]/.test(s)) return s;
+  try {
+    const parsed = JSON.parse(s);
+    const scrubbed = _scrubNested(parsed);
+    return JSON.stringify(scrubbed === undefined ? (Array.isArray(parsed) ? [] : {}) : scrubbed);
+  } catch { return s; }
+}
+
 export function coerceParams(params, paramSchema) {
   const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
   const out = {};
-  for (const [k, v] of Object.entries((params && typeof params === 'object') ? params : {})) {
-    if (typeof v === 'string' && _PLACEHOLDER_VALUE.test(v.trim())) continue;   // v1405 — the LLM binder sometimes ECHOES a placeholder token ("{company}") as the value for a param it couldn't fill; drop it here so it's treated as unfilled everywhere (body + endpoint), never stored literally. v1657 — ALSO [id]/<id>: the binding layer is the one choke point every executor passes through, so one drop here covers the filter path, the direct-param path, and anything added later
+  for (const [k, vRaw] of Object.entries((params && typeof params === 'object') ? params : {})) {
+    let v = vRaw;
+    if (typeof v === 'string' && _PLACEHOLDER_VALUE.test(v.trim())) continue;
+    // v2.74.2055 — an array/object param emitted as JSON TEXT parses first (the common LLM emission absent
+    // structured outputs — else it rides as ONE quoted string into a structured GraphQL variable and dies at
+    // coercion after the call is spent); then nested scrub + declared element-gid coercion (the bare
+    // variant-id case toShopifyGid existed for, unreachable through the param-level slot).
+    {
+      const _t = props[k] && props[k].type;
+      if ((_t === 'array' || _t === 'object') && typeof v === 'string' && /^\s*[\[{]/.test(v)) {
+        try { v = JSON.parse(v); } catch { /* leave as-is — the response trap reports honestly */ }
+      }
+      if ((_t === 'array' || _t === 'object') && v && typeof v === 'object') {
+        const scrubbed = _scrubNested(v);
+        if (scrubbed === undefined) continue;   // fully-empty nested optional → unfilled everywhere
+        v = scrubbed;
+        const eg = props[k] && props[k].elementGid;
+        if (eg && typeof eg === 'object' && Array.isArray(v)) {
+          v = v.map((el) => {
+            if (!el || typeof el !== 'object') return el;
+            const o2 = { ...el };
+            for (const [f, kind] of Object.entries(eg)) {
+              if (o2[f] != null && (typeof o2[f] === 'string' || typeof o2[f] === 'number')) o2[f] = toShopifyGid(o2[f], kind);
+            }
+            return o2;
+          });
+        }
+      }
+    }   // v1405 — the LLM binder sometimes ECHOES a placeholder token ("{company}") as the value for a param it couldn't fill; drop it here so it's treated as unfilled everywhere (body + endpoint), never stored literally. v1657 — ALSO [id]/<id>: the binding layer is the one choke point every executor passes through, so one drop here covers the filter path, the direct-param path, and anything added later
     const t = props[k] && props[k].type;
     const gidKind = props[k] && props[k].gid;
     if (gidKind && (typeof v === 'string' || typeof v === 'number')) {   // CX-7c — a customer/variant id → its gid form

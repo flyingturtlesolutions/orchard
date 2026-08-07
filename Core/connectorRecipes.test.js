@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, drillTargetRedirect, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, drillTargetRedirect, fillEndpoint, fillBody, stripUnfilledJsonBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
@@ -874,5 +874,51 @@ describe('catalog — joinKey ladders carry no contact-NAME rungs', () => {
         }
       }
     }
+  });
+});
+
+// ── v2.74.2055 — nested sanitation + the pre-filled-body strip (the draft-order review's confirmed classes) ──────
+describe('coerceParams — nested sanitation (v2055)', () => {
+  const SCHEMA = { type: 'object', properties: {
+    line_items: { type: 'array', elementGid: { variantId: 'ProductVariant' } },
+    applied_discount: { type: 'object' },
+  }, required: ['line_items'] };
+  it('a JSON-TEXT array emission parses instead of riding as one quoted string', () => {
+    const out = coerceParams({ line_items: '[{"variantId":"45678","quantity":1}]' }, SCHEMA);
+    assert.equal(Array.isArray(out.line_items), true);
+    assert.equal(out.line_items[0].quantity, 1);
+  });
+  it('elementGid coerces a bare variant id inside elements; a full gid passes through', () => {
+    const out = coerceParams({ line_items: [{ variantId: '45678', quantity: 1 }, { variantId: 'gid://shopify/ProductVariant/99', quantity: 2 }] }, SCHEMA);
+    assert.equal(out.line_items[0].variantId, 'gid://shopify/ProductVariant/45678');
+    assert.equal(out.line_items[1].variantId, 'gid://shopify/ProductVariant/99');
+  });
+  it('placeholder echoes and empty strings INSIDE elements drop; a fully-emptied object reads unfilled', () => {
+    const out = coerceParams({
+      line_items: [{ variantId: '{variant_id}', quantity: 1 }],
+      applied_discount: { value: 100, valueType: '' },
+    }, SCHEMA);
+    assert.equal('variantId' in out.line_items[0], false, 'the echoed placeholder member dropped (v1405, one level down)');
+    assert.equal(out.applied_discount.valueType, undefined, 'the empty member dropped (v1403, one level down)');
+    assert.equal(out.applied_discount.value, 100);
+    const gone = coerceParams({ applied_discount: { value: '', valueType: '{value_type}' } }, SCHEMA);
+    assert.equal('applied_discount' in gone, false, 'a fully-emptied nested optional is unfilled everywhere');
+  });
+});
+
+describe('stripUnfilledJsonBody — fillBody drop semantics for a PRE-FILLED string body (v2055)', () => {
+  it('drops sole-placeholder members recursively, keeps real values', () => {
+    const body = JSON.stringify({ operationName: 'DraftOrderCreate', variables: { input: {
+      purchasingEntity: { customerId: 'gid://shopify/Customer/1' }, lineItems: '{line_items}',
+      note: '{note}', appliedDiscount: '{applied_discount}', useCustomerDefaultAddress: true,
+    } } });
+    const out = JSON.parse(stripUnfilledJsonBody(body));
+    const input = out.variables.input;
+    assert.equal(input.purchasingEntity.customerId, 'gid://shopify/Customer/1');
+    assert.equal(input.useCustomerDefaultAddress, true);
+    for (const k of ['lineItems', 'note', 'appliedDiscount']) assert.equal(k in input, false, `${k} placeholder must not ride the wire`);
+  });
+  it('a non-JSON string returns unchanged (the executor refusals own it)', () => {
+    assert.equal(stripUnfilledJsonBody('query { x }'), 'query { x }');
   });
 });

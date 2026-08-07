@@ -13,7 +13,7 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts, opCaptureHint } from '../../Core/connectorRecipes.js';   // v1935 — opCaptureHint: the executor's refusal must name the gesture that actually banks THIS op   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm
+import { fillEndpoint, fillBody, stripUnfilledJsonBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts, opCaptureHint } from '../../Core/connectorRecipes.js';   // v1935 — opCaptureHint: the executor's refusal must name the gesture that actually banks THIS op   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm
 import { pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill; v1758 — rideTabUrlPatterns; v1759 — isCsrfColdFailure
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
@@ -1147,7 +1147,11 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (_carriesPayload) {
             // v1342 — panel may pre-fill via fillWriteBody (string body + contentType); else template fillBody.
             // CX-7 — a gql READ builds its body too (the query document + filled variables).
-            if (typeof payload.body === 'string') body = payload.body;
+            // v2.74.2055 — a PRE-FILLED string body passes through fillBody's drop semantics (review,
+            // probe-verified: fillWriteBody's placeholder-INTACT contract let literal "{applied_discount}"
+            // members ride the wire post-confirm — a paid draft failed GraphQL coercion, a succeeding warranty
+            // draft stored "{note}" garbage). One strip here makes 'unfilled → dropped' true for every door.
+            if (typeof payload.body === 'string') body = stripUnfilledJsonBody(payload.body);
             else body = fillBody(payload && payload.body, args);
           }
           // CX-7 — sniffed-CSRF transport: ride the token acquired above (the liveness probe already sniffed it);
@@ -1164,8 +1168,23 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             // v2.74.1936 — the token's HEADER NAME is per-site (UPS sends `x-xsrf-token`). Defaults to
             // x-csrf-token, so every existing recipe sends exactly what it sent before.
             const _csrfHdr = String((payload && payload.csrfHeader) || 'x-csrf-token').toLowerCase();
-            extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { [_csrfHdr]: csrfTok } : {}) } };
-            _sentCsrf = !!csrfTok;
+            // v2.74.2055 — the SW sources a cookie-class token ITSELF via chrome.cookies, the prewarm's proven
+            // channel (it sees HttpOnly cookies document.cookie cannot). The first live UPS canary (00:09:37Z)
+            // failed `no-csrf` with the cookie sitting in the jar: the sniff bank is empty on an idle ephemeral
+            // tab, and the belt's in-page document.cookie read is blind to HttpOnly — the token existed
+            // everywhere except the request. Double-submit contract: header value = cookie value. A banked
+            // sniffed token still wins when present (fresher on sites that rotate per response); the belt's
+            // cookie-sourcing stays the in-page backstop for non-HttpOnly jars.
+            let _ckTok = csrfTok;
+            if (!_ckTok && payload && payload.csrfCookie) {
+              const _ckPage = origin || appHost;
+              if (_ckPage) {
+                try { const c = await chrome.cookies.get({ url: `https://${_ckPage}/`, name: String(payload.csrfCookie) }); _ckTok = (c && c.value) || null; } catch { /* belt fallback */ }
+              }
+              if (_ckTok) { try { Logger.info('ride', `INVOKE ▸ csrf cookie-sourced (SW jar) @${_ckPage} [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } }
+            }
+            extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(_ckTok ? { [_csrfHdr]: _ckTok } : {}) } };
+            _sentCsrf = !!_ckTok;
             // v2.74.1955 — hand the CONTENT SCRIPT the cookie name so it can source the token itself. It runs ON
             // the page and can read document.cookie; the SW cannot. A cookie-sourced token beats a sniffed one on
             // both axes that have bitten us: it is always CURRENT (no retained/stale capture) and it is

@@ -117,6 +117,10 @@ function recipeParamSchema(params) {
     if (p && p.type) slot.type = p.type;
     if (p && Array.isArray(p.enum)) slot.enum = p.enum.slice(0, 50);
     if (p && p.gid) slot.gid = String(p.gid);   // CX-7c — the Shopify resource Kind; coerceParams wraps a bare id into a gid
+    // v2.74.2055 — hop 3 for the NESTED identifier declaration (invariant #3: a field not read here is silently
+    // dropped on the projected leg): coerceParams gid-coerces the declared members inside array elements, and
+    // inventedIdentifierParams treats them as identifier-class by declaration.
+    if (p && p.elementGid && typeof p.elementGid === 'object') slot.elementGid = { ...p.elementGid };
     // CX-9f (v2.74.1439) — a short per-param HINT the interpret palette renders, so the BINDER knows the slot's
     // semantics (live: `address {type:string}` was bound "greensboro" once and skipped once — a bare name+type gives
     // the router nothing to bind BY). Curated text, capped; rendered through sanitizeToolString like every tool string.
@@ -255,12 +259,34 @@ export function inventedIdentifierParams(legOrRecipe, params = {}, contextText =
   const hay = String(contextText || '').toLowerCase();
   const hayAl = hay.replace(/[^a-z0-9]+/g, '');
   const out = [];
+  const schemaProps = (tool.paramSchema && tool.paramSchema.properties) || (o.paramSchema && o.paramSchema.properties) || {};
   for (const [name, raw] of Object.entries(params)) {
     if (raw == null || typeof raw === 'boolean') continue;
     if (name === urlP) continue;
     if (resolved && Object.prototype.hasOwnProperty.call(resolved, name)) continue;
-    if (!identifierClassParam(name)) continue;
-    const vals = (Array.isArray(raw) ? raw : [raw]).filter((x) => x != null && typeof x !== 'object' && typeof x !== 'boolean').map((x) => String(x).trim()).filter(Boolean);
+    // v2.74.2055 — an `elementGid`-declaring param is identifier-CLASS BY DECLARATION (review: the gate was
+    // doubly blind to variant ids — 'line-items' matches no identifier pattern and object elements were
+    // filtered out of the scan, so a fabricated gid://shopify/ProductVariant/… sailed through while the
+    // renderer strips gids from display, making fabrication the LIKELY path). The declared members' values are
+    // judged by their numeric tail — the human saw/typed the digits, never the gid envelope.
+    const _eg = schemaProps[name] && schemaProps[name].elementGid;
+    if (!identifierClassParam(name) && !_eg) continue;
+    let vals;
+    if (_eg && Array.isArray(raw)) {
+      vals = [];
+      for (const el of raw) {
+        if (!el || typeof el !== 'object') continue;
+        for (const f of Object.keys(_eg)) {
+          const mv = el[f];
+          if (mv != null && (typeof mv === 'string' || typeof mv === 'number')) {
+            vals.push(String(mv).trim().replace(/^gid:\/\/shopify\/\w+\//i, ''));
+          }
+        }
+      }
+      vals = vals.filter(Boolean);
+    } else {
+      vals = (Array.isArray(raw) ? raw : [raw]).filter((x) => x != null && typeof x !== 'object' && typeof x !== 'boolean').map((x) => String(x).trim()).filter(Boolean);
+    }
     const missing = vals.filter((x) => !_containedIn(hay, hayAl, x));
     if (missing.length) out.push({ name, value: missing.join(', ') });
   }

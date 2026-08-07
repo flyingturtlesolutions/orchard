@@ -259,3 +259,18 @@ describe('stampWriteAuthority — fail closed, one authority, never both', () =>
     assert.deepEqual(p.body, { a: 1 });
   });
 });
+
+// ── v2.74.2055 — required params gate the headless invoke (the approved line-items-less POST class) ──────────────
+describe('rideStep — required params gate the invoke (v2055)', () => {
+  it('a missing/empty required param refuses `needs-<param>` before any network', async () => {
+    const REQ = { ...READ, id: 'cap-q', params: [{ name: 'line_items', type: 'array', required: true }, { name: 'note', type: 'string' }] };
+    let invoked = 0;
+    const io = { readRecipes: recipesFor([REQ]), invoke: async () => { invoked++; return { success: true, value: [] }; } };
+    const clause = (bindings) => ({ text: 'q', pinned: { kind: 'ride', capabilityId: 'cap-q', groundId: 'g-1', bindings } });
+    assert.deepEqual(await runRideStep(clause({}), io), { ok: false, error: 'needs-line_items' });
+    assert.deepEqual(await runRideStep(clause({ line_items: [] }), io), { ok: false, error: 'needs-line_items' });
+    assert.equal(invoked, 0, 'no call spent');
+    const r = await runRideStep(clause({ line_items: [{ variantId: 'gid://shopify/ProductVariant/1', quantity: 1 }] }), io);
+    assert.equal(r.ok, true, 'a filled required passes');
+  });
+});
