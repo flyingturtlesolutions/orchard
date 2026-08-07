@@ -9,6 +9,7 @@ import {
   AUDIT_KINDS, AUDIT_CAP,
   classifyCreate, createRecordFrom, auditSucceeded, customerLabelFrom,
   auditEntry, appendCreate, truncationNotice, describeCreate,
+  parseCreatesAsk, createsScopeWindow, filterCreatesByScope, renderCreatesAnswer,
 } from './audit.js';
 
 // ── Fixtures: the mutation reply shapes the seam actually hands recordCreate ──
@@ -124,5 +125,78 @@ describe('describeCreate — the one-line audit row', () => {
   it('gate → auto, falls to id when no label', () => {
     const e = auditEntry({ system: 's', kind: 'record', id: '7', who: 'gate' });
     assert.equal(describeCreate(e, ''), 's · record · 7 · auto');
+  });
+});
+
+describe('parseCreatesAsk — the read-surface shortcut (AU-3)', () => {
+  it('matches retrospective asks', () => {
+    for (const q of ['what have I created', 'what did I create', 'show me what I made', 'list my created records',
+                     'what has Orchard created', 'any records I added?', "what have I created this week"]) {
+      assert.equal(parseCreatesAsk(q).matched, true, q);
+    }
+  });
+  it('does NOT match a real create COMMAND (no interrogative)', () => {
+    assert.equal(parseCreatesAsk('create a draft order for jane@acme.com with 1 Smart Plug').matched, false);
+    assert.equal(parseCreatesAsk('add a customer named Bob').matched, false);
+  });
+  it('does NOT match unrelated reads', () => {
+    assert.equal(parseCreatesAsk('show me my draft orders').matched, false);   // no create verb
+    assert.equal(parseCreatesAsk('how many tickets are open').matched, false);
+  });
+  it('extracts the scope window', () => {
+    assert.equal(parseCreatesAsk('what have I created today').scope, 'today');
+    assert.equal(parseCreatesAsk('what did I create yesterday').scope, 'yesterday');
+    assert.equal(parseCreatesAsk('what have I created this week').scope, 'week');
+    assert.equal(parseCreatesAsk('what have I created').scope, 'all');
+  });
+});
+
+describe('createsScopeWindow + filterCreatesByScope — deterministic (now passed in)', () => {
+  const NOW = 10 * 86400000;   // day 10
+  const rows = [
+    { at: NOW - 30 * 60000, verb: 'create', id: 'recent' },       // 30 min ago → today
+    { at: NOW - 1.5 * 86400000, verb: 'create', id: 'yday' },     // ~1.5 days ago → yesterday window
+    { at: NOW - 5 * 86400000, verb: 'create', id: 'thisweek' },   // 5 days ago → within week, not today
+    { at: 0, verb: 'create', id: 'legacy' },                      // unstamped
+  ];
+  it("today keeps only the last day's rows", () => {
+    assert.deepEqual(filterCreatesByScope(rows, 'today', NOW).map((r) => r.id), ['recent']);
+  });
+  it('week keeps the last 7 days (not the legacy at=0)', () => {
+    assert.deepEqual(filterCreatesByScope(rows, 'week', NOW).map((r) => r.id), ['recent', 'yday', 'thisweek']);
+  });
+  it("all keeps everything incl. legacy at=0", () => {
+    assert.equal(filterCreatesByScope(rows, 'all', NOW).length, 4);
+  });
+  it('window bounds are honest', () => {
+    assert.deepEqual(createsScopeWindow('today', NOW), { from: NOW - 86400000, to: NOW });
+  });
+});
+
+describe('renderCreatesAnswer — the markdown answer (AU-3)', () => {
+  const fmtTime = (at) => (at ? `t${at}` : '');
+  it('lists creates newest-first with a count header', () => {
+    const items = [
+      auditEntry({ at: 1, system: 'admin.shopify.com', kind: 'draft', id: '1', label: '#D1', who: 'human' }),
+      auditEntry({ at: 2, system: 'deako.zendesk.com', kind: 'ticket', id: '2', label: 'Broken', who: 'gate' }),
+    ];
+    const out = renderCreatesAnswer({ items, total: 2, notice: '' }, { fmtTime });
+    assert.match(out, /You've created 2 records:/);
+    const lines = out.split('\n');
+    assert.match(lines[1], /ticket · Broken/);   // newest first
+    assert.match(lines[2], /draft · #D1/);
+  });
+  it('empty → honest nothing message (scoped)', () => {
+    assert.match(renderCreatesAnswer({ items: [], total: 0 }, { fmtTime, scope: 'today' }), /haven't created anything today/);
+  });
+  it('surfaces the truncation notice on the all-scope header', () => {
+    const items = [auditEntry({ at: 1, system: 's', kind: 'record', id: '1', who: 'gate' })];
+    assert.match(renderCreatesAnswer({ items, total: 812, notice: 'showing the last 500 of 812' }, { fmtTime }), /showing the last 500 of 812/);
+  });
+  it('filters to verb==="create" (v1 stores creates only, but the filter is honest for AU-6)', () => {
+    const items = [{ at: 1, verb: 'delete', kind: 'draft', id: 'x' }, auditEntry({ at: 2, system: 's', kind: 'draft', id: '2', label: '#D2', who: 'human' })];
+    const out = renderCreatesAnswer({ items, total: 2 }, { fmtTime });
+    assert.match(out, /You've created 1 record:/);
+    assert.doesNotMatch(out, /delete/);
   });
 });

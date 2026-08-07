@@ -186,3 +186,57 @@ export function describeCreate(entry, clock = '') {
   bits.push(e.who === 'human' ? 'you' : 'auto');
   return bits.filter(Boolean).join(' · ');
 }
+
+/**
+ * AU-3 — recognise the "what have I created?" ask (the read-surface shortcut). PURE. Requires an interrogative
+ * (what/which/show/list/any/audit) AND a create verb (create/made/added) AND a first-person / Orchard subject, so a
+ * real create COMMAND ("create a draft order for …") does NOT match (no interrogative). Returns a scope window.
+ * @returns {{matched:boolean, scope?:'all'|'today'|'yesterday'|'week'}}
+ */
+export function parseCreatesAsk(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (!t) return { matched: false };
+  const verb = /\b(create[ds]?|creating|made|added)\b/.test(t);
+  const interrog = /\b(what|which|show|list|any)\b/.test(t) || /\baudit\b/.test(t);
+  const subject = /\b(i|we|orchard|you)\b/.test(t) || /\b(i've|i'?ve)\b/.test(t) || /\bmy\b/.test(t);
+  if (!(verb && interrog && subject)) return { matched: false };
+  let scope = 'all';
+  if (/\btoday\b/.test(t)) scope = 'today';
+  else if (/\byesterday\b/.test(t)) scope = 'yesterday';
+  else if (/\bthis (week|wk)\b|\bthis week\b/.test(t)) scope = 'week';
+  return { matched: true, scope };
+}
+
+/** Window bounds [from, to] in ms for a scope, given `now`. PURE (no Date.now — `now` passed in). */
+export function createsScopeWindow(scope, now = 0) {
+  const n = Number.isFinite(now) && now > 0 ? now : 0;
+  const DAY = 86400000;
+  if (!n || scope === 'all' || !scope) return { from: 0, to: n || Infinity };
+  if (scope === 'today') return { from: n - DAY, to: n };
+  if (scope === 'yesterday') return { from: n - 2 * DAY, to: n - DAY };
+  if (scope === 'week') return { from: n - 7 * DAY, to: n };
+  return { from: 0, to: n };
+}
+
+/** Filter creates to a scope window. PURE. Rows with at=0 (legacy/unstamped) are kept only for scope 'all'. */
+export function filterCreatesByScope(items, scope, now = 0) {
+  const arr = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!scope || scope === 'all') return arr;
+  const { from, to } = createsScopeWindow(scope, now);
+  return arr.filter((e) => Number.isFinite(e.at) && e.at >= from && e.at <= to);
+}
+
+/**
+ * AU-3 — render the "what have I created" answer as a markdown block. PURE: `fmtTime(at)->string` is injected so
+ * the module stays deterministic (the chat caller passes a real local-time formatter). Newest first. Filters to
+ * verb==='create' (v1 stores only creates, but the filter keeps the ask honest the moment writes are added, §6.1).
+ */
+export function renderCreatesAnswer({ items, total, notice } = {}, { fmtTime = (at) => String(at || ''), scope = 'all' } = {}) {
+  const rows = (Array.isArray(items) ? items : []).filter((e) => e && e.verb === 'create');
+  const when = scope === 'today' ? ' today' : scope === 'yesterday' ? ' yesterday' : scope === 'week' ? ' this week' : '';
+  if (!rows.length) return `You haven't created anything${when} that Orchard has on record.`;
+  const lines = rows.slice().reverse().map((e) => `- ${describeCreate(e, fmtTime(e.at))}`);   // newest first
+  const n = rows.length;
+  const head = `You've created ${n} record${n === 1 ? '' : 's'}${when}${(!when && notice) ? ` (${notice})` : ''}:`;
+  return [head, ...lines].join('\n');
+}

@@ -80,6 +80,7 @@ import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recen
 import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { parseDashboardAsk, friendlyVitalsLine, clockWord } from './Core/vitalsDashboard.js';   // VT-2d (v2.74.1583) — the context dashboard door; v1590 — the human-words layer for incident cases
+import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer } from './Core/audit.js';   // AU-3 (DESIGN_audit.md §11) — the "what have I created?" read surface (local ledger, one-shot answer)
 import { friendlyError as _errWord, actionPhrase as _actionPhrase, recordNounWord as _recordNounWord } from './Core/chatVoice.js';   // v2.74.1591 — ONE chat voice: slugs/codes → phrases, catalog verbs → sentences, leg names → nouns
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId, galleryUserDefs } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance); DK-6b — galleryUserDefs ("Your desks" = customs only)
@@ -98,6 +99,7 @@ import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) �
 import { evaluatePinBank, refinePinBankAfterStore } from './Core/workflowPinBank.js';   // v2.74.2038 — pin-bank cause probes (refuse taxonomy; no remediation)
 import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun, explainPartialWhy, normalizeHistoryTrace, formatTraceLines } from './Core/runHistory.js';   // CD-6; v2027 items; v2029 partial why; v2030 banked trace
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
+import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
@@ -16246,6 +16248,25 @@ async function sendChatMessage(textOverride = null) {
           ? `Opened ${word} in a tab — live counts from the outcome funnel; re-ask to refresh it.`
           : `Couldn’t open the dashboard${r2 && r2.error ? ` — ${_errWord(r2.error)}` : ''}.`);
       } catch { _setMessageBody(m, 'Couldn’t open the dashboard.'); }
+      _orchFinalize(m); return;
+    }
+  }
+
+  // AU-3 (DESIGN_audit.md §11) — "what have I created?" answers from the LOCAL creates-audit ledger in one shot
+  // (the iron-principle payoff: read the record, don't maintain it). loadCreates is a fast chrome.storage read, so
+  // this decides BY DOING — no slow probe (Invariant #4); the entry echo/clear already happened at the top of
+  // sendChatMessage, so this only appends the assistant answer. Hoisted above _showSection: "show me what I
+  // created" carries a "show" the section-nav would otherwise try to eat.
+  {
+    const createsAsk = parseCreatesAsk(text);
+    if (createsAsk.matched) {
+      const m = appendMessage({ role: 'assistant', body: '' });
+      try {
+        const { items, total, notice } = await loadCreates();
+        const scoped = filterCreatesByScope(items, createsAsk.scope, Date.now());
+        const fmtTime = (at) => { try { return at ? new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''; } catch { return ''; } };
+        _setMessageBody(m, renderCreatesAnswer({ items: scoped, total, notice }, { fmtTime, scope: createsAsk.scope }));
+      } catch { _setMessageBody(m, 'Couldn’t read the audit ledger.'); }
       _orchFinalize(m); return;
     }
   }
