@@ -184,6 +184,9 @@ export const DECISION_MARKERS = [
   // here so the timing line surfaces in a `gc` decisions download too, not only a `gl` full trace (invariant #1).
   // REMOVE this entry together with the paired PERF marks in chat.js / Services/ChatAPI.js / background.js.
   { key: 'perf', src: "PERF ▸" },
+  // AU-1 (DESIGN_audit.md §11) — the creates-audit hook's body-blind marker: one line per durable create banked
+  // (system · verb · kind · who — never the id/label). metric:true so the fleet count sees "creates banked" (§5/§7-7).
+  { key: 'audit', src: "AUDIT ▸", metric: true, metricPattern: 'AUDIT ▸' },
 ];
 
 /** The decisions-view filter, derived (studio.js consumes this). */

@@ -17,6 +17,7 @@ import { fillEndpoint, fillBody, stripUnfilledJsonBody, recipeForOrigin, isReadO
 import { pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill; v1758 — rideTabUrlPatterns; v1759 — isCsrfColdFailure
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
+import { recordCreate } from './audit.js';   // AU-1 (DESIGN_audit.md §11) — the creates-audit hook, a SIBLING to reportLegOutcome at the two write-capable success branches (banks the created id + label; fail-safe)
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
 import { registerConnTransitionListener } from './connections.js';   // v2.74.1853 — presence is the csrf bank's TRUE lifecycle clock (signed-out → the session-bound token is certainly dead)
 import { BROKER_CATALOG } from '../../Core/brokerCatalog.js';   // v1342 — UNLINK clears this provider's liveTools cache entries
@@ -1391,6 +1392,9 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             csrfInvolved: !!(payload && (payload.gql || payload.csrf)), probePath: (payload && payload.identityProbe) || null, probeAccept: (payload && payload.probeAccept) || null, probeHeaders: (payload && payload.requestHeaders) || null };
           if (reply && reply.success) {
             try { void reportLegOutcome({ ..._evtBase, ok: true, urlArgs: _urlArgs || null }); } catch { /* LEG-1 — the funnel banks lastUrlArgs off successful rides */ }
+            // AU-1 (DESIGN_audit.md §11) — bank the create into the audit ledger (fail-safe; auditSucceeded is
+            // belt-and-suspenders here — reply.value already passed the :1263-1280 nested-userErrors screen).
+            if (isWrite) { try { void recordCreate({ value: reply.value, origin, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null, urlArgs: _urlArgs || null }); } catch { /* */ } }
             sendResponse({ ...reply, origin, urlArgs: _urlArgs });
           } else {
             let _heal = null;
@@ -1842,6 +1846,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // riding along — VendorSuite's json-liveness probe registers on the first good ride) + the lastOkAt
           // stamp/ratchet-clear (RH-1a) in one door.
           try { void reportLegOutcome({ transport: 'ride', ok: true, origin: sessionHost, groundId: (payload && payload.groundId) || null, recipeId: (payload && payload.recipeId) || null, probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null }); } catch { /* */ }
+          // AU-1 (DESIGN_audit.md §11) — bank the create. auditSucceeded is LOAD-BEARING here: this branch has NO
+          // nested-userErrors screen (:1802 checks only top-level r.body.errors), so a 200-with-userErrors reaches
+          // it as ok:true — recordCreate's guard refuses to bank that phantom row (§10.1).
+          if (isWrite) { try { void recordCreate({ value: r.body, origin: apiHost, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null }); } catch { /* */ } }
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
       })();
