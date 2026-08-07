@@ -5615,6 +5615,25 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   }
 
   /**
+   * v2.74.2056 — caption a saved WORKFLOW for its rail card: one plain sentence saying what it does, from the
+   * name + step phrasings. Cheap tier. The steps are the user's OWN ask phrasings — the same content class that
+   * already rides INTERPRET_ASK, so no new egress channel opens here (DESIGN_llm_privacy.md). Fails safe → null
+   * (the card keeps its meta line only).
+   * @param {{ name?:string, steps:string[] }} args
+   * @returns {Promise<string|null>}
+   */
+  static async blurbWorkflow({ name = '', steps = [] } = {}) {
+    const list = (Array.isArray(steps) ? steps : []).map((s) => String(s || '').trim()).filter(Boolean).slice(0, 12);
+    if (!list.length || !(await AnthropicService.hasLlm())) return null;
+    const system = 'You caption saved automations. Given a workflow’s name and its steps, write ONE plain sentence (under 90 characters) saying what it does for the user — present tense, concrete, no repetition of the name, never starting with “This workflow”. Return ONLY the sentence: no quotes, no preamble.';
+    const user = `Name: ${String(name || 'workflow').slice(0, 120)}\nSteps:\n${list.map((s, i) => `${i + 1}. ${s.slice(0, 200)}`).join('\n')}\n\nCaption:`;
+    const res = await AnthropicService.#call(system, user, 60, [], { role: 'routing', operation: 'workflow-blurb' });
+    if (!res || res.success === false || !res.text) return null;
+    const t = String(res.text).trim().replace(/^["'“”\s]+|["'“”\s]+$/g, '').replace(/\s+/g, ' ').trim();
+    return t ? t.slice(0, 140) : null;
+  }
+
+  /**
    * §17 POLISH (v2.74.1273) — name a HARVESTED ride-recipe + write its one-line `does` + suggest clearer param names.
    * The OBS-4 analog for the network twin. PRIVACY-FIRST: the input is the endpoint's STRUCTURE only (method, the path
    * with real ids already collapsed to {params}, param types) — no instance data ever leaves (DESIGN_llm_privacy.md).

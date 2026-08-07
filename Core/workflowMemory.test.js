@@ -24,6 +24,13 @@ describe('workflowMemory — normalizeWorkflow', () => {
     assert.equal(workflowId('x', ['a', 'b']), workflowId('X', ['A', 'B']));   // case-insensitive
     assert.notEqual(workflowId('x', ['a', 'b']), workflowId('x', ['a', 'c']));
   });
+  // v2.74.2056 — the card caption survives normalize (whitelist discipline: an unlisted field dies on the next
+  // edit, and the panel would silently re-generate the blurb forever).
+  it('carries the LLM blurb through normalize; absent stays undefined', () => {
+    const w = normalizeWorkflow(WF('a', ['b', 'c'], { blurb: 'creates a Shopify customer for each unmatched row' }));
+    assert.equal(w.blurb, 'creates a Shopify customer for each unmatched row');
+    assert.equal(normalizeWorkflow(WF('a', ['b', 'c'])).blurb, undefined);
+  });
 
   // DESIGN_cadence.md §2.1 (BLOCKER regression guard) — the literal is closed by construction, and BOTH
   // saveWorkflow and updateWorkflow route through normalize; a field that isn't whitelisted is dropped on every

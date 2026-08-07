@@ -1213,6 +1213,23 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // v2.74.2056 — WORKFLOW_BLURB: one-sentence card caption for a saved workflow (name + step phrasings →
+    // "what does this do"). Best-effort: null → the card keeps its meta line. The steps are the user's own ask
+    // phrasings — the content class INTERPRET_ASK already carries; no new egress channel.
+    WORKFLOW_BLURB: async (payload, _sender, sendResponse) => {
+      try {
+        const name = String(payload?.name ?? '').slice(0, 160);
+        const steps = (Array.isArray(payload?.steps) ? payload.steps : []).map((s) => String(s ?? '').slice(0, 200)).filter(Boolean).slice(0, 12);
+        if (!steps.length) { sendResponse({ success: true, blurb: null }); return; }
+        const blurb = await AnthropicService.blurbWorkflow({ name, steps });
+        if (blurb) Logger.info('background', `WORKFLOW ▸ blurb generated for "${name.slice(0, 40)}"`);   // existing decisions family (invariant #1)
+        sendResponse({ success: true, blurb });
+      } catch (err) {
+        Logger.error('background', `WORKFLOW_BLURB failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // AS-5c (v2.74.1409) — SUGGEST_SETUP_EXAMPLE: a dynamic compound EXAMPLE instruction for a just-set-up app,
     // grounded in the sites the user picked (shown as a starter, NEVER executed). Best-effort; null → the panel keeps
     // its static example. Inputs are the app's own config (seed) + the picked site labels — no page/PII data.

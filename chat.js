@@ -1108,7 +1108,9 @@ async function _renderRailListNow() {
   const _parkedFull = {};   // v2.74.1777 — the full entries render as needs-action rows atop the workflows section
   try {
     const r = await _orchReq('WORKFLOW_PARKED', {});
-    for (const p of ((r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [])) {
+    const _pk = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [];
+    _wfNoteOpenParks(_pk);   // WFP-5 — the ▶ handler + due auto-runner read this map on whichever tab renders
+    for (const p of _pk) {
       if (p && p.appId) {
         _parkedByInst[p.appId] = (_parkedByInst[p.appId] || 0) + 1;
         (_parkedFull[p.appId] = _parkedFull[p.appId] || []).push(p);
@@ -1229,7 +1231,7 @@ async function _renderRailListNow() {
     if (row.role === 'app') {   // v1817 — every desk groups (both sections always exist)
       _startGroup(el, row);
       // needs-action rows ride at the TOP of the workflows section: parked runs (approve/cancel inline)
-      if (_grpWfs && conv.instanceId) for (const p of (_parkedFull[conv.instanceId] || [])) _grpWfs.insertBefore(_railParkedRow(p), _grpWfs.querySelector('.rail-wf-add'));
+      if (_grpWfs && conv.instanceId) for (const p of (_parkedFull[conv.instanceId] || [])) { if (p && p.kind === 'paused') continue; _grpWfs.insertBefore(_railParkedRow(p), _grpWfs.querySelector('.rail-wf-add')); }   // WFP (user ruling) — a PAUSED run is the CARD's state, never a separate row
       continue;
     }
     _grpCases = _grpWfs = null;
@@ -5086,8 +5088,8 @@ function _clauseError(kind, e, msg) {
   try { _setMessageBody(msg, `That step couldn’t run — ${escHtml(m)}.`); _orchFinalize(msg); } catch { /* */ }
 }
 
-async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
-  _walkAbortFlag.requested = false;
+async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg = null, goal = '', inChain = false } = {}) {
+  if (!inChain) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // WFP-1 (§12.3) — a STANDALONE run is a run start (reset both latches); MID-CHAIN this erased a stop pressed during the previous clause's LLM roundtrip, after which a write created rows the user had already refused
   _ilBusy(msg, true);
   // v1660 — ENTRY line: distinguishes "never ran" from "ran and found nothing" without inference.
   try { _orchLog(`FIELD_READ ▸ start field="${fr.field}"${fr.term ? ` term="${fr.term}"` : ''} collection=${typeof fr.collection === 'object' ? 'self' : fr.collection} prior=${priorValue != null ? 'yes' : 'no'}`); } catch { /* */ }
@@ -5265,7 +5267,7 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
           if (_ar && _fr3 && _ar !== _fr3) { _swapNote = `  _(**${escHtml(_cands[0])}** is the ${_fr3} on the record — it doesn’t name a ${_ar})_`; try { _orchLog(`FIELD_READ ▸ role note — the ask wants the ${_ar}; ${_cands[0]} is the ${_fr3}`); } catch { /* */ } }
         }
         try { _orchLog(`FIELD_READ ▸ interrogative-swap — a "${_qr}" ask is not answered by ${fp.path}; reading ${_cands[0]} instead`); } catch { /* */ }
-        return _runFieldReadClause(msg, { ...fr, field: _cands[0].replace(/\./g, ' '), term: '', _interrogSwap: true, _interrogNote: _swapNote }, { tabId, priorValue, priorLeg, goal });
+        return _runFieldReadClause(msg, { ...fr, field: _cands[0].replace(/\./g, ' '), term: '', _interrogSwap: true, _interrogNote: _swapNote }, { tabId, priorValue, priorLeg, goal, inChain: true });
       }
       const _list = _cands.slice(0, 3).map((n) => `**${escHtml(n)}**`).join(' or ');
       _setMessageBody(msg, `That reads like a “${_qr}” question, but “${escHtml(fr.field)}” matches **${escHtml(fp.path)}**, which can’t answer it.${_cands.length ? ` Did you mean ${_list}?` : ' I don’t see a field on this record that can — name it the way the record spells it.'}`, { markdown: true });
@@ -5327,7 +5329,7 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
       // `_termRetry` bounds the recursion: the second pass carries no term, so the gate cannot hold again — but the
       // flag makes that structural rather than incidental.
       try { _orchLog(`FIELD_READ ▸ term-as-field — "${fr.term}" IS a field (${_tk}), not a part of ${fp.path}`); } catch { /* */ }
-      return _runFieldReadClause(msg, { ...fr, field: _tk, term: '', _termRetry: true }, { tabId, priorValue, priorLeg, goal });
+      return _runFieldReadClause(msg, { ...fr, field: _tk, term: '', _termRetry: true }, { tabId, priorValue, priorLeg, goal, inChain: true });
     }
     // The term names no field either. Rendering the whole field with a tally then reads as a completed read about
     // the record — `0 found, 1 whole-field` is what launders a routing error into an answer. Say what happened.
@@ -5521,8 +5523,8 @@ function _wfReplayStopped(msg, wf, plan) {
   _orchFinalize(msg);
 }
 
-async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
-  _walkAbortFlag.requested = false;
+async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = null, goal = '', inChain = false } = {}) {
+  if (!inChain) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // WFP-1 (§12.3) — a STANDALONE run is a run start (reset both latches); MID-CHAIN this erased a stop pressed during the previous clause's LLM roundtrip, after which a write created rows the user had already refused
   _ilBusy(msg, true);
   try { _orchLog(`BRANCH ▸ start arms=${br.arms.map((a) => a.label).join('|')} mode=${br.mode} collection=${typeof br.collection === 'object' ? 'self' : br.collection} prior=${priorValue != null ? 'yes' : 'no'}`); } catch { /* */ }
 
@@ -5948,8 +5950,8 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
  * `queued` becomes a proposal for review, `refused` never runs at all. An UNDECLARED write lands in `queued`,
  * so this clause cannot widen what the catalog permits — it can only act on what was explicitly allowed.
  */
-async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = null, goal = '', state = null } = {}) {
-  _walkAbortFlag.requested = false;
+async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = null, goal = '', state = null, inChain = false } = {}) {
+  if (!inChain) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // WFP-1 (§12.3) — a STANDALONE run is a run start (reset both latches); MID-CHAIN this erased a stop pressed during the previous clause's LLM roundtrip, after which a write created rows the user had already refused
   _ilBusy(msg, true);
   const st = state || {};
   const misses = Array.isArray(st.lastMisses) ? st.lastMisses : [];
@@ -6154,8 +6156,8 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
  * made the live misroute so bad: the safest thing a person could have asked for became an outward write to a real
  * CS queue, because `case` was not in `INTENTS` and the router had to choose SOMETHING.
  */
-async function _runCaseClause(msg, cs, { tabId, priorValue = null, priorLeg = null, goal = '', state = null } = {}) {
-  _walkAbortFlag.requested = false;
+async function _runCaseClause(msg, cs, { tabId, priorValue = null, priorLeg = null, goal = '', state = null, inChain = false } = {}) {
+  if (!inChain) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // WFP-1 verify — the FIFTH executor: same mid-chain-erasure class as its four siblings (a stop pressed during the prior clause's roundtrip must survive into the case dispatch)
   _ilBusy(msg, true);
   const st = state || {};
   const rows = (priorValue != null ? rowsFromValue(priorValue) : []);
@@ -6338,9 +6340,9 @@ async function _closeCaseFromLeg(msg, params = {}) {
 }
 
 
-async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '' } = {}) {
+async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = null, goal = '', inChain = false } = {}) {
   const system = map.target.system;
-  _walkAbortFlag.requested = false;   // v1625 — a FRESH top-level run clears a stale stop (the _orchRunChain rule); PM-5 chain entry will pass state instead
+  if (!inChain) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // WFP-1 (§12.3) — a STANDALONE run is a run start (reset both latches); MID-CHAIN this erased a stop pressed during the previous clause's LLM roundtrip, after which a write created rows the user had already refused
   _ilBusy(msg, true);   // the glyph thinks through the read + the N lookups
   // 1) the COLLECTION — the piped prior read, or a self-contained read (the v1545 pattern).
   let rows = [];
@@ -6654,7 +6656,7 @@ async function _runMapClause(msg, map, { tabId, priorValue = null, priorLeg = nu
       // v1628 drill merge INCLUDING the `also` sidecar (contacts — live 19:44: `MAP ▸ enriched 9/9 … +1 sidecar`),
       // which is exactly where a "homeowner's phone" lives. fieldRead's own drill does NOT consult `also` (the
       // standing v1881 gap), so re-reading fresh would LOSE fields the map already fetched.
-      return _runFieldReadClause(msg, { kind: 'fieldRead', field: _frField, term: '', collection: 'prior' }, { tabId, priorValue: { results: rows }, priorLeg: srcLeg || priorLeg, goal });
+      return _runFieldReadClause(msg, { kind: 'fieldRead', field: _frField, term: '', collection: 'prior' }, { tabId, priorValue: { results: rows }, priorLeg: srcLeg || priorLeg, goal, inChain: true });
     }
     _setMessageBody(msg, `Those live on the record itself — tell me which field to read (“for each one, read the <field>”) and I’ll read it off each record.`, { markdown: true });
     _orchFinalize(msg);
@@ -8360,6 +8362,7 @@ async function _wfRunStep(stepText) {
   w.st.lastEmptyStop = null;   // v1688 — same discipline: only THIS run's empty-prior stop may re-set it
   // v1624 — a signed-out step's "↻ Try again" (the chain's sign-in bar, which rides into this page) re-runs the
   // STEP through the wizard instead of firing a fresh front-door ask (the "retries out of the wizard" bug).
+  _walkPauseFlag.requested = false;   // WFP-1 verify — the wizard passes shared state (no chain-level reset); a stale ⏸ must not fake-pause a wizard step (the wizard offers no pause surface)
   try { await _orchRunChain(runMsg, { tabId: w.tabId, clauses: [{ text: stepText }], firstMatch: null, ask: stepText, state: w.st, offers: false, onRetry: () => { void _wfRunStep(stepText); } }); }
   catch (e) { try { _setMessageBody(runMsg, `That step couldn’t run — ${_errWord(e && e.message)}.`); } catch { /* */ } }
   const _engaged = ((w.st.ranSteps || []).length > _ranBefore);
@@ -9736,7 +9739,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
   // must not re-gate the steps under a different app's writePolicy), and registers with the CR-S1 liveness
   // refcount so "stop" reaches a runaway chain (it was invisible to _stopLongRunning before).
   const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, lastLeg: null, lastReadoutIdx: null, policyConfig: _currentConversationConfig };   // T2 — resolved steps for promotion; lastValue/lastLeg — last read's result + source leg (CV-4-full fan-out + the DK-8f drill); lastReadoutIdx — that read's readout slot (DK-8i drops it when a spawn consumes the read)
-  if (!state) _walkAbortFlag.requested = false;   // a FRESH chain clears a stale stop; a demo-resume (state passed) honors an in-flight one
+  if (!state) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // a FRESH chain clears a stale stop/pause; a demo-resume (state passed) honors an in-flight one
   const _record = (m, clause, kind) => { st.ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); st.chainGroundId = m.groundId; };
   // The demo of clause i performed it live → record the new capability for promotion, then continue from i+1.
   const _resumeAfterDemo = (i, clause, gid) => (cap) => {
@@ -9749,9 +9752,20 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
   try {
   for (let i = startIndex; i < total; i++) {
     if (_walkAbortFlag.requested) {   // v1338 — "stop" lands at the next clause boundary
+      _walkPauseFlag.requested = false;   // WFP-1 (§12.3) — an honored abort clears any pending pause
       _setMessageBody(msg, total > 1 ? `Stopped at step ${i + 1} of ${total}.` : 'Stopped.');
       _orchFinalize(msg);
-      return;
+      return { aborted: true, atStep: i };
+    }
+    // WFP-2 (§12.3) — PAUSE lands at the clause boundary too, abort checked FIRST (abort beats pause). The chain
+    // stays workflow-agnostic: it returns the bookmark ({atStep, state}) and the CALLER banks the park (only the
+    // card handler knows the workflow identity). Consumed on honor — a pause must never leak into the next run.
+    if (_walkPauseFlag.requested) {
+      _walkPauseFlag.requested = false;
+      _setMessageBody(msg, total > 1 ? `Paused at step ${i + 1} of ${total} — resume from the workflow card.` : 'Paused — resume from the workflow card.');
+      _orchFinalize(msg);
+      try { _orchLog(`STOP ▸ chain paused at step ${i + 1}/${total}`); } catch { /* */ }
+      return { paused: true, atStep: i, state: st };
     }
     const clause = clauses[i];
     // PP-4 (v2.74.1686) — THE EMPTY-PRIOR STOP, before ORCH_MATCH and INTERPRET_ASK rather than after.
@@ -9985,7 +9999,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
         // rides into the readouts so the chain tail doesn't overwrite the table with "Done.". A non-ok map already
         // rendered its own honest message (gap / ambiguous / shape-mismatch / empty) — leave it and stop.
         if (cr && cr.fieldRead) {   // PM-9 (v1649) — the per-item OWN-RECORD read
-          const frr = await _runFieldReadClause(msg, cr.fieldRead, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+          const frr = await _runFieldReadClause(msg, cr.fieldRead, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, inChain: true });
           if (frr && frr.text) { st.readouts.push(frr.text); st.lastReadoutIdx = st.readouts.length - 1; }   // v1655 — st.readouts, as every sibling in this loop uses; bare `readouts` is a DIFFERENT function's local (ReferenceError, live-reported)
           // PP-1 (v2.74.1661) — thread the ENRICHED rows forward, as the map branch below already does. Before
           // this, a fieldRead was a composition DEAD END: it rendered and returned, leaving st.lastValue at the
@@ -10011,7 +10025,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
             st.lastMisses = _lastMapRun.misses; st.lastMapLeg = st.lastMapLeg || _lastMapRun.srcLeg;
             st.lastMapLookup = st.lastMapLookup || _lastMapRun.lookup; st.lastMapSystem = st.lastMapSystem || _lastMapRun.system; st.lastMapRan = true;
           }
-          const wrr = await _runWriteClause(msg, cr.write, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, state: st });
+          const wrr = await _runWriteClause(msg, cr.write, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, state: st, inChain: true });
           if (!wrr || !wrr.ok) return;
           if (wrr.text) { st.readouts.push(wrr.text); st.lastReadoutIdx = st.readouts.length - 1; }
           // v2.74.2026 — the write tally is the history row's payload for a create step (created/queued/blocked);
@@ -10049,7 +10063,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           continue;   // st.lastValue unchanged: a write CREATES records, it does not replace the working set
         }
         if (cr && cr.case) {   // PP-3 (v1686) — door A′. `state` carries the chain's stage trail: a case may record only what ran.
-          const csr = await _runCaseClause(msg, cr.case, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, state: st });
+          const csr = await _runCaseClause(msg, cr.case, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, state: st, inChain: true });
           if (!csr || !csr.ok) return;
           st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'case', clause: clause.text, intent: clause.text });
           continue;   // st.lastValue unchanged: a case RECORDS the working set, it does not replace it
@@ -10062,7 +10076,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           const _brT0 = Date.now();
           let _brr = null;
           try {
-            _brr = await _runBranchClause(msg, cr.branch, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+            _brr = await _runBranchClause(msg, cr.branch, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, inChain: true });
           } finally {
             const _rows = (_brr && Array.isArray(_brr.rows)) ? _brr.rows.length : null;
             try {
@@ -10104,7 +10118,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
           continue;
         }
         if (cr && cr.map) {
-          const mr = await _runMapClause(msg, cr.map, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text });
+          const mr = await _runMapClause(msg, cr.map, { tabId, priorValue: st.lastValue, priorLeg: st.lastLeg, goal: clause.text, inChain: true });
           if (!mr || !mr.ok) return;
           st.lastValue = mr.joined; st.lastReadoutIdx = null;   // v1635 — KEEP st.lastLeg: the joined rows still descend from the source leg, and a follow-up map needs its joinKey declaration
           // v2.74.1679 — carry the MISSES forward. A following "create one for the ones not found" needs the
@@ -10247,6 +10261,7 @@ async function _orchRunChainInner(msg, { tabId, clauses, firstMatch, ask = '', s
   // WF-1 — an AUTONOMOUS compound (a connector read / fan-out chain) has no Ground, so the composite saver above
   // bails; offer instead to bank it as a recallable WORKFLOW keyed to the ask (bank → recall → suggest-and-confirm).
   if (offers) _maybeOfferWorkflowSave(msg, { ask, clauses, steps: st.ranSteps });
+  return { done: true };   // WFP-2 — the return CONTRACT: callers branch on paused/aborted/done; other early exits stay undefined (not a clean completion)
   } finally { _planLive = Math.max(0, _planLive - 1); _ilBusy(msg, false); }   // v1338 (review E, CR-S1 pattern); v1505 — the glyph settles on EVERY chain exit, thrown paths included
 }
 
@@ -10461,6 +10476,7 @@ function _offerWorkflowReplay(goal, wf) {
     _wfTraceBegin(_stR.wfRunId);
     try { _orchLog(`WORKFLOW ▸ run=${_stR.wfRunId} start`); } catch { /* */ }
     _walkAbortFlag.requested = false;
+    _walkPauseFlag.requested = false;   // WFP-1 verify — this launcher passes state, so the chain-level fresh reset never fires; a stale ⏸ (one the previous run outran) would fake-pause step 1 with no park banked
     const _pbR = _progressBubble(m);   // PS-9 — the elapsed ticker rides the run bubble
     _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask, state: _stR }).then(() => _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR)).catch(() => { /* */ }).finally(() => _pbR.done());   // replay via the same chain runner, PINNED where banked (PP-0c)
   }, { lockBar: true }));
@@ -10593,7 +10609,7 @@ function _wfScheduleInline(row, wf, wfKey, rerender) {
   off.setAttribute('aria-pressed', !cur ? 'true' : 'false');
   off.addEventListener('click', (e) => { e.stopPropagation(); set(0); });
   pick.appendChild(off);
-  const meta = row.querySelector('.rail-item-meta');
+  const meta = row.querySelector('.wf-row-meta') || row.querySelector('.rail-item-meta');   // v2060 — anchor after the REAL meta line, not the blurb (first-match)
   if (meta) meta.after(pick);
   else row.prepend(pick);
 }
@@ -10603,11 +10619,60 @@ function _wfScheduleInline(row, wf, wfKey, rerender) {
 // Primary click opens ITS history (the run log — its transcript, re-condensed per run), the same "click a child,
 // see its history" semantics a case row has. Action chips hover-reveal on the row (run · headless · schedule ·
 // history · delete) — the exact handlers the retired overlay used.
+// v2.74.2056 (user directive: the at-rest card should SAY what the workflow does) — lazy one-shot caption.
+// ONE attempt per workflow per panel session (the Set holds ids whether the call succeeded, returned null —
+// LLM unconfigured — or failed: a re-render must never turn into an LLM retry loop). The result persists via
+// updateWorkflow (`blurb` is whitelisted in normalizeWorkflow), so the cost is once per workflow EVER; the fill
+// is honest-in-place (RB-6c): textContent into the reserved line if the card is still on screen, no re-render.
+// WFP-5 (§12.4) — the OPEN PARKS map {workflowId → park record}, refreshed by whichever renderer last fetched
+// the parked list. The ▶ handler reads it (paused → resume; gate → point at the ✋ card) and the due auto-runner
+// skips park-open cards — the SW scan's check 5b, applied to the panel doors.
+let _wfOpenParks = {};
+function _wfNoteOpenParks(parked) {
+  _wfOpenParks = {};
+  for (const p of (Array.isArray(parked) ? parked : [])) if (p && p.workflowId) _wfOpenParks[p.workflowId] = p;
+}
+// WFP-2 (§12.2) — the banked chainState must survive a chrome message + storage: JSON round-trip PER KEY, so one
+// unserializable key (a circular ref) drops alone and LOUDLY instead of silently zeroing the whole bookmark —
+// a whole-state degrade made a resume run stateless, and a stateless resume of a per-item chain reads as
+// "the last step came back empty" with no witness.
+function _wfParkableState(st) {
+  const out = {};
+  for (const [k, v] of Object.entries(st || {})) {
+    try { out[k] = v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+    catch { try { _orchLog(`STOP ▸ park state dropped unserializable key "${k}"`); } catch { /* */ } }
+  }
+  return out;
+}
+
+const _wfBlurbTried = new Set();
+function _wfEnsureBlurb(item, wf, wfKey) {
+  if (!wf || wf.blurb || !wf.id || _wfBlurbTried.has(wf.id)) return;
+  _wfBlurbTried.add(wf.id);
+  (async () => {
+    try {
+      const r = await _orchReq('WORKFLOW_BLURB', { name: wf.name || wf.ask || '', steps: Array.isArray(wf.subAsks) ? wf.subAsks : [] });
+      const blurb = (r && r.success && typeof r.blurb === 'string') ? r.blurb.trim() : '';
+      if (!blurb) return;
+      wf.blurb = blurb;
+      if (wfKey) { try { await updateWorkflow(wfKey, wf.id, { blurb }); } catch { /* render-only this session */ } }
+      const el = item.querySelector('.wf-row-blurb');
+      if (el && el.isConnected) el.textContent = blurb;   // escape-first: textContent, never innerHTML
+    } catch { /* the card keeps its meta line */ }
+  })();
+}
+
 function _railWorkflowRow(row, parentConv) {
   const wf = row.wf || {};
   const wfKey = (wf.appId ? String(wf.appId) : '') || row.wfKey || (parentConv && parentConv.instanceId) || _memoryId();   // DK-8k — the record's OWN key first
   const item = document.createElement('div');
   item.className = 'rail-item is-subtask is-workflow';
+  item.dataset.wfId = wf.id || '';   // WFP-5 — the due auto-runner joins the card to the open-parks map by id
+  // WFP (user ruling, live: "this should be handled by the workflow card in question") — a PAUSED run is CARD
+  // state, not a separate needs-action row: the card wears data-paused, its meta names the bookmark, its ▶
+  // reads as Resume (the WFP-5 handler branch already resumes), and a ✕ discard chip sits beside it.
+  const _pausedPark = (_wfOpenParks[wf.id] && _wfOpenParks[wf.id].kind === 'paused') ? _wfOpenParks[wf.id] : null;
+  if (_pausedPark) item.dataset.paused = '1';
   item.setAttribute('aria-expanded', 'false');   // RB — the pinnable card announces its state from birth, not only after the first toggle
   const _sched = _wfScheduleLabel(wf);
   const _t = workflowTier(wf);
@@ -10633,17 +10698,48 @@ function _railWorkflowRow(row, parentConv) {
   const schedLine = _sched ? ('⏱ ' + _sched + (nextDue ? ' · next ' + nextDue : '')) : 'no schedule — the clock chip arms one';
   const stepsList = (Array.isArray(wf.subAsks) ? wf.subAsks : []).map((t) => '<li>' + escHtml(String(t)) + '</li>').join('');
   item.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">•</span><span class="rail-item-badge wf" aria-label="a workflow under ' + escHtml((parentConv && parentConv.title) || '') + '">workflow</span>' + escHtml(wf.name || wf.ask || '') + '</div>'
-    + '<div class="rail-item-meta">' + escHtml(meta) + '</div>'
+    // v2.74.2056 — the at-rest caption: what this workflow DOES, one LLM-generated line (lazy, persisted). The
+    // div renders even when empty so the async fill has a home; CSS hides :empty. Escape-first (escHtml here,
+    // textContent on fill) — the blurb is model output.
+    + '<div class="rail-item-meta wf-row-blurb">' + escHtml(wf.blurb || '') + '</div>'
+    // WFP v2060 — `wf-row-meta` is the NAMED HOOK for every in-place writer on this line: the blurb above shares
+    // .rail-item-meta, so a first-match query returns IT — the v2059 resume-shed edited the caption and the
+    // pause text survived (live report). The paused bookmark is its own SPAN so the shed is a copy-proof
+    // .remove(), never text surgery (a reworded copy string would silently re-break a regex).
+    + '<div class="rail-item-meta wf-row-meta">' + escHtml(meta)
+    + (_pausedPark ? '<span class="wf-paused-note"> · ⏸ paused by you at step ' + ((Number(_pausedPark.stepIndex) || 0) + 1) + '</span>' : '') + '</div>'
     + '<div class="wf-row-detail"><div class="wf-row-detail-inner"><ol class="wf-row-steps">' + stepsList + '</ol><div class="wf-row-sched">' + escHtml(schedLine) + '</div></div></div>';
+  _wfEnsureBlurb(item, wf, wfKey);   // v2.74.2056 — lazy caption (no-op once tried or already persisted)
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions wf-ov-actions';   // schedule picker is in-flow (.wf-sched-pick); this cluster stays the icon chips
   acts.dataset.rowAction = '';
   const rerender = () => { void _renderActiveRailTab({ force: true }); };   // v1816/1934 — action renders land now, on whichever tab the card is shown
-  acts.appendChild(_mkIconBtn('run', _due ? 'Run now (due)' : 'Run this workflow', async (btn) => {
+  acts.appendChild(_mkIconBtn('run', _pausedPark ? `Resume from step ${(Number(_pausedPark.stepIndex) || 0) + 1}` : (_due ? 'Run now (due)' : 'Run this workflow'), async (btn) => {
     // v1822 (user directive) — the run REPORTS IN THE CARD and the rail STAYS OPEN. No desk switch: the
     // pinned clauses are self-contained (PP-0c). The chain writes into a message-shaped host inside the
     // card's detail (which pins open for the run); deeper output (fan-out bubbles, offers) still lands in
     // the thread behind the rail for later reading, and §6.5 history records the run either way.
+    // WFP-3 (§12.4) — THIS card running → the button IS the ⏸. Checked BEFORE the WFC-1 refusal below, which
+    // would otherwise flash "blocked" on its own card. An arming grace keeps a double-click from becoming
+    // run+instant-pause; the 'pausing…' state is the named third state (disabled until the boundary lands).
+    if (item.querySelector('.wf-card-run.wf-run-live')) {
+      if (btn) btn.disabled = false;   // the once-guard disabled it on this click
+      if (Date.now() - (item._wfRunStartedAt || 0) < 300) return;   // arming grace
+      if (btn && btn.dataset.runState === 'pausing') return;
+      _walkPauseFlag.requested = true;
+      if (btn) { btn.dataset.runState = 'pausing'; btn.disabled = true; btn.setAttribute('aria-label', 'Pausing…'); btn.title = 'Pausing at the next step…'; }
+      try { if (item._wfPbRef) item._wfPbRef.tick('pausing at the next step…'); } catch { /* */ }
+      try { _orchLog(`STOP ▸ pause requested for "${String(wf.name || wf.ask || '').slice(0, 40)}"`); } catch { /* */ }
+      return;
+    }
+    // WFP-5 (§12.4) — an open park gates the ▶: a PAUSED park resumes (same lineage, never a fork); a GATE park
+    // points at its ✋ card (a fresh run beside a waiting approval is the §7.2 re-execution hazard).
+    const _openPark = _wfOpenParks[wf.id] || null;
+    if (_openPark && _openPark.kind !== 'paused') {
+      if (btn) btn.disabled = false;
+      try { toast('This workflow is waiting on an approval — see its ✋ card.', 'info'); } catch { /* */ }
+      return;
+    }
     // WFC-1 (UI review #1) — ONE card run at a time: the step hook (window.__wfStepHook), the abort flag
     // (_walkAbortFlag), and the chain state are shared GLOBALS — a second concurrent run overwrites the
     // first's hook (its receipts render on the wrong card) and stomps the abort flag. Refuse politely,
@@ -10732,14 +10828,55 @@ function _railWorkflowRow(row, parentConv) {
         try { item.style.boxShadow = ''; } catch { /* */ }
         return;
       }
-      const _st2 = _wfFreshChainState(); const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
+      // WFP-5 (§12.2) — RESUME a paused park: consume the marker (tier-routed — the SW hands a panel park back
+      // instead of firing it headless) and continue the SAME lineage from its bookmark. A consumed-elsewhere
+      // marker (success:false / not panel) falls through to a fresh run — the park is gone either way.
+      // Known narrow edge (stated, accepted): a hard THROW between this consumption and the chain settling
+      // loses the park with only the STOP ▸ resumed line as witness — ordinary step failures still resolve the
+      // promise and write their history row; only a scaffolding throw hits it.
+      let _startIdx = 0; let _resumeState = null;
+      if (_openPark && _openPark.kind === 'paused') {
+        const rr = await _orchReq('WORKFLOW_RESUME_PARKED', { runId: _openPark.runId }).catch(() => null);
+        if (rr && rr.success && rr.panel && rr.marker) {
+          _startIdx = Math.max(0, Number(rr.marker.stepIndex) || 0);
+          _resumeState = (rr.marker.chainState && typeof rr.marker.chainState === 'object') ? rr.marker.chainState : null;
+          try { _orchLog(`STOP ▸ resumed "${String(wf.name || wf.ask || '').slice(0, 40)}" from step ${_startIdx + 1}${_resumeState ? '' : ' (stateless — no banked chainState)'}`); } catch { /* */ }
+        }
+        delete _wfOpenParks[wf.id];
+        // RB-6c (live: the card kept "⏸ paused by you" through the whole resumed run) — the bookmark is consumed
+        // NOW: shed the paused chrome IN PLACE (the .wf-paused-note span, data-paused, the at-rest ✕); the
+        // deferred truth repaint only reconciles later because it defers on the very pointer that clicked Resume.
+        delete item.dataset.paused;
+        try { const _n = item.querySelector('.wf-paused-note'); if (_n) _n.remove(); } catch { /* */ }
+        try { const _x = acts.querySelector('.wf-card-act[data-icon="x"]'); if (_x) _x.remove(); } catch { /* */ }
+      }
+      // §12.2 — rehydrate over a FRESH scaffold: the panel loop hard-requires readouts/ranSteps arrays, which a
+      // banked (JSON-round-tripped) state carries but a degraded null one doesn't.
+      const _st2 = _resumeState ? { ..._wfFreshChainState(), ..._resumeState } : _wfFreshChainState();
+      const _t2 = Date.now();   // §6.5 — the panel run writes its history entry
       _st2.wfRunId = mintRunId({ now: _t2, rand: Math.random() });
       if (item.dataset.autoDueFire === '1') { _st2.wfTrigger = 'auto'; delete item.dataset.autoDueFire; }
+      if (_startIdx > 0) _markStep(_startIdx);   // WFP-5 — a resume shows its bookmark: earlier chips done, this one running
       _wfTraceBegin(_st2.wfRunId);
-      try { _orchLog(`WORKFLOW ▸ run=${_st2.wfRunId} start`); } catch { /* */ }
+      try { _orchLog(`WORKFLOW ▸ run=${_st2.wfRunId} start${_startIdx > 0 ? ` (resume from step ${_startIdx + 1})` : ''}`); } catch { /* */ }
       _walkAbortFlag.requested = false;
+      _walkPauseFlag.requested = false;   // WFP-1 — run-start reset, both latches
       const _pb2 = _progressBubble(host);   // PS-9 — step/tick/elapsed ride the card
       _pbRef = _pb2;   // v1824 — the observer streams the chain's live text into the tick region
+      // WFP-3 (§12.4) — the ▶⇄⏸ swap: once the run is live (past the arming grace) the SAME button becomes the
+      // pause control — re-enabled, innerHTML/aria/title swapped together, data-icon UNTOUCHED (the WFC-5
+      // always-visible CSS and the due auto-runner's lookup both key on it). Restored on every exit below.
+      item._wfRunStartedAt = Date.now();
+      item._wfPbRef = _pb2;
+      setTimeout(() => {
+        if (host.classList.contains('wf-run-live') && btn && !btn.dataset.runState) {
+          btn.disabled = false;
+          btn.dataset.runState = 'running';
+          btn.innerHTML = (Icons.pause || Icons.x)(16);
+          btn.setAttribute('aria-label', 'Pause this run');
+          btn.title = 'Pause — stops at the next step';
+        }
+      }, 300);
       // WC-1 (v2.74.1845) — the RECEIPT drives the chips: outcome, not position. ok-with-effect advances past
       // the step; no-op/stopped hold and NAME themselves in the tick region (the visual half of
       // LESSON[silence-is-not-success] — a checkmark that is identical for "did the work" and "did nothing"
@@ -10767,8 +10904,25 @@ function _railWorkflowRow(row, parentConv) {
         // from the old prose-parsed one at a glance — and every outcome state now has a mark.
         else if (_chip && r.outcome === 'ok' && ((r.created || 0) + (r.updated || 0)) > 0) { _chip.dataset.outcome = 'effect'; _chip.style.outline = '2px solid var(--border-success, #3B6D11)'; _chip.style.outlineOffset = '1px'; _chip.title = `rows ${r.rowsIn ?? '?'}→${r.rowsOut ?? '?'} · ${r.created || 0} new${r.updated ? `, ${r.updated} updated` : ''}`; }
       } catch { /* cosmetic — never breaks the run */ } };
-      _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2 })
-        .then(() => {
+      _orchRunChain(host, { tabId, clauses: _p2.clauses, firstMatch: null, ask: wf.ask, state: _st2, startIndex: _startIdx })
+        .then(async (r) => {
+          if (r && r.paused) {
+            // WFP-2 (§12.2/§12.4) — honest paused exit: NO all-done chips, NO positional history row (the SW
+            // park-mint writes the 'parked — paused by you' row); pins banked so far are real and survive. The
+            // truth-repaint is FORCED — unforced it defers on the very engagement the ⏸ click created (v1816:
+            // a user action is entitled to a forced land).
+            try { await _orchReq('WORKFLOW_PARK_PANEL', { appId: wfKey, workflowId: wf.id, name: wf.name || wf.ask || '', stepIndex: r.atStep, total: _p2.clauses.length, chainState: _wfParkableState(r.state) }); } catch { /* the run is over either way */ }
+            void _wfPersistPinsFromRun(wf, wfKey, _st2);
+            void _renderActiveRailTab({ force: true });
+            return;
+          }
+          if (r && r.aborted) {
+            // WFP verify (§12.7) — an honored typed `stop` must not read as success: no all-done chips, and the
+            // history row says what happened ('stopped by you'), never a positional verdict.
+            _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2, { verdict: r.atStep > _startIdx ? 'partial' : 'empty', why: `stopped by you at step ${r.atStep + 1} of ${_p2.clauses.length}` });
+            void _wfPersistPinsFromRun(wf, wfKey, _st2);
+            return;
+          }
           _chips.forEach((c) => { c.classList.remove('step-running'); c.classList.add('step-done'); });
           _wfRecordPanelRun(wf, _t2, _p2.clauses.length, _st2);
           void _wfPersistPinsFromRun(wf, wfKey, _st2);   // v2.74.2036 — bank map/write pins for headless cadence
@@ -10781,10 +10935,25 @@ function _railWorkflowRow(row, parentConv) {
           if (_busyGen === _railBusyGen) window.__wfStepHook = null;
           _chips.forEach((c) => c.classList.remove('step-running'));   // a failed run keeps its ✓s honest — only finished steps stay marked
           host.classList.remove('wf-run-live');   // the body now shows the RESULT
+          if (btn) { btn.dataset.runState = ''; btn.innerHTML = Icons.run(16); btn.setAttribute('aria-label', 'Run this workflow'); btn.title = _due ? 'Run now (due)' : 'Run this workflow'; }   // WFP-3 — ⏸ back to ▶ on every exit
           _pb2.done(); if (_busyGen === _railBusyGen) _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } if (_detail) _slideOpen(_detail);
         });
-    } catch { if (_busyGen === _railBusyGen) _railRunBusy--; if (btn) btn.disabled = false; try { item.style.boxShadow = ''; } catch { /* */ } try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
+    } catch { if (_busyGen === _railBusyGen) _railRunBusy--; if (btn) { btn.dataset.runState = ''; btn.innerHTML = Icons.run(16); btn.setAttribute('aria-label', 'Run this workflow'); btn.disabled = false; } try { item.style.boxShadow = ''; } catch { /* */ } try { _mo.disconnect(); } catch { /* */ } host.classList.remove('wf-run-live'); }
   }, { once: true }));
+  // WFP (user ruling) — the DISCARD of a paused run lives on the card too: same direct CANCEL_PARKED the
+  // battle-tested gate ✋ Cancel uses, honest in-place outcome, forced truth-repaint (a user action lands).
+  if (_pausedPark) acts.appendChild(_mkIconBtn('x', 'Discard the paused run', async (b) => {
+    try { _orchLog(`STOP ▸ discard requested for "${String(wf.name || wf.ask || '').slice(0, 40)}" (run ${_pausedPark.runId})`); } catch { /* */ }
+    let res = null;
+    try { res = await _orchReq('WORKFLOW_CANCEL_PARKED', { runId: _pausedPark.runId }); } catch { /* */ }
+    const _m = item.querySelector('.wf-row-meta');   // v2060 — the NAMED hook; first-match .rail-item-meta is the blurb
+    if (_m) _m.textContent = (!res || res.success === false)
+      ? ('couldn’t discard — ' + _errWord(res && res.error))
+      : (res.found === false ? 'already resumed or finished — nothing left to discard' : 'discarded — nothing more will run');
+    delete _wfOpenParks[wf.id];
+    if (b) b.disabled = true;
+    setTimeout(() => { void _renderActiveRailTab({ force: true }); }, 900);
+  }));
   if (_t === 'sw') acts.appendChild(_mkIconBtn('runHeadless', 'Run in the background (headless)', async () => {
     _closeRail();
     // RB (rail review, receipt-to-owner) — the receipt bubble renders ONLY in a conversation that owns this
@@ -10828,7 +10997,7 @@ function _railWorkflowRow(row, parentConv) {
       // RB-6c — realtime: the row leaves NOW, in place; the truth re-render is unforced and lands on disengage.
       try { item.remove(); } catch { /* */ }
     } else {
-      const _m = item.querySelector('.rail-item-meta');
+      const _m = item.querySelector('.wf-row-meta') || item.querySelector('.rail-item-meta');   // v2060 — named hook (the wf card's first .rail-item-meta is the blurb)
       if (_m) _m.textContent = 'couldn’t delete — try again';
     }
     void _renderActiveRailTab();
@@ -11016,6 +11185,7 @@ async function _renderRailAutomations(opts = {}) {
   // parked runs (cross-desk)
   let parked = [];
   try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : []; } catch { /* */ }
+  _wfNoteOpenParks(parked);   // WFP-5 — refresh the open-parks map (▶ routing + auto-runner skip)
 
   const groups = [...wfByDesk.values()].filter((g) => g.wfs.length);
   if (!parked.length && !groups.length) {
@@ -11038,10 +11208,13 @@ async function _renderRailAutomations(opts = {}) {
     void _updateTabDots({ parked: 0 });   // RB fetch-reuse — the empty branch KNOWS both counts are zero
     return;
   }
-  if (parked.length) {
+  // WFP (user ruling, live) — the "Needs approval" group holds GATE parks only: a paused run renders as state ON
+  // its own workflow card (data-paused + the ▶-resumes/✕-discard pair), never as a second surface.
+  const _gateParked = parked.filter((p) => !(p && p.kind === 'paused'));
+  if (_gateParked.length) {
     const h = document.createElement('div'); h.className = 'rail-auto-group'; h.textContent = 'Needs approval';
     container.appendChild(h);
-    for (const p of parked) {
+    for (const p of _gateParked) {
       const owner = desks.find((c) => String(c.instanceId) === String(p.appId) || String(c.appId) === String(p.appId));   // RB-2 — the card names its view
       container.appendChild(_railParkedRow(p, owner ? owner.title : ''));
     }
@@ -11128,8 +11301,12 @@ function _maybeAutoRunDueWorkflowCard() {
   if (Date.now() - _duePanelAutoAt < 4000) return;   // debounce render storms / WORKFLOW_DUE_CHANGED bursts
   const card = document.querySelector('#rail-automations .rail-item.is-workflow[data-due="1"]');
   if (!card) return;
+  // WFP-5 (§12.4) — the panel due-door checks open parks: a paused/parked workflow must not auto-restart from
+  // step 0 beside its own suspended state (the SW scan's check 5b never saw panel-tier parks before this arc).
+  if (card.dataset.wfId && _wfOpenParks[card.dataset.wfId]) return;
   const runBtn = card.querySelector('.wf-card-act[data-icon="run"]');
   if (!runBtn || runBtn.disabled) return;
+  if (runBtn.dataset.runState) return;   // WFP-3 — mid-run/pausing the button is the ⏸; the auto-runner must never click it
   const title = (card.querySelector('.rail-item-title')?.textContent || 'workflow').replace(/^\s*•\s*workflow\s*/i, '').trim();
   _duePanelAutoAt = Date.now();
   card.dataset.autoDueFire = '1';   // history trigger:'auto' (vs a human ▶ of a due card)
@@ -11328,7 +11505,9 @@ async function _wfPersistPinsFromRun(wf, wfKey, st) {
   }
 }
 
-async function _wfRecordPanelRun(wf, t0, total, st) {
+async function _wfRecordPanelRun(wf, t0, total, st, over = null) {
+  // WFP (§12.7) — `over` = {verdict, why}: an honored ABORT must not flow through the snapshot verdict (which
+  // would read the user's own stop as complete/failed) — the caller states what happened.
   try {
     const done = (st && Array.isArray(st.ranSteps)) ? st.ranSteps.length : 0;
     // v2.74.1859 (user report, gl 132049: "the Rail card doesn't communicate actual run status") — the verdict
@@ -11337,7 +11516,7 @@ async function _wfRecordPanelRun(wf, t0, total, st) {
     // COMPLETE, and this run's 2-step replay recorded PARTIAL having produced nothing. `ranSteps` still
     // supplies the counts; the VERDICT now comes from what happened (errors/effects/rows — v1858 gave those
     // real producers). This is the v1780 card ruling ("outcomes, not position") applied to the DATA SOURCE.
-    const verdict = runVerdict(_lastRunSnapshot, { done, total });
+    const verdict = (over && over.verdict) || runVerdict(_lastRunSnapshot, { done, total });
     const lv = st && st.lastValue;
     const rows = Array.isArray(lv) ? lv.length : (lv && typeof lv === 'object' && Array.isArray(lv.rows) ? lv.rows.length : 0);
     // v2.74.2026 — outcome tallies from the chain (map match / write create). A warranty→Shopify run that only
@@ -11366,9 +11545,10 @@ async function _wfRecordPanelRun(wf, t0, total, st) {
     // v2.74.2029 — partial without a why reads like a failure (live: "20 matched → partial" after a clean
     // all-matched create no-op). Bank an explicit explanation on the entry.
     const snapErr = (_lastRunSnapshot && Number.isFinite(_lastRunSnapshot.errors)) ? _lastRunSnapshot.errors : 0;
-    const why = verdict === 'partial'
-      ? explainPartialWhy({ done, total, errors: snapErr, stopWhy: (st && st.lastStopWhy) || '' })
-      : ((st && st.lastStopWhy && verdict === 'complete') ? String(st.lastStopWhy).slice(0, 160) : '');
+    const why = (over && over.why) ? String(over.why).slice(0, 160)
+      : verdict === 'partial'
+        ? explainPartialWhy({ done, total, errors: snapErr, stopWhy: (st && st.lastStopWhy) || '' })
+        : ((st && st.lastStopWhy && verdict === 'complete') ? String(st.lastStopWhy).slice(0, 160) : '');
     try { _orchLog(`WORKFLOW ▸ run=${runId} end verdict=${verdict}${why ? ` why=${why}` : ''}`); } catch { /* */ }
     // v2.74.2030 — take the buffered orch lines BEFORE clearing; bank on the entry so Trace survives ring rotation.
     const trace = normalizeHistoryTrace(_wfTraceTake());
@@ -11736,6 +11916,11 @@ function _matchCloseTabs(text) {
   return null;
 }
 const _walkAbortFlag = { requested: false };
+// WFP-1 (DESIGN_workflows.md §12.3) — the PAUSE latch is a SECOND flag, never the abort flag reused: one boolean
+// cannot encode two verbs, and the chain must know whether the boundary ends the run (abort, terminal) or banks
+// it (pause → a user-minted park). Consumed only by _orchRunChainInner's clause boundary; abort is polled FIRST
+// (abort beats pause), and a fresh chain resets both (run-start-only reset — the executor entry-resets are gone).
+const _walkPauseFlag = { requested: false };
 let _walkLive = false;
 // v2.74.917 (CR-S1) — plan-IR interpreter runs in flight. The .907 stop only armed the flag when a WALK was
 // live, but a foreach/loop plan launched directly (confirm-card ▶ Run — the exact 22:58 runaway path) runs

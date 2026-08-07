@@ -42,6 +42,7 @@ export const NECKS = Object.freeze([
   // ── presentation — waived ───────────────────────────────────────────────────────────────────────────────────
   { operation: 'case-brief', grade: 'presentation', gate: 'waived', why: 'renders the requestor\'s-voice narrative; the v1712 field-display guard keeps it off display paths — routing-TAGGED (model tier) but presentation by function, the correction this registry exists to record' },
   { operation: 'setup-example', grade: 'presentation', gate: 'waived', why: 'example text for the setup surface; nothing executes from it' },
+  { operation: 'workflow-blurb', grade: 'presentation', gate: 'waived', why: 'one-line rail-card caption (v2.74.2056); escape-first render (escHtml/textContent), nothing executes from it' },
 ]);
 
 /** Registry rows by gate status. PURE. */

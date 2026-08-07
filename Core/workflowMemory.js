@@ -100,6 +100,10 @@ export function normalizeWorkflow(raw) {
     ask,
     subAsks,
     name: _str(r.name) || null,                                       // WF-2 — an optional short alias ("standup")
+    // v2.74.2056 — a one-line LLM caption for the rail card ("what does this do?"), generated lazily panel-side
+    // and persisted via updateWorkflow. Whitelisted on orphanedFrom's precedent: normalize is a WHITELIST, so an
+    // unlisted field dies on the next edit and the card would silently re-generate forever.
+    blurb: _str(r.blurb) || undefined,
     appId: _str(r.appId) || null,
     createdAt,
     updatedAt: Number.isFinite(r.updatedAt) ? r.updatedAt : createdAt,

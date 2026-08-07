@@ -298,3 +298,191 @@ truth-repaint on disengage. Text editing is deliberately NOT offered here.
 
 **Status:** SPECCED, not built. Cost at build time: A ≈ ½ day (seed function + ✎ chip + parked-guard) · slim-B ≈
 ½ day (three in-place ops + tests) · no storage or schema change.
+
+## 12. Stopping an in-flight run — PAUSE (⏸, the card verb) + ABORT (terminal) — WFP (specced 2026-08-07)
+
+*(History: v1 of this section specced abort-only (◼) and survived one adversarial pass; the user then ruled the
+card's ▶ should become ⏸ in flight ("Run this workflow is a good candidate for pause"), and a second 4-lens
+adversarial review of that direction found a FATAL + 4 HIGH in the naive reuse story. This section is the
+corrected pause-first spec; every subsection that exists because of a review finding says so.)*
+
+### 12.1 The two verbs
+
+**Pause (⏸)** — the card's in-flight verb: a request latched onto the RUN, honored at the next **clause**
+boundary, that ends the run as a **user-minted park** — `stepIndex` + `chainState`, resumable, the same record
+shape the write gate mints. **Abort** — the terminal verb: typed `stop` (panel runs) and **✕ discard from the
+paused state** (both tiers). While running you can only ⏸; the terminal act happens from the paused card. Both
+verbs latch and honor at boundaries — the current atomic action always finishes
+(DESIGN_background_agents.md:247), so ⏸ loses no halt latency vs the dropped in-flight ◼.
+
+This SUPERSEDES §12.1-v1's "a user-initiated resumable ⏸ stays gate-minted only / remains the roster arc's
+item": the per-workflow half of that item arrives HERE. DESIGN_background_agents.md keeps Pause-ALL / Exit-all /
+the panic key (roster controls, fan-out to these latches when built). And the doctrine stands: a pause or abort
+is **a user act, never a drift signal** — no failure strike, no `failedStep` pollution, trigger exactly as armed
+as it was found.
+
+### 12.2 The tier split — the FATAL the review caught, stated as architecture
+
+The naive design ("pause exits through runDriver's park path; resume = WORKFLOW_RESUME_PARKED, which exists")
+is true ONLY for the SW tier. The panel ▶ runs `_orchRunChain` (chat.js:10797) — it never touches runDriver,
+mints no park records ("an interactive run never parks", DESIGN_cadence.md:425), and `WORKFLOW_RESUME_PARKED`
+resumes through `_fire`'s headless executor, which runs only pinned fieldRead/map/write/ride steps
+(cadence.js:452-468) — a resumed panel-tier workflow would fail every branch/case/walk/unpinned step. So:
+
+- **The park record gains two fields: `kind: 'gate' | 'paused'` and `tier: 'panel' | 'sw'`.** Both are minted
+  where the park is minted, never inferred from the latch (a gate park can fire while a pause is latched — the
+  gate cause wins the record; see 12.3).
+- **SW tier** (cadence fires, headless runs): `runWorkflow` gains a `shouldPause` opt distinct from abort's
+  `shouldStop`; a hit exits through the EXISTING park path with a `pauseCause` on the result — `r.park` is a
+  step-result field and must NOT be overloaded (§12.3-v1's "driver return-contract change" lesson, mirrored).
+  `_fire`'s park branch stamps kind/tier from the cause. Resume: `WORKFLOW_RESUME_PARKED`, which gains a tier
+  check — it refuses `tier:'panel'` records (routes the caller to the panel path) instead of silently failing
+  their steps headless.
+- **Panel tier** (card ▶ runs): TWO new pieces, and they are the real cost of this feature. (1) A park-mint:
+  the chain's pause exit banks {stepIndex, chainState, kind:'paused', tier:'panel'} via a new SW message (the
+  parked store is SW-owned). (2) A return contract: `_orchRunChainInner` returns void on every exit today
+  (chat.js:9754), so the card's `.then()` would mark all chips done and `_wfRecordPanelRun` would write a lying
+  positional history row — the chain must return `{paused: true, atStep}` (at minimum) and the card handler
+  branch on it. Resume: the panel re-runs the card chain with `_orchRunChain`'s EXISTING `startIndex`/`state`
+  seam (chat.js:9725, the `_resumeAfterDemo` path) — never through `_fire`.
+- **Honest state caveat:** the panel chain's state carries scaffold keys (`readouts`/`ranSteps`/`policyConfig`)
+  the SW state lacks; the panel park banks the PANEL shape and only the panel resumes it. The two shapes share
+  map/write keys but are not interchangeable — the `tier` field is what keeps each resume on its own executor.
+
+### 12.3 Poll points and latch discipline (review: duplicate-writes + latch-collision)
+
+**Pause polls between CLAUSES only.** The abort spec's between-rows poll points (map/write `onRow` seams) are
+ABORT-ONLY: a pause honored mid-write-step parks at the step's index with the full miss list still in
+`chainState`, and resume re-enters `runWriteStep` from row 0 — rows 0..k created TWICE (the park record has no
+row cursor; gate parks are safe only because they park BEFORE the create loop, headlessWrite.js:150). The
+worst-case pause latency is therefore one whole step (a 25-create write, a 121-row map); the escalation for
+"stop NOW" mid-step is typed `stop` (panel) or wait-for-the-park-then-✕ (headless) — stated as the deliberate
+trade, not an oversight.
+
+**Two latches, strict precedence.** The pause latch is a SECOND flag/key, never the abort latch reused — panel:
+`_walkAbortFlag` cannot encode two verbs (it is one boolean, chat.js:11765); SW: `cadence:abort:<runId>` and
+`cadence:pause:<runId>` are separate keys (both runId-scoped, both own-key so the ≤1/60s heartbeat re-stamp of
+the RUN marker cannot erase them — the v1 marker-field design died on exactly that overwrite,
+`_stampRunMarker` cadence.js:90). Rules, each one a bug if unstated:
+
+- **Abort beats pause at every poll** — both latched, the boundary honors abort; an honored abort clears the
+  pending pause for that runId.
+- **A gate park beats a pending pause at the same step** — the gate's record (kind:'gate', with preview) is
+  minted; the pause latch is consumed without effect. Safe-but-two-clicks beats a preview nobody saw.
+- **Latches reset at RUN START only** (`_orchRunChain`'s `if (!state)` reset, chat.js:9739, extended to both
+  flags) — the executor entry-resets of `_walkAbortFlag` are SCOPED to standalone runs (`inChain:false`), the
+  WFP build's first panel change: mid-chain they erased a stop pressed during the preceding clause's INTERPRET
+  roundtrip, after which a write step creates up to 25 rows the user already refused. *(Build-verify correction:
+  there are FIVE such executors, not the four this spec first enumerated — `_runWriteClause`, `_runMapClause`,
+  `_runBranchClause`, `_runFieldReadClause`, and `_runCaseClause`, whose miss would have spawned the cases the
+  user refused. Launchers that pass shared state — the thread-replay ▶ and the wizard step-runner — reset the
+  pause latch themselves, since the chain-level fresh reset never fires for them.)*
+
+### 12.4 The button, honestly (review: toggle mechanics ×4)
+
+- **No `data-icon` swap.** The WFC-5 always-visible CSS is keyed to `[data-icon="run"]` (chat.css:2137) and the
+  due auto-runner FINDS the button by it (chat.js:11158); there is no pause glyph and `_mkIconBtn`'s fallback
+  renders ✕ — "discard" in this very spec's vocabulary. The button keeps `data-icon="run"` and gains
+  **`data-run-state="" | "running" | "pausing"`** (the `data-sched` state-attribute pattern, chat.js:10838);
+  innerHTML/aria-label/title swap together on state change.
+- **Per-card run-live branch BEFORE the WFC-1 refusal.** Re-enabling the once-guarded ▶ mid-run routes the
+  second click into `_railBusyHeld()`'s refusal — which flashes "blocked" on its OWN card (the live-card
+  selector finds itself). The handler's first check becomes: this card running → ⏸ semantics; another card
+  running → the existing refusal; else → launch.
+- **"pausing…" is a named third state.** ⏸ click: latch + `data-run-state="pausing"` + button DISABLED + the
+  run-bar tick flips to "pausing at the next step…" (RB-6c in-place, the ◼ precedent) — a second click in the
+  latch-to-boundary window (seconds — an INTERPRET roundtrip) has one honest meaning: nothing. An arming grace
+  (~300ms) between ▶ and the ⏸ branch keeps a double-click from becoming run+instant-pause.
+- **The paused state must LAND under the pointer that clicked ⏸.** The `WORKFLOW_PARKED_CHANGED` re-render is
+  unforced and the user is by definition hovering the card — on Conversations the deferral has NO ceiling
+  (chat.js:1074), on Automate a 30s one. The pause exit confirms in place in the run host AND the follow-up
+  render is **forced** — a user action is entitled to a forced land (the v1816 rule, chat.js:1046).
+- **▶ while a pause-park is open = RESUME, and all three run doors check open parks.** `_hasOpenPark` guards
+  only the SW tick (cadence.js:205); the panel due-on-open auto-runner (`_maybeAutoRunDueWorkflowCard`,
+  chat.js:11153 — clicks ▶ off `data-due` with no park check), the human ▶, and `WORKFLOW_RUN_FIRE`
+  (cadence.js:636) all bypass it — a paused workflow would auto-restart from step 0 at its next due-time
+  beside its own open park (invisible today only because parks are SW-minted; pause mints the first panel
+  parks). The card's ▶ on a paused workflow resumes the park (same lineage, never a fork); the auto-runner and
+  RUN_FIRE skip park-open workflows outright.
+
+### 12.5 One story on every surface (review: the kind-blind funnel, six sites)
+
+`kind` threads through the WHOLE park funnel, not just the card face — the review verified six sites that
+narrate gate vocabulary for any park:
+
+| site | gate park (unchanged) | paused park (new) |
+|---|---|---|
+| park-mint history why (cadence.js:353) | "a write step needs approval" | "paused by you at step k of N" |
+| `_cadencePresence` (cadence.js:499) | badge + OS notification "Scheduled run needs approval" | **neither** — the user just clicked ⏸; notifying them of their own act is noise |
+| ✋ row copy (chat.js:10934/10939) | "a write that needs your approval" + preview | **no row at all** — see the card ruling below |
+| resume meta (chat.js:10966) | "sent — the run continued…" | "resumed from step k" |
+| ✕ history (CANCEL_PARKED, cadence.js:724) | 'partial' + "parked write cancelled by the user" | "stopped by you at step k of N"; verdict **'partial'** if work ran, **'empty'** if the pause landed before step 1 |
+| ✕ confirm copy (chat.js:10981) | "cancelled — the write was not sent" | "discarded — nothing more will run" |
+
+**The paused surface is the CARD, never a second row (user ruling, live 2026-08-07: "this should be handled by
+the workflow card in question").** The v1 build rendered a paused park as a ⏸ variant of the ✋ needs-action row —
+a duplicate surface one row from the card that owns the run (and its forwarded ▶ was dead on first live use).
+Corrected: the "Needs approval" group holds GATE parks only; a paused park renders as card STATE —
+`data-paused` (quiet left rail + at-rest ✕ visibility), the meta line names the bookmark ("⏸ paused by you at
+step k"), the card's ▶ reads "Resume from step k" (the WFP-5 handler branch), and a ✕ discard chip sits in the
+card's own action cluster (direct CANCEL_PARKED, the battle-tested gate path).
+
+`kind` is a REAL FIELD on the park record and on `runHistoryEntry`'s whitelist (Core/runHistory.js:161 — a
+closed constructed literal; branching UI on why-prose minted at two different sites is the documented
+closed-whitelist trap, DESIGN_cadence.md §11.5). **A kind-less record (every legacy park in chrome.storage)
+defaults to `'gate'`** — the wrong default resumes a gate park with the normal reporter, whose gate() always
+returns 'park': ✓ Approve re-parks the same write forever, the v2.74.2043 live defect verbatim
+(headlessWrite.js:120-126). Resume-reporter selection: `kind === 'paused'` → normal (accumulator) reporter — a
+resumed pause must never inherit `makeResumeReporter`'s first-gate-true, or resuming a run paused at step 2
+silently approves an unseen write at step 4; anything else → `makeResumeReporter`.
+
+### 12.6 What pause preserves — and what it does not (review: the honesty note)
+
+Preserved: `stepIndex`, `chainState` (per-tier shape), the workflow's trigger state. **Dropped: the driven-tab
+binding, any intra-step row position, all live DOM context** — resume re-resolves the active tab
+(`_orchActiveTab`), so a nav/walk step after a long pause can target a different site than the run started on.
+This is deliberately BELOW DESIGN_background_agents.md's Pause-all bar ("scope + open tabs + DAG position
+preserved", :245) — that bar needs the roster arc's scope machinery; this pause is the card-sized version, and
+the paused-card copy should not promise more than "resume continues from step k".
+
+### 12.7 Abort, revised to fit (what remains of WFA)
+
+- Typed `stop` stays the panel's terminal verb (reach: live runs via `_planLive`; the §12.3 entry-reset removal
+  is what makes it reliable mid-chain). Against an already-PAUSED run it is a deliberate no-op — the run is not
+  in flight; the terminal act there is ✕. Say so in the stop reply ("nothing running — 'Warranty…' is paused;
+  discard it from its card").
+- The in-flight card ◼ is DROPPED (superseding §12.4-v1 items 2-3 and the WFA-3/4 ◼ rows): one in-flight verb.
+  A headless run's terminal path is therefore two-click (⏸ → boundary → ✕) — deliberate; cessation-of-driving
+  latency is identical to ◼'s (same boundaries), only the second click is added.
+- `WORKFLOW_ABORT_RUN` + `cadence:abort:<runId>` are DE-SCOPED to the panic-key fan-out (Exit-all,
+  DESIGN_background_agents.md:259) — with the card ◼ gone they have no specced sender; build them when the
+  panic key lands, on the runId-keyed-own-key pattern §12.3 already pins down.
+- Abort verdicts (when the panic key or typed stop lands one): `aborted: true` result FIELD (never a new
+  verdict word — `runHistoryEntry` coerces unknowns to 'failed', runHistory.js:164); history 'partial' +
+  "stopped by you at step k of N" (ran > 0) or 'empty' (nothing ran); never a failure strike. The pipelineRun
+  precedent is real but narrower than it looks: `closeRun({aborted})` folds to 'partial' only when ≥1 item
+  settled — a pre-settle abort reads 'failed' today (pipelineRun.js:159 precedes the :161 fold), a known wart
+  of the panel each-run path, not a pattern to copy.
+
+### 12.8 Observability
+
+`STOP ▸` family throughout (Core/decisionMarkers.js:57 — decisions-visible by reuse, invariant #1): one line at
+latch ("pause requested for '<name40>'"), one at honor ("paused at step k/N (run <runId>)" / "aborted at …"),
+one at resume ("resumed '<name40>' from step k"). A request the run outran is visible as request-without-honor.
+CADENCE ▸ lines unchanged.
+
+### 12.9 Build list — WFP-1..6 (SPECCED, not built; order matters)
+
+| # | what | size |
+|---|---|---|
+| WFP-1 | latch discipline: remove the 4 executor entry-resets; second pause flag; abort-beats-pause; run-start-only reset (panel). Typed `stop` becomes reliable mid-chain — shippable alone | ~¼ day |
+| WFP-2 | panel chain return contract (`{paused, atStep}`) + pause exit + park-mint message (kind/tier) + honest card `.then()` branch | ~1 day |
+| WFP-3 | the button state machine: `data-run-state`, per-card branch before WFC-1, "pausing…" state, arming grace, forced post-pause render | ~½ day |
+| WFP-4 | kind/tier through the funnel: park record + runHistoryEntry whitelist + the six copy/notification sites + legacy-default-'gate' + kind-aware resume-reporter + RESUME_PARKED tier check | ~1 day |
+| WFP-5 | park-open checks at the three run doors; ▶-resumes-open-park on the card | ~½ day |
+| WFP-6 | SW tier: `shouldPause` + pauseCause through runDriver (clause-boundary only) + `cadence:pause:<runId>` key + `WORKFLOW_RUN_STATE` broadcast + headless card ⏸ (depends on the broadcast — build it first within this rung) | ~1 day |
+
+WFP-1 is independently valuable today. WFP-2..5 are the panel pause (the surface the user named). WFP-6 is the
+headless half and can trail. Core changes (runDriver/runHistory/pipeline) are testable headless; the button,
+fences, and copy need live eyeballs — the bus test at build time: `[human]` pause a 3-step run at step 2,
+resume it, then discard a second paused run, checking history reads "paused by you" / "stopped by you".

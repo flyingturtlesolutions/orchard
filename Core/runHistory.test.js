@@ -28,6 +28,14 @@ describe('runHistory — runHistoryEntry', () => {
     assert.equal('coalesced' in clean, false);  // 1 due-time is not a backlog
     assert.equal('ranAt' in clean, false);      // ran == due, no drift to show
   });
+  // WFP-4 (§12.5) — the park CAUSE is a whitelisted field, closed to 'gate'|'paused'; junk is dropped, absent
+  // stays absent (readers default absent → 'gate' for legacy records).
+  it('carries the park kind through the whitelist; junk and absent stay off the record', () => {
+    assert.equal(runHistoryEntry({ at: 1, verdict: 'parked', kind: 'paused' }).kind, 'paused');
+    assert.equal(runHistoryEntry({ at: 1, verdict: 'parked', kind: 'gate' }).kind, 'gate');
+    assert.equal('kind' in runHistoryEntry({ at: 1, verdict: 'parked', kind: 'vacation' }), false);
+    assert.equal('kind' in runHistoryEntry({ at: 1, verdict: 'parked' }), false);
+  });
 });
 
 describe('runHistory — retention (per workflow, never silent)', () => {

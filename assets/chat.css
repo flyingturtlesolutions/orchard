@@ -1931,6 +1931,22 @@ textarea {
    rule above (equal specificity → source order decides). is-workflow rows have no `.app` class; case rows do. */
 .rail-item.is-workflow .rail-item-title,
 .rail-item.is-subtask.app .rail-item-title { color: var(--c-text); font-weight: 500; }
+/* v2.74.2056 (user directive) — the at-rest workflow card: the NAME reads as a compact headline (it was the
+   largest text on the card and crowded out everything else), and the LLM caption line under it says what the
+   workflow DOES. The caption is meta-toned; hidden until generated (:empty), clamped to two lines so a wordy
+   caption can't stretch the list. Hover/expand behavior untouched. */
+.rail-item.is-workflow .rail-item-title { font-size: 12px; line-height: 1.35; }
+.rail-item.is-workflow .wf-row-blurb {
+  color: var(--c-text-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 1px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rail-item.is-workflow .wf-row-blurb:empty { display: none; }
 .rail-item.has-children { padding-right: 64px; }   /* clear the action cluster, which sits left of the delete button */
 
 /* ── Rail peek/pin (v2.74.1774, DESIGN_panel_surfaces.md §8) ─────────────────────────────────────────────
@@ -2124,6 +2140,13 @@ textarea {
 .rail-item.is-workflow:hover .wf-card-act[data-icon="runHeadless"],
 .rail-item.is-workflow .wf-card-act[data-icon="run"]:hover,
 .rail-item.is-workflow .wf-card-act[data-icon="run"]:focus-visible { opacity: 1; }
+/* WFP (user ruling) — a PAUSED run is CARD state: its ✕ discard is a standing decision, visible at rest like
+   the primary run chip (WFC-5's hover-only default would hide the only terminal control on touch). */
+.rail-item.is-workflow[data-paused="1"] .wf-card-act[data-icon="x"] { opacity: 0.62; }
+.rail-item.is-workflow[data-paused="1"]:hover .wf-card-act[data-icon="x"],
+.rail-item.is-workflow[data-paused="1"] .wf-card-act[data-icon="x"]:hover,
+.rail-item.is-workflow[data-paused="1"] .wf-card-act[data-icon="x"]:focus-visible { opacity: 1; }
+.rail-item.is-workflow[data-paused="1"] { box-shadow: inset 2px 0 0 var(--c-text-subtle); }   /* the bookmark's quiet left rail */
 /* v2.74.2031 — a TIME TRIGGER is also primary chrome: armed/paused schedule chips stay visible (option A).
    Unscheduled cards keep the hover-only clock so the list doesn't fill with inert affordances. */
 .rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched="armed"],

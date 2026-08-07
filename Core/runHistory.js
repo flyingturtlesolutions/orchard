@@ -164,6 +164,10 @@ export function runHistoryEntry(f = {}) {
     verdict: HISTORY_VERDICTS.includes(f.verdict) ? f.verdict : 'failed',
     counts: (f.counts && typeof f.counts === 'object') ? { ...f.counts } : null,
     ...(f.parkedRunId ? { parkedRunId: _str(f.parkedRunId) } : {}),          // §8 — points at the wfp_ case
+    // WFP-4 (DESIGN_workflows.md §12.5) — the park's CAUSE as a real field: 'gate' (a write needs approval) vs
+    // 'paused' (the user's ⏸). Whitelisted so consumers branch on data, never on why-prose (the closed-whitelist
+    // trap). Absent on non-park rows and on legacy records — readers default absent to 'gate'.
+    ...((f.kind === 'gate' || f.kind === 'paused') ? { kind: f.kind } : {}),
     ...(f.why ? { why: _str(f.why).slice(0, 200) } : {}),                    // the disarm reason / stop cause
     ...(coalesced ? { coalesced } : {}),                                     // §7.2 — "3 due-times collapsed"
     ...(ranAt && ranAt !== at ? { ranAt } : {}),                             // §7.3 — due 09:00 · ran 14:32

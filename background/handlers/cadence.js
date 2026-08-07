@@ -350,7 +350,7 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
       ...(traceBank.length ? { trace: traceBank } : {}),   // v2.74.2048 — the durable Trace (parity with panel ▶)
       ...(out.failedStep ? { failedStep: out.failedStep } : {}),
       ...(resumedFrom ? { resumedFrom } : {}),
-      ...(verdict === 'parked' ? { parkedRunId, why: 'a write step needs approval' } : {}),
+      ...(verdict === 'parked' ? { parkedRunId, kind: 'gate', why: 'a write step needs approval' } : {}),   // WFP-4 — SW parks are gate-minted; the panel's pause parks stamp kind:'paused'
       ...(coalesced > 1 ? { coalesced } : {}),
     });
   } catch { /* history must never block the clock */ }
@@ -364,6 +364,7 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
     try {
       await chrome.storage.local.set({ [PARK_PREFIX + parkedRunId]: {
         runId: parkedRunId, workflowId: wf.id, appId, name: wf.name || wf.ask || wf.id,
+        kind: 'gate', tier: 'sw',   // WFP-4 (§12.2) — cause + executor; readers default an absent kind to 'gate'
         stepIndex: out.parkedAt, at: now, preview: (snap.preview && typeof snap.preview === 'object') ? snap.preview : null,
         // §8 (v1715) — the chainState rides the park record: phase-1 ride steps thread no state yet, but the
         // moment a write's params come from a prior step's read, losing this would resume the write blind.
@@ -639,6 +640,15 @@ export function createCadenceHandlers() {
             sendResponse({ success: false, error: 'in-flight', runId: _mk.runId || '' });
             return;
           }
+          // WFP-5 (§12.4) — the manual door checks open parks too: a paused/parked workflow re-fired from step 0
+          // runs beside its own suspended state (the scan's check 5b, applied here — parks were SW-only before
+          // the pause arc, so only the scan needed it).
+          const _openPark = await _hasOpenPark(wf.id);
+          if (_openPark) {
+            Logger.info('cadence', `CADENCE ▸ manual fire of "${wf.name || wf.id}" refused — a ${_openPark.kind === 'paused' ? 'paused' : 'parked'} run is waiting (${_openPark.runId})`);
+            sendResponse({ success: false, error: 'parked-open', runId: _openPark.runId || '', kind: _openPark.kind === 'paused' ? 'paused' : 'gate' });
+            return;
+          }
           const now = Date.now();
           const res = await _fire(owner, wf, wf.trigger || normalizeTrigger({ minutes: 60 }), { now, coalesced: 1, trigger: 'headless' });   // §6.5 — the 4-way initiation stamp
           sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
@@ -700,12 +710,27 @@ export function createCadenceHandlers() {
           if (!runId) { sendResponse({ success: false, error: 'runId required' }); return; }
           const marker = await _readParked(runId);
           if (!marker) { sendResponse({ success: false, error: 'parked-run-not-found' }); return; }
+          // WFP-2 (§12.2) — TIER-ROUTED resume: a panel-tier park (a paused card run) must never resume through
+          // _fire's headless executor, which runs only pinned fieldRead/map/write/ride steps — branch/case/walk
+          // steps would fail one by one. The panel drives its own resume: consume the marker and hand it back.
+          if (marker.tier === 'panel') {
+            await _clearParked(runId);
+            Logger.info('cadence', `TRIGGER ▸ panel-tier park ${runId} handed back for a panel resume ("${marker.name || marker.workflowId}")`);
+            sendResponse({ success: true, panel: true, marker });
+            return;
+          }
           const { wf, appId } = await _resolveWorkflow(marker.workflowId);
           if (!wf) { sendResponse({ success: false, error: 'workflow-not-found' }); await _clearParked(runId); return; }
           await _clearParked(runId);   // this park is consumed; a re-park mints a fresh marker
-          Logger.info('cadence', `TRIGGER ▸ resume "${wf.name || wf.id}" from step ${(marker.stepIndex || 0) + 1} (approved write, run ${runId})`);
+          // WFP-4 (§12.5) — the resume REPORTER is picked by the park's CAUSE, and a kind-less legacy record is
+          // 'gate': makeResumeReporter's first-gate-true IS the human's approval of the write they were shown; a
+          // PAUSED park has no shown write, so it resumes with the accumulator (gate → park) — resuming a pause
+          // must never silently approve an unseen write. (Wrong default the other way = the v2043 approve-forever
+          // loop: a gate park resumed with the accumulator re-parks the same write with no way through.)
+          const _paused = marker.kind === 'paused';
+          Logger.info('cadence', `TRIGGER ▸ resume "${wf.name || wf.id}" from step ${(marker.stepIndex || 0) + 1} (${_paused ? 'paused by user' : 'approved write'}, run ${runId})`);
           const res = await _fire(appId || marker.appId, wf, wf.trigger || normalizeTrigger({ minutes: 60 }),
-            { now: Date.now(), coalesced: 1, trigger: 'resume', resumedFrom: runId, reporter: makeResumeReporter(), startIndex: Number(marker.stepIndex) || 0,
+            { now: Date.now(), coalesced: 1, trigger: 'resume', resumedFrom: runId, reporter: _paused ? makeAccumulatorReporter() : makeResumeReporter(), startIndex: Number(marker.stepIndex) || 0,
               state: (marker.chainState && typeof marker.chainState === 'object') ? marker.chainState : null });   // §8 (v1715) — resume with the parked chainState
           sendResponse({ success: true, verdict: res.verdict, parkedRunId: res.parkedRunId || '' });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'resume-failed' }); }
@@ -721,13 +746,52 @@ export function createCadenceHandlers() {
           const marker = await _readParked(runId);
           await _clearParked(runId);
           if (marker && marker.workflowId) {
-            try { await appendRunEntry(marker.workflowId, { at: marker.at || Date.now(), ranAt: Date.now(), trigger: 'manual', verdict: 'partial', why: 'parked write cancelled by the user' }); } catch { /* */ }
-            Logger.info('cadence', `TRIGGER ▸ cancel parked run ${runId} ("${marker.name || marker.workflowId}") — the write was not sent`);
+            // WFP-4 (§12.5) — the ✕ story is KIND-aware: discarding a PAUSE is "stopped by you" (verdict 'empty'
+            // when the pause landed before step 1 — no work ran), never the gate's write-cancellation story.
+            const _paused = marker.kind === 'paused';
+            const _k = (Number(marker.stepIndex) || 0);
+            const _entry = _paused
+              ? { verdict: _k > 0 ? 'partial' : 'empty', kind: 'paused', why: `stopped by you (was paused at step ${_k + 1})` }
+              : { verdict: 'partial', kind: 'gate', why: 'parked write cancelled by the user' };
+            try { await appendRunEntry(marker.workflowId, { at: marker.at || Date.now(), ranAt: Date.now(), trigger: 'manual', ..._entry }); } catch { /* */ }
+            Logger.info('cadence', `TRIGGER ▸ ${_paused ? 'discard paused' : 'cancel parked'} run ${runId} ("${marker.name || marker.workflowId}")${_paused ? '' : ' — the write was not sent'}`);
           }
           // RB-1 (rail review) — found:false = the marker was already consumed (approved/finished); the panel
           // must not tell the user a stop happened when there was nothing left to stop.
           sendResponse({ success: true, found: !!marker });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'cancel-failed' }); }
+      })();
+      return true;
+    },
+    // WFP-2 (§12.2) — the PANEL's park-mint: a card run the user paused banks its bookmark here (the parked
+    // store is SW-owned). kind:'paused' + tier:'panel' by construction — resume is tier-routed back to the
+    // panel (RESUME_PARKED above), NEVER through _fire. Deliberately NO _cadencePresence and no OS notification
+    // (§12.5): the user just clicked ⏸; notifying them of their own act is noise. The PARKED_CHANGED broadcast
+    // still fires so dots/rows refresh. payload: { appId, workflowId, name, stepIndex, total, chainState }.
+    WORKFLOW_PARK_PANEL: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const { appId, workflowId, name, stepIndex, total, chainState } = (payload && typeof payload === 'object') ? payload : {};
+          if (!appId || !workflowId) { sendResponse({ success: false, error: 'appId + workflowId required' }); return; }
+          const now = Date.now();
+          const runId = mintRunId({ now, rand: (now % 997) / 997 });
+          const _k = Math.max(0, Number(stepIndex) || 0);
+          await chrome.storage.local.set({ [PARK_PREFIX + runId]: {
+            runId, workflowId, appId, name: String(name || workflowId).slice(0, 120),
+            kind: 'paused', tier: 'panel',
+            stepIndex: _k, at: now, preview: null,
+            chainState: (chainState && typeof chainState === 'object' && Object.keys(chainState).length) ? chainState : null,
+          } });
+          try {
+            await appendRunEntry(workflowId, {
+              at: now, ranAt: now, trigger: 'manual', verdict: 'parked', kind: 'paused', parkedRunId: runId,
+              why: `paused by you at step ${_k + 1}${Number(total) > 0 ? ` of ${Number(total)}` : ''}`,
+            });
+          } catch { /* history must never block the park */ }
+          try { chrome.runtime.sendMessage({ type: 'WORKFLOW_PARKED_CHANGED', name: String(name || workflowId).slice(0, 120) }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
+          Logger.info('cadence', `STOP ▸ workflow "${String(name || workflowId).slice(0, 40)}" paused at step ${_k + 1}${Number(total) > 0 ? `/${Number(total)}` : ''} (run ${runId})`);
+          sendResponse({ success: true, runId });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'park-failed' }); }
       })();
       return true;
     },
