@@ -100,6 +100,9 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'create a shopify profile for the homeowner', expect: { legId: 'shopify_create_customer' } },   // trace-adjacent (the find-or-create flow)
   { ask: "update the customer's phone number in shopify", expect: { legId: 'shopify_update_customer' } },
   { ask: 'create a draft order for this customer with that valve', expect: { legId: 'shopify_create_order' } },
+  // v2.74.2072 — create-draft with the optional tags/discount (the model binds applied_discount + tags from the hints)
+  { ask: 'create a draft order for jane@acme.com with 1 smart plug and a 10% discount', expect: { legId: 'shopify_create_order' }, mintedAt: 'v2.74.2072' },
+  { ask: 'create a draft order for jane@acme.com with 2 smart plugs tagged VIP', expect: { legId: 'shopify_create_order' }, mintedAt: 'v2.74.2072' },
   // v2.74.2069 — the draft-orders search read (the delete lookup viaLeg) + the destructive draft delete (gated,
   // like delete_ticket): the reversal for create-draft, one confirmed action at a time.
   { ask: 'show me the open draft orders', expect: { legId: 'shopify_draft_orders' }, mintedAt: 'v2.74.2069' },
