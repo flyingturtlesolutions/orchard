@@ -1,6 +1,8 @@
 # DESIGN — Session Governor (SGV): session health without an attention sink
 
-**Status: spec v1.13 (2026-08-06).** Review pass R1–R7 (lane-663f critical review): `watching` never overrides
+**Status: spec v1.14 (2026-08-07).** O1–O6 observability addendum (lane-663f gap analysis): tick heartbeat · zero-liveness denominators + stored baseline (SGV-0 deliverable) · rule-compliance witnesses incl. suppression lines · pre-registered soak FAIL arms · block-opened lifecycle line + verify outcome grammar · pulse-response efficacy.
+
+Prior (v1.13, 2026-08-06): Review pass R1–R7 (lane-663f critical review): `watching` never overrides
 the steal gate · LLM pack fenced + `relink` behind the focus gate · SGV-4 teardown scoped to the CN-1.1 sites ·
 expansion-pass prerequisite (the v1.4 lesson) · pulses presence-gated · `connect_ui_visits` dev-scoped.
 Prior seal (v1.12, Loop5 B1–B3 +nit): fire-level `presenceStop` · `_orchRunChain`
@@ -237,13 +239,38 @@ Interim: Connect = dev/debug only.
 
 ---
 
-## 10. Metrics
+## 10. Metrics + observability contract (v1.14, O1–O6)
 
-`SGV ▸ heal|verify|escalate|nudge_due|resume-ack|chain-resume|budget-exhausted|blocked-expired|interrupt-pulse`;  
+**Verbs (closed set, extended O3/O5/O6):**
+`SGV ▸ tick|heal|verify|escalate|nudge_due|resume-ack|chain-resume|budget-exhausted|blocked-expired|interrupt-pulse|pulse-response|block-opened|steal-refused|suppressed`
+
+- **O1 tick heartbeat:** ONE `SGV ▸ tick demands=N planned=M deferred=K` per tick, EMPTY PLANS INCLUDED — a dead
+  governor and a quiet one must never look identical (the LOOP GAP lesson, 35.4% duty cycle, applied to SGV).
+  Doubles as the metrics liveness beacon (O2).
+- **O2 zero-liveness + baseline:** `connect_ui_visits` ships with a DENOMINATOR (`panel_opens`, and
+  `visits_total` vs `visits_counted` under the R6 dev-exclusion — an always-dev machine must read as
+  NO-SIGNAL, never as a passing zero). The presence-fail **baseline is an SGV-0 deliverable**: 7d capture,
+  window + count stored in `sgv:baseline` BEFORE SGV-1 lands; "≤50% baseline" with no stored baseline is
+  ungradeable.
+- **O3 rule-compliance witnesses:** required silence and refusals LOG — `steal-refused (userActiveOn)` when the
+  focus gate declines, `suppressed toast|badge (presence-block)` at each §5h suppression, `budget-exhausted`
+  per cap hit. Absence-of-line is never evidence (the request-without-honor principle); R1/R5 violations must
+  be greppable, not complaint-discovered.
+- **O4 soak arms (SGV-0, pre-registered):** the inert soak grades against FAIL arms derivable from §2/§4 —
+  plan proposes `focus` while `userActiveOn` = FAIL · plan exceeds per-tick caps = FAIL · heal planned with no
+  workDemand = FAIL · two heals one origin = FAIL. No arms → the soak is vibes (the loop's founding rule).
+- **O5 incident lifecycle completeness:** `block-opened` at Door A/B upsert (keyed `incidentId`), so the chain
+  block-opened → heal/verify → resume-ack|blocked-expired is greppable END TO END. `verify` carries an outcome
+  arm: `verify ok|fail|timeout` (the lease's `verifyFailStreak` gets a line-level witness).
+- **O6 pulse efficacy:** `pulse-response acted|ignored|dismissed dt=<s>` (acted = panel-open or ack within
+  30min of the pulse) — repeated `ignored` feeds backoff; the attention-sink question must be answerable from
+  data.
+
 `connect_ui_visits` (**counted only when `!_devModeEnabled` — the operator debugging in dev must not fail the
 user-metric, R6**); `presence_fail_runs` (**per-incident dedup, R7 — a burst morning of one SSO rotation must not
 dominate the residual**).  
-Pass bar 7d: connect visits 0; presence fails ≤50% baseline; no blocked &gt;24h without ack/abort.
+Pass bar 7d: connect visits 0 **with live denominator (O2)**; presence fails ≤50% stored baseline; no blocked
+&gt;24h without ack/abort.
 
 ---
 
@@ -252,9 +279,11 @@ Pass bar 7d: connect visits 0; presence fails ≤50% baseline; no blocked &gt;24
 0. **Expansion pass (R4, prerequisite)** — inline every "as prior"/"as before" in this file before SGV-0: the
    v1.4 seal records this spec once LOSING machinery to its own compression; an implementing session must not
    need git archaeology across 13 revisions to resolve a contract term.  
-1. SGV-0 — planner tests + no-op fold. **Wire the §10 metrics onto the glf bus as tests at SGV-1** — the pass
-   bar's arms are pre-registered predictions in everything but format; the loop that graded the census grades
-   the governor.  
+1. SGV-0 — planner tests + no-op fold **+ the §10 observability floor (v1.14): `SGV ▸` registered in
+   `Core/decisionMarkers.js` FIRST (unregistered lines are dropped by the ship pipe — the soak would grade
+   nothing) · the O1 tick heartbeat · the O2 baseline capture (`sgv:baseline`) · the O4 soak FAIL arms as a bus
+   test**. The §10 pass-bar metrics wire onto the glf bus as tests at SGV-1 — the loop that graded the census
+   grades the governor.  
 2. SGV-1 — full presence pipe + hold + doors + ack.  
 3. SGV-1b — ChainPark.  
 4. SGV-2 — interrupt + pulse.  
@@ -265,7 +294,7 @@ Pass bar 7d: connect visits 0; presence fails ≤50% baseline; no blocked &gt;24
 
 ## 12. Revision history (durable)
 
-Spec iterated 2026-08-05 → 2026-08-06. Living contract is **this file @ v1.13**. Findings also in
+Spec iterated 2026-08-05 → 2026-08-06. Living contract is **this file @ v1.14**. Findings also in
 `logs/run/findings.md` (local); canvases under Cursor project `canvases/sgv-*.canvas.tsx` are review
 artifacts, not the source of truth.
 
@@ -284,7 +313,8 @@ artifacts, not the source of truth.
 | v1.10 | 08-06 | **Loop3** Z1–Z6 all-auto hold, PresenceCtx fields, MARK_RAN defer, Door B=predicate |
 | v1.11 | 08-06 | **Loop4** A1–A5 hold-until-ack, headlessWrite stop, panel≠success, transient∩authClass |
 | v1.12 | 08-06 | Loop5 B1–B3 fire `presenceStop`, `_orchRunChain` return, origin-scoped hold |
-| **v1.13** | **08-06** | **Review pass** R1 watching≠steal-override · R2 pack fenced + relink gated · R3 SGV-4 teardown scoped (CN-1.1 sites) · R4 expansion-pass prerequisite · R5 pulses presence-gated · R6 dev-scoped visits metric · R7 burst dedup (review: lane-663f; full text in that session's transcript) |
+| v1.13 | 08-06 | **Review pass** R1 watching≠steal-override · R2 pack fenced + relink gated · R3 SGV-4 teardown scoped (CN-1.1 sites) · R4 expansion-pass prerequisite · R5 pulses presence-gated · R6 dev-scoped visits metric · R7 burst dedup (review: lane-663f; full text in that session's transcript) |
+| **v1.14** | **08-07** | **Observability addendum** O1 tick heartbeat · O2 denominators + sgv:baseline at SGV-0 · O3 steal-refused/suppressed witnesses · O4 soak arms · O5 block-opened + verify ok|fail|timeout · O6 pulse-response (gap analysis: lane-663f) |
 
 ### 12b. Non-goals (frozen)
 

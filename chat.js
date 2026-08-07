@@ -10478,7 +10478,21 @@ function _offerWorkflowReplay(goal, wf) {
     _walkAbortFlag.requested = false;
     _walkPauseFlag.requested = false;   // WFP-1 verify — this launcher passes state, so the chain-level fresh reset never fires; a stale ⏸ (one the previous run outran) would fake-pause step 1 with no park banked
     const _pbR = _progressBubble(m);   // PS-9 — the elapsed ticker rides the run bubble
-    _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask, state: _stR }).then(() => _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR)).catch(() => { /* */ }).finally(() => _pbR.done());   // replay via the same chain runner, PINNED where banked (PP-0c)
+    // WFP (arc-review finding) — the replay launcher must BRANCH like the card ▶: it discarded the chain result,
+    // so a typed-stop abort recorded a positional (possibly 'failed') verdict — the §12.7 failure-conflation —
+    // and a paused exit would have banked no park. Paused is unreachable here today (no ⏸ surface on a replay
+    // bubble; the latch resets above), but the branch is cheap and the contract is one shape everywhere.
+    _orchRunChain(m, { tabId, clauses: _plan.clauses, firstMatch: null, ask: wf.ask, state: _stR }).then(async (r) => {
+      if (r && r.paused) {
+        try { await _orchReq('WORKFLOW_PARK_PANEL', { appId: wf.appId || _memoryId(), workflowId: wf.id, name: wf.name || wf.ask || '', stepIndex: r.atStep, total: _plan.clauses.length, chainState: _wfParkableState(r.state) }); } catch { /* */ }
+        return;
+      }
+      if (r && r.aborted) {
+        _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR, { verdict: r.atStep > 0 ? 'partial' : 'empty', why: `stopped by you at step ${r.atStep + 1} of ${_plan.clauses.length}` });
+        return;
+      }
+      _wfRecordPanelRun(wf, _tR, _plan.clauses.length, _stR);
+    }).catch(() => { /* */ }).finally(() => _pbR.done());   // replay via the same chain runner, PINNED where banked (PP-0c)
   }, { lockBar: true }));
   bar.appendChild(_mkBtn('No, interpret it', () => {
     bar.remove();
