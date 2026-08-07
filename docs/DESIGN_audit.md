@@ -504,11 +504,15 @@ primary surface. Attention = a quiet count, never a badge.
 
 ## 11. Build arc — the execution-ready v1 (AU-0 → AU-3), file-grounded
 
-**STATUS: v1 BUILT (2026-08-07).** AU-0 + AU-1 landed at v2.74.2079 (f1cdd03), AU-3 at v2.74.2080 (2c068e7) —
+**STATUS: v1 BUILT (2026-08-07).** AU-0 + AU-1 landed at v2.74.2079 (f1cdd03), AU-3 at v2.74.2080 (2c068e7), and
+**AU-8 (the RECORDS rail tab — the visible surface) at v2.74.2081 (21fb93e)** — pulled forward from "deferred" after
+the user reported the pull-only ask read as "nothing visible on rail" (the surface-not-capture lesson). Built:
 `Core/audit.js` (pure, 37 tests), `Services/Storage/AuditCreateStore.js` (6 tests), `background/handlers/audit.js`
-(the hook), the two connector.js wire points, the `AUDIT ▸` marker, and the chat.js "what have I created?" intercept.
-`npm test` green (4407 passing); live eyeball owed (bus tests v2.74.2079/2080). AU-2 was folded into AU-3's render
-(see below), not shipped as a separate fill-at-capture rung. AU-4..AU-8 stay deferred (§7/§10).
+(the hook), the two connector.js wire points, the `AUDIT ▸` marker (capture LIVE-PROVEN 22:33Z), the chat.js "what
+have I created?" intercept, and the **Records tab** (`_renderRailRecords` — a persistent card per create, drillable).
+`npm test` green (4407); live eyeball owed (bus tests v2.74.2079/2080/2081). AU-2 folded into render (below).
+Remaining: AU-4 (export), AU-5 (gated undo), AU-6 (update/delete writes-expansion), AU-7 (cross-system), plus a
+live SW→panel push so the Records tab updates without re-opening, and the drill-to-record link (AU-2-at-render).
 
 §7 is the full AU-0..8 ladder; this section is the **buildable v1 only** (creates → durable link → read), each rung
 independently landable, `npm test`-green, and bump-per-rung. It names the exact new files, the function signatures,
