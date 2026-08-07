@@ -11324,12 +11324,15 @@ async function _renderRailRecords(opts = {}) {
   live.replaceChildren(...container.childNodes);
 }
 
-// One record card (drill = toggle a self-contained details row; no catalog lookup, no round-trip). PURE DOM.
+// One record card (§6.1): HOVER peeks its detail line (the .rail-add-desc idiom); CLICK/Enter DRILLS INTO the
+// record's overlay — the run-history overlay idiom (openPanelOverlay / .wf-history-overlay), "a record → its
+// events, exactly as a run → its items". PURE DOM.
 function _railRecordCard(e, fmtTime) {
   const card = document.createElement('div');
   card.className = 'rail-record-card';
   card.setAttribute('role', 'button');
   card.setAttribute('tabindex', '0');
+  card.title = 'Open this record';
   const top = document.createElement('div'); top.className = 'rail-record-top';
   const kind = document.createElement('span'); kind.className = 'rail-record-kind'; kind.textContent = e.kind || 'record';
   const label = document.createElement('span'); label.className = 'rail-record-label'; label.textContent = e.label || e.id || '';
@@ -11337,16 +11340,54 @@ function _railRecordCard(e, fmtTime) {
   const meta = document.createElement('div'); meta.className = 'rail-record-meta';
   meta.textContent = [e.system, fmtTime(e.at), e.who === 'human' ? 'you' : 'auto'].filter(Boolean).join(' · ');
   card.appendChild(meta);
-  const det = document.createElement('div'); det.className = 'rail-record-detail'; det.hidden = true;
-  const bits = [];
-  if (e.id) bits.push(`id ${e.id}`);
-  if (e.recipeId) bits.push(`via ${e.recipeId}`);
-  det.textContent = bits.join(' · ') || 'no further detail';
-  card.appendChild(det);
-  const toggle = () => { det.hidden = !det.hidden; card.classList.toggle('open', !det.hidden); };
-  card.addEventListener('click', toggle);
-  card.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
+  // HOVER-PEEK — a detail line that slides open on hover/focus (same curve + intent as ＋ View, §6.1).
+  const peek = document.createElement('div'); peek.className = 'rail-record-peek';
+  const pbits = [];
+  if (e.id) pbits.push(`id ${e.id}`);
+  if (e.recipeId) pbits.push(`via ${e.recipeId}`);
+  pbits.push('click to open →');
+  peek.textContent = pbits.join(' · ');
+  card.appendChild(peek);
+  const open = () => _openRecordDrill(e, fmtTime);
+  card.addEventListener('click', open);
+  card.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
   return card;
+}
+
+// DRILL-IN (§6.1) — the record's timeline in the run-history overlay idiom. v1 captures creates only, so the
+// timeline is one CREATE event, richly shown (kind · label · system · id · recipe · authority); updates/deletes
+// (AU-6) will append here. Reuses openPanelOverlay + the .wf-history-* classes verbatim.
+function _openRecordDrill(e, fmtTime) {
+  const ov = openPanelOverlay({
+    id: 'record:' + (e.id || e.at || 'x'),
+    title: e.label || e.id || 'Record',
+    titleMeta: [e.system, e.kind].filter(Boolean).join(' · '),
+  });
+  if (!ov || !ov.body) return;
+  const body = ov.body;
+  body.replaceChildren();
+  const row = document.createElement('div'); row.className = 'wf-history-row';
+  const summary = document.createElement('div'); summary.className = 'wf-history-summary';
+  summary.textContent = `Created${fmtTime(e.at) ? ` ${fmtTime(e.at)}` : ''} by ${e.who === 'human' ? 'you' : 'Orchard (auto)'}`;
+  row.appendChild(summary);
+  const detail = document.createElement('div'); detail.className = 'wf-history-detail';
+  const fields = [
+    ['Kind', e.kind], ['Label', e.label || e.id], ['System', e.system],
+    ['Internal id', e.id], ['Recipe', e.recipeId], ['Authority', e.who === 'human' ? 'human-approved' : 'gate-cleared'],
+  ].filter(([, v]) => v);
+  for (const [k, v] of fields) {
+    const line = document.createElement('div'); line.className = 'rail-record-drill-line';
+    const kEl = document.createElement('span'); kEl.className = 'rail-record-drill-key'; kEl.textContent = k;
+    const vEl = document.createElement('span'); vEl.className = 'rail-record-drill-val'; vEl.textContent = String(v);
+    line.append(kEl, vEl);
+    detail.appendChild(line);
+  }
+  row.appendChild(detail);
+  body.appendChild(row);
+  const note = document.createElement('div');
+  note.className = 'rail-record-drill-note';
+  note.textContent = 'Updates and deletions to this record will appear here as they’re captured.';
+  body.appendChild(note);
 }
 
 async function _renderRailAutomations(opts = {}) {

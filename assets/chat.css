@@ -1817,15 +1817,23 @@ textarea {
 .rail-automations-empty { padding: var(--sp-4) var(--sp-3); font-size: 12px; color: var(--c-text-subtle); line-height: 1.5; }
 .rail-auto-group { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-text-subtle); padding: var(--sp-2) var(--sp-2) 2px; }
 
-/* AU-8 (DESIGN_audit.md §6.1) — the Records tab cards: same rail card theme, drillable. */
-.rail-record-card { margin: var(--sp-1) var(--sp-2); padding: var(--sp-2); border: 1px solid var(--c-border); border-radius: var(--radius-sm, 6px); background: var(--c-bg-subtle); cursor: pointer; }
-.rail-record-card:hover { border-color: var(--c-border-strong, var(--c-border)); }
-.rail-record-card.open { border-color: var(--c-accent, var(--c-border-strong, var(--c-border))); }
+/* AU-8 (DESIGN_audit.md §6.1) — the Records tab cards: same rail card theme; HOVER peeks, CLICK drills into the overlay. */
+.rail-record-card { margin: var(--sp-1) var(--sp-2); padding: var(--sp-2); border: 1px solid var(--c-border); border-radius: var(--radius-sm, 6px); background: var(--c-bg-subtle); cursor: pointer; transition: border-color 160ms ease; }
+.rail-record-card:hover, .rail-record-card:focus-within { border-color: var(--c-border-strong, var(--c-accent, var(--c-border))); }
+.rail-record-card:focus-visible { outline: 2px solid var(--c-accent, var(--c-border-strong)); outline-offset: 1px; }
 .rail-record-top { display: flex; align-items: baseline; gap: var(--sp-2); }
-.rail-record-kind { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-text-subtle); }
+.rail-record-kind { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-text-subtle); flex: none; }
 .rail-record-label { font-size: 13px; font-weight: 600; color: var(--c-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-record-meta { margin-top: 2px; font-size: 11px; color: var(--c-text-subtle); font-variant-numeric: tabular-nums; }
-.rail-record-detail { margin-top: var(--sp-1); padding-top: var(--sp-1); border-top: 1px dashed var(--c-border); font-size: 11px; color: var(--c-text-subtle); word-break: break-all; }
+/* HOVER-PEEK — the ＋ View curve (v1820), slides the detail line open on hover/focus. */
+.rail-record-peek { max-height: 0; opacity: 0; overflow: hidden; margin-top: 0; font-size: 11px; color: var(--c-text-subtle); word-break: break-all; transition: max-height 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease, margin-top 240ms ease; }
+.rail-record-card:hover .rail-record-peek, .rail-record-card:focus-within .rail-record-peek { max-height: 3em; opacity: 1; margin-top: var(--sp-1); transition-delay: 120ms; }
+@media (prefers-reduced-motion: reduce) { .rail-record-peek { transition: none; } }
+/* DRILL overlay detail rows (reuses the .wf-history-* shell). */
+.rail-record-drill-line { display: flex; gap: var(--sp-2); padding: 3px 0; font-size: 12px; border-bottom: 1px solid var(--c-border); }
+.rail-record-drill-key { flex: none; width: 84px; color: var(--c-text-subtle); }
+.rail-record-drill-val { color: var(--c-text); word-break: break-all; }
+.rail-record-drill-note { margin-top: var(--sp-2); font-size: 11px; color: var(--c-text-subtle); font-style: italic; }
 
 /* v2.74.1040 — small gap between the trash and the ✕ close button (they now sit side-by-side) */
 .rail-header .icon-btn + .icon-btn {
