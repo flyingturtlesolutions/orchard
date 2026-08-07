@@ -1,3 +1,7 @@
+// DORMANT (stamped 2026-08-07, dead-code audit) — §15/A2 row-correlation: NO live consumer yet by design.
+// Revive trigger: a canHarvest producer / the §15 read-leg build (DESIGN_connectors.md §15, build-order rows).
+// Kept tested (harvest.test.js is the consumer) per the forageFrontier park pattern; delete only as a PACKAGE
+// with readLeg's network-harvest gate + the §15/A2 spec rows.
 // Core/harvest.js — pure network-harvest correlation + extraction (DESIGN_connectors.md §15, A2). CX-9 slice 2 (pure core).
 // v2.74.1159.
 //

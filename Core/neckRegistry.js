@@ -33,7 +33,9 @@ export const NECKS = Object.freeze([
   { operation: 'judge-match', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'accepts/rejects a capability match; fails safe to ref:null → ask — subject #6 (v2.74.1734)' },
   { operation: 'sweep-reads', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'selects which READ legs a sweep runs; parseSweepReads is offered-only, deduped, capped — subject #7 (v2.74.1734)' },
   { operation: 'seed-directives', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'proposes cadence — parseSeedDirectives bounds the quota (1..200) and requires both routine fields — subject #8 (v2.74.1734)' },
-  { operation: 'step-il', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'the IL per-step decision — kind/needs whitelists, leg resolved against the palette (invented → null) — subject #9 (v2.74.1734)' },
+  // dead-code pass 2026-08-07 — the 'step-il' row is RETIRED with AnthropicService.stepIl + the STEP_IL handler
+  // (the IL-2 shelf). parseStepDecision (the neck's pure half) stays live + graded via decisionGate subject #9;
+  // if a caller ever re-transports it, re-add the operation row with it.
   // ── shaping — waived, each naming the bracket that re-validates its output ─────────────────────────────────
   { operation: 'resplit-step', grade: 'shaping', gate: 'waived', why: 'output re-enters the decomposer\'s own parse+sanitize brackets (subject #2 covers the seam)' },
   { operation: 'fanout-spec', grade: 'shaping', gate: 'waived', why: 'splits {task, persona} into child SEED text; no direct dispatch' },

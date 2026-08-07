@@ -267,7 +267,7 @@ pending, `⚠ n` parked, ⏱ next-run.
 A workflow is a desk's chat history condensed to its replayable skeleton — the INTENSIONAL record of a strand
 of work beside the case's extensional one. Both render as desk children through one mechanism:
 
-- `buildRailTree` emits typed children (`role: 'workflow' | 'subtask'`); `workflowsByConv` feeds it from ONE
+- `buildRailTree` emits typed children (`role: 'workflow' | 'subtask'`); `workflowsByConv` feeds it from ONE  *(dead-code pass 2026-08-07: retired — the accordion emits no workflow rows; the Automations tab renders them)*
   `listAllWorkflows()` sweep per render (counts + content for every desk — no per-peek fetch).
 - Each desk group holds up to two `.rail-section` slide blocks — workflows above cases, mirroring the button
   order. Sections share the peek/pin machinery: hover the button (150ms intent) peeks, leaving the group

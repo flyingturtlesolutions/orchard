@@ -63,21 +63,16 @@ describe('railTree — buildRailTree', () => {
     assert.equal(open.find((r) => r.id === 'app1').expanded, true, 'the pin flows through');
   });
 
-  it('v1777 "one class" — workflows emit as desk children (role workflow) between the app row and its cases', () => {
+  it('dead-code pass 2026-08-07 — workflow rows are GONE from the accordion (they render in the Automations tab)', () => {
     const summaries = [
       { id: 'app1', title: 'Support', kind: 'agent', appId: 'support', instanceId: 'inst1', updatedAt: 100 },
       { id: 't1', title: 'Ticket #1', kind: 'agent', parentId: 'app1', updatedAt: 90 },
     ];
     const wf = { id: 'w1', name: 'daily sweep', ask: 'get open tickets', subAsks: ['a', 'b'] };
+    // a legacy caller still passing the retired option is IGNORED — no workflow rows, no wfCount field
     const rows = buildRailTree(summaries, { workflowsByConv: new Map([['app1', [wf]]]) });
-    const appIdx = rows.findIndex((r) => r.id === 'app1');
-    assert.equal(rows[appIdx].wfCount, 1, 'the app row carries the workflow count for the mirrored button');
-    assert.equal(rows[appIdx + 1].role, 'workflow', 'workflow rows come FIRST (icon order), then cases');
-    assert.equal(rows[appIdx + 1].title, 'daily sweep');
-    assert.equal(rows[appIdx + 1].wfKey, 'inst1', 'wfKey = the desk instance (the bank key)');
-    assert.deepEqual(rows[appIdx + 1].wf, wf, 'the full record rides the row — actions need it');
-    assert.equal(rows[appIdx + 2].role, 'subtask');
-    assert.equal(buildRailTree(summaries).find((r) => r.id === 'app1').wfCount, 0, 'no map → count 0, no button');
+    assert.equal(rows.some((r) => r.role === 'workflow'), false, 'role:workflow is never emitted');
+    assert.equal('wfCount' in rows.find((r) => r.id === 'app1'), false, 'the mirrored-button count died with the section');
   });
 
   it('dev mode off hides dev conversations; on shows them as plain rows', () => {

@@ -32,7 +32,6 @@ import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js'
 import { buildInterpretMessages, parseInterpretOutput } from '../Core/interpretPrompt.js';   // F-2 — the interpret front-door prompt
 import { buildSweepReadsMessages, buildSweepProposeMessages } from '../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — the propose-only sweep's two think seams
 import { buildSeedDirectivesMessages } from '../Core/fleetSchedule.js';   // FL-6b (v2.74.1356) — cadence stated in the seed
-import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the inference-layer step controller prompt (fenced palette + observation)
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
 import { buildCanvasMessages, parseCanvasOutput } from '../Core/canvasPrompt.js';   // CA-9 — the app COMPOSES a CanvasSpec from an ask
@@ -5652,23 +5651,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
 
   /**
    * IL-2 — the inference-layer STEP controller (DESIGN_inference_layer.md §4.1). Unlike routeAsk (a single-shot
-   * SELECT over a catalog), this is the iterated think seam: given the StepContext (goal · signal-only ledger ·
-   * latest observation · scope keys · palette), it returns the next Decision {kind: act|ask|done|needs}. PURE
-   * prompt + parse live in Core/stepPrompt.js (palette + observation fenced as inert DATA — §3/§9; scope VALUES
-   * never narrated — §5); this is the thin transport. Fails safe to needs:clarify so the loop hands back, never
-   * guesses an action. Core/agentLoop.js does the anti-hallucination check that the chosen leg was offered.
-   * @param {import('../Core/agentLoop.js').StepContext} ctx
-   * @returns {Promise<import('../Core/agentLoop.js').Decision>}
+   * DEAD-CODE PASS (2026-08-07) — stepIl DELETED with its only transport (the STEP_IL handler, the IL-2
+   * shelf). The pure prompt/parse (Core/stepPrompt.js) stays live via promptCatalog + the decision-gate neck.
    */
-  static async stepIl(ctx = {}) {
-    const palette = Array.isArray(ctx && ctx.palette) ? ctx.palette : [];
-    const { system, user } = buildStepMessages(ctx || {});
-    const res = await AnthropicService.#call(system, user, 512, [], { role: 'routing', operation: 'step-il' });
-    if (!res || res.success === false) {
-      return { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'il-unavailable' };
-    }
-    return parseStepDecision(res.text, palette);
-  }
 
   /**
    * IL-2 — Orchard as the USER'S STAND-IN at matchCapability's decision point. The substrate already PICKED +

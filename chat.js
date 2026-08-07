@@ -90,7 +90,6 @@ import { SCOPE_KEY as CONN_SCOPE_KEY, scopeIdsFor, resolveConnections, inherited
 import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retireActFail } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view; v1523 — retireActFail consumes the "re-teach" lesson at re-teach
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
-import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { connectScopeOrigins, connectPanelModel } from './Core/connectAttention.js';   // v2.74.2043 — Connect tab cards + badge + Front chip share one scoped attention model
 import { isCsrfColdFailure } from './Core/connection.js';   // v2.74.1759 — CSRF-cold silent retry (idle Shopify after reload)
 import { loadWorkflows, saveWorkflow, updateWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow, markWorkflowsOrphaned, listAllWorkflows } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete); WW-1 (v1610) — updateWorkflow (edit-in-place preserves the surrogate id); v1720 — listAllWorkflows (the orphan-adoption door reads the banks no live desk can name)
@@ -112,7 +111,7 @@ import { writeTally, writePreflight } from './Core/writeClause.js';
 import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
 import { emptyPriorStop } from './Core/priorScope.js';
 import { casePeek } from './Core/pipelineCase.js';   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
-import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS, recentlyResolved } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
+import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
@@ -172,34 +171,14 @@ async function _ensureOverviewConversation() {
   return conv;
 }
 
-// VT-2 (v2.74.1571, DESIGN_vitals.md §8) — the ADMIN DESK: the reserved Orchard-operator conversation (vitals
-// incidents + the moved Connections/vitals card). Get-or-create like the Front desk; re-creatable if deleted.
-// v2.74.1574 — the desk carries its ROLE as a CV-2 persona seed (live: "what can you do?" in the desk answered
-// with the ACTIVE TAB's palette — the desk didn't know it was the operator console). Healed onto existing
-// installs via patchMeta (the desk may already exist seedless).
-const _ADMIN_SEED = 'You are the Admin view — Orchard’s own operator console (not a website view). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.';
-// Prior revisions of OUR seed text — heal-eligible (a seed matching one upgrades to the current text; anything
-// else is user-edited and is never touched). v1575's empty-only guard couldn't ship seed-text improvements.
-// v1733 — the pre-rename "Admin desk" revision joins the list so the desk→view vocabulary heals stored seeds too.
-const _ADMIN_SEED_PRIOR = [
-  'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities.',
-  'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The 🩺 Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.',
-  'You are the Admin desk — Orchard’s own operator console (not a website desk). Your scope: the health of Orchard’s connections and learned capabilities. You report connection presence (which apps are signed in), ride-recipe shape health (drift suspects and proposed fixes), and open incidents — each incident card here carries its fix action (Sign in, or Relearn from the site). The Vitals card in this thread is the live status; checks also run on their own schedule. When asked what you can do, describe THIS operator role — watching connections, detecting request-shape drift, proposing relearns — not the current page’s capabilities. Honesty rule: only claim sign-in status for origins actually listed under Connections in the vitals card; a ride-armed ground with no Connections entry is “not checked yet”, never “connected”.',
-];
-async function _ensureAdminConversation() {
-  let conv = null;
-  try { conv = await ConversationStore.load(ADMIN_ID); } catch { /* */ }
-  if (!conv) conv = await ConversationStore.create({ id: ADMIN_ID, title: 'Admin view', seed: _ADMIN_SEED });
-  else {
-    if (conv.title === 'Admin desk') { try { await ConversationStore.patchMeta(ADMIN_ID, { title: 'Admin view' }); conv = { ...conv, title: 'Admin view' }; } catch { /* heal is best-effort */ } }   // v1732 — the desk→view rename heals the stored fixture title
-    if (!conv.seed || _ADMIN_SEED_PRIOR.includes(conv.seed)) { try { await ConversationStore.patchMeta(ADMIN_ID, { seed: _ADMIN_SEED }); conv = { ...conv, seed: _ADMIN_SEED }; } catch { /* heal is best-effort */ } }   // v1576 — prior revisions of OUR text upgrade; user edits never touched
-  }
-  return conv;
-}
+// DEAD-CODE PASS (2026-08-07, audit-verified): the Admin-desk fixture machinery is DELETED — _ADMIN_SEED /
+// _ADMIN_SEED_PRIOR / _ensureAdminConversation / _historyPinRow / _historyAdminRow / the role:'overview' +
+// role:'admin' rail branches / _spawnSubTask's ops-case branch / _maybeRenderAdminDesk's unreachable body.
+// railTree stopped emitting both fixture roles at CN-2, so every consumer was structurally unreachable.
+// LIVE survivors, untouched: _syncIncidentCases (vtc_ cases, parentId ADMIN_ID), the CN-2 boot guard,
+// _openAdminDesk (dev-mode Connect door). The §8.3 dev console rebuilds from spec + git history when taken up.
 
-// Open the Admin desk programmatically (the Rail pin / Front-desk chip / per-desk pointers). Mirrors the
-// Front-desk pin's open shape (v2.74.1515): a NON-EMPTY conversation rehydrates; an EMPTY one pins the current
-// pointer without rehydrating (rehydrate assumes messages) — _maybeRenderAdminDesk then draws the vitals card.
+// Open the operator surface programmatically (the Overview chip's dev button / stale pointers).
 async function _openAdminDesk() {
   // CN-2 (DESIGN_vitals.md §8.4) — the Admin desk is RETIRED (its Rail home fixture removed; home is the launch page).
   // SGV-4 — Connect is dev-only now: a dev operator's stale chip/pointer still lands on Connect; a non-dev
@@ -1018,7 +997,6 @@ function _startRailStatusTimer() {
 function _stopRailStatusTimer() { if (_railStatusTimer) { clearInterval(_railStatusTimer); _railStatusTimer = null; } }
 
 let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the drawer accordion (collapsed by default)
-let _expandedWfs = new Set();    // v2.74.1777 ("one class") — which desks' WORKFLOWS sections are pinned open
 let _expandedWfDetails = new Set();   // v1804 — which workflow CARDS' details are pinned open (by wf.id)
 let _railBodyPinned = null;   // v1811 — which view/case card carries the body shift (conv id; click toggles it)
 let _railRunBusy = 0;         // v1822 — card-hosted workflow runs in flight; background renders hold off
@@ -1143,7 +1121,7 @@ async function _renderRailListNow() {
   const all = await ConversationStore.list();
 
   // RB-4 (rail review) — the v1777 per-desk workflow sweep is GONE from this hot path: since v1934 the Chat tab
-  // renders no workflow rows (_grpWfs is pinned null), so the full-area listAllWorkflows scan here fed only the
+  // renders no workflow rows (the whole _grpWfs section died in the 2026-08-07 dead-code pass), so the full-area listAllWorkflows scan here fed only the
   // desk-landing cache — a chrome.storage.get(null) deserialize per render (up to 5/sec under churn) for a value
   // read once at desk-open. The landing now builds its own list on demand (_wfLandingFor — same class-owned
   // v1780/v1814 semantics, one desk at a time). The Automate tab keeps its own sweep; it renders the rows.
@@ -1165,7 +1143,6 @@ async function _renderRailListNow() {
   // notification channel (the thread nudge is retired — a transient bubble in a conversation the run doesn't
   // belong to was the wrong surface). One cross-desk fetch, grouped by the workflow's OWN appId.
   const _parkedByInst = {};
-  const _parkedFull = {};   // v2.74.1777 — the full entries render as needs-action rows atop the workflows section
   try {
     const r = await _orchReq('WORKFLOW_PARKED', {});
     const _pk = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : [];
@@ -1180,7 +1157,6 @@ async function _renderRailListNow() {
           || all.find((c) => c && String(c.appId) === String(p.appId) && c.instanceId);
         const key = owner ? owner.instanceId : p.appId;
         _parkedByInst[key] = (_parkedByInst[key] || 0) + 1;
-        (_parkedFull[key] = _parkedFull[key] || []).push(p);
       }
     }
   } catch { /* badge-only — never blocks the Rail */ }
@@ -1208,7 +1184,7 @@ async function _renderRailListNow() {
   // .rail-group (the case rows are ALWAYS in the DOM; a class hides them). Hover on the cases button PEEKS the
   // group open; mouse-away (with grace) closes it; click PINS (persists in _expandedApps). No re-render on hover —
   // a hover-driven rebuild would destroy the node under the pointer and flicker-loop.
-  let _grpCases = null, _grpWfs = null;
+  let _grpCases = null;   // dead-code pass 2026-08-07: _grpWfs deleted — workflows render in _renderRailAutomations (v1934), never here
   // v2.74.1777 — a section = one grid 0fr→1fr slide block (v1776) with its OWN pin/peek classes; a group can
   // hold two (workflows above cases, mirroring the icon order). Inner wrapper = the one sizable grid child.
   const _mkSection = (g, cls, pinned) => {
@@ -1227,29 +1203,8 @@ async function _renderRailListNow() {
     g.className = 'rail-group';
     g.appendChild(el);
     // v2.74.1934 (user directive) — WORKFLOWS moved to the Automations TAB: the Conversations accordion keeps
-    // only the CASES section per desk. _grpWfs stays null, so the workflow rows, the ＋ Workflow row, and the
-    // parked-into-wfs insertion below all no-op here; they render in _renderRailAutomations instead.
-    _grpWfs = null;
+    // only the CASES section per desk; workflow/parked rows render in _renderRailAutomations instead.
     _grpCases = _mkSection(g, 'rail-sec-cases', row.expanded);
-    // TL-1 (v2.74.1796, §14.2) — creation stays reachable with a thread up: the section ends in a ＋ Workflow
-    // row (the landing's card now shows only in true launch state). Parked + workflow rows insert BEFORE it.
-    if (_grpWfs) {
-      const add = document.createElement('div');
-      add.className = 'rail-item is-subtask rail-wf-add';
-      // v1818/1821 — the ＋ row's type description is HOVER-revealed (the ＋ View pattern; live report: the
-      // empty-only static line read as "no description on hover").
-      add.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">＋</span>Workflow</div>'
-        + '<div class="rail-item-meta rail-add-desc">save a multi-step task you run often — it can run on a schedule</div>';
-      add.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        _closeRail();
-        const pc = byId.get(row.id);
-        if (pc && pc.id !== _currentConversationId) await _openConvFullTimeline(pc);
-        _promptWorkflowIntent();
-      });
-      _wireRowKeyboard(add, () => add.click(), 'New workflow');
-      _grpWfs.appendChild(add);
-    }
     // v1817 — the ＋ Case trailing row (the ＋ View / ＋ Workflow pattern replaces the Add-case icon).
     if (_grpCases) {
       const addCase = document.createElement('div');
@@ -1258,7 +1213,6 @@ async function _renderRailListNow() {
         + '<div class="rail-item-meta rail-add-desc">a focused thread under this view — one per ticket, task, or customer</div>';   // v1821 — hover-revealed (the ＋ View pattern)
       addCase.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (row.id === ADMIN_ID) await _ensureAdminConversation();   // the parent must exist before a child hangs off it
         _expandedApps.add(row.id);            // reveal the new case immediately
         await _spawnSubTask(row.id);
         void _renderRailList({ force: true });
@@ -1267,24 +1221,10 @@ async function _renderRailListNow() {
       _grpCases.appendChild(addCase);
     }
     container.appendChild(g);
-    _wireSectionPeek(el.querySelector('.rail-item-wf'), _grpWfs && _grpWfs.parentElement);
     _wireSectionPeek(el.querySelector('.rail-item-cases'), _grpCases && _grpCases.parentElement);
   };
   for (const row of rows) {
-    if (row.role === 'overview') { _grpCases = _grpWfs = null; container.appendChild(_historyPinRow(row)); continue; }
-    if (row.role === 'admin') {   // VT-2 (v2.74.1573) — the reserved vitals fixture
-      _startGroup(_historyAdminRow(row), row);   // v1817 — always grouped (empty cases section holds ＋ Case)
-      continue;
-    }
-    if (row.role === 'new-app') { _grpCases = _grpWfs = null; container.appendChild(_historyNewAppRow()); continue; }
-    if (row.role === 'workflow') {   // v2.74.1777 — a desk child, same as a case row
-      if (_grpWfs) {
-        _grpWfs.insertBefore(_railWorkflowRow(row, byId.get(row.parentId)), _grpWfs.querySelector('.rail-wf-add'));
-        // v1809 — a pinned card holds its section open across re-renders too
-        if (row.wf && _expandedWfDetails.has(row.wf.id)) { const sec = _grpWfs.parentElement; sec.style.height = 'auto'; sec.inert = false; }
-      }
-      continue;
-    }
+    if (row.role === 'new-app') { _grpCases = null; container.appendChild(_historyNewAppRow()); continue; }
     const conv = byId.get(row.id);
     if (!conv) continue;
     const el = _historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_parkedByInst[conv.instanceId] || 0) : 0);
@@ -1295,13 +1235,11 @@ async function _renderRailListNow() {
       if (row.active) { _grpCases.parentElement.classList.add('pinned'); _grpCases.parentElement.style.height = 'auto'; _grpCases.parentElement.inert = false; }
       continue;
     }
-    if (row.role === 'app') {   // v1817 — every desk groups (both sections always exist)
+    if (row.role === 'app') {   // v1817 — every desk groups (the cases section always exists)
       _startGroup(el, row);
-      // needs-action rows ride at the TOP of the workflows section: parked runs (approve/cancel inline)
-      if (_grpWfs && conv.instanceId) for (const p of (_parkedFull[conv.instanceId] || [])) { if (p && p.kind === 'paused') continue; _grpWfs.insertBefore(_railParkedRow(p), _grpWfs.querySelector('.rail-wf-add')); }   // WFP (user ruling) — a PAUSED run is the CARD's state, never a separate row
       continue;
     }
-    _grpCases = _grpWfs = null;
+    _grpCases = null;
     container.appendChild(el);
   }
 
@@ -1523,83 +1461,6 @@ function _wireRowKeyboard(el, activate, label) {
   });
 }
 
-// CV-3c — the Overview pin: the reserved home row (the general assistant). Single-click → resume the last conversation
-// (keep the drawer open); double-click → resume + open the full timeline (close the drawer). (.1223)
-function _historyPinRow(row) {
-  const el = document.createElement('div');
-  el.className = `rail-item rail-overview${row.active ? ' active' : ''}`;
-  // v2.74.1219 — the Overview "pick up where you left off" peek = the last active conversation's summary (drawerTree).
-  const summaryLine = row.summary ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>` : '';
-  // v2.74.1580 — HOME vector (the feather idiom, matching the Admin desk's gear in size + stroke theme) replaces
-  // the ⌂ character; both pins share the fixed 16px glyph slot so their titles align.
-  const homeIcon = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>';
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${homeIcon}</span>${escHtml(row.title)}</div>${summaryLine}`;
-  // v2.74.1234 — Overview is a REAL persistent conversation: clicking it LOADS its own thread (its history) and closes
-  // the drawer. An empty Overview shows the general-assistant home (suggestion cards), but pinned to the thread so
-  // chatting appends to it.
-  el.addEventListener('click', async () => {
-    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
-    const conv = await _ensureOverviewConversation();
-    if ((conv.messages || []).length) {
-      if (conv.id !== _currentConversationId) { await _rehydrateConversation(conv); await _resumeRunningInvocations(); }
-      else void _maybeRenderConnCard();    // v2.74.1515 — a re-click refreshes the standing card (no rehydrate ran)
-    } else {
-      _clearCurrentConversation();         // general-assistant defaults (agent, no app, gated)…
-      _currentConversationId = conv.id;    // …but pinned to the Overview thread so chatting appends to it
-      _resetConversation();
-      await renderSuggestionCards();
-      // v2.74.1515 — the EMPTY Front desk never runs _rehydrateConversation, so the Connections card had NO render
-      // path on first open (the live miss: "front desk hasn't shown anything"). Render it here too — once it
-      // persists, the conversation is non-empty and the rehydrate path owns it from then on.
-      void _maybeRenderConnCard();
-    }
-    await _renderRailList();
-    _closeRail();
-  });
-  _wireRowKeyboard(el, () => el.click(), `Home — ${row.title}`);   // v1343 (a11y)
-  return el;
-}
-
-// VT-2 (v2.74.1573, DESIGN_vitals.md §8) — the ADMIN DESK pin: the reserved vitals fixture, always present in
-// the Rail ("silence when green" governs the desk's CONTENT, never its presence — the live miss: with zero
-// incidents there was no chip and therefore no door to the desk at all). The open-incident badge loads async
-// and stays hidden when green; click = get-or-create + open (the row never depends on the conversation existing).
-function _historyAdminRow(row) {
-  const el = document.createElement('div');
-  // v2.74.1578 — FIRST-CLASS desk: share the reserved-pin classes exactly (same flex title, same left edge as
-  // the Front desk — no indent), and a VECTOR glyph (the house feather idiom — the pulse/activity waveform)
-  // instead of an emoji, whose wider metrics made the row read as indented.
-  el.className = `rail-item rail-overview rail-admin${row.active ? ' active' : ''}`;
-  const summaryLine = row.summary ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>` : '';
-  // v2.74.1579 — GEAR vector (user directive; the feather settings icon) — the operator-console glyph.
-  const icon = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-  // v2.74.1589 — APP-ROW PARITY for cases (user directive: "admin desk doesn't have case buttons"): the same
-  // chevron (collapse/expand its incident cases, with count) and the same "+" (open a case by hand — an operator
-  // scratch case via the normal spawn) that every app row carries. Same classes → same styling + hover behavior.
-  if (row.hasChildren) el.classList.add('has-children');
-  // v2.74.1774 — app-row parity for the redesign: case icon + count (peek/pin) and "Add case", in the cluster.
-  const casesBtn = `<button class="rail-item-cases" data-row-action title="Cases — hover to peek, click to pin open" aria-label="Cases (${row.count || 0}) — click to pin open" aria-pressed="${row.expanded}">${Icons.cases(14)}${row.count > 0 ? `<span class="rail-case-count">${row.count}</span>` : ''}</button>`;   // v1817 — always visible; ＋ Case moved into the section
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">${icon}</span>${escHtml(row.title)}<span data-vt-badge hidden></span></div>${summaryLine}<div class="rail-item-actions">${casesBtn}</div>`;
-  void (async () => {   // the attention badge — one cheap storage read; green = nothing
-    try {
-      const r = await _orchReq('VITALS_BADGE', {});
-      const n = (r && r.success !== false && Number(r.open)) || 0;
-      const b = el.querySelector('[data-vt-badge]');
-      if (b && n > 0) { b.textContent = ` ⚠ ${n}`; b.hidden = false; }
-    } catch { /* */ }
-  })();
-  el.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {   // v2.74.1774/1777 — the shared pin toggle
-    e.stopPropagation();
-    _railTogglePin(el, '.rail-sec-cases', _expandedApps, ADMIN_ID, e.currentTarget);
-  });
-  el.addEventListener('click', (e) => {
-    if (e.target.closest('[data-row-action]')) return;   // PS-8 — derived, same rule as conv rows
-    _closeRail(); void _openAdminDesk();
-  });
-  _wireRowKeyboard(el, () => el.click(), 'Admin view — Orchard health');   // a11y (v1343 pattern)
-  return el;
-}
-
 // CV-3c — the New-app entry: opens the gallery (DESIGN_conversations.md §7). Closes the drawer so the cards show.
 function _historyNewAppRow() {
   const el = document.createElement('div');
@@ -1680,10 +1541,6 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0, parkedN = 0) {
   item.querySelector('.rail-item-cases')?.addEventListener('click', (e) => {
     e.stopPropagation();
     _railTogglePin(item, '.rail-sec-cases', _expandedApps, conv.id, e.currentTarget);
-  });
-  item.querySelector('.rail-item-wf')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    _railTogglePin(item, '.rail-sec-wfs', _expandedWfs, conv.id, e.currentTarget);
   });
 
   // PS-6/1934 — the parked badge is a DOOR to the approve rows, which now live in the Automations tab.
@@ -2527,19 +2384,6 @@ async function _renderNewDeskChooser(container) {
 async function _spawnSubTask(appConvId) {
   let app = null;
   try { app = await ConversationStore.load(appConvId); } catch { /* */ }
-  // VT-2b/1589 — the ADMIN desk spawns cases too (it has no appId — a plain child carrying the operator seed;
-  // incident cases mint themselves via _syncIncidentCases, this is the BY-HAND ops case the row's "+" opens).
-  if (app && app.id === ADMIN_ID && !app.parentId) {
-    let n = 1; let titles = new Set();
-    try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === ADMIN_ID); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
-    while (titles.has(`Ops case #${n}`)) n++;
-    try {
-      await ConversationStore.create({ title: `Ops case #${n}`, kind: 'agent', seed: app.seed || _ADMIN_SEED, parentId: ADMIN_ID });
-      _expandedApps.add(ADMIN_ID);
-      await _revealRail();
-    } catch (e) { try { console.warn('[chat] ops-case spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the case.', 'err'); }
-    return;
-  }
   if (!app || !app.appId || app.parentId) { toast('Cases open under a view.', 'err'); return; }
   let n = 1; let titles = new Set();
   try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === appConvId); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
@@ -10725,7 +10569,7 @@ async function _renderDistill() {
 async function _renderWorkflows() {
   const appId = _memoryId();
   if (!appId || !_currentConversationId) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'Open a view — workflows are saved per view.'); _orchFinalize(m); return; }
-  _expandedWfs.add(String(_currentConversationId));
+  _switchRailTab('automations');   // dead-code pass 2026-08-07 — the per-desk wfs section died at v1934; the Automations tab is where the rows live
   await _openRail();
 }
 
@@ -18394,8 +18238,7 @@ async function _rehydrateConversation(conv) {
   void _renderDeskLanding(conv);
   // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — vitals authority lives in the ADMIN DESK: it renders the full
   // vitals card + incident cards; the Front desk shows at most ONE attention chip; other desks a pointer.
-  void _maybeRenderConnCard();        // Front desk → the attention CHIP (the card moved to the Admin view)
-  void _maybeRenderAdminDesk();       // Admin desk → the vitals card + open-incident cards
+  void _maybeRenderConnCard();        // Front desk → the attention CHIP (dead-code pass: the Admin-desk render is deleted; §8.3 dev Connect owns vitals)
   // TL-2 (v2.74.1792, DESIGN_panel_surfaces.md §14.2) — the desk-connection warning bubble is DELETED: the
   // fact is already carried channel-correctly by the Admin incident CASE + the Rail badge (§7). A status claim
   // must never persist in a transcript — it outlives its own truth.
@@ -18508,9 +18351,8 @@ async function _renderDeskLanding(conv) {
             const mm = appendMessage({ role: 'assistant', body: '' });
             _setMessageBody(mm, 'Checking… (probing sessions + running due canaries — this can take a minute)');
             try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
-            _setMessageBody(mm, 'Check finished — the vitals card below is current.');
+            _setMessageBody(mm, 'Check finished.');
             _orchFinalize(mm);
-            void _maybeRenderAdminDesk();
           } else {
             const inp = $('chat-input');
             void sendChatMessage(c.command);   // CF-3.9
@@ -18527,9 +18369,8 @@ async function _renderDeskLanding(conv) {
       // v1608 — the landing IS the surface: with the setup chatter gone, nothing else flips the view on the
       // +desk birth path — ensure it shows. (Unlike the v1607 status-chip rule: this is the page, not a decoration.)
       if (cont.classList.contains('hidden')) _enterConversation();
-      // v1601 — the Admin ordering: the vitals card sits BELOW the action cards. The card may already exist
-      // (rehydrated above) or get appended by _maybeRenderAdminDesk in either async order — moving it after the
-      // landing converges every ordering (an update-in-place keeps the moved position).
+      // v1601 — the Admin ordering: a REHYDRATED legacy vitals card sits BELOW the action cards (the renderer
+      // itself is deleted — dead-code pass 2026-08-07; only stored cards from old installs still appear).
       if (isAdmin) {
         try { const vc = cont.querySelector('.message[data-message-id="vitals_card"]'); if (vc) cont.appendChild(vc); } catch { /* */ }
       }
@@ -18716,85 +18557,8 @@ async function _maybeRenderConnCard() {
   else bar.appendChild(_mkBtn('Show incidents', () => { (async () => { try { await _revealRail(); _switchRailTab('conversations'); } catch { /* */ } })(); }));   // SGV-4 — the cases fixture is the non-dev destination
 }
 
-// VT-2 (v2.74.1571, DESIGN_vitals.md §8) — the ADMIN DESK render: the vitals card (presence rows + per-ground
-// shape rollup; persisted upsert like the old conn card) + one card per OPEN incident (transient upserts — the
-// incident STORE is the durable record; closed incidents are history, not attention). Incident heal bars reuse
-// the existing point-of-need bars verbatim: sign-in (presence) and the RH-1b relearn bar (drift).
-async function _maybeRenderAdminDesk() {
-  // CN-2 (DESIGN_vitals.md §8.4 F1) — RETIRED. The Admin desk is no longer a user surface; the vitals card (F1) is
-  // deferred to the §8.3 dev-mode Connect render. UNCONDITIONALLY inert via the early-return below — NOT merely the
-  // ADMIN_ID guard: a stray ADMIN_ID-current path (e.g. a vitals event) could otherwise re-render the operator card
-  // and re-seed _ADMIN_SEED into a user chat (verify-caught). The dead body + guard delete when §8.3 absorbs F1.
-  return;
-  // eslint-disable-next-line no-unreachable
-  if (_currentConversationId !== ADMIN_ID) return;
-  // v2.74.1575 — the persona heal must cover EVERY door into the desk (live: the panel BOOT-RESTORED the Admin
-  // desk as the current conversation — a path that never passes _openAdminDesk, so the ensure-time patchMeta
-  // heal never ran, the store seed stayed empty, and "what can you do?" answered from the active tab again —
-  // twice). This hook fires on every open of the desk, whichever door was used. v2.74.1576 — OUR prior seed
-  // revisions are upgrade-eligible too (the honesty-rule addition — live: the persona called presence-unknown
-  // grounds "all connected"); anything else is user-edited and is never touched.
-  if (!_currentConversationSeed || _ADMIN_SEED_PRIOR.includes(_currentConversationSeed)) {
-    _currentConversationSeed = _ADMIN_SEED;
-    try { void ConversationStore.patchMeta(ADMIN_ID, { seed: _ADMIN_SEED }); } catch { /* */ }
-  }
-  let r = null;
-  try { r = await _orchReq('VITALS_STATUS', {}); } catch { return; }
-  if (!r || r.success === false) return;
-  if ($('messages') && $('messages').classList.contains('hidden')) _enterConversation();
-  const now = r.now || Date.now();
-  const presence = renderConnectionsCard(r.registry || {}, { now }) || 'No connected apps yet — connect a session-ride app and its health shows here.';
-  const gl = (r.grounds || []).map((g) => {
-    // v2.74.1574 — "never" read as alarming next to "shape ok" (live paste): lastOkAt only accrues from runs on
-    // this build, so a fresh install honestly has no stamps yet — say that, not "never".
-    const age = g.lastOkAt ? `last ok ${Math.max(1, Math.round((now - g.lastOkAt) / 3600e3))}h ago` : 'no runs yet';
-    const drift = g.driftSuspects ? ` · ⚠ ${g.driftSuspects} drift-suspect${g.proposals ? ` (${g.proposals} fix proposed)` : ''}` : ' · shape ok';
-    return `• ${g.host} — ${g.armed} read${g.armed === 1 ? '' : 's'}, ${age}${drift}`;
-  }).join('\n');
-  // VT-2b (v2.74.1587) — the desk timeline stays quiet: open incidents live as CASES in the Rail; the card carries
-  // ONE pointer line (silence when green: none → no line at all).
-  const openInc = (r.incidents || []).filter((x) => x && x.status === 'open');
-  const incLine = openInc.length ? `\n\n⚠ ${openInc.length} open incident${openInc.length === 1 ? '' : 's'} — see the case${openInc.length === 1 ? '' : 's'} under Admin desk in the Rail.` : '';
-  // v2.74.1705 — the AUTO-DISMISS audit trail. A self-healed presence case is removed from the Rail (attention),
-  // but the Admin desk keeps the record of what was actioned and why: subject · how it resolved · when. Reads the
-  // closed incidents already in the store — no new write path. Presence-only (drift resolutions stay as cases).
-  const resolved = recentlyResolved(r.incidents || [], { now, max: 5, cls: 'presence' });
-  const resolvedBlock = resolved.length
-    ? `\n\n**Recently auto-resolved**\n${resolved.map((inc) => {
-        const last = (inc.evidence || []).slice(-1)[0];
-        const how = last ? friendlyVitalsLine(last.line) : 'signed back in';
-        return `• ${escHtml(String(inc.subject || '').slice(0, 48))} — ${escHtml(how)} · cleared ${clockWord(inc.closedAt, now)}`;
-      }).join('\n')}`
-    : '';
-  // CW-4 (DESIGN_cloud_logs.md §5) — shipping is never invisible: while cloud log shipping is enabled the
-  // card carries a standing line naming the level. Silence when off (the default posture needs no badge).
-  let _cwLine = '';
-  try {
-    const _cw = (await chrome.storage.local.get('settings:cloudLogs'))?.['settings:cloudLogs'];
-    if (_cw === 'decisions' || _cw === 'full') _cwLine = `\n\ncloud logs: **on (${_cw})** — the scrubbed trace mirrors to CloudWatch · \`cloudlogs off\` stops it`;
-  } catch { /* the card never blocks on the setting read */ }
-  const body = `**Vitals**\n\n${presence}${gl ? `\n\n**Ride shape**\n${gl}` : ''}${incLine}${resolvedBlock}${_cwLine}`;   // v2.74.1581 — emoji-free chrome (user directive)
-  let msg = document.querySelector('#messages .message[data-message-id="vitals_card"]');
-  if (msg) _setMessageBody(msg, body, { markdown: true });
-  else msg = appendMessage({ role: 'assistant', body, id: 'msg-vitals_card' });
-  _orchFinalize(msg);   // persists the card (stable id → upsert; reopening shows the last-known state instantly)
-  try { msg.querySelectorAll('.orch-actions').forEach((b) => b.remove()); } catch { /* */ }
-  const bar = _orchActionBar(msg);
-  for (const a of attentionOrigins(r.registry || {}, Object.keys(r.registry || {})).slice(0, 4)) {
-    bar.appendChild(_mkBtn(`Sign in ${a.origin}`, async () => { try { await _orchReq('CONN_FOCUS', { origin: a.origin }); } catch { /* */ } }));
-  }
-  bar.appendChild(_mkBtn('Check now', async () => {
-    _setMessageBody(msg, `${body}\n\nChecking… (probing sessions + running due canaries — this can take a minute)`, { markdown: true });
-    try { await _orchReq('VITALS_CHECK_NOW', {}); } catch { /* */ }
-    void _maybeRenderAdminDesk();
-  }));
-  bar.appendChild(_mkBtn('Keep-alive…', () => { void _showKeepAlive(); }));   // KA-1 (v1599) — the per-connection opt-in picker
-  // VT-2b (v2.74.1587) — incidents are CASES (sub-conversations under this desk, in the Rail), not cards in this
-  // timeline (live 1586 report: the card-in-thread was the recorded v1 deviation; the requirement was a case).
-  // Mint/refresh them; the desk thread stays quiet — the vitals card above carries the one-line pointer.
-  void _syncIncidentCases(r);
-  try { document.querySelectorAll('#messages .message[data-vt-incident]').forEach((el) => el.remove()); } catch { /* legacy cards */ }
-}
+// DEAD-CODE PASS (2026-08-07) — _maybeRenderAdminDesk DELETED (CN-2 retired it to an unconditional early-return;
+// its ~70-line body was unreachable). The §8.3 dev-mode Connect console rebuilds F1 from spec + git history.
 
 // ── VT-2b (v2.74.1587) — incidents as CASES: one sub-conversation per incident, under the Admin desk ─────────────
 const _vtCaseId = (incId) => `vtc_${incId}`;
@@ -18908,8 +18672,7 @@ try {
     if (!m || (m.type !== 'CONN_STATUS_CHANGED' && m.type !== 'VITALS_CHANGED')) return;
     void _syncIncidentCases();
     if (_railTab === 'connect') void _renderConnect();
-    if (_currentConversationId === ADMIN_ID) void _maybeRenderAdminDesk();
-    else if (String(_currentConversationId || '').startsWith('vtc_')) void _maybeRenderIncidentCase();
+    if (String(_currentConversationId || '').startsWith('vtc_')) void _maybeRenderIncidentCase();
     else if (_currentConversationId === OVERVIEW_ID) void _maybeRenderConnCard();
   });
 } catch { /* */ }

@@ -23,14 +23,12 @@ describe('uiViewModel — the pure, PII-safe snapshot', () => {
     assert.doesNotMatch(blob, /Acme|Jane Doe|broken switch|billing|awaiting vendor|daily sweep/, 'no free text leaks into the view-model');
     const app = vm.rail.rows.find((r) => r.id === 'app1');
     assert.equal(app.role, 'app');
-    assert.equal(app.wfCount, 1);
     assert.equal(app.active, true);
     assert.equal(vm.rail.tab, 'automations');
     assert.equal(vm.pane, 'thread');
-    // the workflow row is present, keyed to the desk, carrying no name
-    const wf = vm.rail.rows.find((r) => r.role === 'workflow');
-    assert.equal(wf.parentId, 'app1');
-    assert.ok(!('title' in wf) && !('name' in wf), 'workflow row carries no free text');
+    // dead-code pass 2026-08-07 — the accordion emits NO workflow rows (they live in the Automations tab);
+    // a legacy workflowsByConv arg is ignored, so no workflow name can leak by construction.
+    assert.equal(vm.rail.rows.some((r) => r.role === 'workflow'), false);
   });
 
   it('thread carries only convId + a message COUNT, never bodies', () => {
@@ -74,17 +72,11 @@ describe('uiInvariants — the checklist FIRES on each real bug class', () => {
     assert.ok(checkUiInvariants(vm).some((f) => f.code === 'pinned-gt-one'));
   });
 
-  it('a workflow under a missing desk → orphan-child (the cross-desk leak)', () => {
+  it('a subtask under a missing desk → orphan-child (the cross-desk leak; workflow rows died with the accordion section)', () => {
     const vm = base();
-    const wf = vm.rail.rows.find((r) => r.role === 'workflow');
-    wf.parentId = 'ghost-desk';
+    const sub = vm.rail.rows.find((r) => r.role === 'subtask');
+    sub.parentId = 'ghost-desk';
     assert.ok(checkUiInvariants(vm).some((f) => f.code === 'orphan-child'));
-  });
-
-  it('wfCount out of step with the emitted workflow rows → wfcount-mismatch', () => {
-    const vm = base();
-    vm.rail.rows.find((r) => r.id === 'app1').wfCount = 5;
-    assert.ok(checkUiInvariants(vm).some((f) => f.code === 'wfcount-mismatch'));
   });
 
   it('an unknown pane / rail tab → bad-pane / bad-tab', () => {

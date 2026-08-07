@@ -47,7 +47,7 @@ Alongside the runtime markers sits a **test-time assertion harness** (L1): pure 
 
 - **L1 — the logical checklist** (v1949, commit `d059a63`). `Core/uiViewModel.js` projects persisted state
   (`buildRailTree` + pane/tab facts) into a frozen, PII-safe snapshot (ids/enums/counts/flags — titles/summaries
-  *stripped*). `Core/uiInvariants.js`: exactly-one-active, ≤1-pinned, no-desk-leak, wfCount-matches, and the
+  *stripped*). `Core/uiInvariants.js`: exactly-one-active, ≤1-pinned, no-desk-leak, wfCount-matches, and the  *(retired 2026-08-07 with the accordion workflow rows)*
   **`noFreeText` executable PII boundary**, plus a **cross-reload equality** test (derive → serialize round-trip →
   re-derive → `deepEqual`) — cross-reload survival as a headless assertion.
 - **`SHAPE ▸` — the reply-shape decision** (v1964, `a349cf0`). Emitted at both `_ilRunBuiltin` twin tails after a

@@ -1896,13 +1896,8 @@ textarea {
 
 /* CV-3c (v2.74.1168) — the drawer ACCORDION (DESIGN_conversations.md §7): the Overview pin, the New-app entry, the
    app expand-chevron, the sub-task leaf glyph. Hierarchy is glyph + chevron + weight, NEVER indentation. */
-.rail-overview .rail-item-title,
 .rail-new-app  .rail-item-title { display: flex; align-items: center; gap: var(--sp-2); }
 .rail-glyph { color: var(--c-text-subtle); font-weight: 600; }
-/* v2.74.1579 — the reserved pins' glyphs occupy a FIXED slot so both titles start at the same x regardless of
-   glyph width (the ⌂ character vs the Admin desk's gear SVG — the width delta read as an indent). rail-admin
-   carries rail-overview too, so one selector serves both pins. */
-.rail-overview .rail-glyph { width: 16px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .rail-glyph.leaf { margin-right: 5px; font-weight: 700; }
 .rail-new-app { color: var(--c-text-subtle); }
 /* v1820 — the ＋ View row's type description slides open on hover only (same curve + intent gate). */
@@ -1978,8 +1973,7 @@ textarea {
 }
 /* the CASES + WORKFLOWS buttons — one look ("one class"): icon + count chip, always visible (the count is
    workload signal). Hover peeks that section's rows; click pins (aria-pressed → accent). */
-.rail-item-cases,
-.rail-item-wf {
+.rail-item-cases {
   height: 22px;
   min-width: 28px;
   padding: 0 5px;
@@ -1993,10 +1987,8 @@ textarea {
   font-weight: 600;
   transition: background var(--t-fast), color var(--t-fast);
 }
-.rail-item-cases:hover,
-.rail-item-wf:hover { background: var(--c-bg); color: var(--c-text); }
-.rail-item-cases[aria-pressed="true"],
-.rail-item-wf[aria-pressed="true"] { color: var(--c-accent); }
+.rail-item-cases:hover { background: var(--c-bg); color: var(--c-text); }
+.rail-item-cases[aria-pressed="true"] { color: var(--c-accent); }
 .rail-case-count { font-variant-numeric: tabular-nums; }
 /* v2.74.1781–1784 — the hover-expand theme continues INTO the workflow card: the detail (itemized steps +
    schedule) slides open with the same grid 0fr→1fr curve, PER CARD (v1784 live report: binding it to the

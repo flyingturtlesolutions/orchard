@@ -1,3 +1,6 @@
+// DORMANT (stamped 2026-08-07, dead-code audit) — tri-leg Drive/Ride/Broker availability assessor: built,
+// tested, zero live callers, named in no doc. Revive trigger: wiring leg selection (palette / interpret
+// candidate assembly) to a availability pre-check; else delete after the broker (VT-7) ships without it.
 // Core/legAvailability.js — v2.74.1304. Given a Ground's EVIDENCE, assess which of the three legs (Drive / Ride /
 // Broker) are POSSIBLE for that site, why, and which is recommended. This is the whole point of the tri-class palette
 // made EXPLICIT + per-site: pick the leg that actually works for THIS site instead of discovering it by failure.

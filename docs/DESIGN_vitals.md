@@ -244,6 +244,8 @@ UNCHANGED — only the presentation moves.
 
 ### 8.3 The dev render (the maximalist console — retained from the original §8)
 
+> **Dead-code pass 2026-08-07:** the F1 implementation named below (_maybeRenderAdminDesk + _ADMIN_SEED + the Admin rail fixture rows) was DELETED early (v2.74.2077) — it had been unconditionally inert since CN-2. The §8.3 dev console rebuilds F1–F5 from this spec + git history when taken up.
+
 *Below is the original §8, now scoped to the DEV-mode Connect view (not a user desk). Throughout 8.3, "the
 Admin desk" = the dev-mode Connect view, and "Front chip → Admin desk" now reads "→ Connect".* A **permanent
 operator surface**; role = Orchard-operator, queue = incidents, scope = all grounds. The case model fits

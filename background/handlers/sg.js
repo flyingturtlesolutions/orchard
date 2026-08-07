@@ -2118,40 +2118,8 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
-    // IL-2 (v2.74.1112) — RETRIEVE_TOOLS: the LEARNED-leg source for the panel-hosted inference-layer loop's
-    // assemblePalette (Core/ilRun). Mirrors ROUTE_ASK's ground-resolution + candidate computation, minus
-    // the LLM route — returns the retrieved candidates + the resolved groundId so the panel can ctx-bind
-    // execPlan. Reached ONLY by the `il:` panel command (verify-only); never touches the default cascade.
-    RETRIEVE_TOOLS: async (payload, _sender, sendResponse) => {
-      try {
-        const ask = String(payload?.ask ?? '').trim();
-        if (!ask) { sendResponse({ success: false, error: 'ask required' }); return; }
-        let { tabId, groundId } = payload ?? {};
-        let tabUrl = '';
-        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
-        if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
-        let caps = [];
-        if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
-        const candidates = retrieveTools(ask, { capabilities: caps });
-        sendResponse({ success: true, candidates, groundId: groundId || null });
-      } catch (err) {
-        Logger.error('background', `RETRIEVE_TOOLS failed: ${err.message}`);
-        sendResponse({ success: false, error: err.message });
-      }
-    },
-
-    // IL-2 (v2.74.1112) — STEP_IL: the inference-layer loop's THINK seam (AnthropicService.stepIl over a
-    // StepContext). The panel hosts the loop (Core/ilRun + agentLoop) and round-trips here each cold step;
-    // the pure prompt/parse (palette + observation fenced as DATA) lives in Core/stepPrompt.js. Verify-only.
-    STEP_IL: async (payload, _sender, sendResponse) => {
-      try {
-        const decision = await AnthropicService.stepIl(payload?.ctx || {});
-        sendResponse({ success: true, decision });
-      } catch (err) {
-        Logger.error('background', `STEP_IL failed: ${err.message}`);
-        sendResponse({ success: false, error: err.message });
-      }
-    },
+    // DEAD-CODE PASS (2026-08-07) — RETRIEVE_TOOLS + STEP_IL DELETED with Core/ilRun.js (the IL-2 shelf):
+    // zero callers since ilStandin took the panel loop (~v1166); REVIEW_chat_stack_2026-07.md item C.
 
     // IL-2 (v2.74.1118) — JUDGE_MATCH: Orchard as the user's stand-in deciding WHICH of matchCapability's
     // candidates to run (or reject), given the ask + the values the substrate already bound. The panel passes the

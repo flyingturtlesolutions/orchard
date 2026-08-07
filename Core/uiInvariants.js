@@ -44,24 +44,15 @@ export function checkUiInvariants(vm) {
   const pinnedOpen = rows.filter((r) => r.expanded);
   if (pinnedOpen.length > 1) push('pinned-gt-one', `more than one rail section pinned-open: ${pinnedOpen.length}`);
 
-  // 3) NO ORPHAN CHILD. Every subtask/workflow row's parent must be a present app/admin row — a child under a missing
-  //    desk is the cross-desk leak class (buildRailTree renders true orphans as `plain`, so a `subtask`/`workflow`
-  //    role with a dangling parentId is a genuine invariant breach).
-  const parents = new Set(rows.filter((r) => r.role === 'app' || r.role === 'admin').map((r) => r.id));
+  // 3) NO ORPHAN CHILD. Every subtask row's parent must be a present app row — a child under a missing desk is
+  //    the cross-desk leak class (buildRailTree renders true orphans as `plain`, so a `subtask` role with a
+  //    dangling parentId is a genuine invariant breach). (dead-code pass 2026-08-07: the `workflow` role and
+  //    its wfCount rule died with the accordion's workflow section — workflows render in the Automations tab.)
+  const parents = new Set(rows.filter((r) => r.role === 'app').map((r) => r.id));
   for (const r of rows) {
-    if ((r.role === 'subtask' || r.role === 'workflow') && r.parentId != null && !parents.has(r.parentId)) {
+    if (r.role === 'subtask' && r.parentId != null && !parents.has(r.parentId)) {
       push('orphan-child', `${r.role} ${r.id} has no present parent ${r.parentId}`);
     }
-  }
-
-  // 4) WORKFLOW ROWS SIT UNDER THEIR DESK, and each app's wfCount matches its emitted workflow children (they follow
-  //    the app row directly, before the case rows). A mismatch = the workflow-scoping bug (workflows keyed wrong, or a
-  //    workflow rendered under the wrong desk).
-  for (let i = 0; i < rows.length; i++) {
-    if (rows[i].role !== 'app') continue;
-    let n = 0;
-    for (let j = i + 1; j < rows.length && rows[j].role === 'workflow'; j++) { if (rows[j].parentId === rows[i].id) n++; }
-    if ((rows[i].wfCount | 0) !== n) push('wfcount-mismatch', `app ${rows[i].id} wfCount=${rows[i].wfCount} but ${n} workflow rows follow`);
   }
 
   // 5) THE FIXTURES (CN-2, DESIGN_vitals.md §8.4): the Admin fixture is REMOVED (home is the launch page). Exactly

@@ -21,7 +21,7 @@ import { buildRailTree } from './railTree.js';
 /** The frozen enums the view-model is allowed to name. Exported so uiInvariants.js validates against the same source. */
 export const PANES = Object.freeze(new Set(['rail', 'thread', 'canvas']));
 export const RAIL_TABS = Object.freeze(new Set(['conversations', 'automations', 'connect']));   // CN-1 — the Connect tab (login/connection status)
-export const RAIL_ROLES = Object.freeze(new Set(['app', 'subtask', 'workflow', 'plain', 'admin', 'new-app', 'overview']));
+export const RAIL_ROLES = Object.freeze(new Set(['app', 'subtask', 'plain', 'new-app']));   // dead-code pass 2026-08-07 — workflow/admin/overview roles died with their fixtures
 
 /**
  * Project a `buildRailTree` row → the PII-safe view-model row. PURE.
@@ -39,7 +39,6 @@ function projectRow(r) {
     hasChildren: !!r.hasChildren,
     depth: r.depth | 0,
     count: r.count | 0,
-    wfCount: r.wfCount | 0,
     kind: r.kind == null ? null : String(r.kind),
   };
   if (r.appId != null) out.appId = String(r.appId);
@@ -54,7 +53,6 @@ function projectRow(r) {
  *   activeId?: string|null,             // the selected conversation (null = the Admin home)
  *   expanded?: Set<string>|Array<string>|null,
  *   devMode?: boolean,
- *   workflowsByConv?: Map|null,
  *   pane?: 'rail'|'thread'|'canvas',    // the active pane (a live/module fact, passed in — never read here)
  *   railTab?: 'conversations'|'automations',
  *   activeConv?: {messages?: Array}|null // the loaded active conversation (for the msg count — bodies never read)
@@ -62,10 +60,10 @@ function projectRow(r) {
  * @returns {{ pane, rail:{tab, rows:Array}, thread:{convId, msgCount} }}
  */
 export function uiViewModel({
-  summaries = [], activeId = null, expanded = null, devMode = false, workflowsByConv = null,
+  summaries = [], activeId = null, expanded = null, devMode = false,
   pane = 'thread', railTab = 'conversations', activeConv = null,
 } = {}) {
-  const rows = buildRailTree(summaries, { devMode, activeId, expanded, workflowsByConv }).map(projectRow);
+  const rows = buildRailTree(summaries, { devMode, activeId, expanded }).map(projectRow);
   return {
     pane,                                    // passed through as-is; uiInvariants flags an unknown enum
     rail: { tab: railTab, rows },

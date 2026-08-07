@@ -1,3 +1,6 @@
+// DORMANT (stamped 2026-08-07, dead-code audit) — CX-9 per-step read-leg arbitration: zero live callers; the
+// §17 tee bypassed this slice. Revive trigger: re-adjudicating §15 against the §17 machinery (or delete as a
+// package with Core/harvest.js + the spec rows).
 // Core/readLeg.js — the read-leg abstraction for an Observation step (DESIGN_connectors.md §15). CX-9 slice 1.
 // v2.74.1158.
 //
