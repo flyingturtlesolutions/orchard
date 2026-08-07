@@ -1023,11 +1023,11 @@ describe('shopify delete-draft (v2.74.2069) — destructive write + its draft-or
     assert.equal(gateActionForLeg(legOf('shopify_delete_order')).decision, 'refused');
   });
 
-  it('the delete body fills input.id from {draft_gid} (param name == placeholder, or the field silently drops)', () => {
+  it('the delete body fills draftOrderDeleteInput.id from {draft_gid} (real HAR shape; param name == placeholder or the field silently drops)', () => {
     const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_delete_order');
     const b = fillBody(rec.body, { draft_gid: 'gid://shopify/DraftOrder/123456' });
     assert.equal(b.operationName, 'DeleteDraftOrder');
-    assert.equal(b.variables.input.id, 'gid://shopify/DraftOrder/123456');
+    assert.equal(b.variables.draftOrderDeleteInput.id, 'gid://shopify/DraftOrder/123456');   // v2.74.2071 — real HAR key
   });
 
   it('draft_gid carries a lookup (viaLeg the draft search) but NO gid: coercion (the destructive chain-path footgun)', () => {
