@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 import { CONNECTOR_RECIPES, drillTargetRedirect, fillEndpoint, fillBody, stripUnfilledJsonBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
+import { gateActionForLeg } from './pipelineGate.js';   // v2.74.2069 — the destructive delete must REFUSE unattended
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
   const REC = (over) => ({ id: 'r1', name: 'My schedules', does: 'list schedules', method: 'GET', endpoint: '/v2/admin/profiles/{id}/schedules', origin: 'deakoapi.deako.com', params: [{ name: 'id', type: 'string', required: true }], safetyClass: 'auto', enabled: true, reviewState: 'accepted', provenance: 'harvested', ...over });
@@ -745,7 +746,8 @@ describe('connectorRecipes — LEG-2a (v2.74.1594): the SH-T4 checklist surface 
     // v2.74.1921 — Timeline joins: the second READ persisted op (the order page's lazy-loaded timeline fetch).
     // v2.74.1926 — order_creator rides the SAME op (one sha, one bank entry, one capture hint) — so the wanted
     // list must not gain a duplicate: the checklist asks a human to capture each OP once, not each leg.
-    assert.deepEqual([...new Set(ops)], ['CustomerCreate', 'DraftOrderCreate', 'EditCustomer', 'OrderListData', 'Search', 'Timeline'], 'the three SH-T5 writes + the three persisted reads');
+    // v2.74.2069 — DeleteDraftOrder (the draft delete write) + DraftOrderList (its lookup viaLeg read) join.
+    assert.deepEqual([...new Set(ops)], ['CustomerCreate', 'DeleteDraftOrder', 'DraftOrderCreate', 'DraftOrderList', 'EditCustomer', 'OrderListData', 'Search', 'Timeline'], 'the SH writes (+ delete-draft) + the persisted reads (+ draft-index)');
     assert.equal(ops.filter((o) => o === 'Timeline').length, 1, 'two legs, ONE Timeline capture demand');
     for (const w of wanted) { assert.ok(w.recipeId && w.recipeName, 'each carries its recipe identity for the checklist line'); }
     assert.deepEqual(persistedOpsForHost('deako.zendesk.com'), [], 'Zendesk writes are REST — no op-hash demands');
@@ -989,5 +991,108 @@ describe('enum belt — the catalog declarations + hop-3 (v2056)', () => {
     const vs = CONNECTOR_RECIPES.find((r) => r.id === 'vs_warranty_tasks');
     const leg = recipeToLeg({ ...vs, app: 'vendorsuite', origin: 'vendorsuite.example.com', groundId: 'g' }, { trusted: true });
     assert.ok(leg.paramSchema.properties.status.enumSynonyms.open.includes('active'), 'a dropped enumSynonyms would be the seeded-path bug class');
+  });
+});
+
+// ── v2.74.2069 — the DELETE-DRAFT capability: a destructive, human-confirmed reversal for create-draft, plus the
+// draft-orders search read that is its lookup viaLeg. The delete rides the persisted-op POST transport (NOT REST
+// DELETE), gates HARD (destructive → gated → gateActionForLeg refuses unattended), and resolves a draft NUMBER →
+// gid via a `lookup` so no gid is ever typed — with NO `gid:` coercion on the destructive param (the chain-path
+// pre-mint footgun). Reuses only already-sealed fields, so hopSeal.test.js auto-walks both new entries.
+describe('shopify delete-draft (v2.74.2069) — destructive write + its draft-orders search read', () => {
+  const legOf = (id) => recipeLegs({ account: 'me', trusted: true }).find((l) => l && l.tool && l.tool.recipeId === id);
+
+  it('shopify_delete_order: ACT leg, GATED (destructive, reversible:false), persisted-op POST — never REST DELETE', () => {
+    const leg = legOf('shopify_delete_order');
+    assert.ok(leg, 'the delete leg projects');
+    assert.equal(leg.mode, 'act');
+    assert.equal(leg.safety, 'gated');                       // destructive → gated (human confirm only)
+    assert.equal(leg.tool.method, 'POST');                   // persisted-op transport, NOT method:'DELETE'
+    assert.notEqual(leg.tool.method, 'DELETE');
+    assert.equal(leg.tool.gql, false);
+    assert.equal(leg.tool.persistedOp, 'DeleteDraftOrder');
+    assert.equal(leg.tool.csrf, 'sniff');                    // inherited from SH — a write needs the sniffed token
+    assert.equal(leg.tool.endpoint, '/api/operations/{op_sha}/DeleteDraftOrder/shopify/{handle}');
+    assert.equal(leg.tool.reversible, false);                // the honest axis — a deleted draft cannot be restored
+    assert.equal(leg.tool.outward, false);
+    assert.equal(leg.tool.itemUrl, null);                    // the record ceases to exist — no "show" venue
+    assert.equal(leg.tool.shopProbe, true);                  // Shopify liveness marker rides (from SH)
+  });
+
+  it('gateActionForLeg REFUSES the delete unattended (a human confirms every delete — §10.1 adopt-don\'t-undo)', () => {
+    assert.equal(gateActionForLeg(legOf('shopify_delete_order')).decision, 'refused');
+  });
+
+  it('the delete body fills input.id from {draft_gid} (param name == placeholder, or the field silently drops)', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_delete_order');
+    const b = fillBody(rec.body, { draft_gid: 'gid://shopify/DraftOrder/123456' });
+    assert.equal(b.operationName, 'DeleteDraftOrder');
+    assert.equal(b.variables.input.id, 'gid://shopify/DraftOrder/123456');
+  });
+
+  it('draft_gid carries a lookup (viaLeg the draft search) but NO gid: coercion (the destructive chain-path footgun)', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_delete_order');
+    const p = rec.params.find((x) => x.name === 'draft_gid');
+    assert.ok(p && p.required === true);
+    assert.equal(p.gid, undefined, 'a gid: marker would pre-mint gid://shopify/DraftOrder/<D-number> and bypass the lookup on the chain path — forbidden on an irreversible delete');
+    assert.ok(rec.lookup && rec.lookup.draft_gid, 'the destination carries a lookup spec');
+    assert.equal(rec.lookup.draft_gid.viaLeg, 'shopify_draft_orders');
+    assert.equal(rec.lookup.draft_gid.valueParam, 'query');
+    assert.deepEqual(rec.lookup.draft_gid.match, ['name']);
+    assert.equal(rec.lookup.draft_gid.id, 'id');
+    assert.equal(rec.lookup.draft_gid.require[0].field, 'status');   // never delete a COMPLETED draft
+  });
+
+  it('coerceParams does NOT gid-coerce draft_gid — a bare D-number rides through unchanged for the lookup to resolve', () => {
+    const leg = legOf('shopify_delete_order');
+    const out = coerceParams({ draft_gid: 'D1023' }, leg.paramSchema);
+    assert.equal(out.draft_gid, 'D1023');                    // untouched — no fabricated gid://shopify/DraftOrder/1023
+  });
+
+  it('the lookup marker rides hop 3 onto leg.tool (invariant #3: unread here = dropped on the seeded path)', () => {
+    const leg = legOf('shopify_delete_order');
+    assert.ok(leg.tool.lookup && leg.tool.lookup.draft_gid, 'lookup threads to the tool');
+    assert.equal(leg.tool.lookup.draft_gid.viaLeg, 'shopify_draft_orders');
+  });
+
+  it('shopify_draft_orders: a READ (ask) on the persisted-op GET path — the delete lookup viaLeg', () => {
+    const leg = legOf('shopify_draft_orders');
+    assert.ok(leg, 'the draft-orders read projects');
+    assert.equal(leg.mode, 'ask');
+    assert.equal(leg.safety, 'auto');                        // trusted curated read
+    assert.equal(leg.tool.method, 'GET');
+    assert.equal(leg.tool.gql, false);
+    assert.equal(leg.tool.persistedOp, 'DraftOrderList');
+    assert.match(String(leg.tool.endpoint), /\/api\/operations\/\{op_sha\}\/DraftOrderList\/shopify\/\{handle\}/);
+    assert.match(String(leg.tool.endpoint), /operationName=DraftOrderList/);
+    assert.match(String(leg.tool.endpoint), /%22query%22%3A%22\{query\}%22/, 'the one fill slot rides percent-encoded');
+    assert.equal(leg.tool.listUrl, '/store/{handle}/draft_orders');
+    assert.deepEqual(leg.tool.displayId, ['name']);
+  });
+
+  it('the reversibility fix lives on the NEW delete leg — create-draft is NOT re-gated (regression fence, Scout B)', () => {
+    const create = legOf('shopify_create_order');
+    assert.equal(create.tool.reversible, true);
+    assert.notEqual(create.safety, 'gated');
+    assert.notEqual(gateActionForLeg(create).decision, 'refused');   // create still runs unattended in a reviewed pipeline
+  });
+
+  it('create-draft\'s does now NAMES its reversal (make reversible:true honest — prose only)', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_create_order');
+    assert.match(rec.does, /shopify_delete_order|delete-draft/i);
+  });
+
+  it('the banned money/inventory id ban still holds — neither new id trips it (draft delete is not a money class)', () => {
+    for (const id of ['shopify_delete_order', 'shopify_draft_orders']) {
+      assert.equal(/refund|return|draftorder|complete_order/i.test(id), false, `${id} must not read as a banned class id`);
+    }
+  });
+
+  it('persistedOpsForHost banks the two new ops; opCaptureHint coaches each with a by-hand action', () => {
+    const ops = persistedOpsForHost('admin.shopify.com').map((w) => w.op);
+    assert.ok(ops.includes('DeleteDraftOrder'));
+    assert.ok(ops.includes('DraftOrderList'));
+    assert.match(opCaptureHint('DeleteDraftOrder'), /delete/i);
+    assert.match(opCaptureHint('DraftOrderList'), /draft/i);
   });
 });

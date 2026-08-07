@@ -667,7 +667,7 @@ export const CONNECTOR_RECIPES = [
   // PERCENTAGE `applied_discount` + a zero `shipping_line`. Nested structures ride as WHOLE object params (sole
   // placeholders → native value; unfilled → dropped), so an ordinary paid draft omits them cleanly.
   { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, gql: false, persistedOp: 'DraftOrderCreate',
-    does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
+    does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; reversible via the delete-draft action (shopify_delete_order, human-confirmed) if it should not stand; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
     // v2.74.2067 RC-1/RC-2 — LOOKUP resolution (Core/lookupRun.js): users type a customer EMAIL and a product
     // NAME, never gids. IN-PLACE: an email in `customer_gid` resolves via shopify_customer_by_email; a name/sku in
     // each line_items[].variantId resolves via by-SKU-then-search. A value already a `gid://` passes through. The
@@ -708,6 +708,59 @@ export const CONNECTOR_RECIPES = [
       { name: 'shipping_line', type: 'object', required: false,
         hint: 'object {title, price} — free shipping is {title:"Free shipping", price:"0.00"}' },
     ] },
+  // v2.74.2069 — the DRAFT-ORDERS SEARCH read (persisted op DraftOrderList, already banked live on
+  // admin.shopify.com). Two jobs: (a) a standalone "show my draft orders" read, and (b) the viaLeg the DELETE leg's
+  // `lookup` resolves a draft NUMBER/name (#D1023) → the draft's internal gid through — so a user never types a gid
+  // to delete. Same persisted-op GET transport as OrderListData/Search/Timeline: GET, {op_sha} from the per-origin
+  // op bank, variables pre-encoded in the query string with {query} the one fill slot. Rows:
+  // data.draftOrders.edges[].node { id: gid://shopify/DraftOrder/<n>, name: '#D1023',
+  // status: OPEN|INVOICE_SENT|COMPLETED, totalPrice, customer{email} } — `name` is what the delete lookup matches on.
+  // ⚠ LIVE-UNVERIFIED (same class as the create/timeline envelopes at connectorRecipes.js:693): the DraftOrderList
+  // variables scaffold below is HAR-era hand-authoring modeled on OrderListData's sibling shape — the pinned document
+  // may use plain `first`/`query` instead of `draftOrdersFirst`, and whether its `query` field-matches on a draft
+  // NAME is unproven. Both fail LOUDLY (server userErrors / empty edges), never silently; first live run is the proof owed.
+  { ...SH, id: 'shopify_draft_orders', name: 'Search Shopify draft orders', method: 'GET', gql: false, persistedOp: 'DraftOrderList',
+    listUrl: '/store/{handle}/draft_orders', displayId: ['name'], joinKey: ['customer.email'], coverage: 'selection',
+    does: 'search DRAFT orders — open/pending drafts not yet completed: number (#D…), status, customer, total; blank = the most recent drafts — riding your admin login. First use may need the Drafts list opened by hand once to bank the operation',
+    endpoint: '/api/operations/{op_sha}/DraftOrderList/shopify/{handle}?operationName=DraftOrderList&variables=%7B%22draftOrdersFirst%22%3A50%2C%22draftOrdersLast%22%3Anull%2C%22before%22%3Anull%2C%22after%22%3Anull%2C%22query%22%3A%22{query}%22%2C%22sortKey%22%3A%22UPDATED_AT%22%2C%22reverse%22%3Atrue%2C%22savedViewId%22%3Anull%7D',
+    params: [{ name: 'query', type: 'string', required: false, hint: 'Shopify draft search syntax (status:open) or a draft number like #D1023, or blank for the most recent drafts' }] },
+  // v2.74.2069 — DELETE a Shopify DRAFT order (persisted op DeleteDraftOrder, already banked live). The
+  // DESTRUCTIVE-write template (delete_ticket's safety axes: write:true, reversible:false, destructive:true) on the
+  // Shopify persisted-op TRANSPORT (create's POST to the op bank, NOT delete_ticket's REST method:'DELETE' — the
+  // actual call is a GraphQL mutation over the persisted-op POST; an HTTP DELETE to that URL never reaches the BFF).
+  // reversible:false + destructive:true ⇒ hintToSafety → safety:'gated' and pipelineGate.gateActionForLeg REFUSES it
+  // unattended ⇒ a human confirms EVERY delete, never auto (§10.1 adopt-don't-undo; a deleted draft cannot be
+  // restored, so reversible:false is the honest axis). This IS the concrete reversal shopify_create_order's `does`
+  // now names — a SEPARATE, human-confirmed action, never an engine auto-undo (no rollback runner exists in Core).
+  //
+  // draft_gid carries a `lookup` (viaLeg shopify_draft_orders) so a draft NUMBER/name resolves to the internal gid —
+  // users never type gids. CRUCIAL: draft_gid carries NO `gid:` coercion marker (unlike create's customer_gid). On
+  // the chain/map path coerceParams runs BEFORE the lookup, so a `gid:`-marked digit-bearing phrase ("D1023") would
+  // be pre-minted into gid://shopify/DraftOrder/1023 — the human D-NUMBER, not the internal id — and _looksResolvedGid
+  // would then SKIP the lookup and this IRREVERSIBLE delete would target the WRONG draft. Omitting `gid:` closes that
+  // on both paths: the lookup alone mints the real gid, an already-gid value passes through, a bare number fails
+  // exact-match and safely ASKS. (create's customer_gid has the same latent chain-path exposure, but it is a
+  // REVERSIBLE write and a fabricated Customer gid 404s rather than hitting a different real customer — out of scope.)
+  //
+  // ⚠ LIVE-UNVERIFIED body envelope (same class as DraftOrderCreate at connectorRecipes.js:693): variables:{input:{id}}
+  // is inferred from the admin's own EditCustomer op (input:{id}) + the public draftOrderDelete(DraftOrderDeleteInput{id}).
+  // The internal DeleteDraftOrder op MAY instead take a bare variables:{id}; first live run is the proof owed — it
+  // fails LOUD (server userErrors), never silently.
+  { ...SH, id: 'shopify_delete_order', name: 'Delete a Shopify draft order', write: true, reversible: false, outward: false, destructive: true, gql: false, persistedOp: 'DeleteDraftOrder',
+    does: 'permanently DELETE a Shopify DRAFT order by its number (#D1023) — IRREVERSIBLE, this cannot be undone; only unsent/open DRAFTS are deleted this way, never a completed or paid order — riding your admin login. A human confirms every delete',
+    // v2.74.2069 — resolve a draft number/name → the draft's internal gid via the draft-orders search leg; a value
+    // already a gid:// passes through, ambiguous/none/completed ASK (never guess on a destructive delete).
+    lookup: {
+      draft_gid: { viaLeg: 'shopify_draft_orders', valueParam: 'query', rows: 'data.draftOrders.edges[].node',
+        match: ['name'], id: 'id', label: ['name', 'status'], exact: true,
+        // belt-and-suspenders: never delete a COMPLETED draft (it corresponds to a real placed order). Only ever
+        // yields an ASK, never a wrong delete; a harmless no-op if DraftOrderList omits completed drafts.
+        require: [{ field: 'status', op: '!=', value: 'COMPLETED', fail: 'completed' }] },
+    },
+    endpoint: '/api/operations/{op_sha}/DeleteDraftOrder/shopify/{handle}',
+    body: { operationName: 'DeleteDraftOrder', variables: { input: { id: '{draft_gid}' } } },
+    params: [{ name: 'draft_gid', type: 'string', required: true,
+      hint: 'the draft order number (e.g. #D1023 or D1023) — resolved to the exact draft for you; a gid:// is also accepted' }] },
   // ── VendorSuite (CX-9) — the curated cookie-ride READS. {divisionId}/{status}/{taskId} are explicit params for now;
   // the convivial auto-fill of {divisionId} from VendorSuite/State (access.DefaultDivision.Id) is the next slice.
   // FL-1c/1d (v2.74.1432) — `itemUrl`/`listUrl`: VendorSuite is a hash-route SPA with ONLY 4 sections (#warranty /
@@ -1153,6 +1206,9 @@ const _OP_CAPTURE_HINTS = {
   Timeline: 'open any order page and scroll down to its timeline once — that banks the timeline operation',
   // v2.74.1928 — the orders index itself (the breadth read behind any across-the-orders question).
   OrderListData: 'open the Orders list once (Orders in the left nav) — that banks the order-index operation',
+  // v2.74.2069 — the draft delete WRITE + the drafts-index READ (the delete lookup's viaLeg).
+  DeleteDraftOrder: 'delete a draft order by hand (Orders → Drafts → open a test draft → More actions → Delete draft) — that banks the delete operation',
+  DraftOrderList: 'open the Drafts list once (Orders → Drafts in the left nav) — that banks the draft-index operation',
 };
 /** The by-hand capture instruction for an op. PURE (a safe default for unmapped ops). */
 export function opCaptureHint(op) {

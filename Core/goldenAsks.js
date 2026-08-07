@@ -100,6 +100,10 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'create a shopify profile for the homeowner', expect: { legId: 'shopify_create_customer' } },   // trace-adjacent (the find-or-create flow)
   { ask: "update the customer's phone number in shopify", expect: { legId: 'shopify_update_customer' } },
   { ask: 'create a draft order for this customer with that valve', expect: { legId: 'shopify_create_order' } },
+  // v2.74.2069 — the draft-orders search read (the delete lookup viaLeg) + the destructive draft delete (gated,
+  // like delete_ticket): the reversal for create-draft, one confirmed action at a time.
+  { ask: 'show me the open draft orders', expect: { legId: 'shopify_draft_orders' }, mintedAt: 'v2.74.2069' },
+  { ask: 'delete draft order #D1023', expect: { legId: 'shopify_delete_order' }, mustBeGated: true, mintedAt: 'v2.74.2069' },
   // ── VendorSuite (trace-verbatim where live asks exist) ────────────────────────────────────────────────────
   { ask: 'show my vendorsuite state', expect: { legId: 'vs_state' } },
   { ask: 'what version is vendorsuite on', expect: { legId: 'vs_versions' } },
