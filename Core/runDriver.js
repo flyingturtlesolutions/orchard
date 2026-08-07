@@ -56,7 +56,7 @@ export function normalizeReporter(reporter) {
  * @param {object}   [opts.state=null]    carried chain state (readouts, lastValue, …)
  * @returns {Promise<{verdict:string, ranSteps:number, failedSteps:number, parkedAt:number, parkedRunId:string, state:object}>}
  */
-export async function runWorkflow({ clauses, reporter, runStep, startIndex = 0, state = null } = {}) {
+export async function runWorkflow({ clauses, reporter, runStep, startIndex = 0, state = null, shouldPause = null } = {}) {
   const rep = normalizeReporter(reporter);
   const list = Array.isArray(clauses) ? clauses : [];
   const total = list.length;
@@ -69,6 +69,19 @@ export async function runWorkflow({ clauses, reporter, runStep, startIndex = 0, 
   let firstFailure = null;   // §6.5 — the FIRST failing step is the audit story (the chain may continue past soft fails)
 
   for (let i = Math.max(0, Number(startIndex) || 0); i < total; i++) {
+    // WFP-6 (DESIGN_workflows.md §12.3) — the run-level PAUSE poll, clause boundaries ONLY (a row-level pause
+    // duplicates writes on resume — the park record has no row cursor). The caller binds it (SW: the
+    // cadence:pause:<runId> key; a throwing/absent poll never pauses). Exits through the PARK shape so the
+    // existing resume machinery (stepIndex + chainState, kind-aware reporter) carries it; `pauseCause`
+    // distinguishes a user's ⏸ from a write-gate park so _fire stamps kind/copy honestly.
+    if (typeof shouldPause === 'function') {
+      let _p = false;
+      try { _p = !!(await shouldPause()); } catch { _p = false; }
+      if (_p) {
+        rep.done('parked');
+        return { ..._result('parked', ran, failed, i, '', st), pauseCause: 'paused' };
+      }
+    }
     const clause = list[i] || {};
     rep.step(i, total, _str(clause.text));
 

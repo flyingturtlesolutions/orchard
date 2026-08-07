@@ -31,6 +31,7 @@ const TICK_ALARM = 'cadence:tick';
 const TICK_MINUTES = 5;                    // honor the 5-min cadence floor (Core/trigger clamps below this)
 const RUN_PREFIX = 'cadence:run:';         // per-workflow in-flight marker { runId, startedAt } — survives SW death
 const PARK_PREFIX = 'cadence:parked:';     // a parked run's minimal resume marker (CD-7 promotes this to a wfp_ case)
+const PAUSE_PREFIX = 'cadence:pause:';     // WFP-6 — the headless ⏸ latch {at}, runId-scoped OWN key (the heartbeat re-stamp would erase a marker field); cleared with the run
 // v2.74.2047 — how often an EACH sweep re-stamps its own run marker (see _runStepInner's onEach): the 5-min
 // in-flight window (Core/fleetSchedule.priorRunVerdict) is a hard ceiling on run DURATION, and a 121-invoke sweep
 // can cross it cold (measured 6.8–11.9s per cold ride) — after which the next 5-min tick judges the marker DIED
@@ -297,6 +298,10 @@ async function _reportDeferred(wf, appId, trig, now) {
 async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', reporter = null, startIndex = 0, state = null, resumedFrom = '' } = {}) {
   const runId = mintRunId({ now, rand: (now % 997) / 997 });   // deterministic-ish entropy (Math.random is banned in Core; fine here)
   await _stampRunMarker(wf.id, runId, now);
+  // WFP-6 (§12.9) — the RUN-STATE broadcast: the panel card renders a running state for cadence fires (the ⏸'s
+  // surface) from this. Payload contract (written here, the arc's rung 1): {workflowId, runId, state, name}.
+  const _runState = (stateWord) => { try { chrome.runtime.sendMessage({ type: 'WORKFLOW_RUN_STATE', workflowId: wf.id, runId, state: stateWord, name: String(wf.name || wf.ask || wf.id).slice(0, 120) }, () => { void chrome.runtime.lastError; }); } catch { /* closed panel */ } };
+  _runState('running');
   const rep = reporter || makeAccumulatorReporter();
   let out = { verdict: 'failed' };
   // v2.74.2048 — bank the run's OWN lines as the durable Trace. v2030 gave PANEL runs this ({t,m} on the
@@ -324,6 +329,9 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
         startIndex: Math.max(0, Number(startIndex) || 0),
         state,
         runStep: (clause, cctx) => _runStep(clause, { ...cctx, runId, wf, bank: bankLine }),
+        // WFP-6 — the SW pause binding: an own-key latch (never a marker field — the heartbeat re-stamp
+        // overwrites the marker wholesale), runId-scoped so a stale ⏸ can never latch a newer run.
+        shouldPause: async () => { try { const o = await chrome.storage.local.get(PAUSE_PREFIX + runId); return !!o[PAUSE_PREFIX + runId]; } catch { return false; } },
       });
     }
   } catch (e) {
@@ -331,9 +339,13 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
     out = { verdict: 'failed' };
   }
   await _clearRunMarker(wf.id);
+  try { await chrome.storage.local.remove(PAUSE_PREFIX + runId); } catch { /* */ }   // WFP-6 — the latch dies with the run (honored or outran)
+  _runState('ended');
+  const _pausedRun = out.pauseCause === 'paused';   // WFP-6 — the user's ⏸, never a write-gate park
   try {
     const v = out.verdict === 'parked' ? 'parked' : out.verdict;
-    _cadencePresence(v === 'parked' || v === 'failed' ? v : 'done', { name: wf.name || wf.ask || wf.id, verdict: v });
+    // §12.5 — a pause is the user's own act: NO presence pulse, no OS notification, no "needs approval" badge.
+    if (!_pausedRun) _cadencePresence(v === 'parked' || v === 'failed' ? v : 'done', { name: wf.name || wf.ask || wf.id, verdict: v });
   } catch { /* */ }
 
   const snap = rep.snapshot();
@@ -350,7 +362,7 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
       ...(traceBank.length ? { trace: traceBank } : {}),   // v2.74.2048 — the durable Trace (parity with panel ▶)
       ...(out.failedStep ? { failedStep: out.failedStep } : {}),
       ...(resumedFrom ? { resumedFrom } : {}),
-      ...(verdict === 'parked' ? { parkedRunId, kind: 'gate', why: 'a write step needs approval' } : {}),   // WFP-4 — SW parks are gate-minted; the panel's pause parks stamp kind:'paused'
+      ...(verdict === 'parked' ? { parkedRunId, kind: _pausedRun ? 'paused' : 'gate', why: _pausedRun ? `paused by you at step ${(Number(out.parkedAt) || 0) + 1}` : 'a write step needs approval' } : {}),   // WFP-4/WFP-6 — the park's CAUSE picks the story
       ...(coalesced > 1 ? { coalesced } : {}),
     });
   } catch { /* history must never block the clock */ }
@@ -364,8 +376,8 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
     try {
       await chrome.storage.local.set({ [PARK_PREFIX + parkedRunId]: {
         runId: parkedRunId, workflowId: wf.id, appId, name: wf.name || wf.ask || wf.id,
-        kind: 'gate', tier: 'sw',   // WFP-4 (§12.2) — cause + executor; readers default an absent kind to 'gate'
-        stepIndex: out.parkedAt, at: now, preview: (snap.preview && typeof snap.preview === 'object') ? snap.preview : null,
+        kind: _pausedRun ? 'paused' : 'gate', tier: 'sw',   // WFP-4/6 (§12.2) — cause + executor; readers default an absent kind to 'gate'
+        stepIndex: out.parkedAt, at: now, preview: _pausedRun ? null : ((snap.preview && typeof snap.preview === 'object') ? snap.preview : null),
         // §8 (v1715) — the chainState rides the park record: phase-1 ride steps thread no state yet, but the
         // moment a write's params come from a prior step's read, losing this would resume the write blind.
         chainState: (out.state && typeof out.state === 'object' && Object.keys(out.state).length) ? out.state : null,
@@ -375,8 +387,10 @@ async function _fire(appId, wf, trig, { now, coalesced = 1, trigger = 'auto', re
     // (§8: "ran and is waiting on you" is the most important thing to say). Fire-and-forget; a closed panel misses
     // it and finds the run in the manage-view parked banner instead. Only an AUTO fire nudges (a manual/⚡ run is
     // already on-screen for the user who started it).
-    if (auto) { try { chrome.runtime.sendMessage({ type: 'WORKFLOW_PARKED_CHANGED', name: wf.name || wf.ask || wf.id }, () => { void chrome.runtime.lastError; }); } catch { /* */ } }
-    Logger.info('cadence', `CADENCE ▸ "${wf.name || wf.id}" PARKED at step ${out.parkedAt + 1} — a write needs a human (run ${parkedRunId})`);
+    if (auto || _pausedRun) { try { chrome.runtime.sendMessage({ type: 'WORKFLOW_PARKED_CHANGED', name: wf.name || wf.ask || wf.id }, () => { void chrome.runtime.lastError; }); } catch { /* */ } }   // WFP-6 — a pause refreshes the open panel too (rows/dots), it just never NOTIFIES
+    Logger.info('cadence', _pausedRun
+      ? `STOP ▸ workflow "${String(wf.name || wf.id).slice(0, 40)}" paused at step ${out.parkedAt + 1} (run ${parkedRunId})`
+      : `CADENCE ▸ "${wf.name || wf.id}" PARKED at step ${out.parkedAt + 1} — a write needs a human (run ${parkedRunId})`);
     if (auto) await _advance(appId, wf, now);
   } else if (verdict === 'failed') {
     // v2.74.2043 — pass the FIRST failing step's error so an auth/offline failure doesn't burn a disarm strike.
@@ -720,7 +734,11 @@ export function createCadenceHandlers() {
             return;
           }
           const { wf, appId } = await _resolveWorkflow(marker.workflowId);
-          if (!wf) { sendResponse({ success: false, error: 'workflow-not-found' }); await _clearParked(runId); return; }
+          if (!wf) {
+            // verify-fix LOW — a resume whose workflow vanished must not evaporate: one history row says so.
+            try { await appendRunEntry(marker.workflowId, { at: Date.now(), ranAt: Date.now(), trigger: 'manual', verdict: 'failed', why: 'resume failed — the workflow no longer exists' }); } catch { /* */ }
+            sendResponse({ success: false, error: 'workflow-not-found' }); await _clearParked(runId); return;
+          }
           await _clearParked(runId);   // this park is consumed; a re-park mints a fresh marker
           // WFP-4 (§12.5) — the resume REPORTER is picked by the park's CAUSE, and a kind-less legacy record is
           // 'gate': makeResumeReporter's first-gate-true IS the human's approval of the write they were shown; a
@@ -792,6 +810,37 @@ export function createCadenceHandlers() {
           Logger.info('cadence', `STOP ▸ workflow "${String(name || workflowId).slice(0, 40)}" paused at step ${_k + 1}${Number(total) > 0 ? `/${Number(total)}` : ''} (run ${runId})`);
           sendResponse({ success: true, runId });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'park-failed' }); }
+      })();
+      return true;
+    },
+    // WFG-1e — is a HEADLESS run live for this workflow? The panel's edit guard asks (its broadcast-fed map
+    // misses fires that started before the panel opened). payload: { workflowId }.
+    WORKFLOW_RUN_LIVE: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const workflowId = payload && payload.workflowId;
+          if (!workflowId) { sendResponse({ success: false, error: 'workflowId required' }); return; }
+          const mk = await _readRunMarker(workflowId);
+          sendResponse({ success: true, live: !!(mk && mk.runId && priorRunVerdict(mk, Date.now()).inFlight), runId: (mk && mk.runId) || '' });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'live-check-failed' }); }
+      })();
+      return true;
+    },
+    // WFP-6 (§12.9) — PAUSE a HEADLESS run: latch cadence:pause:<runId> against the LIVE run marker only
+    // (runId-scoped — a stale ⏸ can never latch a newer run; no live run → found:false, "already finished").
+    // The driver's shouldPause poll honors it at the next clause boundary; the park exit stamps kind:'paused'.
+    WORKFLOW_PAUSE_RUN: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const { workflowId, runId } = (payload && typeof payload === 'object') ? payload : {};
+          if (!workflowId) { sendResponse({ success: false, error: 'workflowId required' }); return; }
+          const mk = await _readRunMarker(workflowId);
+          const live = mk && mk.runId && priorRunVerdict(mk, Date.now()).inFlight;
+          if (!live || (runId && mk.runId !== runId)) { sendResponse({ success: true, found: false }); return; }
+          await chrome.storage.local.set({ [PAUSE_PREFIX + mk.runId]: { at: Date.now() } });
+          Logger.info('cadence', `STOP ▸ pause requested for workflow ${String(workflowId).slice(0, 40)} (run ${mk.runId})`);
+          sendResponse({ success: true, found: true, runId: mk.runId });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'pause-failed' }); }
       })();
       return true;
     },

@@ -22,6 +22,8 @@ import { heartbeatTargets } from '../../Core/connectionPresence.js';
 import { armable, partitionRecipesByOrigin } from '../../Core/rideRecipe.js';   // v2.74.2052 — the OWN-ORIGIN read door (the vs_state-as-shopify-canary incident)
 import { primaryHost } from '../../Core/groundDedup.js';   // v2.74.2052 — the ground's OWN identity anchors the filter (never the modal-of-records host)
 import { invokeRideRecipe } from '../../Core/rideStep.js';   // DESIGN_cadence.md §12 (v1715) — share the RUNNER: one resolve→plan→invoke for the canary AND the workflow step
+import { planSessionGovernorTick } from '../../Core/sessionGovernor.js';   // SGV-0 — the governor's PURE planner (inert soak; BUILD_ARC rung 4)
+import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   // SGV-0 — due-soon demand source for the snapshot
 
 const TICK_ALARM = 'vitals:tick';
 const CONFIRM_PREFIX = 'vitals:confirm:';
@@ -259,7 +261,9 @@ export function initVitals(ctx) {
 
 async function _tick() {
   if (!_ctx) return;
-  const s = await _settings(); if (!s.enabled) return;
+  const s = await _settings();
+  // verify-fix MED (O1) — the heartbeat NEVER dies quietly: vitals-disabled still says so (dead ≠ quiet ≠ off).
+  if (!s.enabled) { try { Logger.info('vitals', 'SGV ▸ tick demands=0 planned=0 deferred=0 (vitals disabled)'); } catch { /* */ } return; }
   await _presenceSweep(s);
   // v2.74.1760 — after presence: pre-warm sniffed CSRF on open Shopify-class tabs so the first ask isn't cold-403.
   try { await _ctx.invokeSgHandler('CSRF_PREWARM', {}); } catch { /* best-effort — never block the tick */ }
@@ -269,6 +273,75 @@ async function _tick() {
   if (Date.now() - last >= s.dailyWindowH * 3600e3) {
     try { await chrome.storage.local.set({ [LAST_DAILY_KEY]: Date.now() }); } catch { /* */ }   // stamp at START (double-run guard across SW restarts)
     await _dailySweep(s);
+  }
+  await _sgvInertTick();   // SGV-0 — the governor's INERT soak: plan + log, never execute (BUILD_ARC rung 4)
+}
+
+// ── SGV-0 (DESIGN_session_governor.md v1.14 §11.1) — the planner runs INERT: every tick snapshots, plans, and
+// LOGS (`SGV ▸` heartbeat + plan lines) — nothing executes. The soak's plans are graded against real traffic
+// BEFORE the governor gains hands (SGV-1 is gated on that grade). Plus the O2 baseline capture: the §10 pass
+// bar's "presence fails ≤50% of baseline" is ungradeable without a stored pre-SGV-1 baseline — the vitals
+// tally's rolling {ok,auth,miss,other} book is today's presence-failure proxy, snapshotted per UTC day.
+const SGV_BASELINE_KEY = 'sgv:baseline';
+async function _sgvInertTick() {
+  try {
+    const now = Date.now();
+    const registry = await _registry();
+    const origins = {};
+    for (const [o, e] of Object.entries(registry || {})) {
+      if (!e || typeof e !== 'object') continue;
+      origins[o] = { status: (typeof e.status === 'string') ? e.status : 'unknown' };
+    }
+    // demand sources at SGV-0: due-soon workflows only (blocked/activeAsks arrive with SGV-1's doors and the
+    // panel PING — absent here, honestly zero, and the heartbeat says so every tick).
+    const due = [];
+    try {
+      const banks = await listAllWorkflows();
+      for (const g of (banks || [])) {
+        for (const w of (g && g.items) || []) {
+          const t = w && w.trigger;
+          if (!(t && t.enabled && Number(t.nextDue) > 0)) continue;
+          // verify-fix MED — a demand NAMES ITS ORIGINS (§2's derivation, via.host): with origins:[] the
+          // planner could never demand anything and the soak graded liveness only.
+          const _os = new Set();
+          for (const st of (Array.isArray(w.steps) ? w.steps : [])) { const h = st && st.via && st.via.host; if (h) _os.add(String(h)); }
+          due.push({ workflowId: w.id, nextDue: Number(t.nextDue), origins: [..._os] });
+        }
+      }
+    } catch { /* due demand degrades to none */ }
+    const plan = planSessionGovernorTick({ now, origins, due, userActiveOn: false, blocked: [], activeAsks: [] });
+    // O1 — the heartbeat, EMPTY PLANS INCLUDED: a dead governor and a quiet one must never look identical.
+    Logger.info('vitals', `SGV ▸ tick demands=${plan.demands} planned=${plan.planned} deferred=${plan.deferred}`);
+    for (const h of plan.heals) Logger.info('vitals', `SGV ▸ heal plan verb=${h.verb} origin=${h.origin} incident=${h.incidentId} (inert — SGV-0 soak)`);
+    for (const o of plan.budgetExhausted) Logger.info('vitals', `SGV ▸ budget-exhausted origin=${o} (inert)`);
+    // O2 — the baseline book: one row per UTC day from the tally's auth/total counts, capped at 14 days.
+    try {
+      // verify-fix HIGH (O2) — the tally book is NESTED {groundId: {dayKey: {ok,auth,miss,other}}}; the flat
+      // read summed undefineds and the baseline filled with structural zeros — a false passing-zero, the exact
+      // failure O2 exists to prevent. Walk both levels, keyed by the tally's OWN (local) day keys.
+      const tallyRaw = (await chrome.storage.local.get(TALLY_KEY))?.[TALLY_KEY] || {};
+      const byDay = {};
+      for (const ground of Object.values(tallyRaw)) {
+        if (!ground || typeof ground !== 'object') continue;
+        for (const [dk, v] of Object.entries(ground)) {
+          if (!v || typeof v !== 'object') continue;
+          const d = byDay[dk] = byDay[dk] || { auth: 0, total: 0 };
+          d.auth += Number(v.auth) || 0;
+          d.total += (Number(v.ok) || 0) + (Number(v.auth) || 0) + (Number(v.miss) || 0) + (Number(v.other) || 0);
+        }
+      }
+      const book = (await chrome.storage.local.get(SGV_BASELINE_KEY))?.[SGV_BASELINE_KEY] || { startedAt: now, days: [] };
+      let days = Array.isArray(book.days) ? book.days : [];
+      for (const [dk, agg] of Object.entries(byDay)) {
+        const idx = days.findIndex((d) => d && d.day === dk);
+        if (idx >= 0) days[idx] = { day: dk, ...agg };
+        else days.push({ day: dk, ...agg });
+      }
+      days = days.sort((a, b) => String(a.day).localeCompare(String(b.day))).slice(-14);
+      await chrome.storage.local.set({ [SGV_BASELINE_KEY]: { startedAt: book.startedAt || now, days } });
+    } catch { /* the baseline book is best-effort; the heartbeat still proves liveness */ }
+  } catch (e) {
+    try { Logger.info('vitals', `SGV ▸ tick failed: ${(e && e.message) || e}`); } catch { /* */ }
   }
 }
 

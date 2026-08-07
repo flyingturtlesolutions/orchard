@@ -47,12 +47,35 @@ userActiveOn: `SGV_USER_TOUCH` 5min primary; lastAccessed ≤60s secondary.
 
 ## 3. Contested + pass-through
 
-`DRIVE_STALL_STEPS = 3`. Contested / give_up / LLM pack (≤1/tick, 4s → mechanical) as prior.  
+`DRIVE_STALL_STEPS = 3`. *(Expansion pass, rung 3 — the two "as prior" compressions below are now INLINE; this
+section is self-sufficient.)*
+
+**Contested:** an origin is CONTESTED when two consecutive probes disagree with each other or with the registry
+(`fresh`↔`signed-out` flapping, or probe says fresh while an invoke just failed presence). A contested origin is
+never healed on the flapping signal alone — it gets ONE more probe next tick; still contested (`contested ≥ 2`
+in the lease) → the heal ladder may not proceed past `probe`/`warm`, and the incident escalates to §8 staging
+only with a determinate status.
+
+**give_up:** a heal chain gives up when its `verifyFailStreak ≥ 3`, its budget class is exhausted (§6), or
+`escalate_secret` verified nothing within its lease deadline — give_up writes `cooldownUntil = now + 6h` on the
+lease (quiet hours pause the clock), emits `SGV ▸ escalate … give_up`, and the incident stays OPEN (a blocked
+run stays blocked; §10's >24h-unacked arm is the backstop that surfaces a wedged give_up).
+
+**LLM pack:** ≤1 call per tick across ALL origins; the call carries `{origin, allowedVerbs, pack≤2KB}` and must
+answer within 4s or the tick proceeds MECHANICALLY (the deterministic ladder below) — the model advises verb
+choice, it never gates the tick.  
 **Pack fencing (R2):** the pack is page-derived → FENCED DATA (`DESIGN_injection_boundary.md`) — a verb outside
 `allowedVerbs`, or ANY pack-derived selector/URL/param, is discarded; drive micro-ops are UrlClass-TEMPLATE-driven,
 never page-text-driven.  
 UrlClass: `app|login_identify|login_password|sso|mfa|captcha|password_reset|other`.  
-rideSignals; warmAt. Mechanical defaults as prior.
+rideSignals; warmAt.
+
+**Mechanical defaults (the no-LLM ladder, inline):** `signed-out|wrong-account` + workDemand → `probe` first
+(cheapest determinate signal); csrf-capable host whose token is cold → `warm`; `stale` + KA book on → `keepalive`;
+determinate signed-out after a clean probe + focus gate open → `focus`; `login_*` UrlClass on the focused tab →
+`drive_assist`; brokerDead → `relink`; anything needing §7 → `escalate_secret`; no demand → `noop`. One verb per
+origin per tick, cheapest-first, never skipping a rung except on a determinate signal that makes the cheaper rung
+moot (e.g. a fresh probe already in this tick's ledger).
 
 **Pass-through:** never collapse wrong-account → signed-out/not-logged-in on PRESENCE_CHECK state,
 headless `error` + `reportAuthSignal`, or interactive error.
@@ -276,7 +299,7 @@ Pass bar 7d: connect visits 0 **with live denominator (O2)**; presence fails ≤
 
 ## 11. Build order
 
-0. **Expansion pass (R4, prerequisite)** — inline every "as prior"/"as before" in this file before SGV-0: the
+0. **Expansion pass (R4, prerequisite) — DONE (rung 3, 2026-08-07):** §3's contested/give_up/LLM-pack terms and the mechanical-defaults ladder are inline; grep for "as prior" finds only history. The original gate text: inline every "as prior"/"as before" in this file before SGV-0: the
    v1.4 seal records this spec once LOSING machinery to its own compression; an implementing session must not
    need git archaeology across 13 revisions to resolve a contract term.  
 1. SGV-0 — planner tests + no-op fold **+ the §10 observability floor (v1.14): `SGV ▸` registered in

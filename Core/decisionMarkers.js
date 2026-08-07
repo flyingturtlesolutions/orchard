@@ -146,6 +146,8 @@ export const DECISION_MARKERS = [
   { key: 'exercise', src: "EXERCISE ▸" },
   { key: 'heal', src: "HEAL ▸", metric: true, metricPattern: 'HEAL ▸ suspect' },
   { key: 'vitals', src: "VITALS ▸", metric: true, metricPattern: 'VITALS ▸ case opened' },
+  { key: 'sgv', src: "SGV ▸" },   // SGV-0 (DESIGN_session_governor.md §10 O1) — registered BEFORE the governor acts: the inert soak's plans must reach the fleet hour-files, and the decisions-level ship pipe drops unregistered lines
+
   { key: 'dash', src: "DASH ▸" },
   { key: 'map', src: "MAP ▸" },
   { key: 'field-read', src: "FIELD_READ ▸" },

@@ -11,6 +11,7 @@ const _svg = (inner, size = 16) =>
 export const Icons = {
   run:         (s) => _svg('<polygon points="6 4 20 12 6 20 6 4"/>', s),
   pause:       (s) => _svg('<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>', s),   // WFP-3 — the ▶⇄⏸ run-state swap (innerHTML only; data-icon stays "run")
+  edit:        (s) => _svg('<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>', s),   // WFG-1e — ✎ opens the builder pre-loaded
   runHeadless: (s) => _svg('<polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>', s),
   schedule:    (s) => _svg('<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/>', s),
   history:     (s) => _svg('<path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 9 8 9"/><polyline points="12 7 12 12 15 14"/>', s),

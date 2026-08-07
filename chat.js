@@ -7823,7 +7823,10 @@ function _wfAbandon() {
   // workflow floor; a single proven step is honestly lost — a workflow IS ≥2). Drafts never reach the launch
   // page; ＋ Workflow on that desk resumes them. Fire-and-forget — the abandon path must never block a send.
   try {
-    if (w && w.appId && Array.isArray(w.steps) && w.steps.length >= 2) {
+    // WFG-1e — an ABANDONED EDIT keeps the SAVED record untouched (the draft-keep would overwrite it with a
+    // partial, status:'draft' merge — a silent un-proving). The user's unfinished edit is honestly dropped;
+    // resuming an edit is re-✎, not a draft resume.
+    if (w && w.appId && Array.isArray(w.steps) && w.steps.length >= 2 && !w.editing) {
       const payload = buildWorkflowSave({ ask: w.ask || w.name || w.steps[0].text, name: w.name || null, steps: w.steps.map((s) => ({ text: s.text, approved: true, provenance: s.provenance })) }, Date.now());
       if (payload) {
         const draft = { ...payload, status: 'draft', qualifiedAt: 0 };
@@ -7908,20 +7911,29 @@ async function _startWorkflowWizard(opts = {}) {
   // resume a draft: a resumed draft's steps/draftId/name would leave the plan gate rendering the draft's steps as
   // banked and _wfDoSave's if(draftId) branch overwriting that draft with a merge of two unrelated workflows. opts.
   // fresh skips the resume; the blank "build step by step" + empty-intent doors still resume (WW-1b).
+  // WFG-1e A (DESIGN_workflows.md §11) — EDIT an existing workflow: the wizard opens PRE-LOADED from the saved
+  // record (`opts.edit` = the wf). Mechanically the WW-1b draft-resume made explicit — the draftId→updateWorkflow
+  // save branch does the rest, so ✎ teaches the wizard nothing new. The edit seed REPLACES the draft resume
+  // (never merge two sources), and appId pins to the record's OWN bank (editing from another desk must not
+  // re-key it). `editing:true` keeps _wfCancel's discard from deleting the real record.
   let draft = null;
-  if (!opts.fresh) {
+  if (!opts.fresh && !opts.edit) {
     try {
       const wfs = (await _loadWorkflowsMerged()) || [];
       draft = wfs.filter((x) => x && x.status === 'draft' && Array.isArray(x.steps) && x.steps.length >= 2)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
     } catch { /* fresh start */ }
   }
+  if (opts.edit && opts.edit.id) draft = opts.edit;
   if (String(_currentConversationId || '') !== convId) return;   // the user moved on mid-await
   _wfWizard = {
-    convId, appId,
+    convId, appId: (opts.edit && opts.edit.appId) ? String(opts.edit.appId) : appId,
     draftId: draft ? draft.id : null,
-    steps: draft ? draft.steps.map((s) => ({ text: s.text, provenance: { text: s.text, via: (s.via && typeof s.via === 'object') ? s.via : { kind: null, host: null, name: null }, bankedAt: s.bankedAt || 0 } })) : [],
+    editing: !!opts.edit,
+    steps: draft ? (Array.isArray(draft.steps) ? draft.steps : []).map((s) => ({ text: s.text, provenance: { ...s, via: (s.via && typeof s.via === 'object') ? s.via : { kind: null, host: null, name: null }, bankedAt: s.bankedAt || 0 } })) : [],   // verify-fix HIGH — provenance = the WHOLE stored step: dropping clause un-pinned every seeded step (tier-sw demoted, PP-0c reopened)
     name: (draft && draft.name) || '',
+    ask: (draft && draft.ask) || '',   // verify-fix — the umbrella intent survives an ✎ save (recall matching + contentId stability)
+    ...(opts.edit && opts.edit.trigger && opts.edit.trigger.enabled && Number(opts.edit.trigger.minutes) > 0 ? { cadenceMinutes: Number(opts.edit.trigger.minutes) } : {}),
     st: _wfFreshChainState(), tabId: (tab && typeof tab.id === 'number') ? tab.id : null,
     phase: draft ? 'banked' : 'await-step', current: null, runMsg: null,
   };
@@ -8459,7 +8471,8 @@ function _wfCancel() {
   const built = w.steps.length > 0 || (w.current && w.current.text);
   if (built && !confirm('Discard this workflow? The steps you’ve built won’t be saved.')) return;
   // WW-1b (v1620) — cancel MEANS discard: a resumed draft dies with it (else it would resurrect on the next ＋ Workflow).
-  if (w.draftId && w.appId) deleteWorkflow(w.appId, w.draftId).catch(() => {});
+  // WFG-1e — an EDIT's discard means "keep the saved record, drop my changes": deleting here would delete the workflow.
+  if (w.draftId && w.appId && !w.editing) deleteWorkflow(w.appId, w.draftId).catch(() => {});
   _wfExitPage();
 }
 
@@ -10710,7 +10723,18 @@ function _railWorkflowRow(row, parentConv) {
       return new Date(wf.trigger.nextDue).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     })() : '';
   const schedLine = _sched ? ('⏱ ' + _sched + (nextDue ? ' · next ' + nextDue : '')) : 'no schedule — the clock chip arms one';
-  const stepsList = (Array.isArray(wf.subAsks) ? wf.subAsks : []).map((t) => '<li>' + escHtml(String(t)) + '</li>').join('');
+  // WFG-1e slim-B (§11) — proof-preserving edits live IN the pinned detail: per-step ✕ remove / ↑↓ reorder
+  // (hover-revealed, ≥3 steps for remove — a workflow IS ≥2) + a rename row. Structural ops require the rich
+  // steps[] to be index-aligned with subAsks — a legacy mismatch would re-pin steps to the wrong indexes, so
+  // those cards route structural edits to the ✎ builder instead.
+  const _stepsAligned = !Array.isArray(wf.steps) || wf.steps.length === 0 || wf.steps.length === (Array.isArray(wf.subAsks) ? wf.subAsks.length : 0);
+  const stepsList = (Array.isArray(wf.subAsks) ? wf.subAsks : []).map((t, i, arr) => '<li>' + escHtml(String(t))
+    + (_stepsAligned ? '<span class="wf-step-ops" data-row-action>'
+      + (arr.length > 2 ? '<button class="wf-step-op" type="button" data-op="rm" data-i="' + i + '" title="Remove this step" aria-label="Remove step ' + (i + 1) + '">✕</button>' : '')
+      + (i > 0 ? '<button class="wf-step-op" type="button" data-op="up" data-i="' + i + '" title="Move up" aria-label="Move step ' + (i + 1) + ' up">↑</button>' : '')
+      + (i < arr.length - 1 ? '<button class="wf-step-op" type="button" data-op="dn" data-i="' + i + '" title="Move down" aria-label="Move step ' + (i + 1) + ' down">↓</button>' : '')
+      + '</span>' : '')
+    + '</li>').join('');
   item.innerHTML = '<div class="rail-item-title"><span class="rail-glyph leaf" aria-hidden="true">•</span><span class="rail-item-badge wf" aria-label="a workflow under ' + escHtml((parentConv && parentConv.title) || '') + '">workflow</span>' + escHtml(wf.name || wf.ask || '') + '</div>'
     // v2.74.2056 — the at-rest caption: what this workflow DOES, one LLM-generated line (lazy, persisted). The
     // div renders even when empty so the async fill has a home; CSS hides :empty. Escape-first (escHtml here,
@@ -10722,8 +10746,17 @@ function _railWorkflowRow(row, parentConv) {
     // .remove(), never text surgery (a reworded copy string would silently re-break a regex).
     + '<div class="rail-item-meta wf-row-meta">' + escHtml(meta)
     + (_pausedPark ? '<span class="wf-paused-note"> · ⏸ paused by you at step ' + ((Number(_pausedPark.stepIndex) || 0) + 1) + '</span>' : '') + '</div>'
-    + '<div class="wf-row-detail"><div class="wf-row-detail-inner"><ol class="wf-row-steps">' + stepsList + '</ol><div class="wf-row-sched">' + escHtml(schedLine) + '</div></div></div>';
+    + '<div class="wf-row-detail"><div class="wf-row-detail-inner"><ol class="wf-row-steps">' + stepsList + '</ol><div class="wf-row-sched">' + escHtml(schedLine)
+    + ' <button class="wf-step-op wf-rename" type="button" data-op="rename" title="Rename this workflow" aria-label="Rename this workflow">rename</button></div></div></div>';
   _wfEnsureBlurb(item, wf, wfKey);   // v2.74.2056 — lazy caption (no-op once tried or already persisted)
+  // WFP-6 — a card rebuilt WHILE a headless run is live wears the running state from birth (the broadcast only
+  // reaches cards that existed when it fired).
+  if (_wfHeadlessRuns[wf.id]) {
+    queueMicrotask(() => {
+      const b = item.querySelector('.wf-card-act[data-icon="run"]');
+      if (b && !b.dataset.runState) { b.dataset.runState = 'running'; b.innerHTML = (Icons.pause || Icons.x)(16); b.setAttribute('aria-label', 'Pause this background run'); b.title = 'Pause — stops at the next step'; }
+    });
+  }
   const acts = document.createElement('div');
   acts.className = 'rail-item-actions wf-ov-actions';   // schedule picker is in-flow (.wf-sched-pick); this cluster stays the icon chips
   acts.dataset.rowAction = '';
@@ -10744,6 +10777,39 @@ function _railWorkflowRow(row, parentConv) {
       if (btn) { btn.dataset.runState = 'pausing'; btn.disabled = true; btn.setAttribute('aria-label', 'Pausing…'); btn.title = 'Pausing at the next step…'; }
       try { if (item._wfPbRef) item._wfPbRef.tick('pausing at the next step…'); } catch { /* */ }
       try { _orchLog(`STOP ▸ pause requested for "${String(wf.name || wf.ask || '').slice(0, 40)}"`); } catch { /* */ }
+      return;
+    }
+    // WFP-6 (§12.9) — a HEADLESS run is live on this workflow → the button is ITS ⏸: latch via message
+    // (runId-scoped SW-side), 'pausing…' in place; the run-state 'ended' broadcast restores/repaints.
+    if (_wfHeadlessRuns[wf.id]) {
+      if (btn) { btn.dataset.runState = 'pausing'; btn.disabled = true; btn.setAttribute('aria-label', 'Pausing…'); btn.title = 'Pausing at the next step…'; }
+      try { _orchLog(`STOP ▸ pause requested for "${String(wf.name || wf.ask || '').slice(0, 40)}" (headless)`); } catch { /* */ }
+      const pr = await _orchReq('WORKFLOW_PAUSE_RUN', { workflowId: wf.id, runId: _wfHeadlessRuns[wf.id] }).catch(() => null);
+      if (!pr || pr.success === false || pr.found === false) {
+        delete _wfHeadlessRuns[wf.id];   // verify-fix MED — a stale entry (missed 'ended' after SW death) wedged the card in ⏸ forever
+        if (btn) { btn.dataset.runState = ''; btn.disabled = false; btn.innerHTML = Icons.run(16); btn.setAttribute('aria-label', 'Run this workflow'); btn.title = 'Run this workflow'; }
+        try { toast('That run already finished.', 'info'); } catch { /* */ }
+      }
+      return;
+    }
+    // WFP-6 — an SW-tier PAUSED park resumes on the SW executor (fire-and-forget; the run-state broadcast
+    // lights the card) — it must NEVER fall through to a fresh panel run beside its own resume.
+    if (_wfOpenParks[wf.id] && _wfOpenParks[wf.id].kind === 'paused' && _wfOpenParks[wf.id].tier !== 'panel') {
+      const _swPark = _wfOpenParks[wf.id];
+      delete _wfOpenParks[wf.id];
+      delete item.dataset.paused;
+      try { const _n = item.querySelector('.wf-paused-note'); if (_n) _n.remove(); } catch { /* */ }
+      try { const _x = acts.querySelector('.wf-card-act[data-icon="x"]'); if (_x) _x.remove(); } catch { /* */ }
+      try { _orchLog(`STOP ▸ resume requested for "${String(wf.name || wf.ask || '').slice(0, 40)}" (headless, from step ${(Number(_swPark.stepIndex) || 0) + 1})`); } catch { /* */ }
+      // verify-fix LOW — the fire-and-forget resume gets a WITNESS: failure toasts + a forced repaint restores
+      // the paused card from storage (the shed above was optimistic).
+      _orchReq('WORKFLOW_RESUME_PARKED', { runId: _swPark.runId }).then((rr) => {
+        if (!rr || rr.success === false) {
+          try { toast('Couldn’t resume — ' + _errWord(rr && rr.error), 'err'); } catch { /* */ }
+          void _renderActiveRailTab({ force: true });
+        }
+      }).catch(() => null);
+      if (btn) btn.disabled = false;
       return;
     }
     // WFP-5 (§12.4) — an open park gates the ▶: a PAUSED park resumes (same lineage, never a fork); a GATE park
@@ -10996,6 +11062,28 @@ function _railWorkflowRow(row, parentConv) {
     else if (_hasCadence) _schedBtn.dataset.sched = 'paused';
     acts.appendChild(_schedBtn);
   }
+  // WFG-1e (§11) — the edit BUSY guard, three sources (BUILD_ARC rung 2): open park (either kind — a paused
+  // park has no ✋ row) · headless run (broadcast map + the SW marker probe for fires that predate panel-open) ·
+  // live PANEL run (no durable marker exists — the card's own DOM is the source).
+  const _wfEditBusy = async () => {
+    const p = _wfOpenParks[wf.id];
+    if (p) return p.kind === 'paused' ? 'a run is paused — resume or discard it first' : 'a run is waiting on an approval';
+    if (_wfHeadlessRuns[wf.id]) return 'a background run is live';
+    // verify-fix MED — the live-run check is id-scoped GLOBALLY, not item-scoped: both rail tabs render the
+    // same workflow, and a run live on the TWIN card was invisible to the old item.querySelector.
+    try { if (document.querySelector(`.rail-item.is-workflow[data-wf-id="${(window.CSS && CSS.escape) ? CSS.escape(String(wf.id)) : String(wf.id)}"] .wf-card-run.wf-run-live`)) return 'a run is live'; } catch { /* */ }
+    // verify-fix MED — the wizard already holds this workflow (an edit or its draft): save-last-wins would clobber.
+    if (_wfWizard && _wfWizard.draftId === wf.id) return 'it’s open in the builder';
+    try { const r = await _orchReq('WORKFLOW_RUN_LIVE', { workflowId: wf.id }); if (r && r.live) return 'a background run is live'; } catch { /* fail open — the SW check is belt, the panel sources are braces */ }
+    return '';
+  };
+  acts.appendChild(_mkIconBtn('edit', 'Edit this workflow (steps re-prove in the builder)', async (b) => {
+    const why = await _wfEditBusy();
+    if (why) { try { toast('Can’t edit — ' + why + '.', 'info'); } catch { /* */ } return; }
+    try { _orchLog(`WORKFLOW ▸ edit opened for "${String(wf.name || wf.ask || '').slice(0, 40)}"`); } catch { /* */ }
+    _closeRail();
+    void _startWorkflowWizard({ edit: wf });
+  }));
   acts.appendChild(_mkIconBtn('history', 'Run history', () => { _closeRail(); void _renderWorkflowRuns(wf); }));   // the rail (z20) would cover the overlay (z18)
   acts.appendChild(_mkIconBtn('trash', 'Delete this workflow', async () => {
     if (!confirm('Delete “' + (wf.name || wf.ask) + '”? This can’t be undone.')) return;   // §5 — confirmation required
@@ -11020,6 +11108,46 @@ function _railWorkflowRow(row, parentConv) {
   // v1799 — the detail's height slides via the measured-height helpers (the grid close snapped); the same
   // 150ms intent / 300ms grace as the CSS opacity, so the two stay in step. focus in/out mirrors for keyboard.
   const _detail = item.querySelector('.wf-row-detail');
+  // WFG-1e slim-B — the in-place ops delegate: rename / remove-step / reorder, each an honest updateWorkflow
+  // (claim only what the returned list proves), gated by the same busy guard as ✎, truth landed FORCED (a user
+  // action). Structural ops splice subAsks AND steps in parallel — alignment guaranteed by the _stepsAligned
+  // render gate above.
+  if (_detail) _detail.addEventListener('click', async (e) => {
+    const op = e.target.closest('.wf-step-op'); if (!op) return;
+    e.stopPropagation();
+    const why = await _wfEditBusy();
+    if (why) { try { toast('Can’t edit — ' + why + '.', 'info'); } catch { /* */ } return; }
+    const kind = op.dataset.op;
+    let patch = null; let what = '';
+    if (kind === 'rename') {
+      const nm = prompt('Rename workflow', wf.name || '');
+      if (nm == null) return;
+      patch = { name: nm.trim() || null }; what = 'renamed';
+    } else {
+      const i = Number(op.dataset.i);
+      const subAsks = (Array.isArray(wf.subAsks) ? wf.subAsks : []).slice();
+      const steps = Array.isArray(wf.steps) ? wf.steps.slice() : [];
+      if (kind === 'rm') {
+        if (subAsks.length <= 2) return;   // a workflow IS ≥2 steps
+        if (!confirm('Remove step ' + (i + 1) + ' — “' + subAsks[i] + '”?')) return;
+        subAsks.splice(i, 1); if (steps.length > i) steps.splice(i, 1);
+        what = 'removed step ' + (i + 1);
+      } else {
+        const j = kind === 'up' ? i - 1 : i + 1;
+        if (j < 0 || j >= subAsks.length) return;
+        [subAsks[i], subAsks[j]] = [subAsks[j], subAsks[i]];
+        if (steps.length > Math.max(i, j)) [steps[i], steps[j]] = [steps[j], steps[i]];
+        what = 'moved step ' + (i + 1) + (kind === 'up' ? ' up' : ' down');
+      }
+      patch = { subAsks, ...(steps.length ? { steps } : {}) };
+    }
+    let ok = false;
+    try { const list = await updateWorkflow(wf.appId, wf.id, patch); ok = Array.isArray(list) && list.some((x) => x && x.id === wf.id); } catch { /* */ }
+    if (ok) {
+      try { _orchLog(`WORKFLOW ▸ edited in place — ${what} ("${String(wf.name || wf.ask || '').slice(0, 40)}")`); } catch { /* */ }
+      void _renderActiveRailTab({ force: true });
+    } else { try { toast('Couldn’t save the edit — try again.', 'err'); } catch { /* */ } }
+  });
   const _detailPinned = () => _expandedWfDetails.has(wf.id);
   if (_detail) {
     let dOpenT = null, dCloseT = null;
@@ -18536,6 +18664,39 @@ try {
     // render into an invisible drawer was 3 storage scans per broadcast for nothing.
     if ($('rail')?.classList.contains('open')) void _renderActiveRailTab();
     else void _updateTabDots();
+  });
+} catch { /* */ }
+// WFP-6 (§12.9) — a HEADLESS run's state reaches the card: 'running' lights the ▶ as ⏸ (send-a-message
+// binding, vs the panel run's flag binding), 'ended' restores it. In-place (RB-6c) — no full render for a
+// state the card can wear itself; the run's own park/history broadcasts handle the rest.
+const _wfHeadlessRuns = {};   // workflowId → runId while a cadence fire is live
+try {
+  chrome.runtime.onMessage.addListener((m) => {
+    if (!m || m.type !== 'WORKFLOW_RUN_STATE' || !m.workflowId) return;
+    const btn = document.querySelector(`.rail-item.is-workflow[data-wf-id="${(window.CSS && CSS.escape) ? CSS.escape(String(m.workflowId)) : String(m.workflowId)}"] .wf-card-act[data-icon="run"]`);
+    if (m.state === 'running') {
+      _wfHeadlessRuns[m.workflowId] = m.runId || '';
+      if (btn && !btn.dataset.runState) {
+        btn.dataset.runState = 'running';
+        btn.innerHTML = (Icons.pause || Icons.x)(16);
+        btn.setAttribute('aria-label', 'Pause this background run');
+        btn.title = 'Pause — stops at the next step';
+      }
+    } else {
+      delete _wfHeadlessRuns[m.workflowId];
+      // verify-fix MED (§12.4) — a run that ended while the button read "pausing…" ended on the USER'S ⏸: their
+      // action is entitled to a FORCED land (unforced defers on the very pointer that clicked — the button
+      // silently reverting to ▶ read as "the pause failed"). Ordinary endings stay unforced.
+      const _wasPausing = !!(btn && btn.dataset.runState === 'pausing');
+      if (btn && btn.dataset.runState) {
+        btn.dataset.runState = '';
+        btn.disabled = false;
+        btn.innerHTML = Icons.run(16);
+        btn.setAttribute('aria-label', 'Run this workflow');
+        btn.title = 'Run this workflow';
+      }
+      if ($('rail')?.classList.contains('open')) void _renderActiveRailTab(_wasPausing ? { force: true } : {});   // the ended run's truth (paused card / history count) lands
+    }
   });
 } catch { /* */ }
 // v2.74.2035 — SW cadence tick found a due panel-tier workflow; wake Automate so due-on-open can ▶ it.

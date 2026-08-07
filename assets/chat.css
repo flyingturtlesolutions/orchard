@@ -2147,6 +2147,16 @@ textarea {
 .rail-item.is-workflow[data-paused="1"] .wf-card-act[data-icon="x"]:hover,
 .rail-item.is-workflow[data-paused="1"] .wf-card-act[data-icon="x"]:focus-visible { opacity: 1; }
 .rail-item.is-workflow[data-paused="1"] { box-shadow: inset 2px 0 0 var(--c-text-subtle); }   /* the bookmark's quiet left rail */
+/* WFG-1e slim-B — per-step ops (✕/↑/↓) + rename: hover-revealed inside the pinned detail, quiet at rest. */
+.wf-row-steps li .wf-step-ops { opacity: 0; margin-left: 6px; transition: opacity 120ms ease; }
+.wf-row-steps li:hover .wf-step-ops, .wf-row-steps li:focus-within .wf-step-ops { opacity: 1; }
+.wf-step-op {
+  background: none; border: 1px solid transparent; border-radius: var(--r-sm, 4px);
+  color: var(--c-text-subtle); font-size: 11px; line-height: 1; padding: 2px 5px; cursor: pointer;
+}
+.wf-step-op:hover, .wf-step-op:focus-visible { color: var(--c-text); border-color: var(--c-border, currentColor); }
+.wf-rename { opacity: 0.55; margin-left: 8px; }
+.wf-row-sched:hover .wf-rename, .wf-rename:focus-visible { opacity: 1; }
 /* v2.74.2031 — a TIME TRIGGER is also primary chrome: armed/paused schedule chips stay visible (option A).
    Unscheduled cards keep the hover-only clock so the list doesn't fill with inert affordances. */
 .rail-item.is-workflow .wf-card-act[data-icon="schedule"][data-sched="armed"],

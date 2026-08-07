@@ -153,3 +153,41 @@ describe('runDriver — verdict enum', () => {
     for (const v of ['complete', 'partial', 'failed', 'empty', 'parked']) assert.ok(DRIVER_VERDICTS.includes(v));
   });
 });
+
+// ── WFP-6 (DESIGN_workflows.md §12.3/§12.9) — the run-level shouldPause poll ─────────────────────────────────────
+describe('runDriver — shouldPause (WFP-6, headless ⏸)', () => {
+  const step = (log) => async (clause) => { log.push(clause.text); return { ok: true, value: clause.text }; };
+
+  it('pauses at the clause boundary with the PARK shape + pauseCause, before the step runs', async () => {
+    const log = [];
+    let polls = 0;
+    const out = await runWorkflow({
+      clauses: [{ text: 'a' }, { text: 'b' }, { text: 'c' }],
+      runStep: step(log),
+      shouldPause: async () => { polls++; return polls === 2; },   // latch lands after step 1
+    });
+    assert.equal(out.verdict, 'parked');
+    assert.equal(out.pauseCause, 'paused');       // distinguishes the ⏸ from a write-gate park
+    assert.equal(out.parkedAt, 1);                // the step ABOUT to run — the resume bookmark
+    assert.deepEqual(log, ['a'], 'step b never started');
+    assert.equal(out.ranSteps, 1);
+  });
+
+  it('a false/absent/throwing poll never pauses; a gate park carries NO pauseCause', async () => {
+    const log = [];
+    const clean = await runWorkflow({ clauses: [{ text: 'a' }, { text: 'b' }], runStep: step(log), shouldPause: async () => false });
+    assert.equal(clean.verdict, 'complete');
+    const boom = await runWorkflow({ clauses: [{ text: 'c' }], runStep: step(log), shouldPause: async () => { throw new Error('x'); } });
+    assert.equal(boom.verdict, 'complete', 'a throwing poll fails safe to not-paused');
+    const gate = await runWorkflow({ clauses: [{ text: 'w' }], runStep: async () => ({ park: true, parkedRunId: 'r1' }) });
+    assert.equal(gate.verdict, 'parked');
+    assert.equal(gate.pauseCause, undefined, 'a gate park must not read as a user pause');
+  });
+
+  it('a pause at the first boundary parks with zero ran (the empty-discard leg downstream)', async () => {
+    const out = await runWorkflow({ clauses: [{ text: 'a' }, { text: 'b' }], runStep: step([]), shouldPause: async () => true });
+    assert.equal(out.verdict, 'parked');
+    assert.equal(out.parkedAt, 0);
+    assert.equal(out.ranSteps, 0);
+  });
+});
