@@ -11358,6 +11358,7 @@ function _railRecordCard(e, fmtTime) {
 // timeline is one CREATE event, richly shown (kind · label · system · id · recipe · authority); updates/deletes
 // (AU-6) will append here. Reuses openPanelOverlay + the .wf-history-* classes verbatim.
 function _openRecordDrill(e, fmtTime) {
+  try { _closeRail(); } catch { /* */ }   // the rail is in the foreground; close it so the overlay isn't opened behind it (the rail-card→overlay convention, chat.js:11291)
   const ov = openPanelOverlay({
     id: 'record:' + (e.id || e.at || 'x'),
     title: e.label || e.id || 'Record',
