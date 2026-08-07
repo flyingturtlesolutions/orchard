@@ -116,6 +116,9 @@ function recipeParamSchema(params) {
     const slot = {};
     if (p && p.type) slot.type = p.type;
     if (p && Array.isArray(p.enum)) slot.enum = p.enum.slice(0, 50);
+    // v2.74.2056 — the per-param enum→member synonym map rides hop 3 (invariant #3: a field not read here is
+    // dropped on the seeded path); coerceParams' RC-validate branch reads slot.enumSynonyms.
+    if (p && p.enumSynonyms && typeof p.enumSynonyms === 'object') slot.enumSynonyms = { ...p.enumSynonyms };
     if (p && p.gid) slot.gid = String(p.gid);   // CX-7c — the Shopify resource Kind; coerceParams wraps a bare id into a gid
     // v2.74.2055 — hop 3 for the NESTED identifier declaration (invariant #3: a field not read here is silently
     // dropped on the projected leg): coerceParams gid-coerces the declared members inside array elements, and

@@ -766,7 +766,12 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
     params: [
       { name: 'divisionId', type: 'string', required: true, hint: 'the DIVISION — a name ("Atlanta West"), a market number ("210"), or exactly "each" for every accessible division; never a street' },
-      { name: 'status', type: 'string', enum: ['new', 'open', 'fixed', 'closed'], required: true },
+      { name: 'status', type: 'string', enum: ['new', 'open', 'fixed', 'closed'], required: true,
+        // v2.74.2056 — the live "show the ACTIVE tasks" case: 'active' is not a member; map the obvious synonyms
+        // to the site's own words so the resolver fills the right one instead of 4xx-ing on the raw phrase.
+        // 'done' deliberately UNMAPPED — it is ambiguous between fixed (repair done) and closed (task done); an
+        // unmapped word rides as-is (no worse than today), never a confident wrong member (review, v2060).
+        enumSynonyms: { open: ['active', 'in progress', 'in-progress', 'ongoing', 'outstanding'], fixed: ['resolved', 'repaired'], new: ['unassigned'] } },
       // v2.74.1860 — this param OWNS every number a person can name (ticket #4886921 · task number 01 · claim ·
       // job · street address). It matches against the row's whole label set and then drills with the row's real
       // internal id, so it is the ONLY correct door for a user-supplied identifier.
@@ -929,7 +934,10 @@ export const CONNECTOR_RECIPES = [
     // return the wrong id anyway. GetCurrentAgentV2_Query returns exactly the ID UpdateAgent_Mutation wants.
     identityGql: { endpoint: acGqlEndpoint('GetCurrentAgentV2_Query'), body: acGqlBody('GetCurrentAgentV2_Query', {}), idPath: 'data.getAgentV2.ID' },
     body: acGqlBody('UpdateAgent_Mutation', { input: { ID: '{me}', availability: { preference: '{preference}' } } }),
-    params: [{ name: 'preference', type: 'string', enum: ['ALWAYS_OPENED', 'ALWAYS_CLOSED', 'DOING_BACK_OFFICE', 'OTHER'], required: true, hint: 'ALWAYS_OPENED = available; ALWAYS_CLOSED = unavailable / do-not-disturb / busy; DOING_BACK_OFFICE = back-office; OTHER = custom' }] },   // v1470 — the opaque enum needs user-language mapping (live: "set me to unavailable" fell to teach)
+    params: [{ name: 'preference', type: 'string', enum: ['ALWAYS_OPENED', 'ALWAYS_CLOSED', 'DOING_BACK_OFFICE', 'OTHER'], required: true, hint: 'ALWAYS_OPENED = available; ALWAYS_CLOSED = unavailable / do-not-disturb / busy; DOING_BACK_OFFICE = back-office; OTHER = custom',
+      // v2.74.2056 — the opaque-enum incident ("set me to unavailable/away" fell to teach): the hint's own
+      // word→member mapping, made MACHINE-resolvable so the belt fills the member instead of leaning on the model.
+      enumSynonyms: { ALWAYS_OPENED: ['available', 'online', 'open', 'free', 'active'], ALWAYS_CLOSED: ['unavailable', 'busy', 'do not disturb', 'do-not-disturb', 'dnd', 'away', 'offline'], DOING_BACK_OFFICE: ['back office', 'back-office', 'admin', 'backoffice'] } }] },   // v1470 — the opaque enum needs user-language mapping (live: "set me to unavailable" fell to teach)
   { ...AC, id: 'aw_send_sms', name: 'Send an SMS from my line', write: true, reversible: false, destructive: true, outward: true, method: 'POST', gql: true, contentType: 'application/json',
     // v2.74.1459 (safety review) — destructive: an SMS is an OUTWARD-FACING message to a real external person (can't
     // unsend), so it rides the two-step confirm tier (safetyClass 'destructive'), same as Zendesk merge/mark-as-spam —
@@ -1127,6 +1135,55 @@ export function opCaptureHint(op) {
   return _OP_CAPTURE_HINTS[String(op || '')] || 'perform that action once by hand in the admin with this tab open';
 }
 
+// v2.74.2056 — RC-validate slice 1: the resolver family's missing VALIDATE half (docs/DESIGN_resolve.md §10.5),
+// enum-first. Two pure primitives + a coerceParams branch below.
+const _enumNorm = (v) => String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' ');
+/**
+ * Resolve a human WORD to a declared enum MEMBER. PURE. Reuses resolveRideParam's verdict vocabulary:
+ * { value } (a member — exact/case/whitespace/declared-synonym) | { ambiguous, candidates } | { unknown };
+ * never silently picks between two members that both claim a synonym. STRING enums only — a boolean enum
+ * (add_comment `public`) is a classification the model must make, not a word to map. The `synonyms` map is a
+ * per-param catalog declaration `{ member: [word, …] }`; without it, only case/whitespace normalization applies.
+ */
+export function resolveEnumValue(word, enumList, { synonyms = null } = {}) {
+  const list = Array.isArray(enumList) ? enumList.filter((x) => typeof x === 'string') : [];
+  if (!list.length) return { unknown: true };
+  const w = _enumNorm(word);
+  if (!w) return { unknown: true };
+  const exact = list.find((m) => m.toLowerCase() === w);
+  if (exact) return { value: exact };
+  if (synonyms && typeof synonyms === 'object') {
+    const owners = [];
+    for (const m of list) {
+      const s = synonyms[m];
+      const arr = Array.isArray(s) ? s : (s != null ? [s] : []);
+      if (arr.some((x) => _enumNorm(x) === w)) owners.push(m);
+    }
+    if (owners.length === 1) return { value: owners[0] };
+    if (owners.length > 1) return { ambiguous: true, candidates: owners };
+  }
+  return { unknown: true };
+}
+
+/**
+ * The refuse-BEFORE-wire primitive (the slice-2 seam — exported now, wired into the executor pre-flight later):
+ * every non-blank param whose value is NOT a member of its declared STRING enum after coerceParams. PURE. A caller
+ * uses this to refuse a call rather than SPEND it on a value the site will 4xx (the live incident: the model
+ * bailed on an opaque enum, then a false 'success' polluted conversation memory). Empty/absent params and boolean
+ * enums are never violations.
+ */
+export function enumViolations(params, paramSchema) {
+  const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
+  const out = [];
+  for (const [k, v] of Object.entries((params && typeof params === 'object') ? params : {})) {
+    const en = props[k] && props[k].enum;
+    if (!Array.isArray(en) || !en.every((x) => typeof x === 'string')) continue;   // string enums only
+    if (v == null || v === '') continue;
+    if (typeof v === 'string' && !en.includes(v)) out.push({ param: k, value: v, enum: en.slice() });
+  }
+  return out;
+}
+
 // v2.74.2055 — NESTED sanitation (review: every protection stopped at the top level while the catalog's most
 // shape-demanding params are nested — a placeholder echo INSIDE line_items rode the wire verbatim, and
 // {value:100, valueType:''} was the v1403 'Phone is invalid' class rebuilt one level down). PURE: drop
@@ -1192,6 +1249,21 @@ export function coerceParams(params, paramSchema) {
         }
       }
     }   // v1405 — the LLM binder sometimes ECHOES a placeholder token ("{company}") as the value for a param it couldn't fill; drop it here so it's treated as unfilled everywhere (body + endpoint), never stored literally. v1657 — ALSO [id]/<id>: the binding layer is the one choke point every executor passes through, so one drop here covers the filter path, the direct-param path, and anything added later
+    // v2.74.2056 — RC-validate slice 1: normalize a STRING-enum value to its member (case / whitespace /
+    // declared synonym) BEFORE it ships. STRICTLY improve-or-noop: an exact member is unchanged; "OPEN"/"active"
+    // → "open" when resolvable; an unresolvable value rides as-is (no worse than today — the refuse-before-wire
+    // path is enumViolations, wired in slice 2). Boolean enums (`public`) are a classification, never word-mapped.
+    {
+      const _pt = props[k] && props[k].type;
+      const en = props[k] && props[k].enum;
+      // string-typed param ONLY (v2060 review — closes the latent trap of an enum declared beside gid/int/bool:
+      // resolving `v` before the type dispatch would then feed a string into the wrong coercion).
+      if ((_pt === 'string' || _pt == null) && !(props[k] && props[k].gid)
+        && Array.isArray(en) && en.every((x) => typeof x === 'string') && typeof v === 'string' && v.trim() !== '' && !en.includes(v)) {
+        const r = resolveEnumValue(v, en, { synonyms: props[k] && props[k].enumSynonyms });
+        if (r && r.value) v = r.value;
+      }
+    }
     const t = props[k] && props[k].type;
     const gidKind = props[k] && props[k].gid;
     if (gidKind && (typeof v === 'string' || typeof v === 'number')) {   // CX-7c — a customer/variant id → its gid form

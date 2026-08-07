@@ -922,3 +922,72 @@ describe('stripUnfilledJsonBody — fillBody drop semantics for a PRE-FILLED str
     assert.equal(stripUnfilledJsonBody('query { x }'), 'query { x }');
   });
 });
+
+// ── v2.74.2056 — RC-validate slice 1: the enum belt (resolve a word to a member; refuse-primitive; hop-3) ────────
+import { resolveEnumValue, enumViolations } from './connectorRecipes.js';
+
+describe('resolveEnumValue — word → declared enum member (v2056)', () => {
+  const E = ['new', 'open', 'fixed', 'closed'];
+  const SYN = { open: ['active', 'in progress'], fixed: ['resolved'] };
+  it('exact match is case- and whitespace-insensitive', () => {
+    assert.deepEqual(resolveEnumValue('open', E), { value: 'open' });
+    assert.deepEqual(resolveEnumValue('  OPEN ', E), { value: 'open' });
+  });
+  it('a declared synonym maps to its member', () => {
+    assert.deepEqual(resolveEnumValue('active', E, { synonyms: SYN }), { value: 'open' });
+    assert.deepEqual(resolveEnumValue('In Progress', E, { synonyms: SYN }), { value: 'open' });
+    assert.deepEqual(resolveEnumValue('resolved', E, { synonyms: SYN }), { value: 'fixed' });
+  });
+  it('a word two members both claim is AMBIGUOUS — never silently picked', () => {
+    const r = resolveEnumValue('done', E, { synonyms: { open: ['done'], fixed: ['done'] } });
+    assert.equal(r.ambiguous, true);
+    assert.deepEqual(r.candidates.sort(), ['fixed', 'open']);
+  });
+  it('an unmapped word is unknown; a non-string enum (boolean) is never mapped', () => {
+    assert.deepEqual(resolveEnumValue('banana', E, { synonyms: SYN }), { unknown: true });
+    assert.deepEqual(resolveEnumValue('true', [true, false]), { unknown: true });
+    assert.deepEqual(resolveEnumValue('', E), { unknown: true });
+  });
+});
+
+describe('coerceParams — the enum resolution branch is strictly improve-or-noop (v2056)', () => {
+  const SCHEMA = { type: 'object', properties: {
+    status: { type: 'string', enum: ['new', 'open', 'fixed', 'closed'], enumSynonyms: { open: ['active'] } },
+    pub: { type: 'boolean', enum: [true, false] },
+  } };
+  it('normalizes case and resolves a synonym', () => {
+    assert.equal(coerceParams({ status: 'OPEN' }, SCHEMA).status, 'open');
+    assert.equal(coerceParams({ status: 'active' }, SCHEMA).status, 'open');
+  });
+  it('an already-valid member is unchanged; an unknown value rides as-is (no worse than today)', () => {
+    assert.equal(coerceParams({ status: 'open' }, SCHEMA).status, 'open');
+    assert.equal(coerceParams({ status: 'banana' }, SCHEMA).status, 'banana');
+  });
+  it('a boolean enum is never word-mapped', () => {
+    assert.equal(coerceParams({ pub: true }, SCHEMA).pub, true);
+    assert.equal(coerceParams({ pub: false }, SCHEMA).pub, false);
+  });
+});
+
+describe('enumViolations — the refuse-before-wire primitive (v2056)', () => {
+  const SCHEMA = { type: 'object', properties: { status: { type: 'string', enum: ['new', 'open', 'fixed', 'closed'] }, pub: { type: 'boolean', enum: [true, false] } } };
+  it('flags a non-blank out-of-enum string value only', () => {
+    assert.deepEqual(enumViolations({ status: 'active' }, SCHEMA), [{ param: 'status', value: 'active', enum: ['new', 'open', 'fixed', 'closed'] }]);
+    assert.deepEqual(enumViolations({ status: 'open' }, SCHEMA), []);
+    assert.deepEqual(enumViolations({ status: '' }, SCHEMA), []);
+    assert.deepEqual(enumViolations({ pub: true }, SCHEMA), []);   // boolean enum never a violation
+  });
+});
+
+describe('enum belt — the catalog declarations + hop-3 (v2056)', () => {
+  it('the live "active → open" mapping is declared on VS warranty status', () => {
+    const vs = CONNECTOR_RECIPES.find((r) => r.id === 'vs_warranty_tasks');
+    const status = vs.params.find((p) => p.name === 'status');
+    assert.ok(status.enumSynonyms.open.includes('active'), 'the flagship synonym must be declared');
+  });
+  it('enumSynonyms rides hop 3 onto the projected leg schema', () => {
+    const vs = CONNECTOR_RECIPES.find((r) => r.id === 'vs_warranty_tasks');
+    const leg = recipeToLeg({ ...vs, app: 'vendorsuite', origin: 'vendorsuite.example.com', groundId: 'g' }, { trusted: true });
+    assert.ok(leg.paramSchema.properties.status.enumSynonyms.open.includes('active'), 'a dropped enumSynonyms would be the seeded-path bug class');
+  });
+});
