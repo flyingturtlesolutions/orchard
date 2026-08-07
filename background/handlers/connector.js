@@ -1333,7 +1333,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               // v2.74.1954 — carry the SERVER's own words on a failure (contentScript now returns them). A whole
               // day of 401 diagnosis ran without ever seeing what UPS actually said; `www-authenticate` names the
               // challenging layer, which is the edge-vs-app distinction the 401 turns on. Failure path only.
-              const _said = (!_ok && reply) ? `${reply.wwwAuth ? ` auth="${String(reply.wwwAuth).slice(0, 60)}"` : ''}${reply.serverSaid ? ` said="${String(reply.serverSaid).replace(/\s+/g, ' ').slice(0, 140)}"` : ''}` : '';
+              // v2.74.2066 — SURFACE reply.detail too. The graphql-error (1279), search-field-dropped (1293) and
+              // op-hash-stale (1259) paths capture the server's own failure STATEMENT in `reply.detail`, but this
+              // line only printed serverSaid/wwwAuth + the value _shape — so a live DraftOrderCreate reject logged
+              // `FAIL graphql-error empty` ("empty" is the SHAPE of the absent value) while the real message sat in
+              // reply.detail, returned to the panel but dropped from every trace (fleet AND local). Scrubbed downstream.
+              const _said = (!_ok && reply) ? `${reply.wwwAuth ? ` auth="${String(reply.wwwAuth).slice(0, 60)}"` : ''}${reply.serverSaid ? ` said="${String(reply.serverSaid).replace(/\s+/g, ' ').slice(0, 140)}"` : ''}${reply.detail ? ` detail="${String(reply.detail).replace(/\s+/g, ' ').slice(0, 160)}"` : ''}` : '';
               Logger.info('ride', `INVOKE ▸ ${origin} ${method} [${(payload && payload.recipeId) || '?'}] → ${_ok ? (reply.status || 'ok') : `FAIL ${(reply && reply.error) || 'no-reply'}`} ${_shape}${_said}`);
               // v2.74.1872 — the KEYS-ONLY shape of what came back. `object{2}` above says a fetch succeeded and
               // nothing about its structure, which is why "correct fetch, wrong field reaches prose" kept getting
