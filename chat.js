@@ -202,8 +202,8 @@ async function _ensureAdminConversation() {
 // pointer without rehydrating (rehydrate assumes messages) — _maybeRenderAdminDesk then draws the vitals card.
 async function _openAdminDesk() {
   // CN-2 (DESIGN_vitals.md §8.4) — the Admin desk is RETIRED (its Rail home fixture removed; home is the launch page).
-  // Its user-facing role is the Connect tab, so any remaining caller (a stale chip / pointer) lands on Connect —
-  // it never re-creates the operator conversation. The dev §8.3 operator console (F1–F5) is deferred to Connect.
+  // SGV-4 — Connect is dev-only now: a dev operator's stale chip/pointer still lands on Connect; a non-dev
+  // caller falls through _switchRailTab's guard to Conversations (presence lives as chips + incident cases).
   try { await _revealRail(); } catch { /* */ }
   try { _switchRailTab('connect'); } catch { /* */ }
 }
@@ -356,6 +356,15 @@ function _applyDevModeVisibility() {
     const el = $(id);
     if (el) el.style.display = _devModeEnabled ? '' : 'none';
   }
+  // SGV-4 (user-facing teardown, executed early by user direction 2026-08-07 — DESIGN_session_governor.md §9 R3
+  // inventory): the Connect tab folds to the DEV render. Non-dev users get no tab; presence lives as desk chips
+  // + incident cases, and sign-in moments arrive as pushed decisions (SGV-1+). The dev operator keeps the full
+  // tab as the interim heal surface until the governor gains hands.
+  try {
+    const tab = $('rail-tab-connect');
+    if (tab) tab.style.display = _devModeEnabled ? '' : 'none';
+    if (!_devModeEnabled && _railTab === 'connect') _switchRailTab('conversations');
+  } catch { /* */ }
 }
 async function _loadDevMode() {
   try { const s = await chrome.storage.local.get('settings:devMode'); _devModeEnabled = s['settings:devMode'] === true; }
@@ -698,6 +707,7 @@ async function _renderActiveRailTab(opts = {}) {
 }
 function _switchRailTab(tab) {
   if (tab !== 'conversations' && tab !== 'automations' && tab !== 'connect') return;   // CN-1 — + connect
+  if (tab === 'connect' && !_devModeEnabled) tab = 'conversations';   // SGV-4 — Connect is dev-only; stale callers (_openAdminDesk, restored state) land safely
   _railTab = tab;
   try {
     document.querySelectorAll('.rail-tab').forEach((t) => {
@@ -744,17 +754,22 @@ async function _updateTabDots(pre = {}) {
   try {
     let connectN = 0, parked = Number.isFinite(pre.parked) ? pre.parked : 0, pending = Number.isFinite(pre.pending) ? pre.pending : 0;
     // v2.74.2043 — Connect badge = scoped panel cards (not raw VITALS_BADGE.open, which counted every incident).
-    try {
-      const r = await _orchReq('VITALS_STATUS', {});
-      if (r && r.success !== false) {
-        const model = connectPanelModel({
-          registry: r.registry || {},
-          incidents: r.incidents || [],
-          scopeOrigins: connectScopeOrigins(_connScopeBook, _boundConnections()),
-        });
-        connectN = model.total;
-      }
-    } catch { /* */ }
+    // SGV-4 — the Connect dot leg is DEV-ONLY (R3: "_updateTabDots' Connect leg dies"); the non-dev roll-up
+    // keeps pending+parked only, so a sign-in need never lights a chore dot for users — it arrives as a pushed
+    // decision instead. The dev operator keeps the full leg with the tab.
+    if (_devModeEnabled) {
+      try {
+        const r = await _orchReq('VITALS_STATUS', {});
+        if (r && r.success !== false) {
+          const model = connectPanelModel({
+            registry: r.registry || {},
+            incidents: r.incidents || [],
+            scopeOrigins: connectScopeOrigins(_connScopeBook, _boundConnections()),
+          });
+          connectN = model.total;
+        }
+      } catch { /* */ }
+    }
     if (!Number.isFinite(pre.parked)) {
       try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = ((r && r.success !== false && Array.isArray(r.parked)) ? r.parked.length : 0) + ((r && Number(r.disarmedN)) || 0); } catch { /* */ }   // RB-2 — the dot covers auto-disarmed automations too (parked + stopped both need a decision)
     }
@@ -18682,7 +18697,10 @@ async function _maybeRenderConnCard() {
   } catch { return; }
   const existing = document.querySelector('#messages .message[data-vt-chip]');
   if (!open) { try { if (existing) existing.remove(); } catch { /* */ } return; }
-  const body = `⚠ ${open} connection${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention — see Connect.`;
+  // SGV-4 (verify MED) — the chip must not name a tab non-dev users can't see, and its button must go somewhere
+  // real: dev keeps Open Connect; non-dev points at the incident cases (the Rail's bottom fixture), which carry
+  // the actual sign-in bars.
+  const body = `⚠ ${open} connection${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} attention${_devModeEnabled ? ' — see Connect.' : '.'}`;
   if (existing) { _setMessageBody(existing, body); return; }
   // DL-1 (v2.74.1607, user directive) — the LAUNCH PAGE carries no attention chip: while the empty state is
   // showing (Front page / gallery / dev hint), the chip WAITS — the Rail's Admin ⚠ badge is the ambient signal.
@@ -18694,7 +18712,8 @@ async function _maybeRenderConnCard() {
   try { delete msg.dataset.messageId; } catch { /* */ }   // ephemeral — the incident store is the durable record
   msg.dataset.vtChip = '1';
   const bar = _orchActionBar(msg);
-  bar.appendChild(_mkBtn('Open Connect', () => { void _openAdminDesk(); }));   // CN-2 — _openAdminDesk now opens the Connect tab
+  if (_devModeEnabled) bar.appendChild(_mkBtn('Open Connect', () => { void _openAdminDesk(); }));   // CN-2 — the dev operator's Connect tab
+  else bar.appendChild(_mkBtn('Show incidents', () => { (async () => { try { await _revealRail(); _switchRailTab('conversations'); } catch { /* */ } })(); }));   // SGV-4 — the cases fixture is the non-dev destination
 }
 
 // VT-2 (v2.74.1571, DESIGN_vitals.md §8) — the ADMIN DESK render: the vitals card (presence rows + per-ground
