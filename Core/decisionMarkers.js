@@ -133,6 +133,12 @@ export const DECISION_MARKERS = [
   // v2.74.1911 — the identifier-provenance gate: a blocked invented param IS a routing decision.
   { key: 'param', src: "PARAM ▸" },
   { key: 'obs-param', src: "OBS_PARAM ▸" },
+  // v2.74.2063 — RC-validate slice A (DESIGN_resolve.md §10.5): the ENUM refuse-before-wire belt. A call refused
+  // because a bound value is out of its declared STRING enum is a ROUTING DECISION — the MEMBERSHIP-gate sibling
+  // of PARAM ▸'s provenance gate. Without the marker the belt firing (and the malformed request it stopped before
+  // the wire) is invisible to a -decisions- download, buried under the noisy INVOKE ▸ family (invariant #1,
+  // registered WITH the connector.js wiring).
+  { key: 'enum', src: "ENUM ▸" },
   { key: 'target', src: "TARGET ▸" },
   { key: 'invoke', src: "INVOKE ▸" },
   // EX-1 (v2.74.1946) — a self-reload or a programmatic ask is the loop ACTING on its own build; if it were absent

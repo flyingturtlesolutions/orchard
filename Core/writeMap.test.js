@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   writeMapPreflight, resolveWriteValue, buildWriteProposals, requireStalenessGuard, writeBatchSummary, WRITE_BATCH_CAP,
   parseCityStateZip, normalizeShopifyPhone, prepareShopifyCustomerCreateParams,
+  parseFreeformAddress, droppedAddressReport,
 } from './writeMap.js';
 
 const createLeg = {
@@ -268,5 +269,136 @@ describe('writeMap — CityStateZip + Shopify create prep (v2020)', () => {
     assert.equal(proposals[0].params.phone, '+17045551212');
     assert.equal('address1' in proposals[0].params, false);
     assert.equal('country' in proposals[0].params, false);
+  });
+});
+
+// v2.74.2063 — §10.5 item 3: PLACE-NAME resolver. Full state names, freeform-address split, country-name → ISO,
+// and the silent incomplete-address drop turned into a drop-WITH-REPORT. Each of these fails on pre-change code
+// (parseCityStateZip hard-required a 2-letter state; the freeform/country/report functions did not exist).
+describe('writeMap — GEO / place resolver (v2062)', () => {
+  it('BYTE-IDENTICAL: the 2-letter path is unchanged — the frozen VendorSuite feed', () => {
+    // Mirrors the frozen block above; a widened regex would move these, so re-assert them here too.
+    assert.deepEqual(parseCityStateZip('Cumming, GA 30040'), { city: 'Cumming', province: 'GA', zip: '30040' });
+    assert.deepEqual(parseCityStateZip('Somewhere NC 28315'), { city: 'Somewhere', province: 'NC', zip: '28315' });
+    // the comma+2-letter form MUST win over the name table — Georgia is also a real town in Vermont
+    assert.deepEqual(parseCityStateZip('Georgia, VT 05468'), { city: 'Georgia', province: 'VT', zip: '05468' });
+  });
+
+  it('parseCityStateZip now resolves a FULL state name (both comma and no-comma)', () => {
+    assert.deepEqual(parseCityStateZip('Cumming, Georgia 30040'), { city: 'Cumming', province: 'GA', zip: '30040' });
+    assert.deepEqual(parseCityStateZip('Cumming Georgia 30040'), { city: 'Cumming', province: 'GA', zip: '30040' });
+  });
+
+  it('parseCityStateZip resolves MULTI-WORD state names (longest match wins)', () => {
+    assert.deepEqual(parseCityStateZip('Raleigh North Carolina 27601'), { city: 'Raleigh', province: 'NC', zip: '27601' });
+    assert.deepEqual(parseCityStateZip('New York New York 10001'), { city: 'New York', province: 'NY', zip: '10001' });
+  });
+
+  it('an unresolvable state stays EMPTY — never a guess', () => {
+    assert.deepEqual(parseCityStateZip('Somewhere Freedonia 30040'), {});
+    assert.deepEqual(parseCityStateZip('no zip here'), {});
+    assert.deepEqual(parseCityStateZip(''), {});
+  });
+
+  it('parseFreeformAddress splits a one-line address, peeling a secondary unit into address2', () => {
+    assert.deepEqual(parseFreeformAddress('123 Main St Apt 4, Cumming Georgia 30040'),
+      { address1: '123 Main St', address2: 'Apt 4', city: 'Cumming', province: 'GA', zip: '30040' });
+    assert.deepEqual(parseFreeformAddress('1008 Harb Drive, ARCHDALE, NC 28315'),
+      { address1: '1008 Harb Drive', city: 'ARCHDALE', province: 'NC', zip: '28315' });   // no address2 key at all
+    assert.deepEqual(parseFreeformAddress('nonsense'), {});
+    assert.deepEqual(parseFreeformAddress(''), {});
+  });
+
+  it('resolveWriteValue: {address,part} reads one part of a freeform address', () => {
+    const row = { RawAddr: '123 Main St Apt 4, Cumming Georgia 30040' };
+    assert.equal(resolveWriteValue(row, 'address2', { address2: { address: 'RawAddr', part: 'address2' } }), 'Apt 4');
+    assert.equal(resolveWriteValue(row, 'address1', { address1: { address: 'RawAddr', part: 'address1' } }), '123 Main St');
+    assert.equal(resolveWriteValue(row, 'province', { province: { address: 'RawAddr', part: 'province' } }), 'GA');
+    // an unplaceable freeform address resolves each part to EMPTY, not a guess
+    assert.equal(resolveWriteValue({ RawAddr: 'nonsense' }, 'city', { city: { address: 'RawAddr', part: 'city' } }), '');
+  });
+
+  it('resolveWriteValue: {countryName} maps a country NAME to its ISO code', () => {
+    assert.equal(resolveWriteValue({ Country: 'United States' }, 'country', { country: { countryName: 'Country' } }), 'US');
+    assert.equal(resolveWriteValue({ Country: 'Canada' }, 'country', { country: { countryName: 'Country' } }), 'CA');
+    assert.equal(resolveWriteValue({ Country: 'US' }, 'country', { country: { countryName: 'Country' } }), 'US');   // idempotent
+    assert.equal(resolveWriteValue({ Country: 'Freedonia' }, 'country', { country: { countryName: 'Country' } }), '');
+  });
+
+  it('droppedAddressReport mirrors the mutator: reports what it WOULD drop, silent when complete', () => {
+    const rep = droppedAddressReport({ first_name: 'A', last_name: 'B', address1: '1 Main', country: 'US' });
+    assert.equal(rep.dropped, true);
+    assert.deepEqual(rep.fields, ['address1', 'country']);
+    assert.match(rep.reason, /incomplete address/);
+    // a complete address → no drop
+    assert.deepEqual(droppedAddressReport({ first_name: 'A', address1: '1 Main', city: 'Cumming', province: 'GA', zip: '30040' }), { dropped: false });
+    // a contact-only row → nothing to drop
+    assert.deepEqual(droppedAddressReport({ first_name: 'A', last_name: 'B', email: 'a@b.c' }), { dropped: false });
+  });
+
+  it('buildWriteProposals: an unplaceable address is REPORTED on `partial`, and the contact-only create STILL ships', () => {
+    const bareAddr = {
+      AddressLine1: '1 Main', CityStateZip: 'garbage',
+      __contacts: [{ IsPrimary: true, FirstName: 'A', LastName: 'B', Email: 'a@b.c' }],
+    };
+    const decl = {
+      first_name: { contact: 'primary', type: 'first' },
+      last_name: { contact: 'primary', type: 'last' },
+      email: { contact: 'primary', type: 'email' },
+      address1: 'AddressLine1',
+      city: { cityStateZip: 'CityStateZip', part: 'city' },
+      country: { literal: 'US' },
+    };
+    const leg = {
+      safety: 'confirm',
+      tool: {
+        id: 'shopify_create_customer', name: 'Create', write: true,
+        params: [
+          { name: 'first_name', required: true }, { name: 'last_name', required: true },
+          { name: 'email' }, { name: 'address1' }, { name: 'city' }, { name: 'country' },
+        ],
+      },
+    };
+    const r = buildWriteProposals([{ row: bareAddr, label: '#1', value: '1 Main' }], { leg, declared: decl });
+    assert.equal(r.proposals.length, 1);                          // the create still ships…
+    assert.equal('address1' in r.proposals[0].params, false);     // …minus the address
+    assert.equal('country' in r.proposals[0].params, false);
+    assert.equal(r.partial.length, 1);                            // …but the drop is now REPORTED
+    assert.equal(r.partial[0].label, '#1');
+    assert.deepEqual(r.partial[0].droppedFields, ['address1', 'country']);
+    assert.match(r.partial[0].reason, /incomplete address/);
+  });
+
+  it('buildWriteProposals: a COMPLETE address leaves `partial` empty', () => {
+    const fullAddr = {
+      AddressLine1: '1 Main', CityStateZip: 'Cumming, GA 30040',
+      __contacts: [{ IsPrimary: true, FirstName: 'A', LastName: 'B' }],
+    };
+    const decl = {
+      first_name: { contact: 'primary', type: 'first' },
+      last_name: { contact: 'primary', type: 'last' },
+      address1: 'AddressLine1',
+      city: { cityStateZip: 'CityStateZip', part: 'city' },
+      zip: { cityStateZip: 'CityStateZip', part: 'zip' },
+    };
+    const leg = {
+      safety: 'confirm',
+      tool: {
+        id: 'shopify_create_customer', name: 'Create', write: true,
+        params: [{ name: 'first_name', required: true }, { name: 'last_name', required: true }, { name: 'address1' }, { name: 'city' }, { name: 'zip' }],
+      },
+    };
+    const r = buildWriteProposals([{ row: fullAddr, label: '#1', value: '1 Main' }], { leg, declared: decl });
+    assert.equal(r.proposals.length, 1);
+    assert.equal(r.proposals[0].params.city, 'Cumming');
+    assert.equal(r.partial.length, 0);
+  });
+
+  it('writeBatchSummary surfaces the partial (address-drop) count', () => {
+    const s = writeBatchSummary({ proposals: [1, 2], partial: [1], system: 'Shopify' });
+    assert.match(s, /2 to create in Shopify/);
+    assert.match(s, /1 with an address I couldn't place/);
+    // no partials → the line is absent
+    assert.equal(writeBatchSummary({ proposals: [1], system: 'Shopify' }).includes('address'), false);
   });
 });

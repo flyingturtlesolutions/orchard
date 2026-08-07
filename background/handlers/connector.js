@@ -13,7 +13,7 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody, stripUnfilledJsonBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts, opCaptureHint } from '../../Core/connectorRecipes.js';   // v1935 — opCaptureHint: the executor's refusal must name the gesture that actually banks THIS op   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm
+import { fillEndpoint, fillBody, stripUnfilledJsonBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts, opCaptureHint, enumViolations } from '../../Core/connectorRecipes.js';   // v1935 — opCaptureHint: the executor's refusal must name the gesture that actually banks THIS op   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm   // v2.74.2063 — enumViolations: the refuse-before-wire ENUM belt (§10.5)
 import { pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill; v1758 — rideTabUrlPatterns; v1759 — isCsrfColdFailure
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
@@ -1123,6 +1123,29 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           }
 
           _mark('identity');
+          // v2.74.2063 — RC-validate slice A: the ENUM refuse-BEFORE-wire belt (DESIGN_resolve.md §10.5 — the
+          // VALIDATE half's highest-leverage member). coerceParams (slice 1) already NORMALIZED a resolvable word
+          // to its declared member on the panel dispatch, so a value STILL out-of-enum by the time it reaches the
+          // executor is genuinely unmappable — riding it to the wire spends the call on a request the site 4xx's,
+          // then a false 'success' pollutes conversation memory (the live incident §10.5 cites). enumViolations is
+          // PURE + NON-MUTATING: a leg with no string-enum param yields [] → this whole block is byte-identical
+          // (the fail-safe). `enum-invalid` is a MALFORMED-REQUEST refusal — deterministic, not an environment
+          // blip — so it names itself via the INVOKE ▸ exit family (v1857) AND emits a dedicated ENUM ▸ decision
+          // line (Core/decisionMarkers, invariant #1). Checked HERE (on the final args bag, before fillEndpoint/
+          // fillBody) so an enum value bound into either the URL or the body is caught the same way. CAVEAT the
+          // property "must not auto-disarm a workflow": `enum-invalid` is NOT in Core/trigger.isTransientFailure,
+          // so a HEADLESS cadence read carrying a pinned out-of-enum value would today count it toward the
+          // 3-strike auto-disarm — closing that needs a trigger.js classification, outside this slice's owned files.
+          {
+            const _ev = enumViolations(args, payload && payload.paramSchema);
+            if (_ev.length) {
+              const _v0 = _ev[0];
+              try { Logger.info('ride', `ENUM ▸ refuse ${_v0.param}="${String(_v0.value).slice(0, 40)}" ∉ [${(_v0.enum || []).join('/')}] [${(payload && payload.recipeId) || '?'}] — not spending the call`); } catch { /* */ }
+              try { Logger.info('ride', `INVOKE ▸ blocked enum-invalid [${(payload && payload.recipeId) || '?'}]`); } catch { /* v1857 — every early exit names itself */ }
+              sendResponse({ success: false, error: 'enum-invalid', param: _v0.param, hint: _enumHint(payload, _v0.param) });
+              return;
+            }
+          }
           // 4) Build + run the call (write body filled from args incl. {me}; SESSION_FETCH JSON-encodes + adds CSRF).
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!path) { try { Logger.info('ride', `INVOKE ▸ blocked session-no-recipe [${(payload && payload.recipeId) || '?'}]`); } catch { /* */ } sendResponse({ success: false, error: 'session-no-recipe' }); return; }
@@ -1689,6 +1712,21 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               // v1472 — the probe outcome is ALWAYS logged (the v1465 lesson applied to this line's own code).
               try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} {me} probe → ${_pnote}${args.me != null ? ' → filled' : ' → UNFILLED'}`); } catch { /* */ }
             } catch { /* best-effort — the {param} guard below carries the honest refusal */ }
+          }
+          // v2.74.2063 — RC-validate slice A, the SESSION_REPLAY TWIN of the INVOKE_SESSION ENUM belt. The two
+          // executors "must never disagree" (v1940/v1943), so the seeded/replay path gets the identical
+          // refuse-before-wire enum gate. args come from payload.params here; paramSchema rides the payload the
+          // same way _enumHint already reads it below. Fail-safe: no paramSchema / no string-enum param →
+          // enumViolations returns [] → byte-identical. Refuses before both fillBody (below) and fillEndpoint.
+          {
+            const _ev = enumViolations(args, payload && payload.paramSchema);
+            if (_ev.length) {
+              const _v0 = _ev[0];
+              try { Logger.info('ride', `ENUM ▸ refuse ${_v0.param}="${String(_v0.value).slice(0, 40)}" ∉ [${(_v0.enum || []).join('/')}]${_rid} — not spending the call`); } catch { /* */ }
+              try { Logger.info('ride', `SESSION_REPLAY ▸ blocked enum-invalid${_rid}`); } catch { /* v1857 — every early exit names itself */ }
+              sendResponse({ success: false, error: 'enum-invalid', param: _v0.param, hint: _enumHint(payload, _v0.param) });
+              return;
+            }
           }
           // v2.74.1471 — the body fills at the EXECUTOR when a template rides (chat sends leg.tool.body verbatim):
           // fillBody after the {me} bind, so ID:'{me}' becomes the real id instead of silently dropping. The legacy

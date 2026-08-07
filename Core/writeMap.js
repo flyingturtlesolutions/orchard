@@ -25,6 +25,7 @@
 
 import { ladderValues, normalizeRungs, pickFieldPath, extractValue } from './peritemMap.js';
 import { legParamDefs } from './connectorLeg.js';
+import { stateToCode, countryToISO } from './geoResolve.js';   // v2.74.2063 — §10.5 item 3: place-name resolver
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v === 0 || v === false ? String(v) : (v == null ? '' : String(v).trim())));
 
@@ -72,8 +73,55 @@ export function parseCityStateZip(raw) {
   if (!s) return {};
   let m = s.match(/^(.+?),\s*([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)$/);
   if (!m) m = s.match(/^(.+?)\s+([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)$/);
-  if (!m) return {};
-  return { city: m[1].trim(), province: m[2].toUpperCase(), zip: m[3] };
+  if (m) return { city: m[1].trim(), province: m[2].toUpperCase(), zip: m[3] };
+  // v2.74.2063 — §10.5 item 3: a FULL state NAME ("Georgia" / "North Carolina"). The two regexes above want a
+  // 2-letter code and run FIRST and UNCHANGED, so every current output is byte-identical; this is the LAST-resort
+  // path the previously-empty cases fall into. It requires a trailing zip (the regexes do too), so 'no zip here'
+  // stays {}, and the comma+2-letter form always wins above ('Georgia, VT 05468' → the town Georgia, VT).
+  const zm = s.match(/^(.+?)[,\s]+(\d{5}(?:-\d{4})?)$/);
+  if (zm) {
+    const left = zm[1].replace(/,\s*$/, '').trim();               // drop a trailing 'City,' comma
+    const toks = left.split(/\s+/).filter(Boolean);
+    for (let n = Math.min(3, toks.length); n >= 1; n--) {          // longest match first ('North Carolina' before 'Carolina')
+      const code = stateToCode(toks.slice(toks.length - n).join(' '));
+      if (!code) continue;
+      const city = toks.slice(0, toks.length - n).join(' ').replace(/,\s*$/, '').trim();
+      if (city) return { city, province: code, zip: zm[2] };       // a state with no city prefix is not a usable locality
+      break;
+    }
+  }
+  return {};
+}
+
+// v2.74.2063 — §10.5 item 3: peel a secondary-unit designator off a street line into address2. PURE.
+// '123 Main St Apt 4' → { address1:'123 Main St', address2:'Apt 4' }; no designator → { address1:<street> } only.
+function _peelUnit(street) {
+  const s = _str(street);
+  if (!s) return {};
+  const m = s.match(/^(.*?\S)\s+((?:apt|apartment|suite|ste|unit|bldg|building|fl|floor|rm|room)\b.*|#\S.*)$/i);
+  if (m && _str(m[1])) return { address1: _str(m[1]), address2: _str(m[2]) };
+  return { address1: s };
+}
+
+/**
+ * v2.74.2063 — §10.5 item 3: split a freeform one-line address into MailingAddressInput parts. PURE.
+ *   '123 Main St Apt 4, Cumming Georgia 30040'
+ *     → { address1:'123 Main St', address2:'Apt 4', city:'Cumming', province:'GA', zip:'30040' }
+ * The comma is what separates STREET from LOCALITY — without one the split is ambiguous (the state-name fallback
+ * would greedily swallow the street into the city), so a comma is required. Take the LEFTMOST comma whose tail
+ * parses as a locality: that keeps the city on the locality side. Returns {} when no comma yields a placeable tail.
+ */
+export function parseFreeformAddress(raw) {
+  const s = _str(raw);
+  if (!s) return {};
+  for (let i = s.indexOf(','); i >= 0; i = s.indexOf(',', i + 1)) {
+    const head = s.slice(0, i).trim();
+    const loc = parseCityStateZip(s.slice(i + 1).trim());
+    if (head && loc.city && loc.province && loc.zip) {
+      return { ..._peelUnit(head), city: loc.city, province: loc.province, zip: loc.zip };
+    }
+  }
+  return {};
 }
 
 /**
@@ -111,6 +159,27 @@ export function prepareShopifyCustomerCreateParams(filled) {
   return out;
 }
 
+// The fields prepareShopifyCustomerCreateParams DROPS, in its own delete order — the report companion consults it.
+const _ADDR_DROP_FIELDS = ['address1', 'address2', 'city', 'province', 'country', 'zip', 'company'];
+
+/**
+ * v2.74.2063 — §10.5 item 3: what prepareShopifyCustomerCreateParams WOULD delete, as a REPORT. PURE.
+ * The mutator drops an incomplete address SILENTLY (contact-only create still ships); this surfaces the drop so the
+ * batch summary can say it happened. It mirrors the mutator's hasStreet/hasLocality test EXACTLY (same source of
+ * truth) so the two can never disagree — this only reads, never mutates, and is never folded into the mutator.
+ *   → { dropped:false } when the address is complete OR there is no address to drop
+ *   → { dropped:true, fields:[…present address fields…], reason } when the mutator would strip it
+ */
+export function droppedAddressReport(filled) {
+  const f = (filled && typeof filled === 'object') ? filled : {};
+  const hasStreet = !!_str(f.address1);
+  const hasLocality = !!(_str(f.city) || _str(f.zip));
+  if (hasStreet && hasLocality) return { dropped: false };
+  const fields = _ADDR_DROP_FIELDS.filter((k) => _str(f[k]));
+  if (!fields.length) return { dropped: false };                 // a contact-only row has nothing to drop
+  return { dropped: true, fields, reason: 'incomplete address (needs a street and a city or ZIP)' };
+}
+
 export function resolveWriteValue(row, paramName, declared) {
   if (!row || typeof row !== 'object') return '';
   const decl = declared && Object.prototype.hasOwnProperty.call(declared, paramName) ? declared[paramName] : undefined;
@@ -119,6 +188,18 @@ export function resolveWriteValue(row, paramName, declared) {
   if (decl && typeof decl === 'object' && decl.cityStateZip && decl.part) {
     const parts = parseCityStateZip(extractValue(row, decl.cityStateZip));
     return _str(parts[decl.part]);
+  }
+  // v2.74.2063 — §10.5 item 3: a FREEFORM one-line address → one MailingAddressInput part. MUST sit ABOVE the
+  // generic object branch below (which would swallow {address,part} as a contact rung and return '' — the exact
+  // silent-drop this slice fixes).
+  if (decl && typeof decl === 'object' && decl.address && decl.part) {
+    const parts = parseFreeformAddress(extractValue(row, decl.address));
+    return _str(parts[decl.part]);
+  }
+  // v2.74.2063 — §10.5 item 3: a country NAME → ISO-2 (VendorSuite rides a literal 'US'; user-typed sources carry
+  // the name). Also ABOVE the generic branch, same reason.
+  if (decl && typeof decl === 'object' && decl.countryName) {
+    return _str(countryToISO(extractValue(row, decl.countryName)));
   }
   if (decl && typeof decl === 'object') {                          // a contact rung — same vocabulary as joinKey
     // normalizeRungs FIRST: ladderValues matches the type against lower-cased keys and does NOT normalize its
@@ -142,9 +223,10 @@ export function resolveWriteValue(row, paramName, declared) {
 /**
  * Build the reviewable write batch from the map's no-match rows. PURE.
  *
- * Returns { proposals, unproposable, capped, dropped }:
+ * Returns { proposals, unproposable, partial, capped, dropped }:
  *   proposals   — ready to hand to addProposals(); each carries exact params + the staleness guard
  *   unproposable— rows that could NOT be filled, each with the required params that resolved to nothing
+ *   partial     — rows that DO create but whose incomplete address the mutator drops ({label, droppedFields, reason})
  *   capped/dropped — honest truncation (never silent; the caller must say so)
  */
 export function buildWriteProposals(missRows, {
@@ -158,6 +240,7 @@ export function buildWriteProposals(missRows, {
   const use = rows.slice(0, Math.max(0, cap));
   const proposals = [];
   const unproposable = [];
+  const partial = [];   // v2.74.2063 — rows that DO create (contact-only) but whose address the mutator drops
 
   for (const entry of use) {
     const row = entry && entry.row ? entry.row : entry;             // accept either a raw row or a map result entry
@@ -173,8 +256,15 @@ export function buildWriteProposals(missRows, {
     if (missing.length) { unproposable.push({ label, missing }); continue; }
     // v2.74.2020 — shopify_create_customer: normalize phone + drop incomplete addresses before the proposal
     // freezes the params the human will approve (the preview IS the truth).
-    const send = (tool.id === 'shopify_create_customer' || tool.recipeId === 'shopify_create_customer')
-      ? prepareShopifyCustomerCreateParams(filled) : filled;
+    const isShopCreate = (tool.id === 'shopify_create_customer' || tool.recipeId === 'shopify_create_customer');
+    const send = isShopCreate ? prepareShopifyCustomerCreateParams(filled) : filled;
+    // v2.74.2063 — §10.5 item 3: the create still ships (contact-only), but an address the mutator silently drops
+    // now rides out on the `partial` list so writeBatchSummary can surface it. NOT `dropped` (that is the cap COUNT)
+    // and NOT `unproposable` (which BLOCKS the create) — a distinct channel for "created, minus an address".
+    if (isShopCreate) {
+      const rep = droppedAddressReport(filled);
+      if (rep.dropped) partial.push({ label, droppedFields: rep.fields, reason: rep.reason });
+    }
     const prop = {
       name: _str(tool.name) || 'Create record',
       targets: [label],
@@ -192,7 +282,7 @@ export function buildWriteProposals(missRows, {
     }
     proposals.push(prop);
   }
-  return { proposals, unproposable, capped: rows.length > use.length, dropped: Math.max(0, rows.length - use.length) };
+  return { proposals, unproposable, partial, capped: rows.length > use.length, dropped: Math.max(0, rows.length - use.length) };
 }
 
 /**
@@ -206,9 +296,11 @@ export function requireStalenessGuard(proposals) {
 }
 
 /** One honest line for the batch that will be reviewed. PURE. */
-export function writeBatchSummary({ proposals = [], unproposable = [], capped = false, dropped = 0, system = 'the target' } = {}) {
+export function writeBatchSummary({ proposals = [], unproposable = [], partial = [], capped = false, dropped = 0, system = 'the target' } = {}) {
   const bits = [`${proposals.length} to create in ${system}`];
   if (unproposable.length) bits.push(`${unproposable.length} I can't fill`);
+  // v2.74.2063 — §10.5 item 3: surface the silently-dropped address so the contact-only create isn't a surprise.
+  if (partial.length) bits.push(`${partial.length} with an address I couldn't place`);
   if (capped) bits.push(`${dropped} beyond the reviewable batch`);
   return bits.join(' · ');
 }

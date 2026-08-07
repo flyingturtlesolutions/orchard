@@ -14,6 +14,7 @@
 import { recipeToLeg } from './connectorLeg.js';
 import { armable } from './rideRecipe.js';
 import { AC_GQL as AC_GQL_DOCS } from './aircallGqlDocs.js';
+import { resolveDatePhrase } from './dateResolve.js';   // v2.74.2063 — RC-validate slice B (DATE): pure phrase→ISO resolver (clock INJECTED)
 
 /**
  * Substitute `{name}` placeholders in a template from `args`, URL-encoding each value. PURE.
@@ -538,7 +539,11 @@ export const CONNECTOR_RECIPES = [
         pick: { field: 'eventLabel', equals: 'order_placed' },
         extract: [{ from: 'message', as: 'createdBy', pattern: '^(.+?)\\s+created this order' },
           { from: 'attributeToUser', as: 'createdByHuman' }] }] },
-    params: [{ name: 'query', type: 'string', required: false, hint: 'Shopify order search syntax (status:open, tag:vip, financial_status:paid, processed_at:>2026-07-01) or blank for the newest orders — there is no staff/creator field' }] },
+    // v2.74.2063 — RC-validate slice B (DATE): declare the date-bearing FIELD(S) on the param, not in the resolver
+    // (generality — Zendesk's search.query carries created>/solved> and would declare its own fields). coerceParams'
+    // date branch reads this to normalize a relative operand inside {query} to a concrete ISO bound; dateFilterViolations
+    // refuses an unparseable one. Both are DORMANT until a caller injects `now` (this slice ships zero now-callers).
+    params: [{ name: 'query', type: 'string', required: false, dateFilter: { fields: ['processed_at'], grain: 'date' }, hint: 'Shopify order search syntax (status:open, tag:vip, financial_status:paid, processed_at:>2026-07-01) or blank for the newest orders — there is no staff/creator field' }] },
   { ...SH, id: 'shopify_search_products', name: 'Search Shopify products', itemUrl: '/store/{handle}/products/{id}',
     displayId: ['title'],
     does: 'search Shopify products by title or free words (with variants, price, inventory; drafts and archived included — say so when a hit is not ACTIVE), riding your admin login. For an exact SKU use the by-SKU lookup',
@@ -1184,6 +1189,77 @@ export function enumViolations(params, paramSchema) {
   return out;
 }
 
+// v2.74.2063 — RC-validate slice B (DATE). Find `field:<op><operand>` date tokens for the declared dateFilter fields
+// inside a search-syntax value. PURE. Shopify writes `processed_at:>2026-07-01`, Zendesk `created>2026-01-01` (no
+// colon) — both are matched. The operand is a quoted "…" phrase (so a multi-word 'last month' survives) or a bare
+// non-space/comma token. Yields { field, op, operand(unquoted), operandRaw, index, length, whole }.
+function _dateTokens(query, fields) {
+  const list = (Array.isArray(fields) ? fields : []).filter((f) => typeof f === 'string' && f);
+  if (!list.length || typeof query !== 'string' || !query) return [];
+  const alt = list.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const re = new RegExp('\\b(' + alt + ')(:)?\\s*(>=|<=|>|<|=)?\\s*("[^"]*"|[^\\s(),]+)', 'g');
+  const out = [];
+  let m;
+  while ((m = re.exec(query))) {
+    out.push({ field: m[1], op: m[3] || '', operandRaw: m[4], operand: m[4].replace(/^"|"$/g, ''), index: m.index, length: m[0].length, whole: m[0] });
+  }
+  return out;
+}
+
+// Pick the concrete ISO bound a resolved verdict places under a comparator. PURE. A single day (`iso`) places under
+// ANY comparator; a RANGE places `from` under `>`/`>=` and `to` under `<`/`<=` — but an equality / no-op range gets
+// NULL (don't guess an end: that is the silent-mis-filter class this belt exists to kill).
+function _pickDateBound(v, op) {
+  if (!v || v.unknown) return null;
+  if (v.iso) return v.iso;
+  if ((op === '>' || op === '>=') && v.from) return v.from;
+  if ((op === '<' || op === '<=') && v.to) return v.to;
+  return null;
+}
+
+// Rewrite each RELATIVE date operand inside a search-syntax value to a concrete ISO bound, in place. PURE +
+// improve-or-noop: only a token whose operand resolveDatePhrase resolves (and whose bound differs) is rewritten; an
+// already-ISO or unresolved operand is left byte-identical. `now` (an ISO string) is INJECTED — absent, this is a
+// no-op (the branch stays DORMANT until a caller supplies the clock).
+function _normalizeDateQuery(value, dateFilter, now) {
+  if (typeof value !== 'string' || !value || !now) return value;
+  const fields = dateFilter && Array.isArray(dateFilter.fields) ? dateFilter.fields : [];
+  const toks = _dateTokens(value, fields);
+  if (!toks.length) return value;
+  let out = value;
+  for (let i = toks.length - 1; i >= 0; i--) {   // right-to-left so earlier indices stay valid across splices
+    const t = toks[i];
+    const bound = _pickDateBound(resolveDatePhrase(t.operand, now), t.op);
+    if (!bound || bound === t.operand) continue;
+    const replaced = t.whole.slice(0, t.whole.length - t.operandRaw.length) + bound;
+    out = out.slice(0, t.index) + replaced + out.slice(t.index + t.length);
+  }
+  return out;
+}
+
+/**
+ * v2.74.2063 — RC-validate slice B (DATE): the refuse-BEFORE-wire primitive for date operands, beside enumViolations
+ * (the slice-2 seam — exported now, wired into the executor pre-flight later). PURE. For every declared `dateFilter`
+ * param, each `field:<op><operand>` date token whose operand resolveDatePhrase CANNOT resolve (with the injected
+ * `now`) is a violation — a caller refuses rather than SPEND the call on a phrase the site would drop / mis-filter
+ * (the same fabrication-engine risk the query gate names). DORMANT: zero callers this slice, and a no-op without
+ * `now` (a relative phrase is unjudgeable with no clock, so it never false-positives). Returns [{ param, value, field }].
+ */
+export function dateFilterViolations(params, paramSchema, { now } = {}) {
+  const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
+  const out = [];
+  if (!now) return out;   // no clock → cannot judge a relative phrase; stay silent (never false-positive)
+  for (const [k, v] of Object.entries((params && typeof params === 'object') ? params : {})) {
+    const df = props[k] && props[k].dateFilter;
+    if (!df || typeof df !== 'object' || typeof v !== 'string' || !v) continue;
+    for (const t of _dateTokens(v, Array.isArray(df.fields) ? df.fields : [])) {
+      const r = resolveDatePhrase(t.operand, now);
+      if (r && r.unknown) out.push({ param: k, value: t.operand, field: t.field });
+    }
+  }
+  return out;
+}
+
 // v2.74.2055 — NESTED sanitation (review: every protection stopped at the top level while the catalog's most
 // shape-demanding params are nested — a placeholder echo INSIDE line_items rode the wire verbatim, and
 // {value:100, valueType:''} was the v1403 'Phone is invalid' class rebuilt one level down). PURE: drop
@@ -1217,7 +1293,7 @@ export function stripUnfilledJsonBody(text) {
   } catch { return s; }
 }
 
-export function coerceParams(params, paramSchema) {
+export function coerceParams(params, paramSchema, { now } = {}) {   // v2.74.2063 — `now` (ISO) INJECTED for the date branch; absent keeps every caller's 2-arg behavior byte-identical (dormant)
   const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
   const out = {};
   for (const [k, vRaw] of Object.entries((params && typeof params === 'object') ? params : {})) {
@@ -1263,6 +1339,15 @@ export function coerceParams(params, paramSchema) {
         const r = resolveEnumValue(v, en, { synonyms: props[k] && props[k].enumSynonyms });
         if (r && r.value) v = r.value;
       }
+    }
+    // v2.74.2063 — RC-validate slice B (DATE): normalize a RELATIVE date operand inside a declared `dateFilter`
+    // param's value to a concrete ISO bound (reads the hop-3 slot props[k].dateFilter). STRICTLY improve-or-noop and
+    // DORMANT until `now` is injected — no caller passes { now } this slice (the now-supplying callers are all in
+    // contended files), so absent a clock this leaves the value byte-identical, exactly like slice 1's enumViolations
+    // shipped callerless. Boolean/int/gid params are never date-typed, so the string guard keeps this off their path.
+    {
+      const df = props[k] && props[k].dateFilter;
+      if (df && typeof df === 'object' && typeof v === 'string' && now) v = _normalizeDateQuery(v, df, now);
     }
     const t = props[k] && props[k].type;
     const gidKind = props[k] && props[k].gid;
