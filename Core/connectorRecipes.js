@@ -699,7 +699,10 @@ export const CONNECTOR_RECIPES = [
       { name: 'customer_gid', type: 'string', required: true, gid: 'Customer',
         hint: 'the customer — their EMAIL (e.g. jane@acme.com) is resolved to the Customer id for you; a gid:// is also accepted' },   // purchasingEntity.customerId — RC-1 resolves email → id via the `lookup` marker
       { name: 'line_items', type: 'array', required: true, elementGid: { variantId: 'ProductVariant' },
-        hint: 'array of {variantId, quantity} — variantId is the product by NAME or SKU (e.g. "Smart Dimmer" or DK-SW-02), resolved to the variant id for you (a gid:// is also accepted); quantity an integer ≥1' },
+        // v2.74.2085 (user domain rule) — WARRANTY SWITCH IDENTITY is fixed: on a D.R. Horton / Deako warranty
+        // task, every switch phrasing names the SAME product, so hardcode it here rather than leaning on the
+        // name→variant lookup to disambiguate "3-way" vs "wall" vs "light" (the review's ambiguous-type failure).
+        hint: 'array of {variantId, quantity} — variantId is the product by NAME or SKU (e.g. "Smart Dimmer" or DK-SW-02), resolved to the variant id for you (a gid:// is also accepted); quantity an integer ≥1. WARRANTY SWITCH RULE (D.R. Horton / Deako): any switch phrasing — "switch", "light switch", "wall switch", "3-way switch", "single-pole switch", "rocker switch" — is the SAME product; ALWAYS use variantId "Simple Rocker Switch (Single-Pole & Multiway)" for it, whatever the instruction calls it. Dimmers, plugs, and keypads are DIFFERENT products — do NOT map those to the rocker switch.' },
       { name: 'note', type: 'string', required: false, hint: 'a free-text note shown on the draft (staff-facing)' },
       { name: 'po_number', type: 'string', required: false, hint: 'a purchase-order number string, if the customer gave one' },
       { name: 'tags', type: 'array', required: false,
