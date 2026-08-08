@@ -303,6 +303,18 @@ export const CONNECTOR_RECIPES = [
     listUrl: '/agent/search/1?type=user&q={query}',
     params: [{ name: 'query', type: 'string', required: true, hint: 'an email address (exact) or a name fragment' }] },
   // ── writes — gated HARD; fail-closed until the human confirms (CX-6/§9). Each carries a `body` template. ──────────
+  // v2.74.2120 — TRANSPORT EVIDENCE (deako.zendesk.com HAR, 2026-08-08), recorded so it is not re-derived:
+  //   · The agent UI does NOT create tickets over REST. It posts `POST /api/graphql` with
+  //     operationName `CreateIssueTicketMutation`, query text INLINE (883 chars — no persisted-op hash, so it is
+  //     replayable without a captured op), variables
+  //     { ticket: { subject, priority, requesterId, submitterId, brandId, groupId, ticketFormId, tags[],
+  //                 via:{viaChannel}, comment:{ body:{value,format}, isPublic, uploads[] } } },
+  //     answering `createIssueTicket → ... on CreateIssueTicketSuccess { ticket { id } }` (a __typename union, so
+  //     failure is a SIBLING VARIANT, not an HTTP error — the nested-errors shape Core/audit.js guards).
+  //   · REST on the ticket namespace IS reachable on this tenant with the session ride: the same HAR shows
+  //     `DELETE /api/v2/tickets/{id} → 204`.
+  // The REST create below stays PRIMARY: documented, stable, and corroborated by that 204 — but it is not itself
+  // in any HAR yet, so a first live create is the proof. The GraphQL mutation is the fallback if REST is blocked.
   { ...ZD, id: 'create_ticket', name: 'Create a Zendesk ticket', write: true, reversible: true, outward: false, method: 'POST',
     does: 'open a NEW Zendesk ticket with a subject + first comment (optionally a priority / requester id), riding your login',
     endpoint: '/api/v2/tickets.json',

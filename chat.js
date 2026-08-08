@@ -104,7 +104,8 @@ import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
-import { buildContactTicket } from './Core/warrantyContact.js';   // v2.74.2118 — the CONTACT arm's artifact: a support request to the team   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
+import { buildContactTicket } from './Core/warrantyContact.js';
+import { describeRequester } from './Core/zendeskRequester.js';   // v2.74.2120 — who the ticket will appear to be FROM, said before any is created   // v2.74.2118 — the CONTACT arm's artifact: a support request to the team   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -355,6 +356,20 @@ async function _loadDevMode() {
   catch { _devModeEnabled = false; }
   _applyDevModeVisibility();
 }
+
+// v2.74.2120 — the warranty desk's Zendesk REQUESTER identity ({ id, email }), so a support request the desk raises
+// is attributed to the desk rather than to whoever is signed in. Absent until the account is set up, and the
+// preview SAYS so instead of implying otherwise. Read-through cache in the `settings:devMode` idiom.
+let _deskRequester = { id: null, email: '' };
+const _deskRequesterId = () => (Number.isFinite(Number(_deskRequester.id)) && Number(_deskRequester.id) > 0 ? Number(_deskRequester.id) : null);
+const _deskRequesterEmail = () => String(_deskRequester.email || '');
+async function _loadDeskRequester() {
+  try {
+    const s = await chrome.storage.local.get('settings:zendeskDeskUser');
+    const v = s['settings:zendeskDeskUser'];
+    _deskRequester = (v && typeof v === 'object') ? { id: v.id ?? null, email: String(v.email || '') } : { id: null, email: '' };
+  } catch { _deskRequester = { id: null, email: '' }; }
+}
 // CF-4.18 — messageId → last self-persisted body. MODULE scope: _persistMessageUpdate records here and the
 // storage listener below skips the matching echo; a listener-local map would be reborn empty every event.
 const _selfWrites = new Map();
@@ -416,6 +431,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes['settings:zendeskDeskUser']) { const v = changes['settings:zendeskDeskUser'].newValue; _deskRequester = (v && typeof v === 'object') ? { id: v.id ?? null, email: String(v.email || '') } : { id: null, email: '' }; }
   if (area !== 'local' || !changes['settings:devMode']) return;
   _devModeEnabled = changes['settings:devMode'].newValue === true;
   _applyDevModeVisibility();
@@ -16674,6 +16690,11 @@ async function sendChatMessage(textOverride = null) {
         for (const t of _out) {
           _md.push(`**${t.subject}**`, '', '```', t.comment, '```', '');
         }
+        // v2.74.2120 — WHO WILL THIS APPEAR TO BE FROM? The reviewer's question before any ticket exists, and the
+        // honest answer today is "your signed-in account", because the warranty desk requester is not set up yet.
+        // Saying nothing would let a reader assume the desk raised it; saying "no requester" would be false — a
+        // Zendesk ticket always has one (HAR deako.zendesk.com: the create carries requesterId/submitterId).
+        _md.push(`_${describeRequester({ id: _deskRequesterId(), email: _deskRequesterEmail() })}_`);
         _md.push('_Say `open the support requests` to create them in Zendesk._');
         _setMessageBody(mP, _md.join(String.fromCharCode(10)), { markdown: true });
         _orchFinalize(mP);
@@ -18483,6 +18504,7 @@ _wireAttach();
   try { _perfMark('init'); } catch { /* PERF ▸ v2.74.1981 temp — init entered ≈ panel module-graph eval done */ }
 
   await _loadDevMode();   // v2.74.1160 — gate dev/design surfaces before any restore
+  await _loadDeskRequester();   // v2.74.2120 — the desk's Zendesk requester, so a preview can state who a ticket comes from
   await _loadSetupStash();   // v2.74.1340 (review J-setup) — reload-survivor: an in-progress setup flow re-adopts on the next message in its conversation
   await _loadConnScope();    // CS-1 (v2.74.1996) — the desk/preset connection book, mirrored in memory before the first turn (_boundConnections is synchronous)
   // Attempt to restore the most recent conversation. If none exists, the
