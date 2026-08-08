@@ -34,7 +34,7 @@ const _s = (v) => (v == null ? '' : String(v).trim());
 export const CUSTOMER_ANSWERABLE = Object.freeze(['no-count', 'named-product-unresolved']);
 
 /**
- * Causes whose question belongs to US, not to the homeowner.
+ * Causes whose question belongs to US, not to the homeowner. These land in the UNRESOLVED channel.
  *  · other-trade     — "which trade owns this?" is an internal routing question (the user's concern 2).
  *  · already-handled — "was this already sent?" is answered by our own records and the task history; asking the
  *                      homeowner to confirm what we shipped reads as a company that does not know what it did.
@@ -62,23 +62,24 @@ export function contactMethodClass(raw) {
 /**
  * Decide the channel for ONE contact row + cause. PURE.
  *
- * @returns {{channel:'email'|'call'|'internal', why:string, method:string}}
+ * @returns {{channel:'email'|'call'|'unresolved', why:string, method:string}}
  *   email    — send the ask to the customer directly (the new primary path)
  *   call     — a person must phone them: they asked to be phoned, or we hold no address
- *   internal — the customer is not involved at all
+ *   unresolved — the customer is not involved at all; the task still needs work, and it is ours
+ *                (name chosen by the user 2026-08-08 over 'internal')
  */
 export function decideChannel({ cause = '', person = null } = {}) {
   const c = _s(cause);
   const method = contactMethodClass(person && person.prefers);
 
   if (INTERNAL_ONLY.includes(c)) {
-    return { channel: 'internal', method, why: c === 'other-trade'
+    return { channel: 'unresolved', method, why: c === 'other-trade'
       ? 'reads as another trade — routing is ours to decide, not the homeowner\'s'
       : 'the note says it was already handled — our own records answer that, not the homeowner' };
   }
   if (!CUSTOMER_ANSWERABLE.includes(c)) {
     // An unknown cause is not a licence to contact someone.
-    return { channel: 'internal', method, why: `unrecognised cause "${c || '(none)'}" — nobody is contacted on a guess` };
+    return { channel: 'unresolved', method, why: `unrecognised cause "${c || '(none)'}" — nobody is contacted on a guess` };
   }
   if (!person || !_s(person.email)) {
     return { channel: 'call', method, why: 'no email address on the record' };
@@ -94,7 +95,7 @@ export function decideChannel({ cause = '', person = null } = {}) {
  * `items` = [{ id, label, outcome:{cause}, person }] — person is the homeowner from Core/contactRoles.js.
  */
 export function planChannels(items) {
-  const out = { email: [], call: [], internal: [] };
+  const out = { email: [], call: [], unresolved: [] };
   for (const it of (Array.isArray(items) ? items : [])) {
     if (!it) continue;
     const d = decideChannel({ cause: it.outcome && it.outcome.cause, person: it.person });
@@ -105,12 +106,12 @@ export function planChannels(items) {
 
 /** The reviewer's one-line summary, before anything is sent. PURE. Every bucket is named, including the empty. */
 export function describeChannelPlan(plan) {
-  const p = (plan && typeof plan === 'object') ? plan : { email: [], call: [], internal: [] };
+  const p = (plan && typeof plan === 'object') ? plan : { email: [], call: [], unresolved: [] };
   const n = (k) => (Array.isArray(p[k]) ? p[k].length : 0);
   const bits = [];
   if (n('email')) bits.push(`**${n('email')} emailed to the homeowner**`);
   if (n('call')) bits.push(`**${n('call')} needing a phone call** (they asked to be phoned, or we hold no address)`);
-  if (n('internal')) bits.push(`**${n('internal')} kept internal** (not the homeowner's question)`);
+  if (n('unresolved')) bits.push(`**${n('unresolved')} left unresolved** (not the homeowner's question — ours to settle)`);
   if (!bits.length) return 'Nothing to send — no task needs the homeowner.';
   return bits.join(' · ');
 }

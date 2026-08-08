@@ -6096,7 +6096,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           const _d = decideChannel({ cause: _cause, person: _person });
           const _to = _d.channel === 'email' ? (_person.email || '') : _d.channel === 'call' ? (_person.phone || '') : '';
           _chanAct = {
-            what: `${_d.channel}: ${_cause}${_to ? ` → ${_to}` : ''} (${_d.why})`,
+            what: `${_d.channel}: ${_cause}${_to ? ` → ${_to}` : ''} (${_d.why})`,   // channel names: email · call · unresolved (v2.74.2124, user's word over "internal")
             // email AND call both await a person — the user's words were "approves the email, calls or overrides
             // the decision", so a call is owed work awaiting the same consent, not a closed matter. `internal`
             // records that we DECLINED to contact the customer, with the reason, which is what makes it

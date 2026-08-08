@@ -51,24 +51,24 @@ describe('contactChannel — a stated phone preference is never overridden by a 
 });
 
 describe('contactChannel — the customer is never asked OUR questions (the retired "Not Deako" arm)', () => {
-  it('other-trade is INTERNAL — emailing a homeowner about another trade is useless and insulting', () => {
+  it('other-trade is UNRESOLVED — emailing a homeowner about another trade is useless and insulting', () => {
     const d = decideChannel({ cause: 'other-trade', person: homeowner('Any') });
-    assert.equal(d.channel, 'internal');
+    assert.equal(d.channel, 'unresolved');
     assert.match(d.why, /another trade/);
   });
   it('other-trade stays internal even for a homeowner who would happily take email', () => {
     for (const m of ['Any', 'Email', '-1']) {
-      assert.equal(decideChannel({ cause: 'other-trade', person: homeowner(m) }).channel, 'internal');
+      assert.equal(decideChannel({ cause: 'other-trade', person: homeowner(m) }).channel, 'unresolved');
     }
   });
-  it('already-handled is INTERNAL — our own records answer it', () => {
-    assert.equal(decideChannel({ cause: 'already-handled', person: homeowner('Any') }).channel, 'internal');
+  it('already-handled is UNRESOLVED — our own records answer it', () => {
+    assert.equal(decideChannel({ cause: 'already-handled', person: homeowner('Any') }).channel, 'unresolved');
   });
   it('an UNRECOGNISED cause contacts nobody — a guess is not a licence to email someone', () => {
     const d = decideChannel({ cause: 'mystery', person: homeowner('Any') });
-    assert.equal(d.channel, 'internal');
+    assert.equal(d.channel, 'unresolved');
     assert.match(d.why, /nobody is contacted on a guess/);
-    assert.equal(decideChannel({ person: homeowner('Any') }).channel, 'internal');
+    assert.equal(decideChannel({ person: homeowner('Any') }).channel, 'unresolved');
   });
   it('the two cause sets do not overlap, and cover the four declared causes', () => {
     for (const c of CUSTOMER_ANSWERABLE) assert.ok(!INTERNAL_ONLY.includes(c), `${c} is in both sets`);
@@ -88,8 +88,8 @@ describe('contactChannel — the plan a reviewer reads', () => {
     const p = planChannels(items);
     assert.deepEqual(p.email.map((x) => x.id), ['a', 'd']);
     assert.deepEqual(p.call.map((x) => x.id), ['b']);
-    assert.deepEqual(p.internal.map((x) => x.id), ['c']);
-    assert.equal(p.email.length + p.call.length + p.internal.length, items.length, 'every item lands somewhere');
+    assert.deepEqual(p.unresolved.map((x) => x.id), ['c']);
+    assert.equal(p.email.length + p.call.length + p.unresolved.length, items.length, 'every item lands somewhere');
   });
   it('each item carries the DECISION, so a preview can say why', () => {
     const p = planChannels(items);
@@ -100,7 +100,7 @@ describe('contactChannel — the plan a reviewer reads', () => {
     const line = describeChannelPlan(planChannels(items));
     assert.match(line, /2 emailed to the homeowner/);
     assert.match(line, /1 needing a phone call/);
-    assert.match(line, /1 kept internal/);
+    assert.match(line, /1 left unresolved/);
   });
   it('an empty plan says so rather than rendering an empty sentence', () => {
     assert.match(describeChannelPlan(planChannels([])), /Nothing to send/);
