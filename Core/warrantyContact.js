@@ -53,16 +53,78 @@ export const CONTACT_ASKS = Object.freeze({
 /** Priority per cause. Nothing here is urgent; an unrouted task is the one that rots, so it edges up. */
 const _PRIORITY = Object.freeze({ 'no-count': 'normal', 'named-product-unresolved': 'normal', 'other-trade': 'normal', 'already-handled': 'low' });
 
-/** Pull the primary homeowner via the SAME declaration vocabulary the customer-create writeMap uses (contact rungs,
- *  normalized) — never a second, divergent way to read a person off a warranty row. PURE. */
+/**
+ * EVERY contact on the task, each classified by THE RECORD'S OWN FLAGS — never by guessing at a role string.
+ *
+ * The user's warning (2026-08-08): "careful, other might be support or drh sales rep." Phoning a builder's staffer
+ * believing they are the customer is the failure this guards. `TaskContacts` answers it outright — HAR-verified
+ * payload of `GET /api/Vendor/Warranty/TaskContacts/{taskId}` (Core/connectorRecipes.js:915), which the drill merges
+ * onto the row under `__contacts` verbatim, PascalCase intact:
+ *
+ *   Email · HomePhone · WorkPhone · CellPhone · ContactMethod · IsPrimary · IsDrHorton · IsBuyer ·
+ *   AssignmentType · Id · FirstName · LastName · FullName
+ *
+ * Both sampled tasks carried the same four-row shape, and it is the FLAGS that separate the sides:
+ *   IsDrHorton:true + AssignmentType "CSR" / "COORDINATOR"  -> builder staff — NOT the customer, never called
+ *   IsBuyer:true + IsPrimary:true                            -> the primary homeowner
+ *   IsDrHorton:false with no AssignmentType                  -> the co-buyer (the secondary homeowner)
+ *
+ * That last line is the one inference here, and it is made deliberately: the serializer OMITS false booleans, so the
+ * co-buyer arrives carrying no `IsBuyer` at all. Reading "no flags" as "not a homeowner" would silently drop the
+ * second person the user asked to always list; reading it as builder staff would be worse. Absence of a DRH marker is
+ * therefore treated as homeowner-side — the safe direction, since a homeowner mislabelled secondary still gets
+ * called whereas a dropped one does not. `roleStated` marks which labels came from the record verbatim.
+ *
+ * Reading the row's own flat fields (the pickFieldPath fallback) is deliberately AVOIDED — it returns whichever
+ * contact sits first in the array regardless of side, which is how a probe of this module returned the same person
+ * as both primary and "other". PURE.
+ * @returns {Array<{name,email,phone,phoneLabel,prefers,role,roleStated,isPrimary,isHomeowner,isStaff}>}
+ */
+export function contactsFrom(row) {
+  const r = (row && typeof row === 'object') ? row : {};
+  const raw = [r.__contacts, r.contacts].find((x) => Array.isArray(x) && x.length) || [];
+  const out = [];
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    // Case-insensitive reads: the sidecar carries PascalCase, hand-built rows use camelCase.
+    const g = (re) => { const hit = Object.entries(c).find(([k, v]) => re.test(k) && v != null && typeof v !== 'object' && _s(v)); return hit ? _s(hit[1]) : ''; };
+    const flag = (name) => { const hit = Object.entries(c).find(([k]) => k.toLowerCase() === name); return hit ? (hit[1] === true || hit[1] === 'true') : false; };
+
+    const assignment = g(/^assignmenttype$|role|contacttype|relation/i);   // "CSR" · "COORDINATOR" · a stated title
+    const isDrh = flag('isdrhorton');
+    const isStaff = isDrh || (!!assignment && !/home\s*owner|buyer|primary|secondary/i.test(assignment));
+    const isPrimary = flag('isprimary');
+    const isHomeowner = !isStaff;                            // see the note above: no DRH marker => homeowner side
+    const role = assignment
+      ? (isDrh ? assignment + ' (D.R. Horton)' : assignment)
+      : (isPrimary ? 'Primary homeowner' : 'Secondary homeowner');
+
+    // Phone: keep the LABEL, so the agent knows whether they are dialling a cell or a work line.
+    const phones = [['cell', g(/^cellphone$|mobile|cell/i)], ['home', g(/^homephone$/i)], ['work', g(/^workphone$/i)], ['', g(/phone/i)]];
+    const hit = phones.find(([, v]) => v) || ['', ''];
+    const prefersRaw = g(/^contactmethod$/i);                // "Any" · "-1" (the unset sentinel) · a named method
+    const first = g(/first/i); const last = g(/last/i); const full = g(/^fullname$|^name$|displayname/i);
+
+    const person = {
+      name: _s(full || [first, last].filter(Boolean).join(' ')),
+      email: g(/email/i), phone: hit[1], phoneLabel: hit[0],
+      prefers: /^-?1$/.test(prefersRaw) ? '' : prefersRaw,   // "-1" means no preference recorded, not a method
+      role, roleStated: !!assignment, isPrimary, isHomeowner, isStaff,
+    };
+    if (person.name || person.email || person.phone) out.push(person);
+  }
+  // Homeowners first (primary ahead of co-buyer), staff after — the agent reads top-down and calls from the top.
+  const rank = (p) => (p.isHomeowner ? (p.isPrimary ? 0 : 1) : 2);
+  return out.map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map((x) => x.p);
+}
+
+/** The homeowner to name on the ticket — primary first, and NEVER a builder staffer. PURE. */
 export function homeownerFrom(row) {
-  const pick = (type) => _s(resolveWriteValue(row || {}, type, { contact: 'primary', type }));
-  const first = pick('first'); const last = pick('last');
-  return {
-    name: _s([first, last].filter(Boolean).join(' ')),
-    email: pick('email'),
-    phone: pick('phone'),
-  };
+  const all = contactsFrom(row);
+  const p = all.find((x) => x.isHomeowner && x.isPrimary) || all.find((x) => x.isHomeowner) || null;
+  return p
+    ? { name: p.name, email: p.email, phone: p.phone, role: p.role }
+    : { name: '', email: '', phone: '', role: '' };
 }
 
 /** The task's own identifiers/location, as the support agent needs to see them. PURE. */
@@ -102,11 +164,32 @@ export function buildContactTicket({ row = {}, outcome = {}, instructions = '', 
   lines.push(`WHAT WE NEED: ${spec.ask}`);
   if (cause === 'named-product-unresolved' && named) lines.push(`The note names: "${_clip(named, 80)}"`);
   lines.push('');
-  lines.push('HOMEOWNER');
-  lines.push(`  Name:    ${who.name || '(not on the task)'}`);
-  lines.push(`  Phone:   ${who.phone || '(not on the task)'}`);
-  lines.push(`  Email:   ${who.email || '(not on the task)'}`);
-  lines.push(`  Address: ${id.address || '(not on the task)'}`);
+  // WHO TO CALL vs WHO ELSE IS ON THE TASK. A warranty task's contacts include people who are NOT the customer —
+  // the builder's own CSR and coordinator ride on every one of them. Phoning a CSR believing they are the homeowner
+  // is the failure this split prevents, so the two sides are separated by the record's `IsDrHorton`/`AssignmentType`
+  // flags (see contactsFrom) and everyone is listed with the title the record gives them.
+  const people = contactsFrom(row);
+  const owners = people.filter((p) => p.isHomeowner);
+  const others = people.filter((p) => !p.isHomeowner);
+  const say = (p) => {
+    lines.push(`  ${p.name || '(name not stated)'}  — ${p.role}`);
+    const ph = p.phone ? `${p.phone}${p.phoneLabel ? ` (${p.phoneLabel})` : ''}` : '(none)';
+    lines.push(`    Phone: ${ph}    Email: ${p.email || '(none)'}${p.prefers ? `    Prefers: ${p.prefers}` : ''}`);
+  };
+  lines.push(owners.length > 1 ? 'HOMEOWNERS — call these' : 'HOMEOWNER — call this person');
+  if (!owners.length) {
+    lines.push(people.length
+      ? '  (every contact on this task is builder staff — no homeowner is listed; check VendorSuite before calling anyone below)'
+      : '  (no contacts on the task — look them up in VendorSuite before calling)');
+  }
+  for (const p of owners) say(p);
+  if (others.length) {
+    lines.push('');
+    lines.push('ALSO ON THE TASK (not the customer)');
+    for (const p of others) say(p);
+  }
+  lines.push('');
+  lines.push(`  Address:   ${id.address || '(not on the task)'}`);
   if (id.project) lines.push(`  Community: ${id.project}`);
   lines.push('');
   lines.push('WARRANTY TASK');

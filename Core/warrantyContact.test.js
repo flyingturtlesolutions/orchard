@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildContactTicket, buildContactTickets, homeownerFrom, taskIdentityFrom, CONTACT_ASKS, describeContactTicket } from './warrantyContact.js';
+import { buildContactTicket, buildContactTickets, homeownerFrom, contactsFrom, taskIdentityFrom, CONTACT_ASKS, describeContactTicket } from './warrantyContact.js';
 
 // A warranty row shaped like the real one (HAR-verified keys) + the contacts sidecar the drill merges in.
 const ROW = {
@@ -11,19 +11,60 @@ const ROW = {
   AddressLine1: '1565 Fairlie Way', CityStateZip: 'Raleigh, NC 27603',
   ProjectName: 'Fairlie', ProjectDisplayName: 'Fairlie Park',
   Instructions: 'Please send homeowner deako switches',
-  contacts: [{ type: 'primary', firstName: 'Dana', lastName: 'Reyes', email: 'dana@example.com', phone: '919-555-0142' }],
+  // The REAL TaskContacts payload, keys verbatim from the HAR (GET /api/Vendor/Warranty/TaskContacts/{taskId},
+  // 2026-08-08, two sampled tasks — same four-row shape both times): the builder's CSR and coordinator ride on every
+  // warranty task alongside the buyers, and only the flags tell them apart. Note the co-buyer carries NO IsBuyer /
+  // IsPrimary at all — the serializer omits false booleans — which is exactly the case that must not be dropped.
+  __contacts: [
+    { Email: 'dana@example.com', CellPhone: '919-555-0142', ContactMethod: 'Any', IsPrimary: true, IsDrHorton: false, IsBuyer: true, AssignmentType: null, Id: 1, FirstName: 'Dana', LastName: 'Reyes', FullName: 'Dana Reyes' },
+    { Email: 'marcus@example.com', CellPhone: '919-555-0188', ContactMethod: '-1', IsDrHorton: false, AssignmentType: null, Id: 2, FirstName: 'Marcus', LastName: 'Reyes', FullName: 'Marcus Reyes' },
+    { Email: 'priya@drhorton.com', CellPhone: '919-555-0100', ContactMethod: 'Any', IsDrHorton: true, AssignmentType: 'CSR', Id: 3, FirstName: 'Priya', LastName: 'Shah', FullName: 'Priya Shah' },
+    { Email: 'lee@drhorton.com', WorkPhone: '919-555-0177', ContactMethod: 'Any', IsDrHorton: true, AssignmentType: 'COORDINATOR', Id: 4, FirstName: 'Lee', LastName: 'Ortiz', FullName: 'Lee Ortiz' },
+  ],
 };
 
 describe('warrantyContact — reading the person and the task off the row', () => {
-  it('pulls the primary homeowner through the writeMap contact vocabulary', () => {
+  it('names the primary buyer as the person to call', () => {
     const who = homeownerFrom(ROW);
     assert.equal(who.name, 'Dana Reyes');
     assert.equal(who.email, 'dana@example.com');
     assert.equal(who.phone, '919-555-0142');
   });
+  it('splits homeowners from builder staff by the flags the record carries, homeowners first', () => {
+    const all = contactsFrom(ROW);
+    assert.deepEqual(all.map((p) => p.name), ['Dana Reyes', 'Marcus Reyes', 'Priya Shah', 'Lee Ortiz']);
+    assert.deepEqual(all.map((p) => p.isHomeowner), [true, true, false, false]);
+    assert.deepEqual(all.map((p) => p.role),
+      ['Primary homeowner', 'Secondary homeowner', 'CSR (D.R. Horton)', 'COORDINATOR (D.R. Horton)']);
+  });
+  it('the co-buyer survives even though the payload omits IsBuyer/IsPrimary for them', () => {
+    // The serializer drops false booleans, so the second homeowner arrives with NO flags at all. Absence of a DRH
+    // marker must read as homeowner-side — the other reading silently loses the person the user asked to always list.
+    const marcus = contactsFrom(ROW)[1];
+    assert.equal(marcus.isHomeowner, true);
+    assert.equal(marcus.isPrimary, false);
+    assert.equal(marcus.prefers, '', 'ContactMethod "-1" is the unset sentinel, never a method to print');
+  });
+  it('a CSR or coordinator is NEVER named as the person to call', () => {
+    const csr = contactsFrom(ROW).find((p) => /CSR/.test(p.role));
+    assert.equal(csr.isHomeowner, false);
+    assert.equal(csr.isStaff, true);
+    assert.equal(homeownerFrom(ROW).name, 'Dana Reyes');   // the PRIMARY buyer, not whoever sits first in the array
+  });
+  it('a task carrying only builder staff names no homeowner rather than promoting one', () => {
+    const staffOnly = { __contacts: [{ FullName: 'Lee Ortiz', IsDrHorton: true, AssignmentType: 'COORDINATOR', CellPhone: '1' }] };
+    assert.equal(homeownerFrom(staffOnly).name, '');
+    assert.equal(contactsFrom(staffOnly)[0].isHomeowner, false);
+  });
+  it('keeps the phone LABEL — a work line and a cell are not interchangeable', () => {
+    const all = contactsFrom(ROW);
+    assert.equal(all[0].phoneLabel, 'cell');
+    assert.equal(all[3].phoneLabel, 'work');
+    assert.equal(all[0].prefers, 'Any');
+  });
   it('a row with no contacts yields empty fields, never a guess', () => {
-    const who = homeownerFrom({ TicketId: 1 });
-    assert.deepEqual(who, { name: '', email: '', phone: '' });
+    assert.deepEqual(homeownerFrom({ TicketId: 1 }), { name: '', email: '', phone: '', role: '' });
+    assert.deepEqual(contactsFrom({ TicketId: 1 }), []);
   });
   it('reads the task identity + location', () => {
     const id = taskIdentityFrom(ROW);
@@ -56,9 +97,15 @@ describe('warrantyContact — the ticket is a SUPPORT REQUEST, not a customer em
     }
   });
   it('carries who to reach, where, and the task ids', () => {
-    assert.match(t.comment, /Name:\s+Dana Reyes/);
-    assert.match(t.comment, /Phone:\s+919-555-0142/);
-    assert.match(t.comment, /Address: 1565 Fairlie Way, Raleigh, NC 27603/);
+    assert.match(t.comment, /HOMEOWNERS — call these/);
+    assert.match(t.comment, /Dana Reyes\s+— Primary homeowner/);
+    assert.match(t.comment, /Marcus Reyes\s+— Secondary homeowner/);
+    assert.match(t.comment, /Phone: 919-555-0142 \(cell\)/);
+    assert.match(t.comment, /ALSO ON THE TASK \(not the customer\)/);
+    assert.match(t.comment, /Priya Shah\s+— CSR \(D\.R\. Horton\)/);
+    // the staff block sits BELOW the homeowners — the agent calls from the top
+    assert.ok(t.comment.indexOf('Dana Reyes') < t.comment.indexOf('Priya Shah'));
+    assert.match(t.comment, /Address:\s+1565 Fairlie Way, Raleigh, NC 27603/);
     assert.match(t.comment, /Ticket:\s+#4903279/);
   });
   it('quotes the note verbatim as the evidence', () => {
@@ -72,8 +119,8 @@ describe('warrantyContact — the ticket is a SUPPORT REQUEST, not a customer em
   });
   it('missing contact details degrade honestly, they do not vanish', () => {
     const bare = buildContactTicket({ row: { TicketId: 9, Instructions: 'send switches' }, outcome: { cause: 'no-count' } });
-    assert.match(bare.comment, /Name:\s+\(not on the task\)/);
-    assert.match(bare.comment, /Phone:\s+\(not on the task\)/);
+    assert.match(bare.comment, /HOMEOWNER — call this person/);
+    assert.match(bare.comment, /no contacts on the task — look them up in VendorSuite/);
   });
 });
 
