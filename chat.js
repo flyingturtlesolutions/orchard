@@ -5858,8 +5858,12 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
         const src = payloadItems.find((p) => String(p.id) === id);
         const o = readWarrantyItem(f, (src && src.text) || '', { inCatalog: () => true });   // catalog check: AU — the draft leg resolves the product and reports honestly if it cannot
         _outcomes.push(o);
-        const _why = o.cause ? `${o.cause}${o.fields.note ? ` — ${o.fields.note}` : ''}`
-          : `${o.count} × ${o.product}${o.fields.note ? ` — ${o.fields.note}` : ''}`;
+        // The row line IS the draft preview: what would be ordered, and by which counting rule it was derived —
+        // so a wrong number is traceable to a named rule (EXPLICIT / RANGE_UPPER / SUM_OF_PLACES / SINGLE_FAULT)
+        // rather than to a model's adjective. A contact row states its closed-enum cause instead.
+        const _why = o.cause
+          ? `${o.cause}${o.fields.note ? ` — ${o.fields.note}` : ''}`
+          : `${o.count} × ${o.product} (${String(o.fields.count_route || '').toLowerCase().replace(/_/g, ' ')})${o.fields.note ? ` — ${o.fields.note}` : ''}`;
         classifyBy.set(id, { group: o.arm, why: restore(_why, redMap).text, _outcome: o });
       }
       const _t = tallyOutcomes(_outcomes);
@@ -5940,13 +5944,32 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     for (const r of unknown) lines.push(`  • ${escHtml(_rowLabel(r.item, srcLeg))}${_why(r)}`);
   }
 
+  // v2.74.2107 (user directive: "process these should include the count and switch type that would be drafted") —
+  // THE PLAN, before any drafting. The extraction already derived a count and a product per row; state the total
+  // ORDER as a line the reviewer can check at a glance, per product, so what WOULD ship is visible without opening
+  // a draft. Extraction path only — the classify path has no counts to total.
+  const planLines = [];
+  if (_warrantyExtract && classifyBy && classifyBy.size) {
+    const byProduct = new Map(); let orders = 0;
+    for (const v of classifyBy.values()) {
+      const o = v && v._outcome;
+      if (!o || o.arm !== 'replacement needed' || !o.count || !o.product) continue;
+      orders++;
+      byProduct.set(o.product, (byProduct.get(o.product) || 0) + o.count);
+    }
+    if (orders) {
+      const parts = [...byProduct.entries()].sort((a, b) => b[1] - a[1]).map(([p, n]) => `**${n} × ${escHtml(p)}**`);
+      planLines.push('', `_Would draft ${orders} order${orders === 1 ? '' : 's'} — ${parts.join(' · ')}. Nothing is ordered until you say so._`);
+    }
+  }
+
   const tally = branchTally(results, { arms: br.arms });
   // v2.74.1895 — when NOTHING could be judged, the headline is the reason, not the sorting. "Sorted each record into 3
   // groups · couldn't tell 7" reads as a classifier that hedged; the truth was that the records had no such field.
   const head = _classifyGap
     ? `I couldn’t sort these — ${_classifyGap}.${capped ? `  (first ${cap} of ${rows.length})` : ''}`
     : `Sorted each record into **${br.arms.length}** group${br.arms.length === 1 ? '' : 's'}.${capped ? `  (first ${cap} of ${rows.length})` : ''}`;
-  _setMessageBody(msg, [head, tally, ...lines].join('\n'), { markdown: true });
+  _setMessageBody(msg, [head, tally, ...lines, ...planLines].join('\n'), { markdown: true });
   _orchFinalize(msg);
   try { _orchLog(`BRANCH ▸ ${results.length} × ${br.mode} → ${tally}${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
   if (unknownWhy.length) { try { _orchLog(`BRANCH ▸ unknown reasons: ${unknownWhy.join(' | ')}`); } catch { /* */ } }
