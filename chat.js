@@ -5128,6 +5128,7 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
   };
   let fp = _resolve();
   const _dj = (!fp && srcLeg && srcLeg.tool && srcLeg.tool.drill && srcLeg.tool.drill.via && srcLeg.tool.drill.from) ? srcLeg.tool.drill : null;
+  let _enrichGot = 0, _enrichNoJoin = 0;   // v2.74.2084 — legible-failure diagnostics: how many rows enriched vs. carried no drill join id (`from`)
   if (_dj) {
     const viaLeg = await _rideDrillLeg(srcLeg, _dj.via, (srcLeg.tool && srcLeg.tool.groundId) || null);
     // v2.74.1929 — THE SIDECAR REACHES THIS DOOR TOO. This enrich read only the `via` leg, so a field that lives
@@ -5145,7 +5146,9 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
         if (_walkAbortFlag.requested) return;
         const joinId = use[k] && use[k][_dj.from];
         // the primary drill needs its join id; a re-keyed sidecar may not (it reads its own field off the row)
-        if ((joinId == null || joinId === '') && !runSidecars) { done++; return; }
+        const _hasJoin = joinId != null && joinId !== '';
+        if (!_hasJoin) _enrichNoJoin++;   // v2.74.2084 — a row that can't be opened (no `from` id, e.g. a cross-division aggregate that dropped TaskId)
+        if (!_hasJoin && !runSidecars) { done++; return; }
         let merged = null;
         if (viaLeg && joinId != null && joinId !== '') {
           let dr = null;
@@ -5162,10 +5165,13 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
         _setMessageBody(msg, `Opening each record for “${escHtml(fr.field)}”… ${done}/${use.length}`);
       });
       fp = _resolve();
+      _enrichGot = got;   // v2.74.2084 — carry the enrich outcome to the legible-failure branch below
       // The COST is stated in the trace (the VendorSuite `FIND ▸ … est=` discipline): reads spent, lanes, wall
       // clock. No spend gate here yet — `use` is already row-capped upstream, so the unbounded case this would
       // guard is unreachable; when that cap rises, the `_FIND_AUTO_MS` ceiling is the mechanism to reuse.
-      try { _orchLog(`FIELD_READ ▸ enriched ${got}/${use.length} row(s) via ${viaLeg ? _dj.via : '—'}${runSidecars ? ` +${(_dj.also || []).length} sidecar(s)` : ''} — ${use.length * _perRow} read(s) ×${Math.min(_RIDE_CONC, use.length)} lanes in ${((Date.now() - _t0) / 1000).toFixed(1)}s → field ${fp ? `"${fp.path}"` : 'STILL absent'}`); } catch { /* */ }
+      // v2.74.2084 — `noJoin` in the trace distinguishes "opened them, field absent" from "couldn't open any"
+      // (rows lacked the drill's `from` id — the cross-division aggregate case), which the bare 0/N hid.
+      try { _orchLog(`FIELD_READ ▸ enriched ${got}/${use.length} row(s)${_enrichNoJoin ? ` (noJoin ${_enrichNoJoin})` : ''} via ${viaLeg ? _dj.via : '—'}${runSidecars ? ` +${(_dj.also || []).length} sidecar(s)` : ''} — ${use.length * _perRow} read(s) ×${Math.min(_RIDE_CONC, use.length)} lanes in ${((Date.now() - _t0) / 1000).toFixed(1)}s → field ${fp ? `"${fp.path}"` : 'STILL absent'}`); } catch { /* */ }
     }
   }
   if (!fp && _tied && _tied.length) {
@@ -5197,9 +5203,32 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
     return { ok: false, gap: true };
   }
   if (!fp) {
-    _setMessageBody(msg, `I couldn’t find a “${escHtml(fr.field)}” field on these records. Name it the way it appears on the record and I’ll read it.`, { markdown: true });
+    // v2.74.2084 — a legible dead-end, not a bare "name it yourself" (the user rarely knows the key either). Two
+    // honest branches: (a) the drill couldn't OPEN the records (no `from` join id on any row — the cross-division
+    // aggregate that dropped TaskId), say so + the workaround; (b) the records opened but carry no matching field,
+    // so LIST the fields that ARE readable so the user/model can pick (the field-discovery gap the warranty
+    // "get instructions for each" hit live: the field IS `Instructions`, on the detail, and naming it is the ask).
+    const _present = [];
+    { const _seen = new Set();
+      for (const r of (Array.isArray(use) ? use.slice(0, 4) : [])) {
+        if (r && typeof r === 'object' && !Array.isArray(r)) for (const [k, v] of Object.entries(r)) {
+          if (!k || String(k).endsWith('__read') || _seen.has(k)) continue;
+          if (typeof v === 'string' || typeof v === 'number') { _seen.add(k); _present.push(k); }
+        }
+      }
+    }
+    let _body;
+    if (_dj && _enrichNoJoin >= use.length) {
+      _body = `I couldn’t open the individual records to read “${escHtml(fr.field)}” — these rows don’t carry the internal id the detail read needs (this happens on a cross-division list). Open one record, or run it within a single division, and I’ll read it.`;
+    } else if (_present.length) {
+      const _bold = _present.slice(0, 14).map((n) => `**${escHtml(n)}**`);
+      _body = `I couldn’t find a “${escHtml(fr.field)}” field on these records. The fields I can read are: ${_bold.join(' · ')}. Which one?`;
+    } else {
+      _body = `I couldn’t find a “${escHtml(fr.field)}” field on these records. Name it the way it appears on the record and I’ll read it.`;
+    }
+    _setMessageBody(msg, _body, { markdown: true });
     _orchFinalize(msg);
-    try { _orchLog(`FIELD_READ ▸ no field — "${fr.field}" absent on ${use.length} row(s)`); } catch { /* */ }
+    try { _orchLog(`FIELD_READ ▸ no field — "${fr.field}" absent on ${use.length} row(s)${_dj ? ` (enriched ${_enrichGot}/${use.length}, noJoin ${_enrichNoJoin})` : ''}; present: ${_present.slice(0, 14).join(',')}`); } catch { /* */ }
     return { ok: false, gap: true };
   }
 
