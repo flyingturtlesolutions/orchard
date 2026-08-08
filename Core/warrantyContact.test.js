@@ -186,3 +186,27 @@ describe('warrantyContact — the homeowner projection carries the CONTACT METHO
     assert.equal(homeownerFrom(row).prefers, '');
   });
 });
+
+describe('warrantyContact — assignment + the class tag (v2.74.2127)', () => {
+  it('carries the assignee so the request is actionable, not just filed', () => {
+    const t = buildContactTicket({ row: ROW, outcome: { cause: 'no-count' }, assignee: { email: 'dmonk@deako.com' } });
+    assert.equal(t.assignee_email, 'dmonk@deako.com');
+  });
+  it('omits assignment entirely when none is given — the caller fails CLOSED on that', () => {
+    // A support request asking a person to phone a homeowner is useless sitting unassigned, so the absence must be
+    // detectable rather than papered over with a default buried at the call site.
+    const t = buildContactTicket({ row: ROW, outcome: { cause: 'no-count' } });
+    assert.equal('assignee_email' in t, false);
+    assert.equal('assignee_id' in t, false);
+    assert.equal('group_id' in t, false);
+  });
+  it('a junk assignee is dropped rather than sent — an undeliverable address assigns to nobody', () => {
+    // "dmonk@deako" (no TLD) is exactly the shape the user first gave; it must not become an assignment.
+    const t = buildContactTicket({ row: ROW, outcome: { cause: 'no-count' }, assignee: { email: 'dmonk@deako' } });
+    assert.equal('assignee_email' in t, false);
+  });
+  it('tags the class AND the cause, so the team can filter either way', () => {
+    const t = buildContactTicket({ row: ROW, outcome: { cause: 'other-trade' }, assignee: { email: 'a@b.com' } });
+    assert.deepEqual(t.tags, ['ci-warranty-contact', 'ci-warranty-other-trade']);
+  });
+});

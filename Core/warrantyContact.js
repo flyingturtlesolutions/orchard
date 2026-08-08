@@ -23,6 +23,7 @@
 
 import { resolveWriteValue } from './writeMap.js';
 import { readContacts } from './contactRoles.js';
+import { assignmentFields, CONTACT_TAG } from './zendeskAssignee.js';   // v2.74.2127 — who it lands on, and the class tag
 
 const _s = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
 const _clip = (v, n) => { const s = _s(v); return s.length > n ? `${s.slice(0, n - 1)}…` : s; };
@@ -93,7 +94,7 @@ export function taskIdentityFrom(row) {
  * @param {{row:object, outcome:{cause:string, fields?:object}, instructions?:string, requesterId?:number|string}} spec
  * @returns {{subject:string, comment:string, priority:string, cause:string, requester_id?:number}|null}
  */
-export function buildContactTicket({ row = {}, outcome = {}, instructions = '', requesterId = null } = {}) {
+export function buildContactTicket({ row = {}, outcome = {}, instructions = '', requesterId = null, assignee = {} } = {}) {
   const cause = _s(outcome && outcome.cause);
   const spec = CONTACT_ASKS[cause];
   if (!spec) return null;                                   // an unknown cause writes NOTHING — never a vague ticket
@@ -153,9 +154,16 @@ export function buildContactTicket({ row = {}, outcome = {}, instructions = '', 
   lines.push('');
   lines.push('Reply here with the answer and the replacement can be drafted.');
 
+  // v2.74.2127 — ASSIGNMENT + the class tag ride on the ticket. The assignee is what makes this actionable: a
+  // request asking a person to phone a homeowner is useless sitting unassigned, so `hasAssignment` (which the
+  // caller checks) fails CLOSED without one. The tag is a sibling of the live `ci-warranty-replacements` seen on
+  // a real ticket, so the team can filter these as a class.
+  const assignFields = assignmentFields(assignee || {});
   const rid = Number(requesterId);
   return {
     subject, comment: lines.join('\n'), priority: _PRIORITY[cause] || 'normal', cause,
+    tags: [CONTACT_TAG, `ci-warranty-${cause}`],
+    ...assignFields,
     // ORCHARD is the requester (user ruling: "every ticket has a requestor — orchard can be the requestor here").
     // Omitted when the id is unknown, in which case Zendesk attributes the ticket to the authenticated session —
     // still a real requester, and never the homeowner, who is named in the body as the person to CALL.

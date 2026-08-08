@@ -34,6 +34,17 @@ const _posInt = (v) => { const n = Number(v); return (Number.isFinite(n) && n > 
 export const CONTACT_TAG = 'ci-warranty-contact';
 
 /**
+ * The assignee these land on until a real routing rule exists.
+ *
+ * Set by the user 2026-08-08 for TESTING: "support requests get assigned to dmonk@deako (testing)". Written here
+ * as a `.com` address because `dmonk@deako` has no TLD and is not deliverable — assignmentFields would reject it
+ * as junk rather than silently assigning to nothing. Flagged to the user; correct in ONE place if the internal
+ * domain really is bare. This is a DEFAULT, not a constant: `settings:zendeskAssignee` overrides it, so going to
+ * production is a settings change rather than a code change.
+ */
+export const DEFAULT_ASSIGNEE = 'dmonk@deako.com';
+
+/**
  * Normalize whatever the user said into assignment fields for the create. PURE.
  *
  * Accepts an email ("assign them to jane@deako.com"), a numeric agent id, or a group id — an email is the only
