@@ -7554,11 +7554,10 @@ function _provFromLeg(leg) {
 // parent leg — one door instead of two, and it does not depend on provenance.groundId being populated (it was
 // null in the reproduction, and requiring it is what made the roster refuse).
 // Returns {contacts, why} — `why` names the miss so a refusal can state it instead of guessing.
-async function _drillContacts(prov, joinId) {
+async function _drillContacts(prov, joinIn, fields = null) {
   const why = { host: false, leg: false, also: 0, ok: 0 };
   if (!prov || !prov.host) return { contacts: [], why };
   why.host = true;
-  if (joinId == null || joinId === '') return { contacts: [], why };
   const { groundId: gid2, recipes } = await _cachedHostRecipes(prov.host, { groundId: prov.groundId || null });
   const gid = prov.groundId || gid2 || null;
   if (!gid || !recipes || !recipes.length) return { contacts: [], why };
@@ -7574,14 +7573,30 @@ async function _drillContacts(prov, joinId) {
   let parentLeg = legs.find((l) => l && l.tool && prov.recipeId && l.tool.recipeId === prov.recipeId)
     || (dj ? legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === dj.via) : null);
   if (!dj || !Array.isArray(dj.also) || !dj.also.length) {
-    const up = legs.find((l) => l && l.tool && l.tool.drill && prov.recipeId
-      && l.tool.drill.via === prov.recipeId && Array.isArray(l.tool.drill.also) && l.tool.drill.also.length);
-    if (up) { dj = up.tool.drill; parentLeg = up; why.viaParent = up.tool.recipeId || true; }
+    // v2.74.2126 — the walk-up, made independent of `recipeId`. v2125 keyed it on prov.recipeId alone; live
+    // (22:58, src=drill(host=y leg=n also=0 ok=0)) it matched nothing, because a record pinned by a DRILLED leg
+    // carries neither a drill block NOR, reliably, the recipeId the parent names in `drill.via`. Second key: any
+    // leg that declares a contacts sidecar AND joins on a field THIS RECORD ACTUALLY HAS. That is a statement
+    // about the data in hand rather than about an id that may not have survived the projection.
+    const byId = prov.recipeId
+      ? legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === prov.recipeId
+        && Array.isArray(l.tool.drill.also) && l.tool.drill.also.length)
+      : null;
+    const byField = legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.from
+      && Array.isArray(l.tool.drill.also) && l.tool.drill.also.length
+      && fields && fields[l.tool.drill.from] != null && fields[l.tool.drill.from] !== '');
+    const up = byId || byField;
+    if (up) { dj = up.tool.drill; parentLeg = up; why.viaParent = up.tool.recipeId || (byId ? 'id' : 'field'); }
   }
   const also = (dj && Array.isArray(dj.also)) ? dj.also : [];
   why.also = also.length;
   if (!also.length || !parentLeg) return { contacts: [], why };
   why.leg = true;
+  // The join value is read with the spec we JUST CHOSE, never with the record's own (possibly absent) drill block.
+  // Computing it first is what made v2125 dead on arrival: joinId was null before the walk-up could run at all.
+  const joinId = (joinIn != null && joinIn !== '') ? joinIn : (fields ? fields[dj.from] : null);
+  why.join = (joinId != null && joinId !== '') ? dj.from : '';
+  if (joinId == null || joinId === '') return { contacts: [], why };
   const out = [];
   for (const a of also) {
     const spec = _alsoSpec(a);
@@ -7605,9 +7620,11 @@ async function _contactsForRecordEntry(entry, statusMsg = null) {
   const already = readContacts(fields);
   if (already.length) return { people: already, why: { cached: true } };
   const prov = (entry && entry.provenance) || null;
+  // v2.74.2126 — pass the FIELDS, not a pre-extracted join id: which field holds the join depends on WHICH leg
+  // ends up supplying the sidecar, and for a drilled record that leg is the parent, discovered inside.
   const joinId = (prov && prov.drill && prov.drill.from) ? fields[prov.drill.from] : null;
   if (statusMsg) _setMessageBody(statusMsg, 'Reading the contacts…');
-  const { contacts, why } = await _drillContacts(prov, joinId);
+  const { contacts, why } = await _drillContacts(prov, joinId, fields);
   return { people: readContacts({ __contacts: contacts }), why };
 }
 
@@ -7627,7 +7644,7 @@ async function _contactsForListRows(entry, statusMsg = null, cap = 6) {
     if (statusMsg) _setMessageBody(statusMsg, `Reading contacts… ${i + 1}/${rows.length}`);
     const own = readContacts(row);
     if (own.length) { out.push({ label, people: own }); continue; }
-    const { contacts } = await _drillContacts(prov, row[dj.from]);
+    const { contacts } = await _drillContacts(prov, row[dj.from], row);
     out.push({ label, people: readContacts({ __contacts: contacts }) });
   }
   return out.length ? out : null;
