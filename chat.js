@@ -7423,48 +7423,82 @@ async function _openFocusEntry(entry, originalText) {
   try { mW.remove(); } catch { /* transient — never persisted */ }
   return false;
 }
-// v2.74.2116 — CONTACTS FOR EACH ROW of a focused list. "who is the CSR for each?" after a list read is a MAP,
-// and before this it fell through to the field-read path, which answered "I couldn't find a CSR field on these
-// records" — true of the flat columns and useless, because the CSR lives in the contacts sidecar (fleet 20.txt,
-// 20:5x). A focus LIST entry carries everything needed: its `rows` (with the drill's join field) and a provenance
-// block that keeps `drill.also` — the sidecar list — since PV-1. So this is one contacts read per row, no re-query.
-// The parent leg is rebuilt exactly the way _refreshFocusHead does it, rather than by a second hand-rolled lookup.
-// Capped, abort-aware, best-effort per row. Returns [{label, people}] — rows that fail still appear, empty.
+// v2.74.2117 — FETCH the contacts sidecar ON DEMAND, for any record we hold.
+//
+// Root cause of three straight live failures ("no contacts sidecar I can drill", "I don't have the contacts on
+// Warranty task details loaded"): `drill.also` — the contacts leg — is executed by exactly ONE path, the map-enrich
+// pass (chat.js:6552+). The single-record drill (_rideDrillJoin) runs only the DETAIL leg and treats `also` purely
+// as a sanction list, so an opened/drilled record NEVER carries __contacts. Every contact consumer was therefore
+// waiting on data that only a map could have produced.
+//
+// This makes the sidecar fetchable from a record's own provenance, which keeps `drill.also` (PV-1) and the join
+// field. The ground is resolved through _cachedHostRecipes, which ALSO returns the recipes needed to rebuild the
+// parent leg — one door instead of two, and it does not depend on provenance.groundId being populated (it was
+// null in the reproduction, and requiring it is what made the roster refuse).
+// Returns {contacts, why} — `why` names the miss so a refusal can state it instead of guessing.
+async function _drillContacts(prov, joinId) {
+  const why = { host: false, leg: false, also: 0, ok: 0 };
+  if (!prov || !prov.host) return { contacts: [], why };
+  why.host = true;
+  const dj = prov.drill || null;
+  const also = (dj && Array.isArray(dj.also)) ? dj.also : [];
+  why.also = also.length;
+  if (!dj || !also.length || joinId == null || joinId === '') return { contacts: [], why };
+  const { groundId: gid2, recipes } = await _cachedHostRecipes(prov.host, { groundId: prov.groundId || null });
+  const gid = prov.groundId || gid2 || null;
+  if (!gid || !recipes || !recipes.length) return { contacts: [], why };
+  const legs = harvestedRecipeLegs(recipes, { host: prov.host, mode: 'ask', groundId: gid });
+  const parentLeg = legs.find((l) => l && l.tool && prov.recipeId && l.tool.recipeId === prov.recipeId)
+    || legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === dj.via);
+  if (!parentLeg) return { contacts: [], why };
+  why.leg = true;
+  const out = [];
+  for (const a of also) {
+    const spec = _alsoSpec(a);
+    try {
+      const al = await _rideDrillLeg(parentLeg, spec.id, gid);
+      if (!al || (al.tool && al.tool.write)) continue;
+      const pn = spec.param || dj.param || 'id';
+      const r = await _rideExecOnce(al, { [pn]: joinId }, { groundId: gid, quiet: true });
+      if (r && r.ok) {
+        const list = primaryList(r.value);
+        if (Array.isArray(list) && list.length) { out.push(...list); why.ok++; }
+      }
+    } catch { /* a sidecar miss is reported through `why`, never silently */ }
+  }
+  return { contacts: out, why };
+}
+
+// The people on ONE record we already hold — its own __contacts when a map already attached them, else drilled.
+async function _contactsForRecordEntry(entry, statusMsg = null) {
+  const fields = (entry && entry.fields) || {};
+  const already = readContacts(fields);
+  if (already.length) return { people: already, why: { cached: true } };
+  const prov = (entry && entry.provenance) || null;
+  const joinId = (prov && prov.drill && prov.drill.from) ? fields[prov.drill.from] : null;
+  if (statusMsg) _setMessageBody(statusMsg, 'Reading the contacts…');
+  const { contacts, why } = await _drillContacts(prov, joinId);
+  return { people: readContacts({ __contacts: contacts }), why };
+}
+
+// CONTACTS FOR EACH ROW of a focused list — the distributive ask. A focus list entry carries its `rows` (with the
+// drill's join field) and the provenance above, so this is one sidecar read per row, capped and abort-aware.
+// Rows that fail still appear in the roster, empty — the renderer SAYS so rather than shortening the list.
 async function _contactsForListRows(entry, statusMsg = null, cap = 6) {
   const prov = (entry && entry.provenance) || null;
   const rows = (entry && Array.isArray(entry.rows)) ? entry.rows.slice(0, cap) : [];
   const dj = prov && prov.drill;
-  if (!rows.length || !dj || !dj.from || !Array.isArray(dj.also) || !dj.also.length || !prov.groundId) return null;
-  let recs = [];
-  try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: prov.groundId, origin: prov.host || undefined }); recs = (rr && rr.recipes) || []; } catch { recs = []; }
-  const legs = harvestedRecipeLegs(recs, { host: prov.host || '', mode: 'ask', groundId: prov.groundId });
-  const parentLeg = legs.find((l) => l && l.tool && prov.recipeId && l.tool.recipeId === prov.recipeId)
-    || legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === dj.via);
-  if (!parentLeg) return null;
-
+  if (!rows.length || !dj || !dj.from) return null;
   const out = [];
   for (let i = 0; i < rows.length; i++) {
     if (_walkAbortFlag.requested) break;
     const row = rows[i];
     const label = itemLabels([row])[0] || `record ${i + 1}`;
-    const joinId = row && row[dj.from];
-    if (joinId == null || joinId === '') { out.push({ label, people: [] }); continue; }
     if (statusMsg) _setMessageBody(statusMsg, `Reading contacts… ${i + 1}/${rows.length}`);
-    const merged = { ...row };
-    for (const a of dj.also) {
-      const spec = _alsoSpec(a);
-      try {
-        const al = await _rideDrillLeg(parentLeg, spec.id, prov.groundId);
-        if (!al || (al.tool && al.tool.write)) continue;
-        const pn = spec.param || dj.param || 'id';
-        const adr = await _rideExecOnce(al, { [pn]: joinId }, { groundId: prov.groundId, quiet: true });
-        if (adr && adr.ok) {
-          const list = primaryList(adr.value);
-          if (Array.isArray(list) && list.length) merged.__contacts = [...(merged.__contacts || []), ...list];
-        }
-      } catch { /* a sidecar miss leaves this row empty, and the roster SAYS so */ }
-    }
-    out.push({ label, people: readContacts(merged) });
+    const own = readContacts(row);
+    if (own.length) { out.push({ label, people: own }); continue; }
+    const { contacts } = await _drillContacts(prov, row[dj.from]);
+    out.push({ label, people: readContacts({ __contacts: contacts }) });
   }
   return out.length ? out : null;
 }
@@ -16593,16 +16627,21 @@ async function sendChatMessage(textOverride = null) {
               } catch { /* logging is best-effort */ }
               return;
             }
-            _setMessageBody(mR, `I can read the list, but it carries no contacts sidecar I can drill, so I can't say who the ${roleSaid(_cr.role)} is on each. Open one record and ask there.`, { markdown: true });
+            const _p = (_list.provenance || {});
+            _setMessageBody(mR, `I can read that list, but it doesn't carry the join field I need to pull each record's contacts. Open one record and ask there.`, { markdown: true });
             _orchFinalize(mR);
-            try { _orchLog(`CONTACT ▸ role=${_cr.role} each → NO SIDECAR (list has no drill.also/join field in provenance)`); } catch { /* */ }
+            try { _orchLog(`CONTACT ▸ role=${_cr.role} each → NO JOIN (rows=${(_list.rows || []).length} drill=${_p.drill ? 'y' : 'n'} from=${(_p.drill && _p.drill.from) || '-'} also=${((_p.drill && _p.drill.also) || []).length} recipe=${_p.recipeId || '-'})`); } catch { /* */ }
             return;
           }
         }
         if (_hit) {
-          const _people = readContacts(_hit.fields || {});
+          // v2.74.2117 — the record's own __contacts when a map already attached them, else DRILL the sidecar now.
+          // Reading the fields alone is what produced "I don't have the contacts on Warranty task details loaded"
+          // right after a successful open: nothing on the single-record path ever fetches `drill.also`.
           const _label = _cr.ticket ? `#${_cr.ticket}` : (_hit.label || 'this record');
-          const mC = appendMessage({ role: 'assistant', body: '' });
+          const mC = appendMessage({ role: 'thinking', body: 'Reading the contacts…' });
+          const _cf = await _contactsForRecordEntry(_hit, mC);
+          const _people = _cf.people;
           _setMessageBody(mC, renderContactAnswer({ people: _people, role: _cr.role, want: _cr.want, recordLabel: _label }), { markdown: true });   // renderMarkdown is escape-first — the page-derived names are escaped before parsing
           _orchFinalize(mC);
           try {
