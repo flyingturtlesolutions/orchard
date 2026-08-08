@@ -103,7 +103,8 @@ import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §
 import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
-import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
+import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
+import { buildContactTicket } from './Core/warrantyContact.js';   // v2.74.2118 — the CONTACT arm's artifact: a support request to the team   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -5979,6 +5980,36 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       const parts = [...byProduct.entries()].sort((a, b) => b[1] - a[1]).map(([p, n]) => `**${n} × ${p}**`);
       planLines.push('', `_Would draft ${orders} order${orders === 1 ? '' : 's'} — ${parts.join(' · ')}. Nothing is ordered until you say so._`);
     }
+
+    // v2.74.2118 — THE OTHER ARM'S PLAN. `replacement needed` has always previewed what would ship; `contact
+    // homeowner` previewed nothing, so half the queue sorted into a group with no visible consequence. Its
+    // artifact is a Zendesk SUPPORT REQUEST (Core/warrantyContact.js), and the ask differs by CAUSE — "how many?"
+    // is not the same job as "route this to another trade" — so the preview counts BY CAUSE rather than totalling
+    // them, which is the number a reviewer can actually check.
+    const byCause = new Map();
+    for (const v of classifyBy.values()) {
+      const o = v && v._outcome;
+      if (!o || o.arm !== 'contact homeowner' || !o.cause) continue;
+      byCause.set(o.cause, (byCause.get(o.cause) || 0) + 1);
+    }
+    if (byCause.size) {
+      const n = [...byCause.values()].reduce((a, b) => a + b, 0);
+      const parts = [...byCause.entries()].sort((a, b) => b[1] - a[1]).map(([c, k]) => `**${k} ${c}**`);
+      planLines.push('', `_Would open ${n} support request${n === 1 ? '' : 's'} in Zendesk — ${parts.join(' · ')}. Each asks the team to contact the homeowner; nothing is opened until you say so. Say \`show the support requests\` to read them first._`);
+      // BANK the plan so the tickets can be READ before anything is created. A count is not reviewable — the
+      // reviewer's real question is "what would it actually say?", and the answer must be inspectable without a
+      // write having happened. Bounded, single-slot, and stamped: a stale plan is worse than none.
+      const _items = [];
+      for (const [id, v] of classifyBy.entries()) {
+        const o = v && v._outcome;
+        if (!o || o.arm !== 'contact homeowner' || !o.cause) continue;
+        const hit = results.find((r) => String(r.id) === String(id));
+        if (hit && hit.item) _items.push({ id, row: hit.item, outcome: o });
+      }
+      _lastContactPlan = _items.length
+        ? { at: Date.now(), items: _items, prov: _provFromLeg(srcLeg) }
+        : null;
+    }
   }
 
   const tally = branchTally(results, { arms: br.arms });
@@ -6030,7 +6061,12 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       try {
         await _orchReq('PIPELINE_RECORD_ITEM', {
           pipeline, itemId: id, label: _rowLabel(r.item, srcLeg), runId: run.runId,
-          branch: { outcome: r.outcome, arm: armLabel, why: r.why, skipped: (r.skipped || []).map((s) => s.label) },
+          // v2.74.2118 — the warranty CAUSE rides with the arm. "contact homeowner" names the arm but not the
+          // question a person must answer, and the four causes need genuinely different human work (asking "how
+          // many?" is not routing an outlets task to another trade). Without it the case says someone owes a
+          // decision but not which one.
+          branch: { outcome: r.outcome, arm: armLabel, why: r.why, skipped: (r.skipped || []).map((s) => s.label),
+            ...((() => { const _o = classifyBy && classifyBy.get && classifyBy.get(id); return (_o && _o._outcome && _o._outcome.cause) ? { cause: _o._outcome.cause } : {}; })()) },
           stages: [{ name: 'branch', verdict: r.outcome, detail: armLabel || r.why }],
           line: `branch → ${r.outcome}${armLabel ? ` (${armLabel})` : ''}`,
           // An item that reached an arm stays OPEN — the arm's work has not been done yet, and an open case is
@@ -7423,6 +7459,24 @@ async function _openFocusEntry(entry, originalText) {
   try { mW.remove(); } catch { /* transient — never persisted */ }
   return false;
 }
+// v2.74.2118 — the CONTACT arm's banked plan: the rows that sorted into `contact homeowner`, with their causes,
+// so `show the support requests` can render the real ticket bodies before anything is written. Single slot, stamped,
+// cleared when a new branch runs — the same bounded-handoff idiom as _lastGroundedRead / _lastBatchAt.
+let _lastContactPlan = null;
+const _CONTACT_PLAN_TTL = 30 * 60 * 1000;
+
+// A provenance-shaped projection of a source leg, so _drillContacts can pull the contacts sidecar for these rows
+// exactly as it does for a focus entry. Same shape conversationFocus._provenance builds — one reader, one shape.
+function _provFromLeg(leg) {
+  const tool = (leg && leg.tool) || {};
+  return {
+    groundId: tool.groundId || null,
+    host: String(tool.origin || tool.appHost || tool.host || '').toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '') || null,
+    recipeId: tool.recipeId || null,
+    drill: (tool.drill && tool.drill.via && tool.drill.from) ? { ...tool.drill } : null,
+  };
+}
+
 // v2.74.2117 — FETCH the contacts sidecar ON DEMAND, for any record we hold.
 //
 // Root cause of three straight live failures ("no contacts sidecar I can drill", "I don't have the contacts on
@@ -16585,6 +16639,48 @@ async function sendChatMessage(textOverride = null) {
       const _fx = (_currentConversationFocus && _currentConversationFocus.length)
         ? _currentConversationFocus
         : [focusFromSeedRecord(_currentConversationSeed, 'this case’s record')].filter(Boolean);
+      // v2.74.2118 — READ the support requests before any of them exists. The plan line says how many and of
+      // which cause; this renders what each one would actually SAY. Deliberately read-only: the user's standing
+      // rule on the other arm was "no drafting just yet — show what would be drafted", and the same applies here,
+      // where the artifact is a ticket to a human colleague. Contacts are drilled at preview time if the rows do
+      // not already carry them, so the body a reviewer reads is the body that would be sent.
+      if (/^\s*(?:show|preview|read|list)\s+(?:me\s+)?(?:the\s+)?(?:support\s+requests?|zendesk\s+(?:tickets?|requests?)|contact\s+tickets?)\s*$/i.test(text)) {
+        const _plan = (_lastContactPlan && (Date.now() - _lastContactPlan.at) < _CONTACT_PLAN_TTL) ? _lastContactPlan : null;
+        const mP = appendMessage({ role: _plan ? 'thinking' : 'assistant', body: '' });
+        if (!_plan) {
+          _setMessageBody(mP, 'No support requests are planned. Run `process these` on a warranty queue first — the ones that need a person get planned there.', { markdown: true });
+          _orchFinalize(mP);
+          return;
+        }
+        const _out = [];
+        for (let i = 0; i < _plan.items.length; i++) {
+          const { row, outcome } = _plan.items[i];
+          _setMessageBody(mP, `Reading contacts… ${i + 1}/${_plan.items.length}`);
+          let _row = row;
+          if (!readContacts(row).length) {
+            const { contacts } = await _drillContacts(_plan.prov, (_plan.prov && _plan.prov.drill) ? row[_plan.prov.drill.from] : null);
+            if (contacts.length) _row = { ...row, __contacts: contacts };
+          }
+          const t = buildContactTicket({ row: _row, outcome, instructions: row.Instructions || '' });
+          if (t) _out.push(t);
+        }
+        if (!_out.length) {
+          _setMessageBody(mP, 'None of the planned rows produced a ticket — every one had an unknown cause, and a vague support request is worse than none.', { markdown: true });
+          _orchFinalize(mP);
+          return;
+        }
+        // The BODY is what a colleague will read, so show it verbatim in a fence rather than summarising it.
+        const _md = [`**${_out.length} support request${_out.length === 1 ? '' : 's'}** — nothing is created yet.`, ''];
+        for (const t of _out) {
+          _md.push(`**${t.subject}**`, '', '```', t.comment, '```', '');
+        }
+        _md.push('_Say `open the support requests` to create them in Zendesk._');
+        _setMessageBody(mP, _md.join(String.fromCharCode(10)), { markdown: true });
+        _orchFinalize(mP);
+        try { _orchLog(`CONTACT ▸ preview ${_out.length} ticket(s) — ${_out.map((t) => t.cause).join(' · ')}`); } catch { /* */ }
+        return;
+      }
+
       // v2.74.2115 — the contact-role ask runs REGARDLESS OF FOCUS. It used to sit inside `if (_fx.length)`, which
       // meant a ticket the user NAMED was only answerable when a record was already open — backwards, and live
       // proof: on a fresh panel with an empty focus the whole block was skipped, so `who is the CSR on #4903279`
