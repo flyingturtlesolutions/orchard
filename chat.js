@@ -5883,6 +5883,17 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   }
 
   // 3) per row: scope → evaluate → route. Deterministic arms stay local — no network, nothing leaves the panel.
+  // v2.74.2109 (bug pass) — CANONICAL ARMS FOR THE EXTRACTION PATH. Routing and grouping key on `br.arms[].label`,
+  // and those labels are authored by the interpret call ON EVERY RUN. The derivation emits the fixed constants
+  // WARRANTY_ARMS, so the two only line up when interpret happens to word them identically — it did at 18:29
+  // ("replacement needed|contact homeowner|not deako"), but a run that wrote "needs replacement" would drop EVERY
+  // row to "no arm matched". That is precisely the per-run-authored-text dependency this redesign exists to remove,
+  // so the extraction path stops trusting it: the arm set becomes the canonical one, and `not deako` (deleted per
+  // the owner ruling) disappears from the render instead of showing a permanent 0.
+  if (_warrantyExtract && classifyBy) {
+    br = { ...br, arms: WARRANTY_ARMS.map((label) => ({ label, when: { type: 'classify', label, is: '', field: cField } })) };
+  }
+
   const results = [];
   const unknownWhy = [];
   // The lookup key MUST be the same index used when building the payload above. Keyed any other way, every
