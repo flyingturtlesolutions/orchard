@@ -63,7 +63,7 @@ describe('warrantyContact — reading the person and the task off the row', () =
     assert.equal(all[0].prefers, 'Any');
   });
   it('a row with no contacts yields empty fields, never a guess', () => {
-    assert.deepEqual(homeownerFrom({ TicketId: 1 }), { name: '', email: '', phone: '', role: '' });
+    assert.deepEqual(homeownerFrom({ TicketId: 1 }), { name: '', email: '', phone: '', role: '', prefers: '' });
     assert.deepEqual(contactsFrom({ TicketId: 1 }), []);
   });
   it('reads the task identity + location', () => {
@@ -171,5 +171,18 @@ describe('warrantyContact — one ticket per task', () => {
   it('the preview line names the cause and the subject', () => {
     const t = buildContactTicket({ row: ROW, outcome: { cause: 'no-count' } });
     assert.match(describeContactTicket({ ...t }), /^no-count — Warranty #4903279/);
+  });
+});
+
+describe('warrantyContact — the homeowner projection carries the CONTACT METHOD (v2.74.2123)', () => {
+  it('prefers rides along, because the channel decision is made from it', () => {
+    // Dropping it made every homeowner read as "no preference recorded", so a contact who asked to be PHONED
+    // would have been emailed by a machine — the one failure ContactMethod exists to prevent.
+    const row = { __contacts: [{ FullName: 'Dana Reyes', IsPrimary: true, IsBuyer: true, IsDrHorton: false, Email: 'd@x.com', CellPhone: '1', ContactMethod: 'Phone' }] };
+    assert.equal(homeownerFrom(row).prefers, 'Phone');
+  });
+  it('an unset preference projects as empty, not as absent', () => {
+    const row = { __contacts: [{ FullName: 'Dana', IsPrimary: true, IsBuyer: true, IsDrHorton: false, Email: 'd@x.com', ContactMethod: '-1' }] };
+    assert.equal(homeownerFrom(row).prefers, '');
   });
 });

@@ -66,9 +66,13 @@ export { readContacts as contactsFrom };
 export function homeownerFrom(row) {
   const all = readContacts(row);
   const p = all.find((x) => x.isHomeowner && x.isPrimary) || all.find((x) => x.isHomeowner) || null;
+  // v2.74.2123 — `prefers` (the record's ContactMethod) MUST ride along. Core/contactChannel.js decides email vs
+  // call from it, and a projection that drops it makes every homeowner read as "no preference recorded" — so a
+  // contact who asked to be PHONED gets emailed by a machine, which is the one failure that field exists to
+  // prevent. Caught by a probe, not by a test: the shape was right and the decision it fed was silently wrong.
   return p
-    ? { name: p.name, email: p.email, phone: p.phone, role: p.role }
-    : { name: '', email: '', phone: '', role: '' };
+    ? { name: p.name, email: p.email, phone: p.phone, role: p.role, prefers: p.prefers || '' }
+    : { name: '', email: '', phone: '', role: '', prefers: '' };
 }
 
 /** The task's own identifiers/location, as the support agent needs to see them. PURE. */

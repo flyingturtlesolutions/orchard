@@ -104,7 +104,8 @@ import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
-import { buildContactTicket } from './Core/warrantyContact.js';
+import { decideChannel } from './Core/contactChannel.js';   // v2.74.2123 — email / call / internal, decided per item and surfaced on the case
+import { buildContactTicket, homeownerFrom } from './Core/warrantyContact.js';
 import { describeRequester } from './Core/zendeskRequester.js';   // v2.74.2120 — who the ticket will appear to be FROM, said before any is created   // v2.74.2118 — the CONTACT arm's artifact: a support request to the team   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
@@ -6072,6 +6073,39 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
 
       const armLabel = r.outcome === 'arm' ? r.arms.map((a) => a.label).join('+') : '';
       recordStage(run, id, { name: 'branch', verdict: r.outcome, detail: armLabel || r.why });
+
+      // v2.74.2123 — THE CHANNEL DECISION BECOMES A QUEUED ACTION ON THE CASE (user direction: "can this be moved
+      // to Records? or a desk view case? each decision is surfaced, call, email, internal and the user/human
+      // approves the email, calls or overrides the decision").
+      //
+      // The support ticket we were about to build was, among other things, a human CHECKPOINT — an agent seeing
+      // the task would quietly decline to email a homeowner about another trade's work. Sending directly removes
+      // that person, so the checkpoint has to reappear somewhere, and §5.7 already says where: a case carries
+      //   actions: [ { what, state: done | queued-for-approval | refused, ref } ]
+      // `queued-for-approval` IS this affordance, specified before this conversation. Nothing new is invented; the
+      // decision is simply recorded where a human already reviews it, per item, with its reason attached.
+      //
+      // Note the gate axis this sits on (§4): emailing a customer is OUTWARD — it leaves our boundary — so it can
+      // never be un-gated. Internal and call are not outward, and are recorded for visibility rather than consent.
+      let _chanAct = null;
+      try {
+        const _o = classifyBy && classifyBy.get && classifyBy.get(id);
+        const _cause = _o && _o._outcome && _o._outcome.cause;
+        if (_cause) {
+          const _person = homeownerFrom(r.item || {});
+          const _d = decideChannel({ cause: _cause, person: _person });
+          const _to = _d.channel === 'email' ? (_person.email || '') : _d.channel === 'call' ? (_person.phone || '') : '';
+          _chanAct = {
+            what: `${_d.channel}: ${_cause}${_to ? ` → ${_to}` : ''} (${_d.why})`,
+            // email AND call both await a person — the user's words were "approves the email, calls or overrides
+            // the decision", so a call is owed work awaiting the same consent, not a closed matter. `internal`
+            // records that we DECLINED to contact the customer, with the reason, which is what makes it
+            // overridable: a reviewer who disagrees can see exactly what was decided and why.
+            state: (_d.channel === 'email' || _d.channel === 'call') ? 'queued-for-approval' : 'refused',
+            ref: _d.channel,
+          };
+        }
+      } catch { /* a case that cannot carry its decision must not change the branch verdict */ }
       closeItem(run, id, r.outcome === 'arm' ? 'done' : r.outcome === 'none' ? 'skipped' : 'blocked', r.why);
 
       try {
@@ -6084,6 +6118,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           branch: { outcome: r.outcome, arm: armLabel, why: r.why, skipped: (r.skipped || []).map((s) => s.label),
             ...((() => { const _o = classifyBy && classifyBy.get && classifyBy.get(id); return (_o && _o._outcome && _o._outcome.cause) ? { cause: _o._outcome.cause } : {}; })()) },
           stages: [{ name: 'branch', verdict: r.outcome, detail: armLabel || r.why }],
+          ...(_chanAct ? { actions: [_chanAct] } : {}),
           line: `branch → ${r.outcome}${armLabel ? ` (${armLabel})` : ''}`,
           // An item that reached an arm stays OPEN — the arm's work has not been done yet, and an open case is
           // exactly the "someone still owes a decision" marker. A no-arm / unknown item closes: there is nothing
