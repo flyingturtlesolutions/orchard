@@ -5228,9 +5228,30 @@ async function _runFieldReadClause(msg, fr, { tabId, priorValue = null, priorLeg
         }
       }
     }
+    // v2.74.2091 — RETRY ON A SET THAT CAN ANSWER, before giving up. The chosen prior may simply be the wrong one
+    // (selectPrior falls back to RECENCY when two sets share a noun — live: a per-division COUNT summary beat the
+    // task rows). If another set in play carries the field outright, or carries the drill's join id so it CAN be
+    // opened, read THAT instead of telling the user to go do it by hand. One hop only (`_priorRetry`).
+    if (!fr._priorRetry) {
+      const _alts = _priorAlternates(priorValue);
+      const _fromKey = _dj && _dj.from;
+      const _canAnswer = (rws) => {
+        try {
+          if (_cands.some((c) => { const h = pickFieldPath(rws, c, fr.field); return !!(h && h.path); })) return true;   // has the field itself
+        } catch { /* */ }
+        return !!(_fromKey && rws.some((r) => r && r[_fromKey] != null && r[_fromKey] !== ''));                          // or can be opened for it
+      };
+      const _alt = _alts.find((a) => a.rows !== use && _canAnswer(a.rows));
+      if (_alt) {
+        try { _orchLog(`FIELD_READ ▸ prior re-pick — "${fr.field}" unreadable on the chosen set (${_present.slice(0, 6).join(',') || 'no usable fields'}); retrying on "${_scrubHead(_alt.label, 40)}" (${_alt.rows.length} row(s))`); } catch { /* */ }
+        return _runFieldReadClause(msg, { ...fr, _priorRetry: true }, { tabId, priorValue: _alt.value, priorLeg: _alt.leg, goal, inChain: true });
+      }
+    }
     let _body;
     if (_dj && _enrichNoJoin >= use.length) {
-      _body = `I couldn’t open the individual records to read “${escHtml(fr.field)}” — these rows don’t carry the internal id the detail read needs (this happens on a cross-division list). Open one record, or run it within a single division, and I’ll read it.`;
+      // Name what the rows ACTUALLY are — the v2090 wording blamed a "cross-division list" when the real case was a
+      // different SHAPE entirely (a per-division count summary), which sent the user chasing the wrong workaround.
+      _body = `That list can’t answer “${escHtml(fr.field)}” — its rows are ${_present.length ? `${_present.slice(0, 6).map((n) => `**${escHtml(n)}**`).join(' · ')}` : 'summary rows'}, not individual records, so there’s nothing to open. Re-read the tasks themselves (e.g. “get the open warranty tasks”) and ask again, or open one record.`;
     } else if (_present.length) {
       const _bold = _present.slice(0, 14).map((n) => `**${escHtml(n)}**`);
       _body = `I couldn’t find a “${escHtml(fr.field)}” field on these records. The fields I can read are: ${_bold.join(' · ')}. Which one?`;
@@ -7039,6 +7060,31 @@ function _priorForClause(ask, targetSystem = '', targetPhrase = '') {
   const value = e.kind === 'list' ? { results: e.rows } : { results: [e.fields] };
   try { _orchLog(`FOCUS ▸ prior from focus — ${e.kind} "${e.label}" (${e.kind === 'list' ? `${e.rows.length} row(s)` : 'record'}, ${Math.max(0, Math.round((Date.now() - (e.at || 0)) / 1000))}s old) — from focus`); } catch { /* */ }
   return { value, leg };
+}
+
+// v2.74.2091 — THE OTHER SETS IN PLAY, for a clause whose chosen prior turned out unable to answer. `selectPrior`
+// picks by noun then RECENCY, and two sets can share a noun: live 04:31 a "warranty tasks" ask left BOTH the 13
+// task rows AND a 9-row per-division COUNT summary ({division,count}) in play; most-recent took the summary, which
+// carries no TaskId, so the Instructions read had nothing to drill and dead-ended — while the rows that could
+// answer sat one candidate away. This exposes those candidates so a failed read can retry on one that CAN supply
+// the field, instead of telling the user to go open a record by hand.
+function _priorAlternates(usedValue) {
+  const out = [];
+  try {
+    if (_lastGroundedRead && _lastGroundedRead.value != null && _lastGroundedRead.value !== usedValue) {
+      let r = []; try { r = rowsFromValue(_lastGroundedRead.value) || []; } catch { r = []; }
+      if (r.length) out.push({ value: _lastGroundedRead.value, leg: _lastGroundedRead.leg || null, rows: r, label: (_lastGroundedRead.leg && _lastGroundedRead.leg.name) || 'the last read' });
+    }
+    for (const x of (_currentConversationFocus || [])) {
+      if (!x || x.kind !== 'list' || !Array.isArray(x.rows) || !x.rows.length) continue;
+      const p = x.provenance || {};
+      const leg = (p.host || p.groundId)
+        ? { name: x.label || x.noun || 'prior read', domain: 'connector', mode: 'ask', tool: { origin: p.host || '', groundId: p.groundId || null, recipeId: p.recipeId || null, drill: p.drill || null, joinKey: Array.isArray(p.joinKey) ? p.joinKey : null } }
+        : null;
+      out.push({ value: { results: x.rows }, leg, rows: x.rows, label: x.label || x.noun || 'a prior list' });
+    }
+  } catch { /* alternates are best-effort — never break the clause */ }
+  return out;
 }
 // FC-6 (v2.74.1959) — a successful ride READ becomes the conversation's working set, so the next pronoun binds.
 //
