@@ -103,6 +103,7 @@ import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §
 import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
+import { askContactRole, readContacts, renderContactAnswer, selectContacts } from './Core/contactRoles.js';   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -16410,6 +16411,43 @@ async function sendChatMessage(textOverride = null) {
         ? _currentConversationFocus
         : [focusFromSeedRecord(_currentConversationSeed, 'this case’s record')].filter(Boolean);
       if (_fx.length) {
+        // v2.74.2112 — "who is the CSR on #4903279". A contact-ROLE ask is a READ off a record we already hold, not
+        // a page drive, so it is answered here — above the record-bind, which would otherwise send "who is the CSR"
+        // through the ~20s on-site open (the verb ruling: open = drive, get/read = read). Pure and instant: no
+        // probe, no network, invariant #4 intact. It claims the turn ONLY when the ask names a role AND a record we
+        // can answer from; otherwise it falls through untouched and normal routing gets its chance.
+        //
+        // Roles come from the record's own flags (Core/contactRoles.js) — the builder's CSR and coordinator ride on
+        // every warranty task, so "the other contact" is never a safe synonym for "the customer".
+        const _cr = askContactRole(text);
+        if (_cr) {
+          // The record the ask NAMES, else the pinned/newest record head. A typed number is a TICKET number, which
+          // is exactly what recordFind() reads off an entry — the internal TaskId is never what a person types.
+          const _recs = _fx.filter((e) => e && e.kind === 'record');
+          const _hit = _cr.ticket
+            ? _recs.find((e) => recordFind(e) === _cr.ticket)
+            : (_recs.find((e) => e.pinned) || _recs[0]);
+          if (_hit) {
+            const _people = readContacts(_hit.fields || {});
+            const _label = _cr.ticket ? `#${_cr.ticket}` : (_hit.label || 'this record');
+            const mC = appendMessage({ role: 'assistant', body: '' });
+            _setMessageBody(mC, renderContactAnswer({ people: _people, role: _cr.role, want: _cr.want, recordLabel: _label }), { markdown: true });   // renderMarkdown is escape-first — the page-derived names are escaped before parsing
+            _orchFinalize(mC);
+            try {
+              const _sel = selectContacts(_people, _cr.role);
+              _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=${_label} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
+            } catch { /* logging is best-effort */ }
+            return;
+          }
+          // Named a ticket we do not hold: say so rather than answering about a different record.
+          if (_cr.ticket) {
+            const mC = appendMessage({ role: 'assistant', body: '' });
+            _setMessageBody(mC, `I don't have #${_cr.ticket} open. Pull it up first (e.g. \`show ticket ${_cr.ticket}\`), then ask who the ${_cr.role} is.`, { markdown: true });
+            _orchFinalize(mC);
+            try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → NOT IN FOCUS (${_recs.length} record head(s) held)`); } catch { /* */ }
+            return;
+          }
+        }
         const bound = bindReferent(text, _fx);
         if (bound && bound.ambiguous) {
           const mA = appendMessage({ role: 'assistant', body: '' });

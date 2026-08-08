@@ -270,6 +270,13 @@ const _roleWords = (c) => {
   return out.join(' ');
 };
 const _isPrimary = (c) => /\bprimary\b/.test(_roleWords(c));
+// v2.74.2112 — the ladder's 'other' rung means "the OTHER HOMEOWNER" (the user's "primary homeowner" vs
+// "homeowner"), and it was implemented as "the first contact that is not primary". On the real warranty payload the
+// builder's own CSR and COORDINATOR ride on every task (HAR 2026-08-08, Core/contactRoles.js), and neither is
+// primary — so 'other' resolving them is one array order away, and the value it feeds is the Shopify CUSTOMER
+// lookup. That would match, or create, a customer record for a D.R. Horton employee. Staff are excluded by the
+// record's own flags: never by name, never by position.
+const _isStaff = (c) => /\bdrhorton\b/.test(_roleWords(c)) || /\b(csr|coordinator|customer service)\b/.test(_roleWords(c));
 
 // The best value of `type` on one contact: prefer a key that NAMES the type, else a value whose SHAPE matches. PURE.
 function _contactValue(contact, type) {
@@ -315,7 +322,8 @@ export function ladderValues(row, rungs) {
       label = rung.field;
       if (!type) type = _shapeMatches('email', value) ? 'email' : (_shapeMatches('phone', value) ? 'phone' : 'text');
     } else if (rung.type) {
-      const pick = rung.contact === 'other' ? contacts.find((c) => !_isPrimary(c)) : (contacts.find(_isPrimary) || contacts[0]);
+      const owners = contacts.filter((c) => !_isStaff(c));   // a contact rung addresses the CUSTOMER, never the builder's staff
+      const pick = rung.contact === 'other' ? owners.find((c) => !_isPrimary(c)) : (owners.find(_isPrimary) || owners[0]);
       value = pick ? _contactValue(pick, rung.type) : null;
       label = `${rung.contact === 'other' ? 'other contact' : 'primary contact'} ${rung.type}`;
     }

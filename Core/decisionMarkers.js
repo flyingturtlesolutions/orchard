@@ -152,6 +152,7 @@ export const DECISION_MARKERS = [
   { key: 'dash', src: "DASH ▸" },
   { key: 'map', src: "MAP ▸" },
   { key: 'field-read', src: "FIELD_READ ▸" },
+  { key: 'contact-role', src: "CONTACT ▸" },   // v2.74.2112 — which contact ROLE an ask named, and who the record's flags said holds it
   { key: 'context', src: "CONTEXT ▸" },
   { key: 'payload', src: "PAYLOAD ▸" },
   { key: 'find', src: "FIND ▸" },

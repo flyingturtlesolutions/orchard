@@ -206,6 +206,29 @@ describe('peritemMap — PM-7 the LOOKUP LADDER (v1634)', () => {
     const v = ladderValues(rowStr, normalizeRungs([{ contact: 'primary', type: 'email' }, { contact: 'other', type: 'email' }]));
     assert.deepEqual(v.map((x) => x.value), ['p@x.com', 's@x.com']);
   });
+
+  // v2.74.2112 — a contact rung addresses the CUSTOMER. The real warranty payload (HAR 2026-08-08) puts the
+  // BUILDER's own CSR and coordinator on every task, and neither is primary, so 'other' = "first non-primary" was
+  // one array order away from feeding a D.R. Horton employee's email into the Shopify customer lookup — matching,
+  // or creating, a customer record for the builder's staff. Excluded by the record's flags, never by position.
+  describe('a contact rung never resolves to builder staff', () => {
+    const dana = { IsPrimary: true, IsDrHorton: false, IsBuyer: true, FullName: 'Dana Reyes', Email: 'dana@example.com' };
+    const marcus = { IsDrHorton: false, FullName: 'Marcus Reyes', Email: 'marcus@example.com' };
+    const csr = { IsDrHorton: true, AssignmentType: 'CSR', FullName: 'Priya Shah', Email: 'priya@drhorton.com' };
+    const coord = { IsDrHorton: true, AssignmentType: 'COORDINATOR', FullName: 'Lee Ortiz', Email: 'lee@drhorton.com' };
+    const rungs = normalizeRungs([{ contact: 'other', type: 'email' }]);
+
+    it("'other' picks the co-buyer even when staff are listed ahead of them", () => {
+      assert.deepEqual(ladderValues({ __contacts: [dana, csr, coord, marcus] }, rungs).map((x) => x.value), ['marcus@example.com']);
+    });
+    it("'other' yields NOTHING rather than a staffer when there is no second homeowner", () => {
+      assert.deepEqual(ladderValues({ __contacts: [dana, csr, coord] }, rungs), []);
+    });
+    it("'primary' never falls back to a staffer on a task with no buyer flagged", () => {
+      const v = ladderValues({ __contacts: [csr, coord] }, normalizeRungs([{ contact: 'primary', type: 'email' }]));
+      assert.deepEqual(v, [], 'the primary rung fell back to contacts[0], which is the builder’s CSR');
+    });
+  });
 });
 
 describe('peritemMap — v1757 unwrapMapPrior (gl 133556 map→map seam)', () => {
