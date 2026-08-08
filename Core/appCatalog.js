@@ -146,6 +146,10 @@ const PRESETS = [
     baseline: [
       { kind: 'delta', trigger: 'before proposing a warranty task is fixed', body: 'Require evidence the repair is actually complete (a vendor completion note or homeowner confirmation) — a scheduled visit is not a completed fix.' },
       { kind: 'delta', trigger: 'the user names a division by market number or a partial name', body: 'Resolve it to the division before reading — a market number (“210”) and a name (“Atlanta West”) point to the same division; a street address never does.' },
+      // v2.74.2086 (user domain rule) — the SWITCH IDENTITY is a standing parse fact: hardcode it in the parser (this
+      // baseline seeds every warranty instance's LEARNED memory) rather than in the write leg, so any read/branch/draft
+      // sees the one product. Collapses the review's ambiguous-type failure.
+      { kind: 'delta', trigger: 'a warranty task calls for a switch (any switch), or you read/parse an instruction or build a Shopify draft/replacement order for one', body: 'Deako’s warranty switch is ONE product: every switch phrasing — “switch”, “light switch”, “wall switch”, “3-way switch”, “single-pole”, “rocker switch” — is the SAME item, the Simple Rocker Switch (Single-Pole & Multiway). Use that product for all of them, whatever the instruction calls it. A dimmer, plug, or keypad is a DIFFERENT product — never map those to the rocker switch.' },
     ],
   },
   {
