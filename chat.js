@@ -14152,6 +14152,12 @@ async function _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, val
     let metricLabel = '';   // v1889 — the measure this scan is counting, for the negative's wording
     let metricSums = null; let metricHits = 0; const metricGroups = [];   // v1890 — a MEASURE is summed, not stopped at; v1897 — per-cell, for a superlative
     let recCount = 0; const recGroups = [];      // v1891 — 'all' over ROWS: how many, and where
+    // v2.74.2097 — …and WHICH. The scan opens every cell and reads the real records to count them, then threw them
+    // away, so "get all open warranty tasks" → "get instructions for each" dead-ended on a {division,count} tally
+    // (live 17:14: `enriched 0/9 (noJoin 9) … present: division,count`). The rows are already in hand — keep them
+    // so a follow-up can iterate at zero extra cost. Capped: past the cap we keep the tally instead of a PARTIAL
+    // set, because a silently-truncated "for each" is worse than an honest dead end.
+    const recRows = []; const _ALL_ROWS_CAP = 200;
     // v2.74.1893 — the TWIN of the fan's serve decision. Fixing one of two doors is the mistake this arc has made
     // three times (the absence texts, the scan negatives, the metric sentence), so the widen gets it in the same
     // change rather than the next trace.
@@ -14185,7 +14191,10 @@ async function _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, val
           // answering "how many are open" with "here's one from Dallas South" is the failure this mode exists to
           // avoid. Worker order is nondeterministic under concurrency, so the groups are sorted at render.
           if (_mode === 'first') { if (!hit) hit = { label: c.label ?? c.value, value: c.value, row: rows[0], more: rows.length - 1 }; }
-          else { recCount += rows.length; recGroups.push({ label: String(c.label ?? c.value), n: rows.length }); }
+          else {
+            recCount += rows.length; recGroups.push({ label: String(c.label ?? c.value), n: rows.length });
+            for (const _r of rows) { if (recRows.length >= _ALL_ROWS_CAP) break; recRows.push(_r); }   // v2.74.2097 — rows kept as READ (unmodified: an injected key would confuse field resolution)
+          }
         }
       }
     };
@@ -14204,8 +14213,18 @@ async function _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, val
     // v2.74.1891 — 'all' over ROWS answers with the COUNT and where they are, never the rows: the ask was "how many".
     if (_mode === 'all' && recCount) {
       _setMessageBody(msg, countAnswerLine({ ask, noun: _recordNounWord(leg.name || '') || 'records', total: recCount, groups: recGroups, cells: cells.length, cellNoun: noun, failed }), { markdown: true });
-      _lastGroundedRead = { leg, params: rp.params, at: Date.now(), value: { results: recGroups.map((g) => ({ [noun]: g.label, count: g.n })) } };
-      _accreteFocusFromRead({ leg, params: rp.params, value: _lastGroundedRead.value, convId: _widenConvId });
+      // v2.74.2097 — the ANSWER stays the count ("how many" was the ask), but the PRIOR is now the RECORDS the scan
+      // already read, so "…and get X for each" iterates them instead of hitting a {division,count} tally with no
+      // ids to open. Only when the set is COMPLETE: a capped/partial prior would make a following "for each"
+      // silently process a subset, which is the failure this cap exists to prevent — there, the tally stands and
+      // the trace says so.
+      const _rowsComplete = recCount <= _ALL_ROWS_CAP && recRows.length === recCount;
+      const _priorValue = _rowsComplete
+        ? { results: recRows }
+        : { results: recGroups.map((g) => ({ [noun]: g.label, count: g.n })) };
+      try { _orchLog(`SCOPE ▸ all rows ${_rowsComplete ? `retained ${recRows.length} record(s) as the prior — a follow-up "for each" can iterate them` : `NOT retained (${recCount} > cap ${_ALL_ROWS_CAP}) — prior stays the per-${noun} tally; a "for each" must re-read a narrower scope`}`); } catch { /* */ }
+      _lastGroundedRead = { leg, params: rp.params, at: Date.now(), value: _priorValue };
+      _accreteFocusFromRead({ leg, params: rp.params, value: _priorValue, convId: _widenConvId });
       return true;
     }
 
