@@ -4236,6 +4236,19 @@ function _orchFinalize(msg, { outcome = null } = {}) {
     const src = msg.dataset.srcText;
     const body = (src != null && src.trim()) ? src : (msg.querySelector('.message-body')?.textContent ?? '');
     if (!body.trim()) return;
+    // v2.74.2104 (user directive) — CHAT ▸ reply: the REPLY PROSE on the fleet wire.
+    // Why here and not in _setMessageBody: that fires on every streaming update (582 call sites), while this
+    // runs ONCE per finished turn and already holds the final source text. Why the message and not `data`:
+    // `normalizeRingEntry` (Core/logShipping.js) ships {t,lvl,tag,msg,v} and DROPS the ring's data payload — so
+    // a payload is invisible to the fleet by construction. That is the whole "message-only wire" the graders
+    // kept hitting as "reply prose does not cross".
+    // PRIVACY, stated not buried: Logger scrubs emails/phones/UUIDs/HubSpot ids at write, NOT names, addresses
+    // or ticket prose. This deliberately puts reply text on the wire (CloudWatch → the private orchard-logs
+    // repo), reversing PP-5's redact-before-egress for this surface. It is the user's own data in a private
+    // repo and was explicitly asked for — the cost of NOT having it was the user hand-pasting every reply to
+    // grade a step. Clipped so one verbose turn cannot evict the decision markers around it (the outbox is
+    // capped at 2000 with middle-out eviction).
+    try { _orchLog(`CHAT ▸ reply ${body.trim().slice(0, 1200).replace(/\s+/g, ' ')}`); } catch { /* never break a turn over a log */ }
     _persistMessageUpdate(msg, { role: 'assistant', body, markdown: msg.dataset.srcMd === '1', ...(outcome ? { outcome } : {}) })
       .then(() => _refreshRailIfOpen())   // v2.74.1223 — the selected app "updates accordingly": refresh its drawer peek live once the reply is persisted (peek mirrored into the index by then)
       .catch(() => { /* persistence must never break the flow */ });
@@ -7545,17 +7558,29 @@ async function _drillContacts(prov, joinId) {
   const why = { host: false, leg: false, also: 0, ok: 0 };
   if (!prov || !prov.host) return { contacts: [], why };
   why.host = true;
-  const dj = prov.drill || null;
-  const also = (dj && Array.isArray(dj.also)) ? dj.also : [];
-  why.also = also.length;
-  if (!dj || !also.length || joinId == null || joinId === '') return { contacts: [], why };
+  if (joinId == null || joinId === '') return { contacts: [], why };
   const { groundId: gid2, recipes } = await _cachedHostRecipes(prov.host, { groundId: prov.groundId || null });
   const gid = prov.groundId || gid2 || null;
   if (!gid || !recipes || !recipes.length) return { contacts: [], why };
   const legs = harvestedRecipeLegs(recipes, { host: prov.host, mode: 'ask', groundId: gid });
-  const parentLeg = legs.find((l) => l && l.tool && prov.recipeId && l.tool.recipeId === prov.recipeId)
-    || legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === dj.via);
-  if (!parentLeg) return { contacts: [], why };
+
+  // v2.74.2125 — the record may be pinned with the DETAIL leg's provenance rather than the list's, and only the
+  // LIST leg declares `drill.also`. Live: `open #4908619` pins "Warranty task details" (vs_warranty_task), whose
+  // own tool block has no drill at all, so the sidecar lookup ended before it began and the answer was the honest
+  // but useless "I don't have the contacts loaded" — while the SAME sidecar worked fine for the list roster.
+  // So when our own provenance names no sidecar, walk UP: find the leg whose drill.via IS this recipe, and use
+  // its `also`. That is the parent that declared the relationship in the first place.
+  let dj = prov.drill || null;
+  let parentLeg = legs.find((l) => l && l.tool && prov.recipeId && l.tool.recipeId === prov.recipeId)
+    || (dj ? legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === dj.via) : null);
+  if (!dj || !Array.isArray(dj.also) || !dj.also.length) {
+    const up = legs.find((l) => l && l.tool && l.tool.drill && prov.recipeId
+      && l.tool.drill.via === prov.recipeId && Array.isArray(l.tool.drill.also) && l.tool.drill.also.length);
+    if (up) { dj = up.tool.drill; parentLeg = up; why.viaParent = up.tool.recipeId || true; }
+  }
+  const also = (dj && Array.isArray(dj.also)) ? dj.also : [];
+  why.also = also.length;
+  if (!also.length || !parentLeg) return { contacts: [], why };
   why.leg = true;
   const out = [];
   for (const a of also) {
@@ -16265,6 +16290,11 @@ async function sendChatMessage(textOverride = null) {
   // exact instead of estimated.
   _lastFieldMiss = null;
   _ctxFilledParams = {};   // v1886 — same turn scope: which params the CONVERSATION filled, not the ask
+  // v2.74.2104 (user directive) — CHAT ▸ ask: the user's words on the fleet wire, emitted at the ONE place a
+  // turn provably begins (invariant #4), so there is exactly one per turn and it lands BEFORE the duplicate-send
+  // belt and every intercept below. Pairs with `CHAT ▸ reply` in _orchFinalize; together they end the
+  // hand-pasting the graders' [human] steps kept requiring ("reply prose does not cross the message-only wire").
+  try { _orchLog(`CHAT ▸ ask ${text.slice(0, 600).replace(/\s+/g, ' ')}`); } catch { /* never break a turn over a log */ }
   // v2.74.1553 — DUPLICATE-SEND BELT: the IDENTICAL text within 3s is a double-fire (Enter+Enter / Enter+click),
   // not a new ask — live 165125: "show this ticket" arrived twice 1.5s apart and ran TWO full drill pipelines
   // whose interleaved navigations broke each other's row-click. A deliberate retry always comes later than 3s.
@@ -16798,7 +16828,12 @@ async function sendChatMessage(textOverride = null) {
           _orchFinalize(mC);
           try {
             const _sel = selectContacts(_people, _cr.role);
-            _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=${_label} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
+            // v2.74.2125 — the `src=` half was written at v2117 and SILENTLY DID NOT APPLY (a patch that did not
+            // match), so the one live failure this line was meant to explain arrived with no diagnosis attached.
+            const _w = (_cf && _cf.why) || {};
+            const _src = _w.cached ? 'cached'
+              : `drill(host=${_w.host ? 'y' : 'n'} leg=${_w.leg ? 'y' : 'n'} also=${_w.also || 0} ok=${_w.ok || 0}${_w.viaParent ? ` via=${_w.viaParent}` : ''})`;
+            _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=${_label} src=${_src} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
           } catch { /* logging is best-effort */ }
           return;
         }
