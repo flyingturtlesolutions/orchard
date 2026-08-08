@@ -5931,7 +5931,11 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   const _why = (r) => {
     const v = (classifyBy && classifyBy.get && r && r.id != null) ? classifyBy.get(String(r.id)) : null;
     const t = String((v && v.why) || r.why || '').trim();
-    return t ? `  — _${escHtml(t.slice(0, 110))}_` : '';
+    // v2.74.2107 — NOT escHtml'd here: `_setMessageBody(..., {markdown:true})` renders through renderMarkdown,
+    // which takes RAW source and escapes each text segment as it walks (markdown.js:117). Escaping first made it
+    // escape twice — the panel showed "Single-Pole &amp; Multiway" on every rocker row. The escape-first boundary
+    // is still intact (renderMarkdown does it); this only stops doing it a second time.
+    return t ? `  — _${t.slice(0, 110)}_` : '';
   };
   const lines = [];
   for (const [label, list] of groups) {
@@ -5958,7 +5962,9 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       byProduct.set(o.product, (byProduct.get(o.product) || 0) + o.count);
     }
     if (orders) {
-      const parts = [...byProduct.entries()].sort((a, b) => b[1] - a[1]).map(([p, n]) => `**${n} × ${escHtml(p)}**`);
+      // renderMarkdown takes RAW source and escapes as it walks (markdown.js:117) — escaping here too produced
+      // "Single-Pole &amp; Multiway" in the panel. The product string is our own catalog constant, not page-derived.
+      const parts = [...byProduct.entries()].sort((a, b) => b[1] - a[1]).map(([p, n]) => `**${n} × ${p}**`);
       planLines.push('', `_Would draft ${orders} order${orders === 1 ? '' : 's'} — ${parts.join(' · ')}. Nothing is ordered until you say so._`);
     }
   }
