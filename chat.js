@@ -7442,6 +7442,7 @@ async function _resolveTicketRecord(ticket, statusMsg = null) {
   const tid = String(ticket || '').trim();
   if (!tid) return null;
   let found = null;
+  const why = { leg: false, invoked: 0, blocked: 0, rows: 0, hits: 0 };   // named in the log line: a miss must say WHICH miss
   try {
     for (const g of (await _cachedArmedGrounds())) {
       if (!g || !g.host || !g.gid || found) continue;
@@ -7450,6 +7451,7 @@ async function _resolveTicketRecord(ticket, statusMsg = null) {
       const legs = harvestedRecipeLegs(recipes, { host: g.host, mode: 'ask', groundId: g.gid });
       const leg = legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.matchOn && l.tool.drill.from && l.tool.drill.via);
       if (!leg) continue;
+      why.leg = true;
       const dj = leg.tool.drill;
       const slot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
       const enums = (slot && Array.isArray(slot.enum)) ? slot.enum.map(String) : [];
@@ -7457,20 +7459,35 @@ async function _resolveTicketRecord(ticket, statusMsg = null) {
       const div = _contextDivision();
       for (const st of statuses) {
         if (found) break;
-        const params = { [dj.matchOn]: tid };
+        let params = { [dj.matchOn]: tid };
         if (div) params.divisionId = div;
         if (st) params.status = st;
+        // v2.74.2114 — RESOLVE the marked params before invoking. `divisionId` is a required ENDPOINT param whose
+        // recipe declares `resolve: {divisionId: VS_DIVISION}`, i.e. "blank = your current division" filled from a
+        // state read (Core/rideParamResolve.js). Skipping this step is what made the first live run fail: with no
+        // prior warranty read there is no context division, so the param stayed blank and every invoke died at the
+        // pre-flight gate — four `INVOKE ▸ blocked needs-divisionId` lines per ask, before any network call
+        // (fleet 20.txt 20:39:10). The router has always resolved first; a second executor that does not is the
+        // same two-implementations trap that produced the two contact readers.
+        try {
+          const rp = await _resolveRideParamsCore(leg, params, { groundId: g.gid });
+          if (rp && rp.needs) { why.blocked++; continue; }   // ambiguous/unknown scope — try the next bucket, never guess one
+          if (rp && rp.params) params = rp.params;
+        } catch { /* leave params as-is; the executor's own guard answers honestly */ }
         if (statusMsg) _setMessageBody(statusMsg, `Looking up #${tid}${st ? ` (${st})` : ''}…`);
         let r = null;
+        why.invoked++;
         try { r = await _rideExecOnce(leg, params, { groundId: g.gid, quiet: true }); } catch { r = null; }
-        if (!r || !r.ok) continue;
+        if (!r || !r.ok) { if (r && /needs[- ]/i.test(String(r.error || ''))) why.blocked++; continue; }
         const rows = rowsFromValue(r.value) || [];
+        why.rows += rows.length;
         const hits = rows.length ? filterRows(rows, tid, dj.label || []).map((h) => h.row) : [];
+        why.hits += hits.length;
         if (hits.length !== 1) continue;                 // 0 = wrong bucket; >1 = ambiguous, and a guess here names the wrong person
         found = { row: hits[0], leg, gid: g.gid, dj, status: st };
       }
     }
-    if (!found) return null;
+    if (!found) return { miss: why };
 
     // The join id is the INTERNAL TaskId off the matched row — never the number the user typed.
     const joinId = found.row[found.dj.from];
@@ -16536,9 +16553,22 @@ async function sendChatMessage(textOverride = null) {
               } catch { /* logging is best-effort */ }
               return;
             }
-            _setMessageBody(mC, `I couldn't find #${_cr.ticket} in the warranty list, so I can't say who the ${roleSaid(_cr.role)} is. If it's in another division, name it (e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`), or open the record first.`, { markdown: true });
+            // The miss must NAME ITSELF. v2113 said "no single row matched across the status buckets" for every
+            // failure — including the live one where nothing was ever queried (the invoke was blocked before the
+            // network on an unfilled divisionId). A message that asserts a search that did not happen sends the
+            // next reader looking in the wrong place.
+            const _m = (_res && _res.miss) || {};
+            const _said = roleSaid(_cr.role);
+            const _text = !_m.leg
+              ? `I can't look up #${_cr.ticket} — no connected site here reads warranty tasks, so there's nowhere to find the ${_said}.`
+              : (_m.blocked && !_m.rows)
+                ? `I couldn't read the warranty list for #${_cr.ticket} — it needs a division and I don't have one in context. Name it (e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`), or open the record first.`
+                : (_m.hits > 1)
+                  ? `More than one warranty task matches #${_cr.ticket}, so I won't guess which one's ${_said} you mean. Open the record you want first.`
+                  : `#${_cr.ticket} isn't in the warranty list I can see (${_m.rows} task(s) searched across ${_m.invoked} status bucket(s)). If it's in another division, name it — e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`.`;
+            _setMessageBody(mC, _text, { markdown: true });
             _orchFinalize(mC);
-            try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (no single row matched across the status buckets)`); } catch { /* */ }
+            try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (leg=${_m.leg ? 'y' : 'n'} invoked=${_m.invoked || 0} blocked=${_m.blocked || 0} rows=${_m.rows || 0} hits=${_m.hits || 0})`); } catch { /* */ }
             return;
           }
         }
