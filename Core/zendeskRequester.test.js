@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deskUserParams, classifyUserCreate, isDuplicateEmail, deskUserIdFrom, describeRequester, DESK_USER } from './zendeskRequester.js';
+import { deskUserParams, classifyUserCreate, isDuplicateEmail, deskUserIdFrom, describeRequester, customerRequester, DESK_USER } from './zendeskRequester.js';
 
 // Quoted from deako.zendesk.com HAR, 2026-08-08 (values replaced, shape verbatim).
 const CREATED_201 = { user: { id: 27482910345, name: 'Orchard (Warranty Desk)', email: 'desk@example.com', role: 'end-user', verified: false, active: true } };
@@ -102,10 +102,25 @@ describe('zendeskRequester — what the reviewer is told before any ticket exist
   it('without a desk id it says the ticket appears to come from YOU — never "no requester"', () => {
     // A Zendesk ticket always has a requester; the only question is who. Saying "none" would be false.
     const line = describeRequester({});
-    assert.match(line, /would appear to come from you/);
-    assert.doesNotMatch(line, /no requester/i);
+    assert.match(line, /signed-in Zendesk account/);
+    assert.doesNotMatch(line, /not set up yet/i);   // v2121: there is no desk account to set up
   });
   it('a zero or junk id is not a requester', () => {
-    for (const bad of [0, -1, null, 'abc', NaN]) assert.match(describeRequester({ id: bad }), /would appear to come from you/);
+    for (const bad of [0, -1, null, 'abc', NaN]) assert.match(describeRequester({ id: bad }), /signed-in Zendesk account/);
+  });
+});
+
+describe('zendeskRequester — the CUSTOMER as requester (v2.74.2121, the customer-email arc)', () => {
+  it('builds the inline requester Zendesk resolves or creates for us', () => {
+    assert.deepEqual(customerRequester({ name: 'Dana Reyes', email: 'Dana@Example.com' }), { name: 'Dana Reyes', email: 'dana@example.com' });
+  });
+  it('an address alone is enough — the name is optional', () => {
+    assert.deepEqual(customerRequester({ email: 'dana@example.com' }), { email: 'dana@example.com' });
+  });
+  it('no usable address yields NULL — never a ticket that claims a customer and reaches nobody', () => {
+    for (const bad of ['', null, undefined, 'not-an-email', 'a@b', '  ']) {
+      assert.equal(customerRequester({ name: 'Dana', email: bad }), null, `${JSON.stringify(bad)} must not produce a requester`);
+    }
+    assert.equal(customerRequester({}), null);
   });
 });

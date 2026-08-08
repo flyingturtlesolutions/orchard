@@ -1,32 +1,50 @@
-// Core/zendeskRequester.js — v2.74.2119. The Orchard warranty-desk REQUESTER identity.
+// Core/zendeskRequester.js — v2.74.2121. The ticket's REQUESTER — i.e. WHOSE ticket it is.
 //
-// Every Zendesk ticket has a requester, and the user's ruling is that Orchard is it on a warranty support request
-// ("every ticket has a requestor - orchard can be the requestor here"). Until now `requester_id` was an optional
-// number nobody supplied, so tickets would have been attributed to whatever human session happened to be signed
-// in — which reads, to the colleague receiving it, as that person asking. A desk account makes the provenance
-// honest: the warranty desk raised it, automatically, and the reply thread belongs to the desk rather than to
-// whoever last logged in.
+// SCOPE CORRECTED (user, 2026-08-08, two rulings in sequence):
+//   1. "the requestor isn't a required field when creating a ticket, only the assignee. So no need to create an
+//      orchard account."  -> the warranty SUPPORT REQUEST (the contact arm) needs no requester work at all.
+//      Zendesk attributes an unspecified requester to the authenticated session, which costs nothing. What that
+//      ticket needs is an ASSIGNEE — see Core/zendeskAssignee.js.
+//   2. "the requestor will be useful when sending out emails to customer, where the requestor will be the
+//      customer."  -> this module survives for THAT case, with its subject changed. The requester is not Orchard;
+//      it is the HOMEOWNER. A ticket whose requester is the customer is how Zendesk makes the reply thread reach
+//      them by email — which is exactly the customer-facing arc, not the internal one.
 //
-// HAR-VERIFIED (deako.zendesk.com, 2026-08-08) — the shapes below are quoted from real traffic:
-//   POST /api/v2/users  -> 201  {"user":{"id":<number>,"name":…,"email":…,"role":"end-user","verified":false,…}}
-//   POST /api/v2/users  -> 422  {"error":"RecordInvalid","description":"Record validation errors",
-//                                "details":{"email":[{"description":"Email: … is already being used by another
-//                                 user","error":"DuplicateValue"}]}}
+// WHAT THAT CHANGES HERE. Naming the customer as requester does NOT need find-or-create: the REST ticket create
+// accepts an inline `requester: {name, email}` and Zendesk looks up or creates that end user itself. The
+// create-user helpers below therefore stop being the main path and become the fallback for the case where an id
+// is genuinely needed (e.g. assigning an existing profile, or a tenant that rejects inline requesters).
 //
-// THE 422 IS THE IMPORTANT ONE. Creating the desk account is not a one-shot: the second attempt fails with
-// DuplicateValue, and that is not an error — it means the account already exists and we simply do not hold its id.
-// Treating it as a failure would make the desk un-bootstrappable on every run after the first. So the classifier
-// below reports THREE states, and only one of them is a real failure.
-//
-// NOT verified here: the ticket create itself. This HAR contains no POST to any ticket endpoint, so
-// `create_ticket`'s body template remains unproven against the live tenant — say so rather than implying the
-// whole chain is evidenced.
+// HAR-VERIFIED (deako.zendesk.com, 2026-08-08):
+//   POST /api/v2/users -> 201 {"user":{"id":<number>,…,"role":"end-user"}}
+//   POST /api/v2/users -> 422 {"error":"RecordInvalid","details":{"email":[{"error":"DuplicateValue",…}]}}
+// The 422 is the important one and the reason classifyUserCreate reports THREE states: a duplicate email means the
+// person already exists, which is a success for our purposes, not a failure. Read as an error, any repeat run
+// breaks. NOT verified: the inline-requester form on ticket create (documented Zendesk behaviour, unproven here).
 //
 // PURE — no chrome.*, no network, no DOM.
 
 const _s = (v) => (v == null ? '' : String(v).trim());
 
 /** The desk account's stable identity. The name is what a colleague sees as the ticket's requester. */
+/**
+ * The inline requester for a CUSTOMER-FACING ticket — the primary path after the user's correction. PURE.
+ *
+ * Zendesk's ticket create accepts `requester: {name, email}` and resolves it to an existing end user or creates
+ * one, so the customer becomes the requester — which is what makes the reply thread reach them by email — with no
+ * separate create/search round trip and no account for us to own. Returns null when there is no usable address:
+ * a ticket that claims a customer requester and carries a broken one reaches nobody, silently.
+ *
+ * NOT HAR-verified (documented Zendesk behaviour; this tenant's capture shows only the user-create endpoints), so
+ * the create/lookup helpers below remain the fallback if a tenant rejects the inline form.
+ */
+export function customerRequester({ name = '', email = '' } = {}) {
+  const e = _s(email).toLowerCase();
+  if (!e || !/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(e)) return null;
+  const n = _s(name);
+  return n ? { name: n, email: e } : { email: e };
+}
+
 export const DESK_USER = Object.freeze({
   name: 'Orchard (Warranty Desk)',
   // The role is a LITERAL in the recipe body, never a parameter — a sweep can never mint an agent or an admin.
@@ -118,5 +136,8 @@ export function describeRequester({ id = null, email = '', name = DESK_USER.name
   if (Number.isFinite(Number(id)) && Number(id) > 0) {
     return `Requester: ${_s(name) || DESK_USER.name}${_s(email) ? ` <${_s(email)}>` : ''} (Zendesk user ${Number(id)}).`;
   }
-  return 'Requester: your signed-in Zendesk account — the warranty desk account is not set up yet, so these would appear to come from you.';
+  // v2.74.2121 — corrected: there is no desk account to set up, and saying there was implied missing configuration
+  // that nobody owes. An internal support request is raised by the signed-in session BY DESIGN; the requester only
+  // becomes a real choice on the customer-facing arc, where it is the homeowner (see customerRequester).
+  return 'Requester: your signed-in Zendesk account (internal request — no separate account needed).';
 }
