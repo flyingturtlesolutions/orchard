@@ -104,7 +104,10 @@ import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
-import { decideChannel } from './Core/contactChannel.js';   // v2.74.2123 — email / call / internal, decided per item and surfaced on the case
+import { decideChannel, describeChannelPlan } from './Core/contactChannel.js';
+import { buildReviewCard, renderReviewCard } from './Core/contactReview.js';
+import { buildCustomerEmail } from './Core/customerEmail.js';   // v2.74.2129 — the homeowner's message, never the internal one   // v2.74.2128 — the per-item review card
+import { assignmentFields, describeAssignment, DEFAULT_ASSIGNEE } from './Core/zendeskAssignee.js';   // v2.74.2123 — email / call / internal, decided per item and surfaced on the case
 import { buildContactTicket, homeownerFrom } from './Core/warrantyContact.js';
 import { describeRequester } from './Core/zendeskRequester.js';   // v2.74.2120 — who the ticket will appear to be FROM, said before any is created   // v2.74.2118 — the CONTACT arm's artifact: a support request to the team   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
@@ -362,14 +365,19 @@ async function _loadDevMode() {
 // is attributed to the desk rather than to whoever is signed in. Absent until the account is set up, and the
 // preview SAYS so instead of implying otherwise. Read-through cache in the `settings:devMode` idiom.
 let _deskRequester = { id: null, email: '' };
+// v2.74.2128 — WHO the support requests land on. Confirmed by the user 2026-08-08 as dmonk@deako.com (testing);
+// `settings:zendeskAssignee` overrides it, so production is a settings change and not a code change.
+let _deskAssigneeEmail = '';
+const _deskAssignee = () => _deskAssigneeEmail || DEFAULT_ASSIGNEE;
 const _deskRequesterId = () => (Number.isFinite(Number(_deskRequester.id)) && Number(_deskRequester.id) > 0 ? Number(_deskRequester.id) : null);
 const _deskRequesterEmail = () => String(_deskRequester.email || '');
 async function _loadDeskRequester() {
   try {
-    const s = await chrome.storage.local.get('settings:zendeskDeskUser');
+    const s = await chrome.storage.local.get(['settings:zendeskDeskUser', 'settings:zendeskAssignee']);
     const v = s['settings:zendeskDeskUser'];
     _deskRequester = (v && typeof v === 'object') ? { id: v.id ?? null, email: String(v.email || '') } : { id: null, email: '' };
-  } catch { _deskRequester = { id: null, email: '' }; }
+    _deskAssigneeEmail = String(s['settings:zendeskAssignee'] || '');   // v2.74.2128 — overrides DEFAULT_ASSIGNEE
+  } catch { _deskRequester = { id: null, email: '' }; _deskAssigneeEmail = ''; }
 }
 // CF-4.18 — messageId → last self-persisted body. MODULE scope: _persistMessageUpdate records here and the
 // storage listener below skips the matching echo; a listener-local map would be reborn empty every event.
@@ -432,6 +440,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes['settings:zendeskAssignee']) { _deskAssigneeEmail = String(changes['settings:zendeskAssignee'].newValue || ''); }
   if (area === 'local' && changes['settings:zendeskDeskUser']) { const v = changes['settings:zendeskDeskUser'].newValue; _deskRequester = (v && typeof v === 'object') ? { id: v.id ?? null, email: String(v.email || '') } : { id: null, email: '' }; }
   if (area !== 'local' || !changes['settings:devMode']) return;
   _devModeEnabled = changes['settings:devMode'].newValue === true;
@@ -16750,34 +16759,59 @@ async function sendChatMessage(textOverride = null) {
           _orchFinalize(mP);
           return;
         }
+        // v2.74.2128 — each item is now a REVIEW CARD, not a raw ticket body. The reviewer is being asked to
+        // agree with a DECISION (email this person / call them / it is ours), and the ticket text alone never
+        // showed the decision or the reason for it. The card leads with the task's own words, then what the
+        // parser read and by which rule, then the homeowners, then the channel AND its reason — with the drafted
+        // ticket shown only where one would actually be created.
         const _out = [];
         for (let i = 0; i < _plan.items.length; i++) {
-          const { row, outcome } = _plan.items[i];
+          const { row, outcome, id } = _plan.items[i];
           _setMessageBody(mP, `Reading contacts… ${i + 1}/${_plan.items.length}`);
           let _row = row;
           if (!readContacts(row).length) {
-            const { contacts } = await _drillContacts(_plan.prov, (_plan.prov && _plan.prov.drill) ? row[_plan.prov.drill.from] : null);
+            const { contacts } = await _drillContacts(_plan.prov, (_plan.prov && _plan.prov.drill) ? row[_plan.prov.drill.from] : null, row);
             if (contacts.length) _row = { ...row, __contacts: contacts };
           }
-          const t = buildContactTicket({ row: _row, outcome, instructions: row.Instructions || '' });
-          if (t) _out.push(t);
+          const _people = readContacts(_row);
+          const _who = homeownerFrom(_row);
+          const _decision = decideChannel({ cause: outcome && outcome.cause, person: _who });
+          const _ticket = buildContactTicket({ row: _row, outcome, instructions: row.Instructions || '', assignee: { email: _deskAssignee() } });
+          const _custEmail = (_decision.channel === 'email')
+            ? buildCustomerEmail({ person: _who, outcome, instructions: row.Instructions || '' })
+            : null;
+          _out.push({
+            id,
+            decision: _decision,
+            ticket: _ticket,
+            card: buildReviewCard({
+              label: _rowLabel(_row, null) || `#${_row.TicketId || i + 1}`,
+              instructions: row.Instructions || '',
+              outcome, people: _people, decision: _decision,
+              // v2.74.2129 — the draft is the CUSTOMER's message, never the internal one. Attaching the support
+              // request here (as the first cut did) would have shown "Please confirm the quantity on a Deako
+              // warranty task" over a block listing the homeowner's own numbers AND the builder's CSR — the wrong
+              // voice and an internal-contact leak in one message. buildReviewCard drops it on non-email channels
+              // anyway, so a call card can never show something that looks ready to send.
+              draft: _custEmail ? { to: _custEmail.to, subject: _custEmail.subject, body: _custEmail.body } : null,
+            }),
+          });
         }
         if (!_out.length) {
           _setMessageBody(mP, 'None of the planned rows produced a ticket — every one had an unknown cause, and a vague support request is worse than none.', { markdown: true });
           _orchFinalize(mP);
           return;
         }
-        // The BODY is what a colleague will read, so show it verbatim in a fence rather than summarising it.
-        const _md = [`**${_out.length} support request${_out.length === 1 ? '' : 's'}** — nothing is created yet.`, ''];
-        for (const t of _out) {
-          _md.push(`**${t.subject}**`, '', '```', t.comment, '```', '');
-        }
+        // The channel SPLIT leads, because it is the decision being reviewed: how many reach the customer at all.
+        const _plan2 = { email: [], call: [], unresolved: [] };
+        for (const x of _out) (_plan2[x.decision.channel] || _plan2.unresolved).push(x);
+        const _md = [describeChannelPlan(_plan2), '', `_${describeAssignment(assignmentFields({ email: _deskAssignee() }))}_`, ''];
+        for (const x of _out) { _md.push(renderReviewCard(x.card), ''); }
         // v2.74.2120 — WHO WILL THIS APPEAR TO BE FROM? The reviewer's question before any ticket exists, and the
         // honest answer today is "your signed-in account", because the warranty desk requester is not set up yet.
         // Saying nothing would let a reader assume the desk raised it; saying "no requester" would be false — a
         // Zendesk ticket always has one (HAR deako.zendesk.com: the create carries requesterId/submitterId).
-        _md.push(`_${describeRequester({ id: _deskRequesterId(), email: _deskRequesterEmail() })}_`);
-        _md.push('_Say `open the support requests` to create them in Zendesk._');
+        _md.push('_Nothing has been created. Say `open the support requests` to create the emailed ones in Zendesk._');
         _setMessageBody(mP, _md.join(String.fromCharCode(10)), { markdown: true });
         _orchFinalize(mP);
         try { _orchLog(`CONTACT ▸ preview ${_out.length} ticket(s) — ${_out.map((t) => t.cause).join(' · ')}`); } catch { /* */ }
