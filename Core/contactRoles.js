@@ -148,6 +148,10 @@ const _ROLE_SAID = Object.freeze({
 });
 const _said = (role) => _ROLE_SAID[_s(role).toLowerCase()] || _s(role);
 
+/** How a role is SAID back to the user ("csr" -> "CSR"). Exported so callers outside the answer path — the
+ *  not-in-focus refusal, log lines — never print the terse matching key at a person. PURE. */
+export function roleSaid(role) { return _said(role); }
+
 /**
  * The answer text for a resolved contact-role ask. PURE.
  *

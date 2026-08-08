@@ -103,7 +103,7 @@ import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §
 import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
-import { askContactRole, readContacts, renderContactAnswer, selectContacts } from './Core/contactRoles.js';   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
+import { askContactRole, readContacts, renderContactAnswer, selectContacts, roleSaid } from './Core/contactRoles.js';   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -7422,6 +7422,85 @@ async function _openFocusEntry(entry, originalText) {
   }
   try { mW.remove(); } catch { /* transient — never persisted */ }
   return false;
+}
+// v2.74.2113 — RESOLVE a ticket number the user NAMED to its record + contacts, as a pure READ (no tab drive).
+//
+// The user's ask was "the primary, csr, secondary, or coordinator of ANY record", and v2112 only answered for a
+// record already in focus — a ticket typed cold got an honest refusal, which is not what was asked for. The hop is
+// the one Core/connectorRecipes.js:915 insists on: a number a PERSON types is a TICKET number, never the internal
+// TaskId, so it goes to the task LIST as `address`; the list's own drill block (`{via, param, from, matchOn, also}`)
+// then names the detail read and the contacts sidecar. This walks the same three steps the map-enrich pass runs
+// (chat.js:6552+) for exactly ONE row, and deliberately does NOT reuse _openRecordOnSite: that path DRIVES the site
+// (walk replay, tab focus) and the verb ruling is that `open` drives while a read reads. "Who is the CSR" must not
+// navigate anyone's browser.
+//
+// Status is a required list param and the ticket's bucket is unknown, so it walks the enum (most-likely first) and
+// stops at the first bucket holding the row — the same shape as the router's drill walk. Returns null on any miss;
+// the caller falls back to the honest refusal. Costs one read per status tried, so it runs only AFTER the pure
+// parse has already claimed the turn (invariant #4: no probe to DECIDE a claim).
+async function _resolveTicketRecord(ticket, statusMsg = null) {
+  const tid = String(ticket || '').trim();
+  if (!tid) return null;
+  let found = null;
+  try {
+    for (const g of (await _cachedArmedGrounds())) {
+      if (!g || !g.host || !g.gid || found) continue;
+      const { recipes } = await _cachedHostRecipes(g.host, { groundId: g.gid });
+      if (!recipes || !recipes.length) continue;
+      const legs = harvestedRecipeLegs(recipes, { host: g.host, mode: 'ask', groundId: g.gid });
+      const leg = legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.matchOn && l.tool.drill.from && l.tool.drill.via);
+      if (!leg) continue;
+      const dj = leg.tool.drill;
+      const slot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
+      const enums = (slot && Array.isArray(slot.enum)) ? slot.enum.map(String) : [];
+      const statuses = enums.length ? [...enums.filter((s) => s === 'open'), ...enums.filter((s) => s !== 'open')] : [null];
+      const div = _contextDivision();
+      for (const st of statuses) {
+        if (found) break;
+        const params = { [dj.matchOn]: tid };
+        if (div) params.divisionId = div;
+        if (st) params.status = st;
+        if (statusMsg) _setMessageBody(statusMsg, `Looking up #${tid}${st ? ` (${st})` : ''}…`);
+        let r = null;
+        try { r = await _rideExecOnce(leg, params, { groundId: g.gid, quiet: true }); } catch { r = null; }
+        if (!r || !r.ok) continue;
+        const rows = rowsFromValue(r.value) || [];
+        const hits = rows.length ? filterRows(rows, tid, dj.label || []).map((h) => h.row) : [];
+        if (hits.length !== 1) continue;                 // 0 = wrong bucket; >1 = ambiguous, and a guess here names the wrong person
+        found = { row: hits[0], leg, gid: g.gid, dj, status: st };
+      }
+    }
+    if (!found) return null;
+
+    // The join id is the INTERNAL TaskId off the matched row — never the number the user typed.
+    const joinId = found.row[found.dj.from];
+    if (joinId == null || joinId === '') return { row: found.row, contacts: [], why: 'no-join-id' };
+    const merged = { ...found.row };
+    if (statusMsg) _setMessageBody(statusMsg, `Reading the contacts on #${tid}…`);
+    try {
+      const viaLeg = await _rideDrillLeg(found.leg, found.dj.via, found.gid);
+      if (viaLeg) {
+        const dr = await _rideExecOnce(viaLeg, { [found.dj.param || 'id']: joinId }, { groundId: found.gid, quiet: true });
+        const detail = (dr && dr.ok) ? (primaryObject(dr.value) || dr.value) : null;
+        if (detail && typeof detail === 'object' && !Array.isArray(detail)) Object.assign(merged, detail);
+      }
+    } catch { /* the list row alone still identifies the task */ }
+    // The contacts sidecar — the `also` leg the drill block names. This is the payload readContacts() understands.
+    for (const a of (Array.isArray(found.dj.also) ? found.dj.also : [])) {
+      const spec = _alsoSpec(a);
+      try {
+        const al = await _rideDrillLeg(found.leg, spec.id, found.gid);
+        if (!al || (al.tool && al.tool.write)) continue;
+        const pn = spec.param || found.dj.param || 'id';
+        const adr = await _rideExecOnce(al, { [pn]: joinId }, { groundId: found.gid, quiet: true });
+        if (adr && adr.ok) {
+          const list = primaryList(adr.value);
+          if (Array.isArray(list) && list.length) merged.__contacts = [...(merged.__contacts || []), ...list];
+        }
+      } catch { /* a sidecar miss keeps the record */ }
+    }
+    return { row: merged, contacts: merged.__contacts || [], leg: found.leg, gid: found.gid, status: found.status };
+  } catch { return null; }
 }
 // FC-5 — re-pull the focus head's record via its DRILL provenance: same leg family, same join id, fresh fields.
 // Updates the entry + the case_record card; any failure reports honestly and leaves the snapshot standing.
@@ -16439,12 +16518,27 @@ async function sendChatMessage(textOverride = null) {
             } catch { /* logging is best-effort */ }
             return;
           }
-          // Named a ticket we do not hold: say so rather than answering about a different record.
+          // v2.74.2113 — a ticket we do NOT hold is RESOLVED, not refused. The ask was "any record", and the list
+          // leg's own drill block already names every hop (ticket → address filter → TaskId → contacts sidecar).
+          // The turn was claimed by the pure parse above, so the read runs under a visible status bubble.
           if (_cr.ticket) {
-            const mC = appendMessage({ role: 'assistant', body: '' });
-            _setMessageBody(mC, `I don't have #${_cr.ticket} open. Pull it up first (e.g. \`show ticket ${_cr.ticket}\`), then ask who the ${_cr.role} is.`, { markdown: true });
+            const mC = appendMessage({ role: 'thinking', body: `Looking up #${_cr.ticket}…` });
+            let _res = null;
+            _turnLock();
+            try { _res = await _resolveTicketRecord(_cr.ticket, mC); } finally { _turnUnlock(); }
+            if (_res && _res.row) {
+              const _people = readContacts(_res.row);
+              _setMessageBody(mC, renderContactAnswer({ people: _people, role: _cr.role, want: _cr.want, recordLabel: `#${_cr.ticket}` }), { markdown: true });
+              _orchFinalize(mC);
+              try {
+                const _sel = selectContacts(_people, _cr.role);
+                _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=#${_cr.ticket} resolved=${_res.status || 'list'} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
+              } catch { /* logging is best-effort */ }
+              return;
+            }
+            _setMessageBody(mC, `I couldn't find #${_cr.ticket} in the warranty list, so I can't say who the ${roleSaid(_cr.role)} is. If it's in another division, name it (e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`), or open the record first.`, { markdown: true });
             _orchFinalize(mC);
-            try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → NOT IN FOCUS (${_recs.length} record head(s) held)`); } catch { /* */ }
+            try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (no single row matched across the status buckets)`); } catch { /* */ }
             return;
           }
         }
