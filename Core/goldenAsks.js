@@ -54,7 +54,11 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'read ticket 4521', expect: { legId: 'read_ticket' } },
   { ask: 'show the conversation on ticket 4521', expect: { legId: 'ticket_comments' } },
   { ask: 'search tickets for water heater', expect: { legId: 'search_tickets' } },
-  { ask: 'look up the zendesk user jane@example.com', expect: { legId: 'view_user' } },
+  // v2.74.2119 — these two were ONE ask pointing at a leg that cannot serve it: `view_user` takes `id` (integer,
+  // required), so routing an EMAIL there fills nothing and the call is broken before it leaves. The email ask now
+  // names the leg that reads by address; `view_user` keeps the ask its own contract can answer.
+  { ask: 'look up the zendesk user with id 4521', expect: { legId: 'view_user' } },
+  { ask: 'find the zendesk user jane@example.com', expect: { legId: 'search_users' } },
   // ── Zendesk writes ────────────────────────────────────────────────────────────────────────────────────────
   { ask: 'create a zendesk ticket about the broken faucet at 12 Elm', expect: { legId: 'create_ticket' } },
   { ask: 'add a comment to ticket 4521 saying the parts shipped', expect: { legId: 'add_comment' } },

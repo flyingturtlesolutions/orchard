@@ -292,6 +292,16 @@ export const CONNECTOR_RECIPES = [
     does: 'look up a Zendesk user (a requester / customer) by id, riding your login',
     endpoint: '/api/v2/users/{id}.json', itemUrl: '/agent/users/{id}',
     params: [{ name: 'id', type: 'integer', required: true }] },
+  // v2.74.2119 — find a user by EMAIL. `view_user` reads by id only, so after a create returns 422 DuplicateValue
+  // ("that email already belongs to a user") there was no way to learn WHICH user — leaving the warranty desk
+  // account un-bootstrappable on every run after the first (HAR deako.zendesk.com 2026-08-08).
+  // NOTE the endpoint deliberately reuses `search_tickets`' proven `/api/v2/search.json` shape with a type:user
+  // filter, rather than the /users/search.json form, which nothing here has observed. Read-only.
+  { ...ZD, id: 'search_users', name: 'Find a Zendesk user by email',
+    does: 'find a Zendesk user by email address (or name) — e.g. to resolve the id of an account that already exists, riding your login',
+    endpoint: '/api/v2/search.json?query={query}%20type:user&per_page=25',
+    listUrl: '/agent/search/1?type=user&q={query}',
+    params: [{ name: 'query', type: 'string', required: true, hint: 'an email address (exact) or a name fragment' }] },
   // ── writes — gated HARD; fail-closed until the human confirms (CX-6/§9). Each carries a `body` template. ──────────
   { ...ZD, id: 'create_ticket', name: 'Create a Zendesk ticket', write: true, reversible: true, outward: false, method: 'POST',
     does: 'open a NEW Zendesk ticket with a subject + first comment (optionally a priority / requester id), riding your login',
