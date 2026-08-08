@@ -88,7 +88,7 @@ import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // 
 import { capableSitesCatalog, seedDeskCatalog } from './Core/capableSites.js';   // AS-5 — the "sites with defined capabilities" catalog the setup multi-select lists (pure merge); DK-6 — seedDeskCatalog pre-picks a preconfigured desk's builtin sites
 import { originFromText } from './Core/setupSpec.js';   // AS-4 / review P1-6 — the host-shape floor: a real public host has a dot (TLD); rejects bare words like "gmail" before they bank a poisoned target
 import { SCOPE_KEY as CONN_SCOPE_KEY, scopeIdsFor, resolveConnections, inheritedConnections, excludedOrigins, connKey, mergeConnections, bindScope, bindScopes, setScope } from './Core/connectionScope.js';   // CS-1 (v2.74.1996) — a connection binds at DESK + PRESET scope and is INHERITED by new conversations (findings 2026-08-04: per-thread scope silently dropped the legs of a ground the user had bound)
-import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retireActFail } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view; v1523 — retireActFail consumes the "re-teach" lesson at re-teach
+import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retireActFail, pruneBaselineRules } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view; v1523 — retireActFail consumes the "re-teach" lesson at re-teach
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { connectScopeOrigins, connectPanelModel } from './Core/connectAttention.js';   // v2.74.2043 — Connect tab cards + badge + Front chip share one scoped attention model
@@ -2593,6 +2593,17 @@ async function _seedInstanceMemory(instanceId, presetId) {
       .filter((i) => i && i.kind === 'delta' && i.body)
       .map((i) => `${(i.trigger || '').toLowerCase()}|${String(i.body).toLowerCase()}`));
     const missing = seeded.filter((d) => !have.has(`${(d.trigger || '').toLowerCase()}|${String(d.body).toLowerCase()}`));
+    // v2.74.2100 — RETIRE what the catalog no longer ships BEFORE adding what it does. Add-missing alone left an
+    // EDITED baseline rule's old text in place forever, so the instance accumulated contradictory versions of the
+    // same rule and the model picked whichever it liked (live: six consecutive rule fixes changed nothing, and the
+    // classifier produced escalation reasons no version contained). Only 'preset-baseline' rows are pruned; user
+    // and learned rows are untouched.
+    let _pruned = 0;
+    try {
+      const _keep = new Set(seeded.map((d) => `${(d.trigger || '').toLowerCase()}|${String(d.body).toLowerCase()}`));
+      _pruned = await pruneBaselineRules(instanceId, _keep);
+    } catch { /* prune is best-effort — never block the seed */ }
+    if (_pruned) { try { _orchLog(`LEARNED ▸ retired ${_pruned} superseded baseline rule(s) — preset ${presetId || '—'}`); } catch { /* */ } }
     if (!missing.length) return;
     for (const d of missing) await recordGoalItem(instanceId, d);
     const _how = existing.length ? 'top-up' : 'seed-down';   // top-up = an EXISTING desk gaining newly-shipped rules

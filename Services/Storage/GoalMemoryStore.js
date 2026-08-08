@@ -104,6 +104,32 @@ export async function retireActFail(appId, goal) {
   });
 }
 
+/**
+ * v2.74.2100 — RETIRE SUPERSEDED PRESET-BASELINE RULES. Seeding is add-missing by `trigger|body` identity, so
+ * EDITING a shipped baseline rule used to leave the OLD text in the instance forever and add the new one beside
+ * it — the desk then held two contradictory versions of the same rule ("a bare light → CONTACT" next to "a light
+ * symptom is a switch fault → REPLACE"), and the model obeyed whichever it liked. Live: six rule fixes in a row
+ * changed nothing, and the classifier invented reasons neither version contained.
+ *
+ * Removes ONLY rows whose provenance is 'preset-baseline' and whose identity is absent from `keepKeys` (the
+ * CURRENT catalog baseline). User/learned rows — every other provenance, including a `remember:` rule that happens
+ * to echo a baseline one — are never touched. @returns {Promise<number>} removed count.
+ */
+export async function pruneBaselineRules(appId, keepKeys) {
+  if (!appId) return 0;
+  const keep = (keepKeys instanceof Set) ? keepKeys : new Set(Array.isArray(keepKeys) ? keepKeys : []);
+  return _chained(appId, async () => {
+    const items = await loadGoalItems(appId);
+    const next = items.filter((i) => {
+      if (!i || i.provenance !== 'preset-baseline' || !i.body) return true;         // not a shipped baseline row → keep
+      return keep.has(`${(i.trigger || '').toLowerCase()}|${String(i.body).toLowerCase()}`);
+    });
+    const removed = items.length - next.length;
+    if (removed) await _writeGoalMemory(appId, next);
+    return removed;
+  });
+}
+
 /** Clear an app's goal memory (e.g. when an app is forgotten / deleted). @param {string} appId */
 export async function clearGoalMemory(appId) {
   if (!appId) return;
