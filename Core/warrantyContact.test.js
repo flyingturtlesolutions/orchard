@@ -1,0 +1,128 @@
+// Core/warrantyContact.test.js — v2.74.2110. The CONTACT arm's artifact: a support request to the team.
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { buildContactTicket, buildContactTickets, homeownerFrom, taskIdentityFrom, CONTACT_ASKS, describeContactTicket } from './warrantyContact.js';
+
+// A warranty row shaped like the real one (HAR-verified keys) + the contacts sidecar the drill merges in.
+const ROW = {
+  TicketId: 4903279, TaskNumber: '01', TaskStatus: 'Open', Priority: 'Normal',
+  AddressLine1: '1565 Fairlie Way', CityStateZip: 'Raleigh, NC 27603',
+  ProjectName: 'Fairlie', ProjectDisplayName: 'Fairlie Park',
+  Instructions: 'Please send homeowner deako switches',
+  contacts: [{ type: 'primary', firstName: 'Dana', lastName: 'Reyes', email: 'dana@example.com', phone: '919-555-0142' }],
+};
+
+describe('warrantyContact — reading the person and the task off the row', () => {
+  it('pulls the primary homeowner through the writeMap contact vocabulary', () => {
+    const who = homeownerFrom(ROW);
+    assert.equal(who.name, 'Dana Reyes');
+    assert.equal(who.email, 'dana@example.com');
+    assert.equal(who.phone, '919-555-0142');
+  });
+  it('a row with no contacts yields empty fields, never a guess', () => {
+    const who = homeownerFrom({ TicketId: 1 });
+    assert.deepEqual(who, { name: '', email: '', phone: '' });
+  });
+  it('reads the task identity + location', () => {
+    const id = taskIdentityFrom(ROW);
+    assert.equal(id.ticketId, '4903279');
+    assert.equal(id.address, '1565 Fairlie Way, Raleigh, NC 27603');
+    assert.equal(id.project, 'Fairlie Park');
+  });
+});
+
+describe('warrantyContact — the ticket is a SUPPORT REQUEST, not a customer email', () => {
+  const t = buildContactTicket({ row: ROW, outcome: { arm: 'contact homeowner', cause: 'no-count' } });
+  it('asks the TEAM to make the contact, and names the ask up front', () => {
+    assert.match(t.comment, /^Please confirm the quantity on a Deako warranty task/);
+    assert.match(t.comment, /WHAT WE NEED: How many switches does the homeowner need\?/);
+  });
+  // v2.74.2110 corrected (user: "every ticket has a requestor — orchard can be the requestor here"). The earlier
+  // assertion here said "never sets a requester", which encoded a misreading: a Zendesk ticket always HAS one, so
+  // the only real question was WHO. It is Orchard — never the homeowner, who is the person to be CALLED.
+  it('names Orchard as the requester in the body, always', () => {
+    assert.match(t.comment, /RAISED BY: Orchard \(warranty desk\)/);
+  });
+  it('carries requester_id when Orchard\'s Zendesk user id is known', () => {
+    const withId = buildContactTicket({ row: ROW, outcome: { cause: 'no-count' }, requesterId: 4242 });
+    assert.equal(withId.requester_id, 4242);
+  });
+  it('omits requester_id when unknown (Zendesk attributes it to the session) — and never uses the homeowner', () => {
+    assert.equal('requester_id' in t, false);
+    for (const bad of [null, 0, -1, 'abc', NaN]) {
+      assert.equal('requester_id' in buildContactTicket({ row: ROW, outcome: { cause: 'no-count' }, requesterId: bad }), false);
+    }
+  });
+  it('carries who to reach, where, and the task ids', () => {
+    assert.match(t.comment, /Name:\s+Dana Reyes/);
+    assert.match(t.comment, /Phone:\s+919-555-0142/);
+    assert.match(t.comment, /Address: 1565 Fairlie Way, Raleigh, NC 27603/);
+    assert.match(t.comment, /Ticket:\s+#4903279/);
+  });
+  it('quotes the note verbatim as the evidence', () => {
+    assert.match(t.comment, /THE NOTE SAYS\n\s+Please send homeowner deako switches/);
+  });
+  it('says WHY a machine could not settle it', () => {
+    assert.match(t.comment, /WHY THIS NEEDS A PERSON: The note asks for switches but gives no quantity/);
+  });
+  it('the subject names the job, the person and the place', () => {
+    assert.match(t.subject, /^Warranty #4903279 — confirm the quantity with Dana Reyes \(1565 Fairlie Way, Raleigh, NC 27603\)$/);
+  });
+  it('missing contact details degrade honestly, they do not vanish', () => {
+    const bare = buildContactTicket({ row: { TicketId: 9, Instructions: 'send switches' }, outcome: { cause: 'no-count' } });
+    assert.match(bare.comment, /Name:\s+\(not on the task\)/);
+    assert.match(bare.comment, /Phone:\s+\(not on the task\)/);
+  });
+});
+
+describe('warrantyContact — the ask is CAUSE-SPECIFIC (one template would ask the wrong question)', () => {
+  const forCause = (cause, outcome = {}) => buildContactTicket({ row: ROW, outcome: { cause, ...outcome } });
+  it('no-count asks how many', () => assert.match(forCause('no-count').comment, /How many switches/));
+  it('named-product-unresolved asks WHICH product, and quotes the name we could not match', () => {
+    const t = forCause('named-product-unresolved', { fields: { product_name: 'Gen 9 hyperswitch' } });
+    assert.match(t.comment, /Which Deako product is this\?/);
+    assert.match(t.comment, /The note names: "Gen 9 hyperswitch"/);
+    assert.match(t.subject, /confirm the product/);
+  });
+  it('other-trade asks for ROUTING, not a homeowner call', () => {
+    const t = forCause('other-trade');
+    assert.match(t.comment, /Who owns this\? It reads as another trade/);
+    assert.match(t.subject, /route to the right trade/);
+    assert.doesNotMatch(t.comment, /How many switches/);
+  });
+  it('already-handled asks to verify first, and is the one low-priority case', () => {
+    const t = forCause('already-handled');
+    assert.match(t.comment, /Has this already been handled\?/);
+    assert.equal(t.priority, 'low');
+  });
+  it('every declared cause has an ask, a why and a verb', () => {
+    for (const [cause, spec] of Object.entries(CONTACT_ASKS)) {
+      assert.ok(spec.ask && spec.why && spec.verb, `${cause} is missing part of its ask`);
+      assert.ok(buildContactTicket({ row: ROW, outcome: { cause } }), `${cause} builds no ticket`);
+    }
+  });
+  it('an UNKNOWN cause writes nothing — a vague ticket is worse than none', () => {
+    assert.equal(buildContactTicket({ row: ROW, outcome: { cause: 'mystery' } }), null);
+    assert.equal(buildContactTicket({ row: ROW, outcome: {} }), null);
+  });
+});
+
+describe('warrantyContact — one ticket per task', () => {
+  it('builds 1:1 and reports what it skipped', () => {
+    const { tickets, skipped } = buildContactTickets([
+      { id: 'a', row: ROW, outcome: { cause: 'no-count' } },
+      { id: 'b', row: { TicketId: 4888221, AddressLine1: '7356 Axel Creek St', Instructions: 'Electrical outlets loose' }, outcome: { cause: 'other-trade' } },
+      { id: 'c', row: ROW, outcome: { cause: 'not-a-cause' } },
+    ]);
+    assert.equal(tickets.length, 2);
+    assert.deepEqual(tickets.map((t) => t.id), ['a', 'b']);
+    assert.deepEqual(skipped, [{ id: 'c', cause: 'not-a-cause' }]);
+    assert.notEqual(tickets[0].subject, tickets[1].subject);   // each is independently actionable
+  });
+  it('the preview line names the cause and the subject', () => {
+    const t = buildContactTicket({ row: ROW, outcome: { cause: 'no-count' } });
+    assert.match(describeContactTicket({ ...t }), /^no-count — Warranty #4903279/);
+  });
+});
