@@ -5764,11 +5764,19 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     }
   }
   const _cArms = classifyArms(br);
+  // v2.74.2130 — `cField` is declared HERE, in the function scope, because the canonical-arm override far
+  // below (the `_warrantyExtract && classifyBy` block) reads it from OUTSIDE the `if (_cArms.length)` block
+  // it used to be scoped to. Live crash: `process these` answered "That step couldn't run — cField is not
+  // defined" on every run where the classify path produced groups. Neither gate could see it: `node --check`
+  // parses fine (the binding exists) and `npm run undef` passes (it IS declared, just not in that scope),
+  // and no unit test reaches this function. Introduced by 2506d90 — a bug pass that fixed a latent defect
+  // and shipped a live one.
+  let cField = '';
   if (_cArms.length) {
     // v2.74.1662 — String(...).trim(), NOT a `_str` helper: chat.js has no such binding, and an undefined
     // identifier here throws at RUNTIME while passing `node --check` cleanly. That exact class cost six bugs in
     // one session (v1655's `readouts`, v1660's `INTENTS`), every one of them written late in a working stretch.
-    const cField = String((_cArms[0].when && _cArms[0].when.field) ?? '').trim() || String(br.classifyField || '').trim();
+    cField = String((_cArms[0].when && _cArms[0].when.field) ?? '').trim() || String(br.classifyField || '').trim();
     const redMap = newRedactionMap();
     // v2.74.1663 (bug pass) — the correlation id is the ROW INDEX, and that choice is load-bearing twice over.
     //
