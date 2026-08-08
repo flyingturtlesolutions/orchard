@@ -218,6 +218,57 @@ export function parseClassifyOutput(raw, { items = [], armLabels = [] } = {}) {
   return { byId, invalid, missing };
 }
 
+// ─── EXTRACTION MODE (v2.74.2106) ────────────────────────────────────────────────────────────────────────────────
+// The label-picking path above lets the model choose the outcome, and its grammar admits `none`/`unknown` — two
+// residual values with no entry condition, which absorbed eleven consecutive escalation failures on the warranty
+// branch (logs/run/findings.md 2026-08-08). EXTRACTION MODE removes the choice: the caller supplies a system
+// prompt whose reply grammar carries only TYPED FIELDS, and the caller's own pure code derives the outcome. No
+// arm labels are sent, so there is no label to invent and no residual to fall into.
+//
+// Deliberately domain-agnostic: this file owns the transport (envelope, id discipline, JSON recovery); the DOMAIN
+// owns the fields, the exemplars and the derivation (see Core/warrantySwitch.js).
+
+/**
+ * Build an extraction request. The system text is the caller's (procedure + schema + exemplars); the user message
+ * carries only the items, in the same `<item id=…>` envelope the classify path uses. PURE.
+ * @param {{items:Array<{id:string,text:string}>, field?:string, system:string}} spec
+ */
+export function buildExtractRequest({ items = [], field = '', system = '' } = {}) {
+  const itemLines = items.map((it) => `<item id="${_str(it.id)}">\n${_str(it.text)}\n</item>`).join('\n\n');
+  const user = [field ? `Field being read: ${_str(field)}` : '', '', 'ITEMS:', itemLines || '(none)'].filter(Boolean).join('\n');
+  return { system: _str(system), user, itemCount: items.length };
+}
+
+/**
+ * Parse an extraction reply into `id → raw field object`. PURE. Validation is deliberately THIN here: the domain's
+ * own coercion owns field-level repair (an inconsistency must resolve toward the acting reading, which this module
+ * cannot know). This layer only enforces id discipline — unknown/duplicate ids are dropped, and an item the model
+ * skipped is REPORTED as missing rather than silently defaulting.
+ * @returns {{byId:Map<string,object>, invalid:number, missing:string[]}}
+ */
+export function parseExtractOutput(raw, { items = [] } = {}) {
+  const wanted = new Set(items.map((it) => _str(it.id)));
+  const byId = new Map();
+  let invalid = 0;
+
+  let obj = null;
+  if (raw && typeof raw === 'object') obj = raw;
+  else {
+    const m = String(raw ?? '').match(/\{[\s\S]*\}/);
+    if (m) { try { obj = JSON.parse(m[0]); } catch { obj = null; } }
+  }
+  const list = (obj && Array.isArray(obj.verdicts)) ? obj.verdicts : [];
+  for (const v of list) {
+    if (!v || typeof v !== 'object') { invalid++; continue; }
+    const id = _str(v.id);
+    if (!wanted.has(id) || byId.has(id)) { invalid++; continue; }
+    byId.set(id, v);
+  }
+  const missing = [];
+  for (const it of items) { const id = _str(it.id); if (!byId.has(id)) missing.push(id); }
+  return { byId, invalid, missing };
+}
+
 /**
  * Fold a classification result into the per-item evaluator `evalBranch` injects. PURE.
  *

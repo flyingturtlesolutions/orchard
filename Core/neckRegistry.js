@@ -28,6 +28,12 @@ export const NECKS = Object.freeze([
   { operation: 'interpret', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'the leg/clause selector — B5-0 subject #1' },
   { operation: 'decompose-steps', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'emits step TEXT that routes downstream (v1708/1712/1714) — subject #2' },
   { operation: 'branch-classify', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'sorts items into arms that can carry writes (the couldn\'t-tell-22 class) — subject #3' },
+  // v2.74.2106 — the EXTRACTION twin of branch-classify: the model returns TYPED FIELDS and CODE derives the arm
+  // (Core/warrantySwitch.deriveWarrantyOutcome), so the model never emits a routing label. Still routing-grade —
+  // the extracted count/product decide what a write drafts — but the decision surface is a closed enum plus pure
+  // code, which is why its gate is the warrantySwitch fixture (11 historical failures + the 13 real tasks) rather
+  // than the shared decisionGate suite.
+  { operation: 'branch-extract', grade: 'routing', gate: 'built', suite: 'Core/warrantySwitch.test.js', why: 'typed-field extraction whose count/product drive a draft; code derives the arm so no label (or unknown/none residual) is emittable — the eleven-escalation-failure fix' },
   { operation: 'route-ask', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'the pre-door router (mis-sent "open a case showing each…" → demonstrate) — subject #4' },
   { operation: 'match-workflow', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'picks which BANKED workflow replays — parse proposes, resolveWorkflowMatch is the trust gate (hallucinated id → null) — subject #5 (v2.74.1734)' },
   { operation: 'judge-match', grade: 'routing', gate: 'built', suite: 'Core/decisionGate.test.js', why: 'accepts/rejects a capability match; fails safe to ref:null → ask — subject #6 (v2.74.1734)' },

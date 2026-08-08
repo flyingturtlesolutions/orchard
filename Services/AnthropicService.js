@@ -39,7 +39,7 @@ import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/wo
 import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
 import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
 import { buildAnswerShapeMessages, parseAnswerShapeOutput } from '../Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — match a read's answer to the question
-import { buildClassifyRequest, parseClassifyOutput } from '../Core/branchClassify.js';
+import { buildClassifyRequest, parseClassifyOutput, buildExtractRequest, parseExtractOutput } from '../Core/branchClassify.js';   // v2.74.2106 — extract* = the typed-field path (no label, no residual)
 import { buildStepsMessages, parseStepsOutput, sanitizeSteps, deriveStepSpec, assessStepCoverage, buildResplitMessages, stepRejectionContext, restoreQuantifier } from '../Core/stepsPrompt.js';   // v2.74.1669 — intent → workflow STEPS (one step = one leg); dedicated, because interpret is a router and decomposeAsk splits grammar   // PP-5 (v2.74.1662) — batched free-text branch classification (pure prompt + strict parse)
 import { buildCaseBriefMessages, parseCaseBrief } from '../Core/caseBrief.js';   // DK-8h — a spawned case's conversational framing (the requestor's voice)
 import { buildRecipePolishMessages, parseRecipePolishOutput } from '../Core/recipePolishPrompt.js';   // §17 — name/does/param-name a HARVESTED ride-recipe (structure-only input; the OBS-4 analog)
@@ -5565,7 +5565,20 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     return { steps, coverage: assessStepCoverage(steps, spec), dropped: san.dropped, spec, restored: rq.restored };
   }
 
-  static async classifyBranch({ items = [], arms = [], field = '' } = {}) {
+  static async classifyBranch({ items = [], arms = [], field = '', extract = '' } = {}) {
+    // v2.74.2106 — EXTRACTION MODE: when the caller supplies its own system prompt, the model returns TYPED FIELDS
+    // and the caller's code derives the outcome. No arms are sent, so there is no label to invent and no
+    // `none`/`unknown` residual to fall into (the eleven-failure fix — see Core/warrantySwitch.js).
+    if (typeof extract === 'string' && extract.trim()) {
+      if (!Array.isArray(items) || !items.length) return null;
+      if (!(await AnthropicService.hasLlm())) return null;
+      const xr = buildExtractRequest({ items, field, system: extract });
+      const xbudget = Math.min(6000, Math.max(600, items.length * 110));   // typed rows are wider than a label+why
+      const xres = await AnthropicService.#call(xr.system, xr.user, xbudget, [], { role: 'routing', operation: 'branch-extract' });
+      if (!xres || xres.success === false) return null;
+      const parsed = parseExtractOutput(xres.text, { items });
+      return { extracted: true, byId: parsed.byId, invalid: parsed.invalid, missing: parsed.missing };
+    }
     if (!Array.isArray(items) || !items.length || !Array.isArray(arms) || !arms.length) return null;
     if (!(await AnthropicService.hasLlm())) return null;
     const req = buildClassifyRequest({ items, arms, field });

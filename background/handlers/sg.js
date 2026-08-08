@@ -1623,6 +1623,19 @@ export function createSgMessageHandlers(ctx) {
         const items = Array.isArray(payload?.items) ? payload.items : [];
         const arms = Array.isArray(payload?.arms) ? payload.arms : [];
         const field = String(payload?.field ?? '').trim();
+        // v2.74.2106 — EXTRACTION MODE: the caller ships its own system prompt and derives the outcome in its own
+        // pure code, so no arms are sent and the reply carries TYPED FIELDS instead of a label. Same redaction
+        // contract as the classify path (the panel redacts before send; this handler never holds the map).
+        const extract = String(payload?.extract ?? '').trim();
+        if (extract) {
+          if (!items.length) { sendResponse({ success: false, error: 'items required' }); return; }
+          const xout = await AnthropicService.classifyBranch({ items, field, extract });
+          if (!xout) { sendResponse({ success: false, error: 'classifier unavailable' }); return; }
+          const fields = [...xout.byId.entries()].map(([id, v]) => ({ id, ...v }));
+          try { Logger.info('background', `BRANCH ▸ extracted ${fields.length} item(s) — typed fields, no label${xout.invalid ? ` — ${xout.invalid} invalid` : ''}${xout.missing.length ? ` — ${xout.missing.length} skipped` : ''}`); } catch { /* */ }
+          sendResponse({ success: true, fields, invalid: xout.invalid, missing: xout.missing });
+          return;
+        }
         if (!items.length || !arms.length) { sendResponse({ success: false, error: 'items and arms required' }); return; }
         const out = await AnthropicService.classifyBranch({ items, arms, field });
         if (!out) { sendResponse({ success: false, error: 'classifier unavailable' }); return; }

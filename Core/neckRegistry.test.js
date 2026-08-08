@@ -60,9 +60,9 @@ describe('neckRegistry — row discipline', () => {
     }
   });
 
-  it('ALL EIGHT routing-grade necks are gated; the owed list is EMPTY (v1734 Stage 7; step-il retired 2026-08-07 with its transport)', () => {
+  it('ALL NINE routing-grade necks are gated; the owed list is EMPTY (v1734 Stage 7; step-il retired 2026-08-07; branch-extract added v2.74.2106)', () => {
     assert.deepEqual(necksByGate('built').map((n) => n.operation).sort(),
-      ['branch-classify', 'decompose-steps', 'interpret', 'judge-match', 'match-workflow', 'route-ask', 'seed-directives', 'sweep-reads']);
+      ['branch-classify', 'branch-extract', 'decompose-steps', 'interpret', 'judge-match', 'match-workflow', 'route-ask', 'seed-directives', 'sweep-reads']);
     assert.deepEqual(owedNecks(), [], 'a future routing-grade neck starts life on this list — the seal forces the row, this assertion forces the shrink');
   });
 

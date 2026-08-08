@@ -80,7 +80,8 @@ import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recen
 import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { parseDashboardAsk, friendlyVitalsLine, clockWord } from './Core/vitalsDashboard.js';   // VT-2d (v2.74.1583) — the context dashboard door; v1590 — the human-words layer for incident cases
-import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer } from './Core/audit.js';   // AU-3 (DESIGN_audit.md §11) — the "what have I created?" read surface (local ledger, one-shot answer)
+import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer } from './Core/audit.js';
+import { buildWarrantyExtractSystem, readWarrantyItem, tallyOutcomes, WARRANTY_ARMS } from './Core/warrantySwitch.js';   // v2.74.2106 — the warranty branch EXTRACTS typed fields; code derives the arm (no label for the model to invent)   // AU-3 (DESIGN_audit.md §11) — the "what have I created?" read surface (local ledger, one-shot answer)
 import { friendlyError as _errWord, actionPhrase as _actionPhrase, recordNounWord as _recordNounWord } from './Core/chatVoice.js';   // v2.74.1591 — ONE chat voice: slugs/codes → phrases, catalog verbs → sentences, leg names → nouns
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId, galleryUserDefs } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance); DK-6b — galleryUserDefs ("Your desks" = customs only)
@@ -5569,6 +5570,15 @@ function _wfReplayStopped(msg, wf, plan) {
   _orchFinalize(msg);
 }
 
+// v2.74.2106 — is the CURRENT desk the warranty preset? The switch reader is domain-specific, so it arms only
+// where the domain applies; every other desk keeps the generic classify path unchanged.
+function _isWarrantyDesk() {
+  try {
+    const ids = [_currentConversationPresetId, _currentConversationAppId].map((x) => String(x || '').toLowerCase());
+    return ids.some((x) => x === 'warranty-manager');
+  } catch { return false; }
+}
+
 async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = null, goal = '', inChain = false } = {}) {
   if (!inChain) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // WFP-1 (§12.3) — a STANDALONE run is a run start (reset both latches); MID-CHAIN this erased a stop pressed during the previous clause's LLM roundtrip, after which a write created rows the user had already refused
   _ilBusy(msg, true);
@@ -5631,6 +5641,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   // each record's OWN fields, which is the only way an ADDRESS gets redacted at all — no regex finds a street
   // address, but the record knows which field holds one. The map stays in the panel; the service never sees it.
   let classifyBy = null;
+  let _warrantyExtract = false;   // v2.74.2106 — this branch used the typed-field path
   let _classifyGap = '';   // v1895 — WHY nothing could be classified, when that is the answer (a field the records lack)
   // v2.74.1899 — the DRILL, hoisted so BOTH arm kinds reach it. The v1895 drill was gated inside the classify block,
   // so the first live deterministic branch ("has a vendor explanation, or blank" — the model chose assertion arms
@@ -5822,15 +5833,38 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       _classifyGap = _cKey ? `none of the ${use.length} record${use.length === 1 ? '' : 's'} carry a “${_cKey}” field to sort on` : 'there was no field to sort on';
       try { _orchLog(`BRANCH ▸ nothing to classify — "${_cKey || '(record)'}" empty on ${use.length}/${use.length} row(s)${_bdj ? ' even after the drill' : ' and the leg declares no drill'}`); } catch { /* */ }
     } else {
+    // v2.74.2106 — the WARRANTY branch uses EXTRACTION, not label-picking. On a warranty desk the model returns
+    // typed fields and Core/warrantySwitch derives the arm in code, so "escalate" is not a value it can emit.
+    // Eleven prompt fixes could not close that hole from the arm criteria (see logs/run/findings.md 2026-08-08);
+    // this is the structural version. Any other desk keeps the classify path untouched.
+    _warrantyExtract = _isWarrantyDesk();
     try {
-      resp = await _orchReq('CLASSIFY_BRANCH_ITEMS', {
-        items: payloadItems, field: cField,
-        arms: _cLeft.map((a) => ({ label: a.label, is: String((a.when && a.when.is) ?? '').trim() })),
-      });
+      resp = await _orchReq('CLASSIFY_BRANCH_ITEMS', _warrantyExtract
+        ? { items: payloadItems, field: cField, extract: buildWarrantyExtractSystem() }
+        : {
+          items: payloadItems, field: cField,
+          arms: _cLeft.map((a) => ({ label: a.label, is: String((a.when && a.when.is) ?? '').trim() })),
+        });
     } catch { resp = null; }
     }
 
-    if (!_cLeft.length) { classifyBy = null; } else if (resp && resp.success && Array.isArray(resp.verdicts)) {
+    if (!_cLeft.length) { classifyBy = null; } else if (_warrantyExtract && resp && resp.success && Array.isArray(resp.fields)) {
+      // CODE decides. Each row: coerce the typed fields (resolving inconsistencies toward acting), then derive the
+      // arm from positive facts. `note` carries the model's judgement WITHOUT routing on it.
+      classifyBy = new Map();
+      const _outcomes = [];
+      for (const f of resp.fields) {
+        const id = String(f && f.id);
+        const src = payloadItems.find((p) => String(p.id) === id);
+        const o = readWarrantyItem(f, (src && src.text) || '', { inCatalog: () => true });   // catalog check: AU — the draft leg resolves the product and reports honestly if it cannot
+        _outcomes.push(o);
+        const _why = o.cause ? `${o.cause}${o.fields.note ? ` — ${o.fields.note}` : ''}`
+          : `${o.count} × ${o.product}${o.fields.note ? ` — ${o.fields.note}` : ''}`;
+        classifyBy.set(id, { group: o.arm, why: restore(_why, redMap).text, _outcome: o });
+      }
+      const _t = tallyOutcomes(_outcomes);
+      try { _orchLog(`BRANCH ▸ extracted — ${WARRANTY_ARMS.map((a) => `${a} ${_t.byArm[a] || 0}`).join(' · ')} · routes ${Object.entries(_t.byRoute).filter(([, n]) => n).map(([r, n]) => `${r} ${n}`).join(' ') || '—'}${Object.values(_t.byCause).some(Boolean) ? ` · causes ${Object.entries(_t.byCause).filter(([, n]) => n).map(([c, n]) => `${c} ${n}`).join(' ')}` : ''}${resp.invalid ? ` (${resp.invalid} invalid)` : ''}`); } catch { /* */ }
+    } else if (resp && resp.success && Array.isArray(resp.verdicts)) {
       // Restore the model's REASONS locally — they may quote the redacted text, and the user should read the
       // real words even though the model never saw them.
       classifyBy = new Map(resp.verdicts.map((v) => [String(v.id), { group: String(v.group), why: restore(String(v.why || ''), redMap).text }]));
