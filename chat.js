@@ -16506,72 +16506,78 @@ async function sendChatMessage(textOverride = null) {
       const _fx = (_currentConversationFocus && _currentConversationFocus.length)
         ? _currentConversationFocus
         : [focusFromSeedRecord(_currentConversationSeed, 'this case’s record')].filter(Boolean);
-      if (_fx.length) {
-        // v2.74.2112 — "who is the CSR on #4903279". A contact-ROLE ask is a READ off a record we already hold, not
-        // a page drive, so it is answered here — above the record-bind, which would otherwise send "who is the CSR"
-        // through the ~20s on-site open (the verb ruling: open = drive, get/read = read). Pure and instant: no
-        // probe, no network, invariant #4 intact. It claims the turn ONLY when the ask names a role AND a record we
-        // can answer from; otherwise it falls through untouched and normal routing gets its chance.
-        //
-        // Roles come from the record's own flags (Core/contactRoles.js) — the builder's CSR and coordinator ride on
-        // every warranty task, so "the other contact" is never a safe synonym for "the customer".
-        const _cr = askContactRole(text);
-        if (_cr) {
-          // The record the ask NAMES, else the pinned/newest record head. A typed number is a TICKET number, which
-          // is exactly what recordFind() reads off an entry — the internal TaskId is never what a person types.
-          const _recs = _fx.filter((e) => e && e.kind === 'record');
-          const _hit = _cr.ticket
-            ? _recs.find((e) => recordFind(e) === _cr.ticket)
-            : (_recs.find((e) => e.pinned) || _recs[0]);
-          if (_hit) {
-            const _people = readContacts(_hit.fields || {});
-            const _label = _cr.ticket ? `#${_cr.ticket}` : (_hit.label || 'this record');
-            const mC = appendMessage({ role: 'assistant', body: '' });
-            _setMessageBody(mC, renderContactAnswer({ people: _people, role: _cr.role, want: _cr.want, recordLabel: _label }), { markdown: true });   // renderMarkdown is escape-first — the page-derived names are escaped before parsing
+      // v2.74.2115 — the contact-role ask runs REGARDLESS OF FOCUS. It used to sit inside `if (_fx.length)`, which
+      // meant a ticket the user NAMED was only answerable when a record was already open — backwards, and live
+      // proof: on a fresh panel with an empty focus the whole block was skipped, so `who is the CSR on #4903279`
+      // fell through to the answer-shaper, which read the VendorExplanation prose and replied "the CSR field is not
+      // present" (fleet 20.txt 20:54:23, routing/answer-shape, then LEARNED banked it act-ok conf=0.7 — a wrong
+      // answer taught as a good one). Focus is an INPUT to this branch, never its precondition.
+      // v2.74.2112 — "who is the CSR on #4903279". A contact-ROLE ask is a READ off a record we already hold, not
+      // a page drive, so it is answered here — above the record-bind, which would otherwise send "who is the CSR"
+      // through the ~20s on-site open (the verb ruling: open = drive, get/read = read). Pure and instant: no
+      // probe, no network, invariant #4 intact. It claims the turn ONLY when the ask names a role AND a record we
+      // can answer from; otherwise it falls through untouched and normal routing gets its chance.
+      //
+      // Roles come from the record's own flags (Core/contactRoles.js) — the builder's CSR and coordinator ride on
+      // every warranty task, so "the other contact" is never a safe synonym for "the customer".
+      const _cr = askContactRole(text);
+      if (_cr) {
+        // The record the ask NAMES, else the pinned/newest record head. A typed number is a TICKET number, which
+        // is exactly what recordFind() reads off an entry — the internal TaskId is never what a person types.
+        const _recs = _fx.filter((e) => e && e.kind === 'record');
+        const _hit = _cr.ticket
+          ? _recs.find((e) => recordFind(e) === _cr.ticket)
+          : (_recs.find((e) => e.pinned) || _recs[0]);
+        if (_hit) {
+          const _people = readContacts(_hit.fields || {});
+          const _label = _cr.ticket ? `#${_cr.ticket}` : (_hit.label || 'this record');
+          const mC = appendMessage({ role: 'assistant', body: '' });
+          _setMessageBody(mC, renderContactAnswer({ people: _people, role: _cr.role, want: _cr.want, recordLabel: _label }), { markdown: true });   // renderMarkdown is escape-first — the page-derived names are escaped before parsing
+          _orchFinalize(mC);
+          try {
+            const _sel = selectContacts(_people, _cr.role);
+            _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=${_label} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
+          } catch { /* logging is best-effort */ }
+          return;
+        }
+        // v2.74.2113 — a ticket we do NOT hold is RESOLVED, not refused. The ask was "any record", and the list
+        // leg's own drill block already names every hop (ticket → address filter → TaskId → contacts sidecar).
+        // The turn was claimed by the pure parse above, so the read runs under a visible status bubble.
+        if (_cr.ticket) {
+          const mC = appendMessage({ role: 'thinking', body: `Looking up #${_cr.ticket}…` });
+          let _res = null;
+          _turnLock();
+          try { _res = await _resolveTicketRecord(_cr.ticket, mC); } finally { _turnUnlock(); }
+          if (_res && _res.row) {
+            const _people = readContacts(_res.row);
+            _setMessageBody(mC, renderContactAnswer({ people: _people, role: _cr.role, want: _cr.want, recordLabel: `#${_cr.ticket}` }), { markdown: true });
             _orchFinalize(mC);
             try {
               const _sel = selectContacts(_people, _cr.role);
-              _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=${_label} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
+              _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=#${_cr.ticket} resolved=${_res.status || 'list'} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
             } catch { /* logging is best-effort */ }
             return;
           }
-          // v2.74.2113 — a ticket we do NOT hold is RESOLVED, not refused. The ask was "any record", and the list
-          // leg's own drill block already names every hop (ticket → address filter → TaskId → contacts sidecar).
-          // The turn was claimed by the pure parse above, so the read runs under a visible status bubble.
-          if (_cr.ticket) {
-            const mC = appendMessage({ role: 'thinking', body: `Looking up #${_cr.ticket}…` });
-            let _res = null;
-            _turnLock();
-            try { _res = await _resolveTicketRecord(_cr.ticket, mC); } finally { _turnUnlock(); }
-            if (_res && _res.row) {
-              const _people = readContacts(_res.row);
-              _setMessageBody(mC, renderContactAnswer({ people: _people, role: _cr.role, want: _cr.want, recordLabel: `#${_cr.ticket}` }), { markdown: true });
-              _orchFinalize(mC);
-              try {
-                const _sel = selectContacts(_people, _cr.role);
-                _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} record=#${_cr.ticket} resolved=${_res.status || 'list'} → ${_sel.length ? `${_sel.length} match (${_sel.map((p) => p.role).join(', ')})` : 'none'} of ${_people.length} contact(s)`);
-              } catch { /* logging is best-effort */ }
-              return;
-            }
-            // The miss must NAME ITSELF. v2113 said "no single row matched across the status buckets" for every
-            // failure — including the live one where nothing was ever queried (the invoke was blocked before the
-            // network on an unfilled divisionId). A message that asserts a search that did not happen sends the
-            // next reader looking in the wrong place.
-            const _m = (_res && _res.miss) || {};
-            const _said = roleSaid(_cr.role);
-            const _text = !_m.leg
-              ? `I can't look up #${_cr.ticket} — no connected site here reads warranty tasks, so there's nowhere to find the ${_said}.`
-              : (_m.blocked && !_m.rows)
-                ? `I couldn't read the warranty list for #${_cr.ticket} — it needs a division and I don't have one in context. Name it (e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`), or open the record first.`
-                : (_m.hits > 1)
-                  ? `More than one warranty task matches #${_cr.ticket}, so I won't guess which one's ${_said} you mean. Open the record you want first.`
-                  : `#${_cr.ticket} isn't in the warranty list I can see (${_m.rows} task(s) searched across ${_m.invoked} status bucket(s)). If it's in another division, name it — e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`.`;
-            _setMessageBody(mC, _text, { markdown: true });
-            _orchFinalize(mC);
-            try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (leg=${_m.leg ? 'y' : 'n'} invoked=${_m.invoked || 0} blocked=${_m.blocked || 0} rows=${_m.rows || 0} hits=${_m.hits || 0})`); } catch { /* */ }
-            return;
-          }
+          // The miss must NAME ITSELF. v2113 said "no single row matched across the status buckets" for every
+          // failure — including the live one where nothing was ever queried (the invoke was blocked before the
+          // network on an unfilled divisionId). A message that asserts a search that did not happen sends the
+          // next reader looking in the wrong place.
+          const _m = (_res && _res.miss) || {};
+          const _said = roleSaid(_cr.role);
+          const _text = !_m.leg
+            ? `I can't look up #${_cr.ticket} — no connected site here reads warranty tasks, so there's nowhere to find the ${_said}.`
+            : (_m.blocked && !_m.rows)
+              ? `I couldn't read the warranty list for #${_cr.ticket} — it needs a division and I don't have one in context. Name it (e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`), or open the record first.`
+              : (_m.hits > 1)
+                ? `More than one warranty task matches #${_cr.ticket}, so I won't guess which one's ${_said} you mean. Open the record you want first.`
+                : `#${_cr.ticket} isn't in the warranty list I can see (${_m.rows} task(s) searched across ${_m.invoked} status bucket(s)). If it's in another division, name it — e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`.`;
+          _setMessageBody(mC, _text, { markdown: true });
+          _orchFinalize(mC);
+          try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (leg=${_m.leg ? 'y' : 'n'} invoked=${_m.invoked || 0} blocked=${_m.blocked || 0} rows=${_m.rows || 0} hits=${_m.hits || 0})`); } catch { /* */ }
+          return;
         }
+      }
+      if (_fx.length) {
         const bound = bindReferent(text, _fx);
         if (bound && bound.ambiguous) {
           const mA = appendMessage({ role: 'assistant', body: '' });
