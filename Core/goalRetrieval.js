@@ -79,11 +79,17 @@ export function assembleGoalContext(items, { ask = '', maxRules = 8, maxRecall =
     if (c > (posConf.get(b.ref) ?? -1)) posConf.set(b.ref, c);
   }
   // RULES — always-on (no trigger) ALWAYS; triggered rules whose trigger overlaps the ask. Rank tier then confidence.
-  const rules = deltas
+  // v2.74.2090 (critical-review fix #10) — the PRESET-BASELINE FLOOR. `slice(0, maxRules)` ranks by tier then
+  // confidence, and a preset baseline seeds at confirmed/0.8 while user `remember:` rules land at 0.85 — so on a
+  // mature desk the app's own SAFETY/behavior rules (the ones the product ships to be always true) could be
+  // silently truncated away by ordinary learned rules. Baseline rules are therefore taken FIRST (up to maxRules),
+  // then the rest fill the remaining slots. Same cap overall — no budget growth, just a guaranteed floor.
+  const eligible = deltas
     .filter((d) => !(d.provenance === 'act-fail' && d.ref && (posConf.get(d.ref) ?? -1) >= (d.confidence ?? 0)))
     .filter((d) => !d.trigger || _overlap(askTokens, d.trigger) >= minOverlap)
-    .sort((a, b) => (tierRank(b.tier) - tierRank(a.tier)) || ((b.confidence ?? 0) - (a.confidence ?? 0)))
-    .slice(0, maxRules);
+    .sort((a, b) => (tierRank(b.tier) - tierRank(a.tier)) || ((b.confidence ?? 0) - (a.confidence ?? 0)));
+  const _isBaseline = (d) => d && d.provenance === 'preset-baseline';
+  const rules = [...eligible.filter(_isBaseline), ...eligible.filter((d) => !_isBaseline(d))].slice(0, maxRules);
 
   // RECALL — summary-tier beliefs ALWAYS (the distilled summary, §6); plus ask-relevant beliefs ranked by overlap.
   const always = beliefs.filter((b) => b.tier === 'summary');

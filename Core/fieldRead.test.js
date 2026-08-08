@@ -55,6 +55,23 @@ describe('fieldRead — readFieldSection: the term finds its unit, whatever the 
     assert.equal(r.text, PROSE);
   });
 
+  // v2.74.2090 (critical-review fix #6) — the extract is WORDING-DRIVEN (a term hit narrows to its line; a miss
+  // returns everything), so a COUNT sitting on a sibling line is invisible to a consumer reading `text` alone.
+  // `full` carries the whole field on EVERY branch, additively — `text`/`mode` are unchanged.
+  it('carries `full` (the whole field) on a hit, so a sibling-line count stays reachable', () => {
+    const r = readFieldSection(OUTLINE, 'deako');
+    assert.equal(r.mode, 'item');
+    assert.equal(r.text.includes('lot 12 THs'), false);        // the narrow answer stays narrow
+    assert.equal(r.full.includes('lot 12 THs'), true);         // …but the whole field is still available
+    assert.match(r.full, /not pairing in the main hall/);
+  });
+  it('carries `full` on a sentence hit, a miss, and the no-term case', () => {
+    assert.equal(readFieldSection(PROSE, 'deako').full, PROSE);          // sentence mode: text is one sentence, full is all
+    assert.equal(readFieldSection(OUTLINE, 'plumbing').full.includes('Deako switches'), true);   // miss
+    assert.equal(readFieldSection(PROSE, '').full, PROSE);               // no term
+    assert.equal(readFieldSection('', 'x').full, '');                    // empty field → empty full, never undefined
+  });
+
   it('empty/blank field is reported as empty, not as a whole-field answer', () => {
     for (const v of ['', '   ', null, undefined]) {
       const r = readFieldSection(v, 'deako');

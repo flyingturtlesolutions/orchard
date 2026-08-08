@@ -24,6 +24,26 @@ describe('goalRetrieval — assembleGoalContext: RULES', () => {
     assert.equal(assembleGoalContext(items, { ask: 'x' }).rules[0].body, 'r2');
     assert.equal(assembleGoalContext(items, { ask: 'x', maxRules: 1 }).rules.length, 1);
   });
+  // v2.74.2090 (critical-review fix #10) — the PRESET-BASELINE FLOOR: an app's shipped safety/behavior rules seed at
+  // confirmed/0.8 while user rules land at 0.85, so a mature desk could silently truncate the baseline away.
+  it('preset-baseline rules survive the cap even when out-ranked by learned rules', () => {
+    const items = [
+      delta('user rule A', { confidence: 0.85 }),
+      delta('user rule B', { confidence: 0.85 }),
+      delta('SHIPPED SAFETY RULE', { confidence: 0.8, provenance: 'preset-baseline' }),
+    ];
+    const { rules } = assembleGoalContext(items, { ask: 'x', maxRules: 2 });
+    assert.equal(rules.length, 2);
+    assert.ok(rules.some((r) => r.body === 'SHIPPED SAFETY RULE'), 'the baseline rule must not be evicted');
+    assert.equal(rules[0].body, 'SHIPPED SAFETY RULE', 'baseline rules are taken first');
+  });
+  it('baseline pinning does not grow the budget (same cap overall)', () => {
+    const items = [
+      delta('b1', { provenance: 'preset-baseline' }), delta('b2', { provenance: 'preset-baseline' }),
+      delta('u1'), delta('u2'),
+    ];
+    assert.equal(assembleGoalContext(items, { ask: 'x', maxRules: 3 }).rules.length, 3);
+  });
 });
 
 describe('goalRetrieval — AL-3e conflict resolution (an act-fail lesson vs a positive association, v2.74.1328)', () => {

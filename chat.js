@@ -2573,20 +2573,31 @@ async function _createAppConversation(def, { setup = false } = {}) {
 // `confirmed`/`preset-baseline` delta (de-duped, deltas-only — facts never seed). Seed-IF-EMPTY: an instance that
 // already carries memory (a re-created configured app keeps its learning per AP-3, or one that's specialized) is
 // left untouched. Fire-and-forget — a seed failure never blocks opening the app.
+// v2.74.2090 (critical-review fix #2) — SEED-IF-EMPTY WAS A ONE-SHOT: an instance created before a preset's
+// baseline gained a rule never received it (seeding ran only at app-create, `if (existing.length) return`), so a
+// shipped safety/behavior rule silently never reached the desks already in use — the live case: the warranty
+// switch rules landed on nobody's existing Warranty desk. Now ADD-MISSING (the Invariant #3 `mergeRecipes`
+// discipline): bank baseline rules whose `trigger|body` is absent, and NEVER touch a row the instance already
+// has — learned/user rules and edited copies are preserved untouched. Idempotent: a second call adds nothing.
 async function _seedInstanceMemory(instanceId, presetId) {
   try {
     if (!instanceId) return;
     const existing = await loadGoalItems(instanceId);
-    if (existing.length) return;                                   // already has memory — never clobber
     const presetItems = presetId ? await loadGoalItems(`preset:${presetId}`) : [];
     let baseline = [];
     try { baseline = (presetId && builtinApp(presetId)?.baseline) || []; } catch { /* */ }
     const seeded = seedInstanceFromPreset(presetItems, { baseline });
-    for (const d of seeded) await recordGoalItem(instanceId, d);
-    if (seeded.length) {
-      try { console.info(`[chat] §10.1 seeded ${seeded.length} baseline rule(s) into instance from preset ${presetId || '—'}`); } catch { /* */ }
-      try { _orchLog(`LEARNED ▸ banked ${seeded.length} seed rule(s) — preset ${presetId || '—'} (seed-down)`); } catch { /* v2.74.1856 — Experiment B: memory writes speak */ }
-    }
+    // The same identity `seedInstanceFromPreset` de-dupes on (trigger|body, lower-cased) — so an instance that
+    // already carries a rule (seeded earlier, or authored by the user with the same text) is never re-banked.
+    const have = new Set((Array.isArray(existing) ? existing : [])
+      .filter((i) => i && i.kind === 'delta' && i.body)
+      .map((i) => `${(i.trigger || '').toLowerCase()}|${String(i.body).toLowerCase()}`));
+    const missing = seeded.filter((d) => !have.has(`${(d.trigger || '').toLowerCase()}|${String(d.body).toLowerCase()}`));
+    if (!missing.length) return;
+    for (const d of missing) await recordGoalItem(instanceId, d);
+    const _how = existing.length ? 'top-up' : 'seed-down';   // top-up = an EXISTING desk gaining newly-shipped rules
+    try { console.info(`[chat] §10.1 ${_how}: banked ${missing.length} baseline rule(s) into instance from preset ${presetId || '—'}`); } catch { /* */ }
+    try { _orchLog(`LEARNED ▸ banked ${missing.length} seed rule(s) — preset ${presetId || '—'} (${_how})`); } catch { /* v2.74.1856 — Experiment B: memory writes speak */ }
   } catch (e) { try { console.warn('[chat] seed-down failed:', e?.message); } catch { /* */ } }
 }
 
@@ -18287,6 +18298,11 @@ async function _rehydrateConversation(conv) {
   _currentConversationAppId = (conv.kind !== 'dev' && conv.appId) ? String(conv.appId) : null;   // AL-3b — restore the app type
   _currentConversationInstanceId = (conv.kind !== 'dev' && conv.instanceId) ? String(conv.instanceId) : null;   // AP-0 — restore the per-instance memory key
   _currentConversationPresetId = (conv.kind !== 'dev' && conv.presetId) ? String(conv.presetId) : null;        // §10.2 — restore the preset type (distill-up)
+  // v2.74.2090 (critical-review fix #2) — BASELINE TOP-UP ON OPEN. Seeding used to run only at app-CREATE, so a
+  // desk already in use never received a baseline rule shipped after it was made (live: the warranty switch rules
+  // reached no existing Warranty desk). _seedInstanceMemory is now add-missing + idempotent, so calling it on open
+  // tops up newly-shipped rules and touches nothing the instance already has. Fire-and-forget; never blocks the open.
+  if (_currentConversationInstanceId) void _seedInstanceMemory(_currentConversationInstanceId, _currentConversationPresetId || _currentConversationAppId);
   // v2.74.1508 — one-time HEAL of the dropped "desk" descriptor (the rail badges the kind, so "Warranty desk"
   // read "desk Warranty desk"): an existing instance still carrying the old suffixed default title renames once.
   if (conv.title === 'Warranty desk' || conv.title === 'Custom desk') {

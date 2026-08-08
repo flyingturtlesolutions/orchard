@@ -32,16 +32,23 @@ export function splitSentences(text) {
 
 /**
  * Read the part of `text` that concerns `term`. PURE.
- * @returns {{found:boolean, text:string, mode:'item'|'line'|'sentence'|'whole'|'empty', hits:number}}
+ * @returns {{found:boolean, text:string, mode:'item'|'line'|'sentence'|'whole'|'empty', hits:number, full:string}}
  *
  * `mode` is part of the contract, not decoration — the caller must be able to say "this is the whole field, I
  * couldn't find that term" rather than presenting a fallback as a targeted answer.
+ *
+ * v2.74.2090 (critical-review fix #6) — `full` is the WHOLE field, always, alongside the term-scoped `text`. The
+ * extract is wording-driven: a term HIT returns only the matching line(s) while a total MISS returns the entire
+ * field, so the same meaning yields opposite context by phrasing — and a quantity that sits on a SIBLING line
+ * ("Multiple deakos … 4-5", "Four total across the unit") is invisible to a consumer deriving a COUNT from the
+ * extract alone. Additive on purpose: `text`/`mode`/`hits` are unchanged for every existing caller (the narrow
+ * answer stays narrow); a count/disposition consumer reads `full` for the surrounding numbers.
  */
 export function readFieldSection(text, term) {
   const body = _s(text).replace(/\r\n/g, '\n').trim();
-  if (!body) return { found: false, text: '', mode: 'empty', hits: 0 };
+  if (!body) return { found: false, text: '', mode: 'empty', hits: 0, full: '' };
   const needle = _s(term).trim().toLowerCase();
-  if (!needle) return { found: true, text: body, mode: 'whole', hits: 0 };
+  if (!needle) return { found: true, text: body, mode: 'whole', hits: 0, full: body };
 
   const has = (x) => x.toLowerCase().includes(needle);
 
@@ -66,14 +73,14 @@ export function readFieldSection(text, term) {
         }
       }
     }
-    if (out.length) return { found: true, text: out.join('\n'), mode: hits && _ITEM_RE.test(out[0]) ? 'item' : 'line', hits };
+    if (out.length) return { found: true, text: out.join('\n'), mode: hits && _ITEM_RE.test(out[0]) ? 'item' : 'line', hits, full: body };
     // The term isn't on any line — it may still be inside a long single line; fall through to sentences.
   }
 
   const sents = splitSentences(body).filter(has);
-  if (sents.length) return { found: true, text: sents.join(' '), mode: 'sentence', hits: sents.length };
+  if (sents.length) return { found: true, text: sents.join(' '), mode: 'sentence', hits: sents.length, full: body };
 
-  return { found: false, text: body, mode: 'whole', hits: 0 };
+  return { found: false, text: body, mode: 'whole', hits: 0, full: body };
 }
 
 /**
