@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readContacts, selectContacts, askContactRole, renderContactAnswer, answerContactRole, CONTACT_ROLES } from './contactRoles.js';
+import { readContacts, selectContacts, askContactRole, renderContactAnswer, renderContactRoster, answerContactRole, CONTACT_ROLES } from './contactRoles.js';
 
 // The REAL TaskContacts payload, keys verbatim from the HAR (2026-08-08, two sampled tasks — same four-row shape
 // both times). The builder's CSR and coordinator ride on every warranty task alongside the buyers.
@@ -73,7 +73,7 @@ describe('contactRoles — selecting by role', () => {
 
 describe('contactRoles — parsing the ask', () => {
   it('reads the role and the ticket out of the canonical ask', () => {
-    assert.deepEqual(askContactRole('who is the CSR on #4903279'), { role: 'csr', want: 'name', ticket: '4903279' });
+    assert.deepEqual(askContactRole('who is the CSR on #4903279'), { role: 'csr', want: 'name', each: false, ticket: '4903279' });
   });
   it('handles each role the user named', () => {
     assert.equal(askContactRole('who is the coordinator').role, 'coordinator');
@@ -145,5 +145,49 @@ describe('contactRoles — the answer is role-honest', () => {
     for (const role of CONTACT_ROLES) {
       assert.ok(renderContactAnswer({ people: readContacts(ROW), role }).length > 0, `${role} rendered nothing`);
     }
+  });
+});
+
+describe('contactRoles — the DISTRIBUTIVE ask (v2.74.2116)', () => {
+  // Live 2026-08-08: after listing 3 warranty tasks, "who is the CSR for each?" fell through to the field-read
+  // path — "I couldn't find a CSR field on these records" — which is true of the flat columns and useless.
+  it('reads "for each" as a map over the rows, not a question about one record', () => {
+    assert.equal(askContactRole('who is the CSR for each?').each, true);
+    assert.equal(askContactRole('who is the coordinator on every task').each, true);
+    assert.equal(askContactRole('who are the CSRs').each, true, 'the plural IS the distributive phrasing');
+    assert.equal(askContactRole('who are the homeowners').each, true);
+  });
+  it('a plural role name still parses to its role (a word-boundary csr pattern misses "CSRs")', () => {
+    assert.equal(askContactRole('who are the CSRs').role, 'csr');
+    assert.equal(askContactRole('who are the coordinators').role, 'coordinator');
+  });
+  it('a single-record ask is NOT distributive', () => {
+    assert.equal(askContactRole('who is the CSR on #4903279').each, false);
+    assert.equal(askContactRole('who is the CSR').each, false);
+  });
+
+  const roster = (spec) => spec.map(([label, staff]) => ({
+    label,
+    people: readContacts({ __contacts: [
+      { FullName: 'Dana ' + label, IsPrimary: true, IsBuyer: true, IsDrHorton: false, CellPhone: '919-555-0100' },
+      ...(staff ? [{ FullName: 'Priya ' + label, IsDrHorton: true, AssignmentType: 'CSR', WorkPhone: '919-555-0111' }] : []),
+    ] }),
+  }));
+
+  it('names EVERY row, including the ones with nobody in the role', () => {
+    const text = renderContactRoster({ items: roster([['#1', true], ['#2', true], ['#3', false]]), role: 'csr' });
+    assert.match(text, /^2 of 3 have a CSR listed:/m);
+    assert.match(text, /^- \*\*#3\*\* — no CSR listed \(1 contact\(s\) on it\)/m);
+    assert.equal(text.split(String.fromCharCode(10)).length, 4, 'a silently shortened list reads as a complete one');
+  });
+  it('says so plainly when every row has one', () => {
+    assert.match(renderContactRoster({ items: roster([['#1', true], ['#2', true]]), role: 'csr' }), /^The CSR on each:/);
+  });
+  it('states each person’s role verbatim, so builder staff are visible as such', () => {
+    const text = renderContactRoster({ items: roster([['#1', true]]), role: 'csr' });
+    assert.match(text, /Priya #1 — CSR \(D\.R\. Horton\)/);
+  });
+  it('never invents a roster from nothing', () => {
+    assert.match(renderContactRoster({ items: [], role: 'csr' }), /don't have any records in hand/);
   });
 });

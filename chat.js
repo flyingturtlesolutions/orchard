@@ -103,7 +103,7 @@ import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §
 import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
-import { askContactRole, readContacts, renderContactAnswer, selectContacts, roleSaid } from './Core/contactRoles.js';   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
+import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';   // v2.74.2112 — THE one contact reader (record flags, never role-string guesses) + the "who is the CSR?" ask
 import { readFieldSection, fieldReadTally, fieldPhraseCandidates, resolveFieldKey, termFieldKey, askInterrogative, fieldAnswersInterrogative, interrogativeFieldCandidates, askWhoRole, fieldWhoRole } from './Core/fieldRead.js';   // v1912 — the interrogative type guard on term-as-field; v1917 — the same guard at the RESOLVE door; v1923 — WHO has roles (creator ≠ customer)   // PM-9 (v1649) — the per-item own-record field read   // PM-2 (v2.74.1625) — the per-item cross-system MAP (#2): field-path resolve + join + honest tally; v1626 — valueShapeMismatch (typed-target guard)
 import { evalBranch, branchTally, presenceShape } from './Core/branchClause.js';   // PP-1 (v2.74.1661) — the per-item BRANCH: arm decision + honest tally (pure); v1898 — presenceShape: a presence question is an assertion, not a judgement
 import { planBindings, makeBranchEvaluator } from './Core/branchScope.js';   // PP-1 — the reach ADAPTER (§1.1c binding granularity + §2.0.1 pre-check)
@@ -7422,6 +7422,51 @@ async function _openFocusEntry(entry, originalText) {
   }
   try { mW.remove(); } catch { /* transient — never persisted */ }
   return false;
+}
+// v2.74.2116 — CONTACTS FOR EACH ROW of a focused list. "who is the CSR for each?" after a list read is a MAP,
+// and before this it fell through to the field-read path, which answered "I couldn't find a CSR field on these
+// records" — true of the flat columns and useless, because the CSR lives in the contacts sidecar (fleet 20.txt,
+// 20:5x). A focus LIST entry carries everything needed: its `rows` (with the drill's join field) and a provenance
+// block that keeps `drill.also` — the sidecar list — since PV-1. So this is one contacts read per row, no re-query.
+// The parent leg is rebuilt exactly the way _refreshFocusHead does it, rather than by a second hand-rolled lookup.
+// Capped, abort-aware, best-effort per row. Returns [{label, people}] — rows that fail still appear, empty.
+async function _contactsForListRows(entry, statusMsg = null, cap = 6) {
+  const prov = (entry && entry.provenance) || null;
+  const rows = (entry && Array.isArray(entry.rows)) ? entry.rows.slice(0, cap) : [];
+  const dj = prov && prov.drill;
+  if (!rows.length || !dj || !dj.from || !Array.isArray(dj.also) || !dj.also.length || !prov.groundId) return null;
+  let recs = [];
+  try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: prov.groundId, origin: prov.host || undefined }); recs = (rr && rr.recipes) || []; } catch { recs = []; }
+  const legs = harvestedRecipeLegs(recs, { host: prov.host || '', mode: 'ask', groundId: prov.groundId });
+  const parentLeg = legs.find((l) => l && l.tool && prov.recipeId && l.tool.recipeId === prov.recipeId)
+    || legs.find((l) => l && l.tool && l.tool.drill && l.tool.drill.via === dj.via);
+  if (!parentLeg) return null;
+
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (_walkAbortFlag.requested) break;
+    const row = rows[i];
+    const label = itemLabels([row])[0] || `record ${i + 1}`;
+    const joinId = row && row[dj.from];
+    if (joinId == null || joinId === '') { out.push({ label, people: [] }); continue; }
+    if (statusMsg) _setMessageBody(statusMsg, `Reading contacts… ${i + 1}/${rows.length}`);
+    const merged = { ...row };
+    for (const a of dj.also) {
+      const spec = _alsoSpec(a);
+      try {
+        const al = await _rideDrillLeg(parentLeg, spec.id, prov.groundId);
+        if (!al || (al.tool && al.tool.write)) continue;
+        const pn = spec.param || dj.param || 'id';
+        const adr = await _rideExecOnce(al, { [pn]: joinId }, { groundId: prov.groundId, quiet: true });
+        if (adr && adr.ok) {
+          const list = primaryList(adr.value);
+          if (Array.isArray(list) && list.length) merged.__contacts = [...(merged.__contacts || []), ...list];
+        }
+      } catch { /* a sidecar miss leaves this row empty, and the roster SAYS so */ }
+    }
+    out.push({ label, people: readContacts(merged) });
+  }
+  return out.length ? out : null;
 }
 // v2.74.2113 — RESOLVE a ticket number the user NAMED to its record + contacts, as a pure READ (no tab drive).
 //
@@ -16528,6 +16573,32 @@ async function sendChatMessage(textOverride = null) {
         const _hit = _cr.ticket
           ? _recs.find((e) => recordFind(e) === _cr.ticket)
           : (_recs.find((e) => e.pinned) || _recs[0]);
+
+        // v2.74.2116 — DISTRIBUTIVE first: "who is the CSR for each?" is about the LIST just read, not about
+        // whichever single record happens to sit in focus. Answering it from one record would be a confidently
+        // wrong answer to a question about three.
+        if (_cr.each && !_cr.ticket) {
+          const _list = _fx.find((e) => e && e.kind === 'list' && Array.isArray(e.rows) && e.rows.length);
+          if (_list) {
+            const mR = appendMessage({ role: 'thinking', body: 'Reading contacts…' });
+            let _roster = null;
+            _turnLock();
+            try { _roster = await _contactsForListRows(_list, mR); } finally { _turnUnlock(); }
+            if (_roster) {
+              _setMessageBody(mR, renderContactRoster({ items: _roster, role: _cr.role, want: _cr.want }), { markdown: true });
+              _orchFinalize(mR);
+              try {
+                const _with = _roster.filter((r) => selectContacts(r.people, _cr.role).length).length;
+                _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} each=${_roster.length} row(s) → ${_with} with a match`);
+              } catch { /* logging is best-effort */ }
+              return;
+            }
+            _setMessageBody(mR, `I can read the list, but it carries no contacts sidecar I can drill, so I can't say who the ${roleSaid(_cr.role)} is on each. Open one record and ask there.`, { markdown: true });
+            _orchFinalize(mR);
+            try { _orchLog(`CONTACT ▸ role=${_cr.role} each → NO SIDECAR (list has no drill.also/join field in provenance)`); } catch { /* */ }
+            return;
+          }
+        }
         if (_hit) {
           const _people = readContacts(_hit.fields || {});
           const _label = _cr.ticket ? `#${_cr.ticket}` : (_hit.label || 'this record');

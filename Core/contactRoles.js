@@ -99,8 +99,10 @@ export function selectContacts(people, role) {
 // Role vocabulary, longest/most-specific first — "primary homeowner" must not be eaten by the bare "homeowner"
 // pattern, and "customer service representative" must reach `csr` rather than falling through to a homeowner read.
 const _ROLE_PATTERNS = [
-  [/\b(csr|customer\s*service(\s*rep(resentative)?)?)\b/i, 'csr'],
-  [/\bcoordinator\b/i, 'coordinator'],
+  // Plurals matter: "who are the CSRs" is the natural distributive phrasing, and `\bcsr\b` does not match "CSRs"
+  // — so without the optional s the role failed to parse at all and the whole ask fell through.
+  [/\b(csrs?|customer\s*service(\s*reps?(resentatives?)?)?)\b/i, 'csr'],
+  [/\bcoordinators?\b/i, 'coordinator'],
   [/\b(primary|main|first)\s+(home\s*owner|homeowner|buyer|contact|customer)\b/i, 'primary'],
   [/\b(secondary|second|co|other)[-\s]*(home\s*owner|homeowner|buyer|contact|customer)\b/i, 'secondary'],
   [/\bco[-\s]?buyer\b/i, 'secondary'],
@@ -119,7 +121,7 @@ const _WANTS = [[/\b(phone|number|call|cell|mobile)\b/i, 'phone'], [/\b(e-?mail|
  * The guard against over-claiming: the ask must both NAME a role and READ like a question about a person. "process
  * the primary tasks" names a role word and is not a contact ask; "who is the CSR" is. Requiring an interrogative or
  * an explicit channel word keeps this off the generic branch/route paths.
- * @returns {{role:string, want:'name'|'phone'|'email', ticket:string}|null}
+ * @returns {{role:string, want:'name'|'phone'|'email', each:boolean, ticket:string}|null}
  */
 export function askContactRole(ask) {
   const a = _s(ask);
@@ -131,11 +133,18 @@ export function askContactRole(ask) {
   const want = (_WANTS.find(([re]) => re.test(a)) || [])[1] || 'name';
   if (!asksWho && want === 'name') return null;             // a bare role word is not a question
 
+  // DISTRIBUTIVE: "who is the CSR FOR EACH?" after a list read is a map over the rows, not a question about one
+  // record. Live 2026-08-08: that exact ask fell through to the field-read path, which replied "I couldn't find a
+  // CSR field on these records" — true of the flat columns and useless, because the CSR lives in the contacts
+  // sidecar, one drill per row.
+  const each = /\b(each|every|all|both|any of (them|these)|the (rest|others))\b/i.test(a)
+    || /\b(csrs|coordinators|homeowners|buyers)\b/i.test(a);
+
   // A record the ask NAMES — "#4903279" or "on 4903279". This is a TICKET number as a person types it, never the
   // internal TaskId (Core/connectorRecipes.js:915: feeding a typed number to TaskContacts/{taskId} is a bare 500),
   // so the caller must resolve it through the task LIST before drilling. Reported, never dereferenced here.
   const m = a.match(/#\s*(\d{5,})|\b(?:on|for|of)\s+#?\s*(\d{5,})\b/);
-  return { role, want, ticket: _s(m && (m[1] || m[2])) };
+  return { role, want, each, ticket: _s(m && (m[1] || m[2])) };
 }
 
 const _fmtPhone = (p) => (p.phone ? `${p.phone}${p.phoneLabel ? ` (${p.phoneLabel})` : ''}` : '');
@@ -192,4 +201,38 @@ export function answerContactRole(row, ask, { recordLabel = '' } = {}) {
     ...parsed,
     text: renderContactAnswer({ people: readContacts(row), role: parsed.role, want: parsed.want, recordLabel }),
   };
+}
+
+/**
+ * The answer for a DISTRIBUTIVE role ask — one line per record. PURE.
+ *
+ * Every row is named even when it has nobody in the role, because "3 tasks, here are the 2 I could answer" is the
+ * honest shape and a silently shortened list reads as a complete one. `items` = [{label, people}].
+ */
+export function renderContactRoster({ items = [], role = '', want = 'name' } = {}) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return `I don't have any records in hand to read the ${_said(role)} from.`;
+  const said = _said(role);
+  const out = [];
+  let answered = 0;
+  for (const it of rows) {
+    const people = Array.isArray(it && it.people) ? it.people : [];
+    const hits = selectContacts(people, role);
+    if (hits.length) answered++;
+    const who = hits.length
+      ? hits.map((p) => {
+        const bits = [];
+        if (want === 'phone' || want === 'name') { const ph = _fmtPhone(p); if (ph) bits.push(ph); }
+        if (want === 'email' || want === 'name') { if (p.email) bits.push(p.email); }
+        // Always state the role verbatim: the ask says "CSR", the record may say "CSR (D.R. Horton)", and the
+        // difference is the whole point — the reader must see whose staff this person is.
+        return `${p.name || '(no name)'} — ${p.role}${bits.length ? ` — ${bits.join(' · ')}` : ''}`;
+      }).join(' · ')
+      : (people.length ? `no ${said} listed (${people.length} contact(s) on it)` : 'no contacts on the record');
+    out.push(`- **${_s(it && it.label) || '(unlabelled)'}** — ${who}`);
+  }
+  const head = answered === rows.length
+    ? `The ${said} on each:`
+    : `${answered} of ${rows.length} have a ${said} listed:`;
+  return [head, ...out].join('\n');
 }
