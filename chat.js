@@ -6250,12 +6250,43 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           lines.push('', `_${_needHuman.length} of these need a person, but cases open under a desk — ${error.replace(/^[A-Z]/, (c) => c.toLowerCase())}_`);
           try { _orchLog(`PIPELINE ▸ rail cases SKIPPED (${_needHuman.length} owed) — ${error}`); } catch { /* */ }
         } else {
-          const _items = _needHuman.map((r) => ({
-            label: _rowLabel(r.item, srcLeg),
-            detail: dossierLines(r.item, { max: 24 }).join('\n'),
-            focus: null,
-          }));
-          const { created, skipped } = await _createSubTasks(app, _items);
+          // v2.74.2142 — the case card carries the REVIEW CARD, not a narrative. The first live spawn produced a
+          // prose brief ("Mary Klotz at 7356 Axel Creek Street reported loose electrical outlets...") — readable,
+          // and missing every operational fact: no phone, no email, no channel decision, no reason. A case whose
+          // whole purpose is "a person must act" has to show WHO to reach and HOW it was decided.
+          //
+          // Two changes: `detail` is the rendered review card, and brief:false stops _briefCases replacing that
+          // body with the LLM summary (DK-8h). The narrative is a good default for a case born from a plain READ;
+          // it is the wrong default for one born from a DECISION.
+          const _items = [];
+          for (const r of _needHuman) {
+            const _o = classifyBy.get(String(r.id));
+            const _outc = (_o && _o._outcome) || {};
+            let _row = r.item || {};
+            if (!readContacts(_row).length) {
+              try {
+                const { contacts } = await _drillContacts(_provFromLeg(srcLeg), null, _row);
+                if (contacts.length) _row = { ..._row, __contacts: contacts };
+              } catch { /* the card degrades honestly below */ }
+            }
+            const _people = readContacts(_row);
+            const _who = homeownerFrom(_row);
+            const _dec = decideChannel({ cause: _outc.cause, person: _who });
+            const _ce = (_dec.channel === 'email')
+              ? buildCustomerEmail({ person: _who, outcome: _outc, instructions: _row.Instructions || '' })
+              : null;
+            _items.push({
+              label: _rowLabel(r.item, srcLeg),
+              detail: renderReviewCard(buildReviewCard({
+                label: _rowLabel(r.item, srcLeg),
+                instructions: _row.Instructions || '',
+                outcome: _outc, people: _people, decision: _dec,
+                draft: _ce ? { to: _ce.to, subject: _ce.subject, body: _ce.body } : null,
+              })),
+              focus: null,
+            });
+          }
+          const { created, skipped } = await _createSubTasks(app, _items, { brief: false });
           lines.push('', `_Opened ${created.length} case${created.length === 1 ? '' : 's'} under **${app.title}**${skipped ? ` (${skipped} already open)` : ''} — nested under the view in the rail._`);
           try { _orchLog(`PIPELINE ▸ rail cases ${created.length} opened · ${skipped} already open (desk "${app.title}")`); } catch { /* */ }
         }
