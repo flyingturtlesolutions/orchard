@@ -6201,6 +6201,43 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       _orchLog(`PIPELINE ▸ cases ${_caseOk} opened · ${_caseFail} failed${_caseErr ? ` — ${_caseErr}` : ''} (pipeline "${pipeline}")`);
     } catch { /* */ }
 
+    // v2.74.2139 — SPAWN THE RAIL CASES. Until now the branch recorded PIPELINE cases (rows in the
+    // `pipeline:cases` key, visible only through the `show my cases` overlay) and never opened a DESK case — the
+    // conversation nested under the desk in the Rail, which is what a person means by "a case". The user ran the
+    // flow three times, saw nothing in the Rail, and said "no cases are created"; they were right about the thing
+    // they were looking at, and I spent three passes debugging storage for the other artifact. Two objects shared
+    // one word.
+    //
+    // WHICH items: the ones that need a PERSON — the contact arm, i.e. those carrying a queued action. The
+    // replacement rows are owed a DRAFT, not a decision, and opening eleven conversations nobody has to read
+    // would bury the two that matter. Say so rather than deciding it silently.
+    try {
+      const _needHuman = results.filter((r) => {
+        const _o = classifyBy && classifyBy.get && classifyBy.get(String(r.id));
+        return !!(_o && _o._outcome && _o._outcome.cause);
+      });
+      if (_needHuman.length) {
+        const { app, error } = await _fanoutParentApp();
+        if (error) {
+          // The same silent-downgrade trap as the desk-gated extraction: if cases cannot open here, SAY it in the
+          // reply rather than leaving the user to notice an absence.
+          lines.push('', `_${_needHuman.length} of these need a person, but cases open under a desk — ${error.replace(/^[A-Z]/, (c) => c.toLowerCase())}_`);
+          try { _orchLog(`PIPELINE ▸ rail cases SKIPPED (${_needHuman.length} owed) — ${error}`); } catch { /* */ }
+        } else {
+          const _items = _needHuman.map((r) => ({
+            label: _rowLabel(r.item, srcLeg),
+            detail: dossierLines(r.item, { max: 24 }).join('\n'),
+            focus: null,
+          }));
+          const { created, skipped } = await _createSubTasks(app, _items);
+          lines.push('', `_Opened ${created.length} case${created.length === 1 ? '' : 's'} under **${app.title}**${skipped ? ` (${skipped} already open)` : ''} — nested under the view in the rail._`);
+          try { _orchLog(`PIPELINE ▸ rail cases ${created.length} opened · ${skipped} already open (desk "${app.title}")`); } catch { /* */ }
+        }
+      }
+    } catch (e) {
+      try { _orchLog(`PIPELINE ▸ rail cases FAILED — ${(e && e.message) || e}`); } catch { /* */ }
+    }
+
     closeRun(run, { now: Date.now(), aborted: _walkAbortFlag.requested });
     try { _orchLog(runEndLine(run)); } catch { /* */ }
     return { ok: true, text: lines.join('\n'), results, groups, run };
