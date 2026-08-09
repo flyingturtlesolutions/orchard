@@ -120,7 +120,7 @@ import { resolveWriteValue, buildWriteProposals, prepareShopifyCustomerCreatePar
 import { writeTally, writePreflight } from './Core/writeClause.js';
 import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
 import { emptyPriorStop } from './Core/priorScope.js';
-import { casePeek } from './Core/pipelineCase.js';   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
+import { casePeek, caseActionLine} from './Core/pipelineCase.js';   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
 import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
@@ -6551,11 +6551,19 @@ async function _listCasesMsg() {
   if (!open.length) {
     d.innerHTML = renderMarkdown(all.length ? 'No open cases — everything has been closed.' : 'No cases yet.');
   } else {
+    // v2.74.2134 — `casePeek` returns a STRING; this read `peek.line`, which is undefined on a string, so EVERY
+    // row fell back to the literal word "open" and the arm/verdict it computes was discarded. The list was
+    // therefore identical for every case regardless of what happened to it — the one thing a case list must not
+    // be. The peek carries the arm ("contact homeowner") and the verdict; the action line carries what is OWED
+    // (▸ awaiting you / · declined) and is what makes this list the review queue rather than an inventory.
     const lines = open.slice(0, 24).map((c) => {
-      const peek = casePeek(c);
-      return `- **${escHtml(_str0(c.label) || _str0(c.id))}** — ${escHtml(_str0(peek && peek.line) || 'open')}`;
+      const peek = _str0(casePeek(c));
+      const act = _str0(caseActionLine(c));
+      const head1 = `- **${escHtml(_str0(c.label) || _str0(c.id))}** — ${escHtml(peek || 'open')}`;
+      return act ? `${head1}\n    ${escHtml(act)}` : head1;
     });
-    const head = `${open.length} open case${open.length === 1 ? '' : 's'}${open.length > 24 ? ' (first 24)' : ''}`;
+    const awaiting = open.filter((c) => (c.actions || []).some((a) => a && a.state === 'queued-for-approval')).length;
+    const head = `${open.length} open case${open.length === 1 ? '' : 's'}${awaiting ? ` · **${awaiting} awaiting you**` : ''}${open.length > 24 ? ' (first 24)' : ''}`;
     d.innerHTML = renderMarkdown([head, '', ...lines].join('\n'));
   }
   ov.body.appendChild(d);

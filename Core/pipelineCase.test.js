@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   caseId, upsertCase, setBranch, addStage, addAction, closeCase,
-  openCases, openItemIds, casePeek, caseTally, CASE_CAP, CASE_STATES,
+  openCases, openItemIds, casePeek, caseActionLine, caseTally, CASE_CAP, CASE_STATES,
 } from './pipelineCase.js';
 import { openRun, markAlreadyOpen } from './pipelineRun.js';
 
@@ -167,5 +167,38 @@ describe('pipelineCase — the Rail peek', () => {
   it('the tally names every class including the zeroes', () => {
     const t = caseTally(mk().list, 'warranty');
     assert.match(t, /1 open/); assert.match(t, /0 done/); assert.match(t, /0 blocked/); assert.match(t, /0 failed/);
+  });
+});
+
+describe('pipelineCase — caseActionLine: what the row says is OWED (v2.74.2134)', () => {
+  const withAction = (state, what) => ({ id: 'c1', label: '#4899327', state: 'open', stages: [], actions: [{ what, state, ref: '' }] });
+  it('a queued action reads as awaiting the human, and names the act', () => {
+    const line = caseActionLine(withAction('queued-for-approval', 'email: no-count -> dana@example.com (contact method "Any")'));
+    assert.match(line, /^▸ awaiting you — email: no-count/);
+  });
+  it('a refusal reads as declined, WITH its reason — that is what makes it overridable', () => {
+    const line = caseActionLine(withAction('refused', 'unresolved: other-trade (reads as another trade)'));
+    assert.match(line, /^· declined — unresolved: other-trade \(reads as another trade\)/);
+  });
+  it('a done action reads as done', () => {
+    assert.match(caseActionLine(withAction('done', 'email sent')), /^✓ done/);
+  });
+  it('the LATEST action wins — an override must not be hidden behind the original decision', () => {
+    const c = { id: 'c', label: 'x', state: 'open', stages: [], actions: [
+      { what: 'unresolved: other-trade', state: 'refused' },
+      { what: 'email: overridden by you', state: 'queued-for-approval' },
+    ] };
+    assert.match(caseActionLine(c), /awaiting you — email: overridden by you/);
+  });
+  it('a case with no actions yields an empty line rather than a placeholder', () => {
+    assert.equal(caseActionLine({ id: 'c', label: 'x', state: 'open', stages: [], actions: [] }), '');
+    assert.equal(caseActionLine(null), '');
+  });
+  it('casePeek returns a STRING — the list must use it directly', () => {
+    // The overlay read `peek.line` on this string, which is undefined, so every row showed the word "open" and
+    // the arm/verdict was discarded. Pinning the type here so the caller cannot regress to property access.
+    const peek = casePeek({ id: 'c', label: '#1', state: 'open', stages: [], branch: { outcome: 'arm', arm: 'contact homeowner' } });
+    assert.equal(typeof peek, 'string');
+    assert.match(peek, /contact homeowner/);
   });
 });

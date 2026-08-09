@@ -176,6 +176,25 @@ export function casePeek(c) {
   return `${mark} ${c.label || c.itemId}${bits.length ? ` — ${bits.join(' · ')}` : ''}`;
 }
 
+/**
+ * The case's most recent ACTION, as a line for the list. PURE. Empty when it has none.
+ *
+ * v2.74.2134 — the cases list is where the warranty contact decisions are reviewed, so the row has to say what is
+ * owed and by whom. `queued-for-approval` is the affordance the per-item pipeline spec (§5.7) names for exactly
+ * this, and a row that shows only "open" cannot distinguish "waiting on a person" from "nothing happened yet".
+ */
+export function caseActionLine(c) {
+  const acts = (c && Array.isArray(c.actions)) ? c.actions.filter(Boolean) : [];
+  if (!acts.length) return '';
+  const a = acts[acts.length - 1];
+  const state = _str(a.state);
+  const mark = state === 'queued-for-approval' ? '▸ awaiting you'
+    : state === 'done' ? '✓ done'
+      : state === 'refused' ? '· declined'
+        : `· ${state || 'unknown'}`;
+  return `${mark} — ${_str(a.what)}`;
+}
+
 /** Honest tally across a pipeline's cases, every class including the zeroes (§5.5). */
 export function caseTally(list, pipeline = '') {
   const p = _str(pipeline);
