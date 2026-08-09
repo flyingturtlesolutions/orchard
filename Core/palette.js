@@ -60,7 +60,13 @@ export const BUILTIN_LEGS = [
       scope: { type: 'string', description: '"item" = one case per record (the default, for "for each …"), "run" = a single case covering the whole set' },
     }, required: [] } },
   { key: 'LIST_CASES', name: 'Show my cases', mode: 'ask', domain: 'self', safety: 'auto', source: 'builtin',
-    does: 'list the open Orchard cases — what is still waiting on a person', params: [] },
+    // v2.74.2136 — the discrimination goes FIRST, because the `does` budget truncates (the v1861 lesson: a
+    // discriminating clause that does not FIT does not exist). Live misroute: "show my cases" selected
+    // REVIEW_QUEUE at conf 0.95, because that leg's text interpolates the DESK'S NOUN — on a desk whose noun is
+    // "cases" it reads "sweep over the connected cases: read the queue", which out-matches this leg on the very
+    // word the user typed. The user saw an empty sweep surface and concluded no cases had been created, when 13
+    // had. So this leg now says what it is (a LIST) and what it is not (a sweep) before anything else.
+    does: 'SHOW MY CASES — a LIST of Orchard\'s own open cases and what each one decided: which records were processed, what is waiting on a person, and why. Reads only: it proposes nothing, sweeps nothing and changes nothing. Not the connected site\'s queue', params: [] },
   // CD-2 (DESIGN_cadence.md §3.2) — WORKFLOWS resolve through the front door as a LEG, never a composer regex: so
   // "show my workflows", "what runs automatically", and the step DECOMPOSER all see the capability (the v1689
   // lesson: a capability absent from the catalog is not unavailable, it is silently SUBSTITUTED with a wrong act).
@@ -154,7 +160,9 @@ export function fleetOfferedLegs(app, connected = false) {
         off: { type: 'boolean', description: 'true = STOP the scheduled sweeps ("stop the schedule", "stop sweeping automatically")' },
       }, required: [] },
       name: 'Review the queue',
-      does: `run a maintenance sweep over the connected ${noun}: read the queue and PROPOSE actions (merge / resolve / assign …) for the user to approve — nothing executes unasked; use when the user asks to review, check, clean up, or triage the queue. Bind "every" for a RECURRING schedule ("every hour"), "off" to stop it; bind nothing to run once now` },
+      // v2.74.2136 — the "NOT for" clause is early and explicit. This leg's text carries the desk's own noun, so
+      // on a desk whose noun IS "cases" it otherwise wins asks like "show my cases" that belong to LIST_CASES.
+      does: `run a maintenance sweep over the CONNECTED SITE'S ${noun} and PROPOSE actions (merge / resolve / assign …) for the user to approve — nothing executes unasked. NOT for listing Orchard's own cases ("show my cases" / "my open cases" → LIST_CASES); this one sweeps the site. Use when the user asks to review, check, clean up, or triage the queue. Bind "every" for a RECURRING schedule ("every hour"), "off" to stop it; bind nothing to run once now` },
     { key: 'SHOW_ITEM_SOURCES', domain: 'self', mode: 'act', safety: 'auto', source: 'builtin',
       params: ['proposal', 'targets', 'origin'],
       paramSchema: { type: 'object', properties: {

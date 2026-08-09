@@ -196,6 +196,16 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'explore this page', expect: { legId: 'EXPLORE_PAGE' } },
   { ask: 'toggle interaction tracking', expect: { legId: 'TOGGLE_TRACKING' } },
   { ask: 'show my cases', expect: { legId: 'LIST_CASES' } },
+  // v2.74.2136 — the live misroute these pin: "show my cases" selected REVIEW_QUEUE at conf 0.95 because that
+  // leg's does interpolates the DESK'S NOUN, and on a cases-nouned desk it read "sweep over the connected cases".
+  // Both directions are asserted, because fixing one by breaking the other is the obvious failure mode.
+  { ask: 'my open cases', expect: { legId: 'LIST_CASES' } },
+  { ask: 'what is waiting on me', expect: { legId: 'LIST_CASES' } },
+  // NOT asserted here: `review the queue` → REVIEW_QUEUE. That leg is FLEET-OFFERED (Core/palette.js
+  // fleetOfferedLegs), minted per app with the desk's own noun interpolated into its `does`, so the static corpus
+  // cannot see it and the anti-rot test rightly calls it unknown. That is the gap this misroute came through: a
+  // collision between a BUILTIN and an APP-OFFERED leg is structurally invisible to the golden corpus, so no
+  // amount of entries here would have caught "show my cases" losing to a sweep leg whose text said "cases".
   { ask: 'show my workflows', expect: { legId: 'OPEN_WORKFLOWS' } },
   { ask: 'close this case', expect: { legId: 'CLOSE_CASE' } },
   { ask: 'show this in the canvas', expect: { legId: 'DISPLAY' } },
