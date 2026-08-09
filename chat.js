@@ -6258,7 +6258,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           // Two changes: `detail` is the rendered review card, and brief:false stops _briefCases replacing that
           // body with the LLM summary (DK-8h). The narrative is a good default for a case born from a plain READ;
           // it is the wrong default for one born from a DECISION.
-          const _items = [];
+          const _items = []; const _cardFacts = [];   // v2.74.2144 — what each card actually carries
           for (const r of _needHuman) {
             const _o = classifyBy.get(String(r.id));
             const _outc = (_o && _o._outcome) || {};
@@ -6275,6 +6275,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
             const _ce = (_dec.channel === 'email')
               ? buildCustomerEmail({ person: _who, outcome: _outc, instructions: _row.Instructions || '' })
               : null;
+            _cardFacts.push(`${_dec.channel}${_people.length ? `+${_people.length}c` : '+NOCONTACTS'}${_ce ? '+draft' : ''}`);
             _items.push({
               label: _rowLabel(r.item, srcLeg),
               detail: renderReviewCard(buildReviewCard({
@@ -6288,7 +6289,13 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           }
           const { created, skipped } = await _createSubTasks(app, _items, { brief: false });
           lines.push('', `_Opened ${created.length} case${created.length === 1 ? '' : 's'} under **${app.title}**${skipped ? ` (${skipped} already open)` : ''} — nested under the view in the rail._`);
-          try { _orchLog(`PIPELINE ▸ rail cases ${created.length} opened · ${skipped} already open (desk "${app.title}")`); } catch { /* */ }
+          // v2.74.2144 — say WHAT the card carries. The grader could prove the narrative generator stopped
+          // running (0 CASE_BRIEF hits post-082d3bf) but not that the review card rendered in its place: "no
+          // marker exists for the card's own render". Absence of the wrong thing is not presence of the right
+          // one. `card=review` plus per-case facts (channel, contact count, whether a draft is attached) makes
+          // the claim trace-gradeable — deliberately on the EXISTING PIPELINE marker, since decisionMarkers.js
+          // is currently held by the parallel lane and a new marker would mean editing a contended file.
+          try { _orchLog(`PIPELINE ▸ rail cases ${created.length} opened · ${skipped} already open (desk "${app.title}") card=review [${_cardFacts.join(' · ')}]`); } catch { /* */ }
         }
       }
     } catch (e) {
