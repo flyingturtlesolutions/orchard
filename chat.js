@@ -6102,6 +6102,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     });
     try { _orchLog(runStartLine(run)); } catch { /* */ }
 
+    let _caseOk = 0; let _caseFail = 0; let _caseErr = '';   // v2.74.2137 — what actually persisted
     // §5.7's re-run rule: an item already under review is skipped, not re-cased.
     let alreadyOpen = [];
     try {
@@ -6171,8 +6172,16 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           // further to do with it beyond a human reading the reason.
           ...(r.outcome === 'arm' ? {} : { close: { state: r.outcome === 'none' ? 'done' : 'blocked', verdict: r.why || 'no arm matched' } }),
         });
-      } catch { /* a case that fails to persist must not change the branch verdict */ }
+        // v2.74.2137 — COUNT what actually landed. The verdict still stands if a case fails to persist (that rule
+        // is right), but discarding the ANSWER made the failure unobservable: three runs reported "13 items —
+        // 13 done" while the case store stayed empty, and the only surface that could have said otherwise threw
+        // the response away. A swallowed write is indistinguishable from a write that happened.
+        _caseOk++;
+      } catch (e) { _caseFail++; _caseErr = _caseErr || String((e && e.message) || e); }
     }
+    try {
+      _orchLog(`PIPELINE ▸ cases ${_caseOk} opened · ${_caseFail} failed${_caseErr ? ` — ${_caseErr}` : ''} (pipeline "${pipeline}")`);
+    } catch { /* */ }
 
     closeRun(run, { now: Date.now(), aborted: _walkAbortFlag.requested });
     try { _orchLog(runEndLine(run)); } catch { /* */ }

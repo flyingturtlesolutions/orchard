@@ -29,12 +29,27 @@ let _chain = Promise.resolve();
 function _mutate(fn) {
   const step = _chain.then(async () => {
     let list = [];
-    try { list = (await chrome.storage.local.get(CASE_KEY))?.[CASE_KEY] || []; } catch { /* */ }
+    try { list = (await chrome.storage.local.get(CASE_KEY))?.[CASE_KEY] || []; } catch (e) {
+      // v2.74.2137 — these three catches were SILENT, and that is why "no cases are created" could not be
+      // diagnosed from three runs of 13 items: the panel sent 13 PIPELINE_RECORD_ITEM messages, the run reported
+      // "13 items — 13 done", and if any of read / apply / write failed the whole thing still looked successful
+      // from every surface. A store that cannot persist must SAY so; a swallowed write is indistinguishable from
+      // a write that happened.
+      try { Logger.info('background', `PIPELINE ▸ case store READ failed — ${(e && e.message) || e}`); } catch { /* */ }
+    }
     const out = fn(Array.isArray(list) ? list : []);
     const next = Array.isArray(out) ? out : (out && out.list) || [];
-    try { await chrome.storage.local.set({ [CASE_KEY]: next }); } catch { /* */ }
+    try {
+      await chrome.storage.local.set({ [CASE_KEY]: next });
+    } catch (e) {
+      try { Logger.info('background', `PIPELINE ▸ case store WRITE failed (${next.length} case(s) lost) — ${(e && e.message) || e}`); } catch { /* */ }
+      throw e;                    // the caller must not report success on a write that did not land
+    }
     return out;
-  }).catch(() => ({ list: [], opened: false }));
+  }).catch((e) => {
+    try { Logger.info('background', `PIPELINE ▸ case mutate FAILED — ${(e && e.message) || e}`); } catch { /* */ }
+    return { list: [], opened: false, error: String((e && e.message) || e) };
+  });
   _chain = step.then(() => {}, () => {});
   return step;
 }
