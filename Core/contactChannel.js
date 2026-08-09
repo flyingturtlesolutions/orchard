@@ -104,14 +104,23 @@ export function planChannels(items) {
   return out;
 }
 
-/** The reviewer's one-line summary, before anything is sent. PURE. Every bucket is named, including the empty. */
+/**
+ * The reviewer's one-line summary, before anything is sent. PURE. Every bucket is named, including the empty.
+ *
+ * v2.74.2133 — TENSE IS A SAFETY PROPERTY HERE. This read "1 emailed to the homeowner · 1 left unresolved", which
+ * is past tense and states, of a screen whose entire purpose is that NOTHING HAS HAPPENED, that an email was sent
+ * to a customer. A reviewer who believes the send already happened will not check the draft — the opposite of what
+ * a preview is for. The line now leads with the fact that nothing has gone out, and every bucket is phrased as
+ * work still to do. The disclaimer lives INSIDE this function rather than at the call site, because a future
+ * caller can forget a prefix but cannot forget the string it is handed.
+ */
 export function describeChannelPlan(plan) {
   const p = (plan && typeof plan === 'object') ? plan : { email: [], call: [], unresolved: [] };
   const n = (k) => (Array.isArray(p[k]) ? p[k].length : 0);
   const bits = [];
-  if (n('email')) bits.push(`**${n('email')} emailed to the homeowner**`);
+  if (n('email')) bits.push(`**${n('email')} to email the homeowner**`);
   if (n('call')) bits.push(`**${n('call')} needing a phone call** (they asked to be phoned, or we hold no address)`);
-  if (n('unresolved')) bits.push(`**${n('unresolved')} left unresolved** (not the homeowner's question — ours to settle)`);
+  if (n('unresolved')) bits.push(`**${n('unresolved')} for us to settle** (not the homeowner's question)`);
   if (!bits.length) return 'Nothing to send — no task needs the homeowner.';
-  return bits.join(' · ');
+  return `Nothing has been sent. ${bits.join(' · ')}`;
 }

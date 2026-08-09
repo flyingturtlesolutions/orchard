@@ -98,12 +98,37 @@ describe('contactChannel — the plan a reviewer reads', () => {
   });
   it('the summary names every non-empty bucket', () => {
     const line = describeChannelPlan(planChannels(items));
-    assert.match(line, /2 emailed to the homeowner/);
+    assert.match(line, /2 to email the homeowner/);
     assert.match(line, /1 needing a phone call/);
-    assert.match(line, /1 left unresolved/);
+    assert.match(line, /1 for us to settle/);
   });
   it('an empty plan says so rather than rendering an empty sentence', () => {
     assert.match(describeChannelPlan(planChannels([])), /Nothing to send/);
     assert.match(describeChannelPlan(null), /Nothing to send/);
+  });
+});
+
+describe('contactChannel — the summary never claims something already happened (v2.74.2133)', () => {
+  const items = [
+    { id: 'a', label: '#1', outcome: { cause: 'no-count' }, person: homeowner('Any') },
+    { id: 'b', label: '#2', outcome: { cause: 'no-count' }, person: homeowner('Phone') },
+    { id: 'c', label: '#3', outcome: { cause: 'other-trade' }, person: homeowner('Any') },
+  ];
+  it('leads with the fact that nothing has gone out', () => {
+    // "1 emailed to the homeowner" stated, of a preview, that an email had reached a customer. A reviewer who
+    // believes the send already happened will not check the draft — the opposite of what a preview is for.
+    assert.match(describeChannelPlan(planChannels(items)), /^Nothing has been sent\./);
+  });
+  it('uses no PAST-TENSE verb for any bucket', () => {
+    const line = describeChannelPlan(planChannels(items));
+    for (const past of [/emailed/, /sent to/, /called/, /left/, /created/, /opened/]) {
+      assert.doesNotMatch(line, past, `the summary must not say ${past}`);
+    }
+  });
+  it('still names every non-empty bucket, as work still to do', () => {
+    const line = describeChannelPlan(planChannels(items));
+    assert.match(line, /1 to email the homeowner/);
+    assert.match(line, /1 needing a phone call/);
+    assert.match(line, /1 for us to settle/);
   });
 });
