@@ -5886,7 +5886,25 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     // typed fields and Core/warrantySwitch derives the arm in code, so "escalate" is not a value it can emit.
     // Eleven prompt fixes could not close that hole from the arm criteria (see logs/run/findings.md 2026-08-08);
     // this is the structural version. Any other desk keeps the classify path untouched.
-    _warrantyExtract = _isWarrantyDesk();
+    // v2.74.2138 — THE GATE FOLLOWS THE DATA, not the desk. It was `_isWarrantyDesk()` alone, and live that
+    // silently downgraded a whole run: the same 13 VendorSuite warranty tasks, asked in a NEW CONVERSATION rather
+    // than inside the Warranty desk, skipped the typed extraction entirely and fell back to the generic classifier
+    // with per-run LLM-authored arm labels ("needs replacement part" / "does not need replacement part"). Four of
+    // thirteen came out materially wrong — 6 flickering wall switches and "4-5 pointed out" both landed in "does
+    // NOT need replacement part" — and every named count route (EXPLICIT / RANGE_UPPER / SUM_OF_PLACES /
+    // SINGLE_FAULT) disappeared, which is the traceability the v2105 redesign exists to provide.
+    //
+    // The desk was only ever a PROXY for "these rows are warranty tasks". When the proxy and the data disagree,
+    // the data wins: the rows are the same records either way. So the extraction now also fires when the source
+    // leg IS the warranty task leg, and the log says which of the two triggered it — a downgrade this expensive
+    // must never again be inferable only by noticing the arm labels changed.
+    // EXACTLY the two legs that yield warranty TASK rows — the list and the detail. Not vs_warranty_stats,
+    // which returns division COUNTS: extracting switch quantities from a statistics row would be nonsense.
+    const _wRows = !!(srcLeg && srcLeg.tool && /^vs_warranty_tasks?$/.test(String(srcLeg.tool.recipeId || srcLeg.tool.id || '')));
+    _warrantyExtract = _isWarrantyDesk() || _wRows;
+    if (_warrantyExtract) {
+      try { _orchLog(`BRANCH ▸ warranty extraction ON — by ${_isWarrantyDesk() ? 'desk' : 'rows'}${_wRows && !_isWarrantyDesk() ? ' (outside the Warranty desk)' : ''}`); } catch { /* */ }
+    }
     try {
       resp = await _orchReq('CLASSIFY_BRANCH_ITEMS', _warrantyExtract
         ? { items: payloadItems, field: cField, extract: buildWarrantyExtractSystem() }
