@@ -1,54 +1,75 @@
-// Core/customerEmail.js — v2.74.2129. The message the HOMEOWNER actually receives.
+// Core/customerEmail.js — v2.74.2131. The message the HOMEOWNER actually receives.
 //
-// WHY THIS EXISTS, and why it could not be skipped. The review card rendered the internal support-request body
-// under "DRAFT EMAIL → dana@example.com". Approving that would have sent a customer a message opening
-// "Please confirm the quantity on a Deako warranty task before we can ship anything", followed by a HOMEOWNERS
-// block listing their own phone numbers AND the builder's CSR and coordinator. Two different failures in one
-// message: the wrong voice, and an internal-contact leak to an outside party.
+// WHY THIS FILE EXISTS. The review card rendered the INTERNAL support-request body under
+// "DRAFT EMAIL → dana@example.com". Approving that would have sent a customer a message opening "Please confirm
+// the quantity on a Deako warranty task before we can ship anything", followed by a HOMEOWNERS block listing their
+// own phone numbers AND the builder's CSR and coordinator — the wrong voice and an internal-contact leak in one
+// message. So the two artifacts are separate by construction, not by a flag:
+//   Core/warrantyContact.js  -> a request to a COLLEAGUE: both homeowners, builder staff, task ids, our reasoning.
+//   this file                -> a message to the CUSTOMER: their name, one ask, a sign-off. Nothing else.
 //
-// So the two artifacts are separate by construction, not by a flag:
-//   Core/warrantyContact.js  -> a request to a COLLEAGUE. Carries everything a person needs to act: both
-//                               homeowners, the builder's staff, task ids, our reasoning.
-//   this file                -> a message to the CUSTOMER. Carries their own words back, one question, and
-//                               nothing else. No task id, no staff, no other contact, no internal reasoning.
+// v2.74.2131 — THE EMAIL PERFORMS THE ASK; IT DOES NOT NARRATE THE PAPERWORK. The first version quoted the task's
+// Instructions back at the homeowner. That was wrong twice over, and the user caught it on the first real draft:
+//   · META — the customer does not care how we file their request, and being shown our internal record of it
+//     invites them to answer the record rather than the question.
+//   · WRONG SPEAKER — those instructions are the BUILDER's work order to Deako ("Please send homeowner deako
+//     switches"). The homeowner did not write that sentence, so quoting it back as "It says:" attributes to them
+//     a demand addressed to someone else, and reads as bureaucratic nonsense.
+// What we actually need is two facts — WHICH switches are faulty and HOW MANY — so the message asks for exactly
+// those two facts, offers the easiest way to answer, and stops.
 //
-// THE RULE THIS FILE ENFORCES: a customer-facing body may contain only (a) their own name, (b) their own words
-// quoted from the task, (c) one question, (d) our sign-off. Anything else is an internal detail that has no
-// business leaving. `assertNoInternals` is the test-visible statement of that, so a future edit that pastes a
-// contact block in fails loudly rather than shipping.
+// THE LEAK RULE: a customer-facing body may contain only (a) their own name, (b) the ask, (c) our sign-off.
+// `assertNoInternals` is the test-visible statement of that, so an edit that pastes a contact block in fails loudly
+// rather than shipping.
 //
 // PURE — no chrome.*, no network, no DOM.
 
 const _s = (v) => (v == null ? '' : String(v).trim());
-const _clip = (v, n) => { const t = _s(v).replace(/\s+/g, ' '); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
-/** The one question, per cause — phrased for the person who owns the home, not for a colleague. */
+/**
+ * The ask, per cause — phrased for the person who owns the home, not for a colleague.
+ *
+ * Both causes ask the SAME two questions, because both need the same two answers before anything can ship; they
+ * differ only in the hint that makes answering easiest.
+ */
 export const CUSTOMER_ASKS = Object.freeze({
   'no-count': {
-    subject: 'About your Deako switch request',
-    ask: 'How many switches need replacing?',
-    why: 'so we send the right number',
+    subject: 'Your Deako replacement switches',
+    opening: 'We’re getting replacement switches sent out to you under your Deako warranty.',
+    ask: 'Which switches are giving you trouble, and how many need replacing?',
+    help: 'Rooms are enough — for example, “kitchen and both upstairs bedrooms”.',
   },
   'named-product-unresolved': {
-    subject: 'A quick question about your Deako switches',
-    ask: 'Could you tell us which switch it is — or send a photo of it?',
-    why: 'so we send the right one',
+    subject: 'Your Deako replacement switches',
+    opening: 'We’re getting replacement switches sent out to you under your Deako warranty.',
+    ask: 'Which switches are giving you trouble, and how many need replacing?',
+    help: 'If you can, a photo of one of them helps us send the exact match.',
   },
 });
 
 /** Only these causes may ever reach a customer. Mirrors Core/contactChannel.js CUSTOMER_ANSWERABLE. */
 export const CUSTOMER_CAUSES = Object.freeze(Object.keys(CUSTOMER_ASKS));
 
-const _firstName = (full) => _s(full).split(/\s+/)[0] || '';
+// The greeting name is TITLE-CASED. The record supplies whatever casing it stores, and "Hi harminder," is exactly
+// the small wrongness that tells a customer nobody read this before it went out.
+const _firstName = (full) => {
+  const n = _s(full).split(/\s+/)[0] || '';
+  return n ? n.charAt(0).toUpperCase() + n.slice(1).toLowerCase() : '';
+};
 
 /**
  * The customer-facing email for one task. PURE.
  *
- * Returns null when the cause is not one a customer can answer — which is a second, independent guard on top of
- * contactChannel's routing: if this is ever called for `other-trade`, no message exists to send.
+ * `instructions` is accepted and deliberately UNUSED: it is the builder's work order, not the customer's words
+ * (see the header). It stays in the signature because callers pass one spec object to both artifacts and the
+ * INTERNAL one does need it.
+ *
+ * Returns null when the cause is not one a customer can answer — a second, independent guard on top of
+ * contactChannel's routing, so an `other-trade` row has no message to send even if something routes it wrongly.
  * @returns {{to:string, subject:string, body:string, cause:string}|null}
  */
 export function buildCustomerEmail({ person = null, outcome = {}, instructions = '', signOff = 'Deako Warranty' } = {}) {
+  void instructions;
   const cause = _s(outcome && outcome.cause);
   const spec = CUSTOMER_ASKS[cause];
   if (!spec) return null;
@@ -56,33 +77,29 @@ export function buildCustomerEmail({ person = null, outcome = {}, instructions =
   if (!to) return null;                          // no address is not a draft — the channel decision handles that
 
   const name = _firstName(person && person.name);
-  const note = _clip(instructions, 300);
-
-  const lines = [];
-  lines.push(name ? `Hi ${name},` : 'Hello,');
-  lines.push('');
-  // Their OWN words back, so they recognise their request instead of reading a form letter about "a warranty
-  // task". Quoted rather than paraphrased: paraphrasing a customer's complaint back at them reads as correction.
-  lines.push(note
-    ? `We picked up a warranty request for your home about your Deako switches. It says:\n\n  "${note}"`
-    : 'We picked up a warranty request for your home about your Deako switches.');
-  lines.push('');
-  lines.push(`${spec.ask} — ${spec.why}.`);
-  lines.push('');
-  lines.push('Just reply to this email and we\'ll get it on its way.');
-  lines.push('');
-  lines.push('Thanks,');
-  lines.push(signOff);
-
+  const lines = [
+    name ? `Hi ${name},` : 'Hello,',
+    '',
+    spec.opening,
+    '',
+    spec.ask,
+    '',
+    spec.help,
+    '',
+    'Just reply to this email and we’ll get them on their way.',
+    '',
+    'Thanks,',
+    signOff,
+  ];
   return { to, subject: spec.subject, body: lines.join('\n'), cause };
 }
 
 /**
  * The leak guard, exported so it is TESTABLE rather than a comment.
  *
- * Returns the list of internal things found in a body that is about to go outside. Empty means clean. This is
- * deliberately a positive check for known-internal SHAPES rather than a wordlist: phone numbers, our own task
- * ids, the builder's name, and the section headers the internal artifact uses.
+ * Returns the internal things found in a body about to go outside; empty means clean. Deliberately a check for
+ * known-internal SHAPES rather than a wordlist: phone numbers, our task ids, the builder's name, and the section
+ * headers the internal artifact uses.
  */
 export function findInternals(body, { extraNames = [] } = {}) {
   const t = _s(body);

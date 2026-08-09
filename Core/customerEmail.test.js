@@ -10,22 +10,42 @@ import { CUSTOMER_ANSWERABLE } from './contactChannel.js';
 const DANA = { name: 'Dana Reyes', email: 'dana@example.com', phone: '336-555-0142', prefers: 'Any', isHomeowner: true, isPrimary: true };
 const NOTE = 'Homeowner states light switches sticking, please send replacements';
 
-describe('customerEmail — the message is addressed to the HOMEOWNER', () => {
+describe('customerEmail — the message PERFORMS the ask (v2.74.2131)', () => {
   const m = buildCustomerEmail({ person: DANA, outcome: { cause: 'no-count' }, instructions: NOTE });
-  it('greets them by first name and asks ONE question', () => {
-    assert.match(m.body, /^Hi Dana,/);
-    assert.match(m.body, /How many switches need replacing\? — so we send the right number\./);
+  it('asks the two things we actually need: WHICH switches and HOW MANY', () => {
+    assert.match(m.body, /Which switches are giving you trouble, and how many need replacing\?/);
   });
-  it('quotes their OWN words back rather than paraphrasing them', () => {
-    // Paraphrasing a customer's complaint back at them reads as correction.
-    assert.match(m.body, /"Homeowner states light switches sticking, please send replacements"/);
+  it('does NOT quote the task instructions back at them', () => {
+    // Those instructions are the BUILDER's work order to Deako, not the customer's words. Quoting them attributes
+    // to the homeowner a demand addressed to someone else, and invites them to answer our paperwork.
+    assert.doesNotMatch(m.body, /Please send homeowner deako switches/);
+    assert.doesNotMatch(m.body, /It says:/);
+    assert.doesNotMatch(m.body, /warranty request for your home[\s\S]*"/, 'no quoted record of any kind');
+  });
+  it('offers the easiest way to answer rather than demanding precision', () => {
+    assert.match(m.body, /Rooms are enough/);
+  });
+  it('TITLE-CASES the greeting name — records store whatever casing they like', () => {
+    const lower = buildCustomerEmail({ person: { name: 'harminder singh', email: 'h@x.com' }, outcome: { cause: 'no-count' } });
+    assert.match(lower.body, /^Hi Harminder,/);
+    const upper = buildCustomerEmail({ person: { name: 'DANA REYES', email: 'd@x.com' }, outcome: { cause: 'no-count' } });
+    assert.match(upper.body, /^Hi Dana,/);
+  });
+  it('falls back to a plain greeting when no name is known', () => {
+    const anon = buildCustomerEmail({ person: { email: 'x@y.com' }, outcome: { cause: 'no-count' } });
+    assert.match(anon.body, /^Hello,/);
   });
   it('tells them how to answer, in the channel they were reached on', () => {
     assert.match(m.body, /reply to this email/);
   });
-  it('the subject is about THEIR request, not about our process', () => {
-    assert.equal(m.subject, 'About your Deako switch request');
-    assert.doesNotMatch(m.subject, /warranty task|#\d+/i);
+  it('the subject is about THEIR switches, not about our process', () => {
+    assert.equal(m.subject, 'Your Deako replacement switches');
+    assert.doesNotMatch(m.subject, /warranty task|request|#\d+/i);
+  });
+  it('the photo hint appears only where a photo would help', () => {
+    const named = buildCustomerEmail({ person: DANA, outcome: { cause: 'named-product-unresolved' } });
+    assert.match(named.body, /a photo of one of them/);
+    assert.doesNotMatch(m.body, /photo/);
   });
   it('goes to their address', () => assert.equal(m.to, 'dana@example.com'));
 });
@@ -76,9 +96,9 @@ describe('customerEmail — only causes a customer can answer produce a message'
     assert.equal(buildCustomerEmail({ person: { ...DANA, email: '' }, outcome: { cause: 'no-count' } }), null);
     assert.equal(buildCustomerEmail({ outcome: { cause: 'no-count' } }), null);
   });
-  it('a missing note still produces a sendable message, without a dangling quote', () => {
-    const m = buildCustomerEmail({ person: DANA, outcome: { cause: 'no-count' }, instructions: '' });
-    assert.match(m.body, /warranty request for your home about your Deako switches\./);
-    assert.doesNotMatch(m.body, /""/);
+  it('the note is IRRELEVANT to the body — same message with or without it', () => {
+    const withNote = buildCustomerEmail({ person: DANA, outcome: { cause: 'no-count' }, instructions: NOTE });
+    const without = buildCustomerEmail({ person: DANA, outcome: { cause: 'no-count' }, instructions: '' });
+    assert.equal(withNote.body, without.body, "the work order must not shape the customer message");
   });
 });
