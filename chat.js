@@ -6059,6 +6059,22 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     }
   }
 
+  // v2.74.2135 — THE PLAN, as a log line as well as a reply line. The grader could not grade either plan line and
+  // said why: CHAT reply lines truncate at ~250 chars and both plan lines sit at the BOTTOM of the reply, so
+  // `0 hits for "Would draft"` means UNOBSERVABLE, not ABSENT — and a FAIL arm keyed on their absence would have
+  // fired on a working build. Rather than reorder the reply for the log's benefit, the same two numbers go out
+  // under the already-registered `BRANCH ▸` marker (invariant #1: no new marker needed), so what WOULD happen is
+  // gradeable from a trace instead of only from a person's eye.
+  if (planLines.length) {
+    try {
+      const _pl = planLines.filter(Boolean).map((l) => String(l)
+        .replace(/^_|_$/g, '').replace(/\*\*/g, '')
+        .replace(/\.\s*(Nothing is ordered|Each asks the team).*$/s, '')
+        .trim()).filter(Boolean);
+      if (_pl.length) _orchLog(`BRANCH ▸ plan — ${_pl.join(' · ')}`);
+    } catch { /* the reply still carries the plan */ }
+  }
+
   const tally = branchTally(results, { arms: br.arms });
   // v2.74.1895 — when NOTHING could be judged, the headline is the reason, not the sorting. "Sorted each record into 3
   // groups · couldn't tell 7" reads as a classifier that hedged; the truth was that the records had no such field.
