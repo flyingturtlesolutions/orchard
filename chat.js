@@ -6120,7 +6120,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     });
     try { _orchLog(runStartLine(run)); } catch { /* */ }
 
-    let _caseOk = 0; let _caseFail = 0; let _caseErr = '';   // v2.74.2137 — what actually persisted
+    let _caseOk = 0; let _caseFail = 0; let _caseErr = ''; let _caseSkipped = 0;   // v2.74.2137 — what actually persisted; v2140 — and what was deliberately NOT cased
     // §5.7's re-run rule: an item already under review is skipped, not re-cased.
     let alreadyOpen = [];
     try {
@@ -6138,6 +6138,22 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
 
       const armLabel = r.outcome === 'arm' ? r.arms.map((a) => a.label).join('+') : '';
       recordStage(run, id, { name: 'branch', verdict: r.outcome, detail: armLabel || r.why });
+
+      // v2.74.2140 — A CASE MEANS A PERSON OWES A DECISION. User ruling: "are draft orders creating cases? if so
+      // why? the records is the surface for create events." Right, and the two surfaces already exist with those
+      // meanings: the creates-audit ledger (recordCreate → the Records rail tab) is where a draft order lands,
+      // and a case is what says somebody must decide something. A replacement row's outcome is a CREATE, so
+      // opening a case for it puts eleven rows that need nothing into a queue whose only job is "what needs me" —
+      // and buries the two that do. §5.7's "an item that reached an arm stays open" is right for a pipeline whose
+      // arms all owe human work; this branch has one arm that owes a DRAFT, and it is overridden here on purpose.
+      //
+      // Items with NO arm still get a case: "couldn't tell" IS a decision owed, and those close immediately
+      // carrying the reason, so they never sit in the open queue either.
+      const _needsPerson = (() => {
+        const _o = classifyBy && classifyBy.get && classifyBy.get(id);
+        return !!(_o && _o._outcome && _o._outcome.cause);
+      })();
+      if (r.outcome === 'arm' && !_needsPerson) { _caseSkipped++; continue; }
 
       // v2.74.2123 — THE CHANNEL DECISION BECOMES A QUEUED ACTION ON THE CASE (user direction: "can this be moved
       // to Records? or a desk view case? each decision is surfaced, call, email, internal and the user/human
@@ -6198,7 +6214,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       } catch (e) { _caseFail++; _caseErr = _caseErr || String((e && e.message) || e); }
     }
     try {
-      _orchLog(`PIPELINE ▸ cases ${_caseOk} opened · ${_caseFail} failed${_caseErr ? ` — ${_caseErr}` : ''} (pipeline "${pipeline}")`);
+      _orchLog(`PIPELINE ▸ cases ${_caseOk} opened · ${_caseFail} failed · ${_caseSkipped} not cased (a create, not a decision) (pipeline "${pipeline}")`);
     } catch { /* */ }
 
     // v2.74.2139 — SPAWN THE RAIL CASES. Until now the branch recorded PIPELINE cases (rows in the
