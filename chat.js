@@ -16822,7 +16822,15 @@ async function sendChatMessage(textOverride = null) {
         _md.push('_Nothing has been created. Say `open the support requests` to create the emailed ones in Zendesk._');
         _setMessageBody(mP, _md.join(String.fromCharCode(10)), { markdown: true });
         _orchFinalize(mP);
-        try { _orchLog(`CONTACT ▸ preview ${_out.length} ticket(s) — ${_out.map((t) => t.cause).join(' · ')}`); } catch { /* */ }
+        // v2.74.2132 — the causes read `x.ticket.cause`, not `x.cause`. The v2128 rewrite changed each entry from
+        // a bare ticket to {id, decision, ticket, card} and this line was not updated, so it logged
+        // "CONTACT ▸ preview 2 ticket(s) —  · " with the causes silently blank — visible in the first live run.
+        // The channel counts matter more than the causes now, so log both.
+        try {
+          const _byCh = { email: 0, call: 0, unresolved: 0 };
+          for (const x of _out) _byCh[x.decision.channel] = (_byCh[x.decision.channel] || 0) + 1;
+          _orchLog(`CONTACT ▸ preview ${_out.length} item(s) — ${Object.entries(_byCh).filter(([, n]) => n).map(([c, n]) => `${c} ${n}`).join(' · ')} · causes ${_out.map((x) => (x.ticket && x.ticket.cause) || '?').join(' · ')}`);
+        } catch { /* */ }
         return;
       }
 
