@@ -25,6 +25,7 @@ import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { parseFileValue } from './Services/FileParsers.js';   // v2.74.1977 — the 2nd input type: parse an attached .xlsx/.csv (local, no egress)
 import { fileListToRows, sheetCaseMeta, sheetGroundedRead, sheetBrief, isSheetDataAsk, sheetMetaAnswer, PERSIST_CAP } from './Core/sheetCase.js';   // v2.74.1977 — an uploaded sheet opens a grounded case; v1983 — the P2.5 gate
 import { layoutReport, formatLayoutMarker } from './Core/uiLayout.js';   // v2.74.1971 — the deterministic appearance marker (LAYOUT ▸): measure the rendered reply so "does it look right" is a gl grep
+import { matchDesk, deskRefusal } from './Core/deskMatch.js';   // v2.74.2104 — OPEN_DESK's pure matcher (exact → unique prefix → unique contains, then refuse by NAMING the desks)
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, isFieldDisplayAsk, namesDeclaredLeg, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, fanoutReadAsk, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
@@ -6139,13 +6140,22 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       const armLabel = r.outcome === 'arm' ? r.arms.map((a) => a.label).join('+') : '';
       recordStage(run, id, { name: 'branch', verdict: r.outcome, detail: armLabel || r.why });
 
-      // v2.74.2140 — A CASE MEANS A PERSON OWES A DECISION. User ruling: "are draft orders creating cases? if so
-      // why? the records is the surface for create events." Right, and the two surfaces already exist with those
-      // meanings: the creates-audit ledger (recordCreate → the Records rail tab) is where a draft order lands,
-      // and a case is what says somebody must decide something. A replacement row's outcome is a CREATE, so
-      // opening a case for it puts eleven rows that need nothing into a queue whose only job is "what needs me" —
-      // and buries the two that do. §5.7's "an item that reached an arm stays open" is right for a pipeline whose
-      // arms all owe human work; this branch has one arm that owes a DRAFT, and it is overridden here on purpose.
+      // v2.74.2140 — A CASE MEANS A PERSON OWES A DECISION *THAT THIS BUILD CAN SURFACE*. User ruling: "are draft
+      // orders creating cases? if so why? the records is the surface for create events." Right: a draft order is a
+      // CREATE, and the creates-audit ledger (recordCreate → the Records rail tab) is its home, so casing eleven
+      // replacement rows puts rows that need nothing into a queue whose only job is "what needs me".
+      //
+      // v2.74.2141 — THE FIRST VERSION OF THIS COMMENT GOT THE REASON WRONG, and the user corrected it: "the
+      // drafting an order isn't completed work. The order needs to be completed by a human." That is true —
+      // §5.7's "an item that reached an arm stays open because the arm's work has not been done yet" STANDS; a
+      // draft is a halfway house, not a finished act, and something must still carry it to completion. So this is
+      // NOT an override of §5.7 on the merits. It is a scoping decision for a build that has no completion
+      // affordance yet: with no button on the draft-order card and no post-creation order tracking, a replacement
+      // case would sit open forever with nothing a person could do from it — visible debt with no handle.
+      //
+      // FUTURE (user, noted not built): buttons on the draft-order card + order tracking after creation. When
+      // those exist, these rows owe human work again and this skip should be reconsidered — either they get cases
+      // back, or the draft card itself becomes the surface that carries the obligation.
       //
       // Items with NO arm still get a case: "couldn't tell" IS a decision owed, and those close immediately
       // carrying the reason, so they never sit in the open queue either.
@@ -6153,7 +6163,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
         const _o = classifyBy && classifyBy.get && classifyBy.get(id);
         return !!(_o && _o._outcome && _o._outcome.cause);
       })();
-      if (r.outcome === 'arm' && !_needsPerson) { _caseSkipped++; continue; }
+      if (r.outcome === 'arm' && !_needsPerson) { _caseSkipped++; continue; }   // v2141: skipped for want of a completion surface, not because the work is done
 
       // v2.74.2123 — THE CHANNEL DECISION BECOMES A QUEUED ACTION ON THE CASE (user direction: "can this be moved
       // to Records? or a desk view case? each decision is surfaced, call, email, internal and the user/human
@@ -13658,6 +13668,42 @@ const IL_PANEL_LEGS = {
   NEW_DEV_CONVERSATION:     { run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
   NEW_CONVERSATION:         { run: () => { _renderAppGallery(); return { rendered: true }; } },   // CV-3c (.1170) — was a click on the removed btn-new-conversation; opens the gallery directly now
   OPEN_HISTORY:             { run: () => { $('btn-rail')?.click(); }, done: 'Opened conversation history.' },
+  // v2.74.2104 (DESIGN_exerciser_mvp.md §5b.1) — OPEN_DESK. Switching desks was CLICK-ONLY: `_selectConvForInput`
+  // was reachable from a Rail row and from case-spawn, and from no ask. Matching is pure + tested
+  // (Core/deskMatch.js) because the dangerous failure is silent — a fuzzy match sends every LATER ask to the
+  // wrong desk while the trace still reads clean. Refusals name the desks that exist; nothing is ever guessed.
+  OPEN_DESK: { run: async (msg, { params } = {}) => {
+    const name = _str0((params || {}).name) || _str0((params || {}).title) || _str0((params || {}).desk);
+    let desks = [];
+    try {
+      const all = await ConversationStore.list();
+      desks = (all || []).filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev');
+    } catch { /* an empty list refuses honestly below */ }
+    const res = matchDesk(name, desks);
+    if (!res.ok) {
+      try { _orchLog(`DESK ▸ ${res.reason} "${name}" (${desks.length} desk(s))`); } catch { /* */ }
+      _setMessageBody(msg, deskRefusal(res, name), { markdown: true });
+      _orchFinalize(msg);
+      return { rendered: true };
+    }
+    if (String(res.desk.id) === String(_currentConversationId)) {
+      try { _orchLog(`DESK ▸ already there "${res.desk.title}" → ${res.desk.id}`); } catch { /* */ }
+      _setMessageBody(msg, `You're already in **${escHtml(String(res.desk.title))}**.`, { markdown: true });
+      _orchFinalize(msg);
+      return { rendered: true };
+    }
+    try { _orchLog(`DESK ▸ open name="${name}" how=${res.how} → ${res.desk.id} "${res.desk.title}"`); } catch { /* */ }
+    // The switch itself is the SAME call the Rail row makes — this door adds an entrance, never a second path.
+    let ok = true;
+    try { ok = (await _selectConvForInput(res.desk)) !== false; } catch { ok = false; }
+    if (!ok) {
+      try { _orchLog(`DESK ▸ switch FAILED → ${res.desk.id}`); } catch { /* */ }
+      _setMessageBody(msg, `I couldn't switch to **${escHtml(String(res.desk.title))}**.`, { markdown: true });
+      _orchFinalize(msg);
+      return { rendered: true };
+    }
+    return { rendered: false, done: `Opened **${res.desk.title}**.` };
+  } },
   // DELETE_ALL_CONVERSATIONS dropped v2.74.1137 — its button handler calls confirm(), which async-suppresses in
   // the `il:` flow → the click is a no-op, and a `rendered:true` no-op leaves the 'thinking…' placeholder STUCK
   // (one source of the "only thinking… visible" symptom). Destructive + can't fire from a typed command → button-only.
