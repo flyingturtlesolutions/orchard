@@ -6163,7 +6163,20 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
         const _o = classifyBy && classifyBy.get && classifyBy.get(id);
         return !!(_o && _o._outcome && _o._outcome.cause);
       })();
-      if (r.outcome === 'arm' && !_needsPerson) { _caseSkipped++; continue; }   // v2141: skipped for want of a completion surface, not because the work is done
+      if (r.outcome === 'arm' && !_needsPerson) {
+        _caseSkipped++;
+        // v2.74.2145 — CLOSE THE ITEM BEFORE SKIPPING THE CASE. The `continue` used to jump past `closeItem`, so
+        // these rows kept their opening `not-run` outcome — and `runVerdict` reads `not-run` as "the run stopped
+        // short", so a run in which every one of 13 rows was decided reported `partial · 11 not run`. The grader
+        // put it exactly right: a correct decision announced through a word that reads like a defect.
+        //
+        // Not casing a row and not PROCESSING it are different facts, and `skipped` is the outcome that already
+        // means the first (line 6200 uses it for a no-arm row). This does not claim the replacement work is done —
+        // the arm matched, the plan line still says "Would draft 11 orders", and the v2141 note above stands: when
+        // the draft card grows a completion affordance these rows owe human work again.
+        closeItem(run, id, 'skipped', 'decided — replacement is a create; the draft carries it, not a case');
+        continue;
+      }
 
       // v2.74.2123 — THE CHANNEL DECISION BECOMES A QUEUED ACTION ON THE CASE (user direction: "can this be moved
       // to Records? or a desk view case? each decision is surfaced, call, email, internal and the user/human
