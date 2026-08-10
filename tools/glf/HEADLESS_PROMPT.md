@@ -22,6 +22,14 @@ the extension repo. Follow `tools/glf/CRON_PROMPT.md` **in full** with exactly t
 6. **Evidence files** go under `logs/run/` (e.g. `logs/run/ev-<test>.txt`) — pass them to
    `testbus.cjs result … --evidence-file`. If a file write is ever denied, fall back to `--note` with the key
    grep lines.
+   **BANK THE WINDOW BEFORE YOU CITE IT** *(v2.74.2104)*. CRON_PROMPT STEP 1 is not advisory: the fleet archive is
+   a ~48h ring that **rewrites in place**, so an hour-file you quote can be truncated minutes later — on
+   2026-08-08 the 17:00Z file rewrote twice inside ten minutes and dropped 242 lines of the very run being graded.
+   The moment a window is worth quoting, copy it: `Write` is allowlisted for `logs/run/**` (creation), so use the
+   **Write tool** — `cp` / `Copy-Item` are NOT on the list and will be denied (that denial is what made this rule
+   necessary; the 12:45 firing quoted its evidence inline and the window is now gone). Name it
+   `logs/run/fleet-<date>-<hour>-snap<HHMM>.txt` and reference that path in the result. If the copy itself is
+   denied, say so in the result note — a silently unbanked citation is worse than a named gap.
 7. Bus delivery discipline is unchanged and is YOURS to finish: in `../orchard-logs`, `git -C ../orchard-logs add
    tests results` → commit → `git -C ../orchard-logs pull --rebase` → push. A result that only exists locally was
    never delivered.

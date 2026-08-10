@@ -15,6 +15,9 @@ export const Icons = {
   runHeadless: (s) => _svg('<polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>', s),
   schedule:    (s) => _svg('<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/>', s),
   history:     (s) => _svg('<path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 9 8 9"/><polyline points="12 7 12 12 15 14"/>', s),
+  // AU-2 (v2.74.2147) — "view this record on the site it lives on". VIEW, not navigate: the record is already
+  // real and elsewhere; the eye says look at it where it is. Same 24-box / width-2 / round-cap family as the rest.
+  eye:         (s) => _svg('<path d="M1.6 12S5 5.5 12 5.5 22.4 12 22.4 12 19 18.5 12 18.5 1.6 12 1.6 12z"/><circle cx="12" cy="12" r="3.2"/>', s),
   trash:       (s) => _svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>', s),
   collapse:    (s) => _svg('<line x1="12" y1="5" x2="12" y2="19"/><polyline points="5 12 12 19 19 12"/>', s),
   back:        (s) => _svg('<polyline points="15 18 9 12 15 6"/>', s),

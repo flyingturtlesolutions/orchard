@@ -8,7 +8,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  caseId, upsertCase, setBranch, addStage, addAction, closeCase,
+  caseId, caseItemKey, upsertCase, setBranch, addStage, addAction, closeCase,
   openCases, openItemIds, casePeek, caseActionLine, caseTally, CASE_CAP, CASE_STATES,
 } from './pipelineCase.js';
 import { openRun, markAlreadyOpen } from './pipelineRun.js';
@@ -21,6 +21,38 @@ describe('pipelineCase — identity', () => {
     assert.notEqual(caseId('warranty', 'a'), caseId('warranty', 'b'));
     assert.notEqual(caseId('warranty', 'a'), caseId('outreach', 'a'));
   });
+  // v2.74.2172 — the live defect this rule exists to stop. The caller keyed cases by ARRAY POSITION, so index 3
+  // of today's list and index 3 of yesterday's resolved to the SAME case id — one task's run appended onto
+  // another task's case. Live 13:09:21: `case division lookup MISS … matched=y div="" of 200 case(s); labels:
+  // "03" · "01" · "01" · "01"` — the store full of chimeras, and a case matching the wanted label while the
+  // division sat on a different one.
+  it('the item key is the RECORD, so the same task keeps one case across runs whatever its position', () => {
+    const task = { TaskId: 4903279, AddressLine1: '1565 Fairlie Way' };
+    assert.equal(caseItemKey(task, 0), '4903279');
+    assert.equal(caseItemKey(task, 7), '4903279', 'position must not enter the key');
+    assert.equal(caseId('warranty', caseItemKey(task, 0)), caseId('warranty', caseItemKey(task, 7)));
+  });
+
+  it('two different tasks at the same position get DIFFERENT cases (the chimera this prevents)', () => {
+    const a = caseId('warranty', caseItemKey({ TaskId: 111 }, 3));
+    const b = caseId('warranty', caseItemKey({ TaskId: 222 }, 3));
+    assert.notEqual(a, b);
+  });
+
+  it('falls back to a MARKED positional key when the row carries no id at all', () => {
+    assert.equal(caseItemKey({ Address: 'somewhere' }, 4), 'idx:4');
+    assert.equal(caseItemKey(null, 0), 'idx:0', 'never throws — a case must still open');
+    // The marker matters: a reader must be able to tell a record key from a position, so a future migration can
+    // find the ones that were never really identified.
+    assert.match(caseItemKey({}, 2), /^idx:/);
+  });
+
+  it('prefers TaskId, then TicketId, then TaskNumber — the ref the drive joins on', () => {
+    assert.equal(caseItemKey({ TaskId: 1, TicketId: 2, TaskNumber: '3' }), '1');
+    assert.equal(caseItemKey({ TicketId: 2, TaskNumber: '3' }), '2');
+    assert.equal(caseItemKey({ TaskNumber: '3' }), '3');
+  });
+
   it('sanitizes ids without collapsing distinct items together', () => {
     assert.match(caseId('war ranty!', '108/347'), /^pc_[a-zA-Z0-9_-]+_[a-zA-Z0-9_-]+$/);
     assert.notEqual(caseId('p', 'a/b'), caseId('p', 'a_c'));
@@ -49,9 +81,84 @@ describe('pipelineCase — open-or-append (the vitals shape, §9.3)', () => {
   it('stores a record REFERENCE, never the record body', () => {
     const r = mk({ record: { ref: 'gid://1', host: 'x.com', url: 'https://x.com/1', Instructions: 'SECRET', Address: '12 Elm St' } });
     const rec = r.list[0].record;
-    assert.deepEqual(Object.keys(rec).sort(), ['host', 'ref', 'url']);
+    assert.deepEqual(Object.keys(rec).sort(), ['division', 'host', 'ref', 'url']);
     assert.equal(JSON.stringify(rec).includes('SECRET'), false, 'the body must not be duplicated into a second store');
     assert.equal(JSON.stringify(rec).includes('Elm'), false);
+  });
+
+  // v2.74.2156 — the SCOPE half of the ref. A VendorSuite task has no per-record URL; it is reachable only as
+  // (division, row text), so a case that banks the id and drops the division banked half a reference.
+  it('banks the record DIVISION — the scope half of a ref with no URL', () => {
+    const r = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' } });
+    assert.equal(r.list[0].record.division, 'Greensboro');
+  });
+
+  it('a record with no division banks an empty one, never undefined', () => {
+    const r = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '' } });
+    assert.equal(r.list[0].record.division, '', 'a reader must not have to distinguish absent from unknown');
+  });
+
+  // v2.74.2170 — the live defect. Every case in the store was opened BEFORE `division` joined the whitelist, and
+  // the append branch wrote only the timeline + run id — so re-running the flow could never bank one, however
+  // many times it ran. `PIPELINE ▸ cases … div 2/2` (the panel's count of what it SENT) and `divsrc=none` (the
+  // drive's read of what was STORED) were both honest, about two different things.
+  it('an APPEND backfills a reference field the first open did not have', () => {
+    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '' } });
+    assert.equal(first.list[0].record.division, '');
+    const again = upsertCase(first.list, {
+      pipeline: 'warranty', itemId: '10834758', now: 200,
+      record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' },
+    });
+    assert.equal(again.opened, false, 'still one case — the backfill must not mint a second');
+    assert.equal(again.list[0].record.division, 'Greensboro', 'a re-run is how an older case gains a new ref field');
+  });
+
+  it('an APPEND creates the whole reference when the first open had none', () => {
+    const first = mk({ record: null });
+    assert.equal(first.list[0].record, null);
+    const again = upsertCase(first.list, {
+      pipeline: 'warranty', itemId: '10834758', now: 200,
+      record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' },
+    });
+    assert.deepEqual(again.list[0].record, { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' });
+  });
+
+  // MONOTONE: fill blanks only. A later run that has lost the division (stale context, a narrower read) must not
+  // be able to erase the reading taken when the row was first read — that property is what lets the merge run
+  // unconditionally on every append without a policy about which read wins.
+  it('an APPEND never overwrites a banked value — not with a blank, not with a different one', () => {
+    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' } });
+    const blanked = upsertCase(first.list, { pipeline: 'warranty', itemId: '10834758', now: 200, record: { ref: '10834758', division: '' } });
+    assert.equal(blanked.list[0].record.division, 'Greensboro', 'a blank must not erase');
+    assert.equal(blanked.list[0].record.host, 'vendorsuite.example', 'nor may an omitted field');
+    const other = upsertCase(blanked.list, { pipeline: 'warranty', itemId: '10834758', now: 300, record: { ref: '10834758', division: 'Columbus' } });
+    assert.equal(other.list[0].record.division, 'Greensboro', 'the first reading stands');
+  });
+
+  it('an APPEND with no record at all leaves the banked one untouched', () => {
+    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' } });
+    const again = upsertCase(first.list, { pipeline: 'warranty', itemId: '10834758', now: 200, line: 'run 2' });
+    assert.deepEqual(again.list[0].record, { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' });
+  });
+
+  it('an APPEND backfills an EMPTY label — a case must not stay nameless because its first write had none', () => {
+    const first = upsertCase([], { pipeline: 'warranty', itemId: '10834758', now: 100 });
+    assert.equal(first.list[0].label, '');
+    const again = upsertCase(first.list, { pipeline: 'warranty', itemId: '10834758', label: '#10834758 · 7356 AXEL CREEK ST', now: 200 });
+    assert.equal(again.list[0].label, '#10834758 · 7356 AXEL CREEK ST');
+    const third = upsertCase(again.list, { pipeline: 'warranty', itemId: '10834758', label: 'something else', now: 300 });
+    assert.equal(third.list[0].label, '#10834758 · 7356 AXEL CREEK ST', 'a named case keeps its name');
+  });
+
+  // The caller reports what the STORE holds, not what it sent — the v2137 lesson one layer down.
+  it('the return carries the STORED reference, on create and on append alike', () => {
+    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '' } });
+    assert.equal(first.record.division, '', 'create echoes the stored ref');
+    const again = upsertCase(first.list, {
+      pipeline: 'warranty', itemId: '10834758', now: 200,
+      record: { ref: '10834758', division: 'Greensboro' },
+    });
+    assert.equal(again.record.division, 'Greensboro', 'append echoes the ref AFTER the backfill');
   });
 
   it('refuses to mint without a pipeline and item', () => {

@@ -28,6 +28,18 @@ The `<RECORD>` / `<RECENT_TURNS>` / `<SUB_TASKS>` / `<FINDINGS>` wrappers are **
 | 4 | **Typed memory + seed** | `learned` / `objects` / `seed` in `buildAnswerMessages` / `buildInterpretMessages` | **mixed** (instance memory can hold private facts) | preset rules are abstracted (distill-up); instance memory is raw |
 | 5 | **DOM snapshots** | `domSnapshot.slice(0,12000)` in `resolveRoles` / `synthesizeGoals` | **PII** (on-page names/emails) | structurally "sanitized", not PII-redacted |
 | 6 | **The ask** | every router call (`routeAsk`, `interpret`, `matchWorkflow`, `extractFanoutSpec`, `shapeAnswer`) | **low–PII** ("search tickets for john@x.com") | no |
+| 7 | **Chat contents on the FLEET wire** *(new, v2.74.2104)* | `CHAT ▸ ask` (`sendChatMessage` entry) · `CHAT ▸ reply` (`_orchFinalize`) → Logger ring → `CloudLogShipper` → CloudWatch → the private `orchard-logs` repo | **PII** (replies quote record bodies — an observed line carried a homeowner name + street address verbatim) | **clipped only** (600 / 1200 chars). `Logger` scrubs emails · phones · UUIDs · HubSpot ids at write; **names, addresses and ticket prose are NOT scrubbed** |
+
+**Row 7 is a different destination from rows 1–6 and is listed here deliberately.** Everything above crosses to
+the *model*; row 7 crosses to the *fleet archive*. It earns a place in this map because its sensitivity is the
+same and its reviewers are the same — an egress recorded nowhere is an egress nobody audits.
+
+**Decision (user, 2026-08-08): FULL replies, as built.** The alternatives offered and declined were asks-only,
+and gating replies behind `settings:cloudLogs='full'` (declined because `CHAT ▸` is a decision marker, so
+gating it to `full` would hide it again at the `decisions` level the user actually runs). The cost being bought:
+before this, every `[human]` grading step required the user to hand-paste the reply, because "reply prose does
+not cross the message-only fleet wire" — graders said so verbatim on three separate tests. **Reversing is one
+line** (drop the `CHAT ▸ reply` emitter in `_orchFinalize`); the ask half is far lower-sensitivity and can stay.
 
 **Implication for the embodiment debate:** the privacy concern was never embodiment-gated — Orchard *already* sends customer PII to the model whenever it reasons over a read (#1, #3, #5). Redaction is a **current-state** need.
 

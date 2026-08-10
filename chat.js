@@ -81,7 +81,7 @@ import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recen
 import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { parseDashboardAsk, friendlyVitalsLine, clockWord } from './Core/vitalsDashboard.js';   // VT-2d (v2.74.1583) — the context dashboard door; v1590 — the human-words layer for incident cases
-import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer } from './Core/audit.js';
+import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer, recordOpenUrl } from './Core/audit.js';   // AU-2 (v2.74.2147) — recordOpenUrl resolves a banked row to its page on the owning system (the eye button)
 import { buildWarrantyExtractSystem, readWarrantyItem, tallyOutcomes, WARRANTY_ARMS } from './Core/warrantySwitch.js';   // v2.74.2106 — the warranty branch EXTRACTS typed fields; code derives the arm (no label for the model to invent)   // AU-3 (DESIGN_audit.md §11) — the "what have I created?" read surface (local ledger, one-shot answer)
 import { friendlyError as _errWord, actionPhrase as _actionPhrase, recordNounWord as _recordNounWord } from './Core/chatVoice.js';   // v2.74.1591 — ONE chat voice: slugs/codes → phrases, catalog verbs → sentences, leg names → nouns
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
@@ -121,7 +121,7 @@ import { resolveWriteValue, buildWriteProposals, prepareShopifyCustomerCreatePar
 import { writeTally, writePreflight } from './Core/writeClause.js';
 import { casePreflight, caseRecord, caseTally, CASE_WINDOW } from './Core/caseClause.js';
 import { emptyPriorStop } from './Core/priorScope.js';
-import { casePeek, caseActionLine} from './Core/pipelineCase.js';   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
+import { casePeek, caseActionLine, caseItemKey } from './Core/pipelineCase.js';   // v2172 — caseItemKey: a case is identified by its RECORD, never by its position in the run   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
 import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
@@ -1262,6 +1262,9 @@ async function _renderRailListNow() {
     const conv = byId.get(row.id);
     if (!conv) continue;
     const el = _historyConvRow(conv, row, conv.instanceId ? (_pendingByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_nextSweepByInst[conv.instanceId] || 0) : 0, conv.instanceId ? (_parkedByInst[conv.instanceId] || 0) : 0);
+    // v2.74.2150 — the case rail card's ACTION ROW ("rails have buttons, timelines do not"). Attached here, not
+    // inside _historyConvRow, because only this loop knows the sidecar index — and only a SUBTASK is a case.
+    if (row.role === 'subtask') { try { _attachCaseActs(el, conv); } catch { /* a card must render without its buttons */ } }
     if (row.role === 'subtask' && _grpCases) {
       _grpCases.insertBefore(el, _grpCases.querySelector('.rail-case-add'));   // v1817 — cases sit above the ＋ Case row
       // the ACTIVE case must never hide inside a closed section (a spawn opens the case as current) — force it
@@ -2697,7 +2700,13 @@ async function _createSubTasks(app, items, { brief = true } = {}) {
   // (which shows the drilled fields) instead of the requestor's-voice narrative, which omits field names and
   // invents a next-move prompt — the wrong artifact when the ask asked to SHOW specific fields.
   if (brief && briefable.length) _briefCases(app, briefable).catch(() => {});   // DK-8h — non-blocking: cases exist NOW; the framing lands when it lands
-  return { created, skipped };   // DK-8k — callers report skips honestly ("N already open")
+  // v2.74.2178 — REPORT THE DEDUP BASIS. `0 already open` has been the answer on all 12 rail-case spawns today,
+  // while the pipeline sidecar in the SAME run said `3 already open` — two stores disagreeing about whether the
+  // same items are already cased. That is the `divbanked 2/2` / `divsrc=none` shape again: a count that cannot
+  // distinguish its own causes. `0 already open` means either "this desk has no live children" (the user deleted
+  // them, which is legitimate) or "children exist and NONE of their titles matched" (title drift → case-spam
+  // accumulating under the desk). `existingCount` separates those without another guess.
+  return { created, skipped, existingCount: existing.size };   // DK-8k — callers report skips honestly ("N already open")
 }
 
 // DK-8h (v2.74.1500) — the conversational FRAMING pass: a case should open as the REQUESTOR presenting their
@@ -6121,14 +6130,33 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
     });
     try { _orchLog(runStartLine(run)); } catch { /* */ }
 
-    let _caseOk = 0; let _caseFail = 0; let _caseErr = ''; let _caseSkipped = 0;   // v2.74.2137 — what actually persisted; v2140 — and what was deliberately NOT cased
-    // §5.7's re-run rule: an item already under review is skipped, not re-cased.
+    let _caseOk = 0; let _caseFail = 0; let _caseErr = ''; let _caseSkipped = 0;
+    // v2.74.2162 — DID THE DIVISION REACH THE CASE? `divsrc=none` at click time cannot say whether the sweep
+    // tag never arrived or the click-time lookup missed it. This counts the WRITE end; `_caseDivMiss` names the
+    // first row's keys so an absent tag is readable directly instead of inferred.
+    let _caseDiv = 0; let _caseDivMiss = '';   // v2.74.2137 — what actually persisted; v2140 — and what was deliberately NOT cased
+    // v2.74.2172 — THE CASE KEY PER ROW, derived ONCE. `run.items` keep their positional ids (the run's own
+    // bookkeeping — classifyBy, recordStage and closeItem all index by them, and that is correct for a single
+    // run). The CASE store must not: a case outlives the run, so its identity has to be the RECORD.
+    // `caseItemKey` is the pure rule; see its header for what position-as-identity actually did to the store.
+    const _caseKeys = use.map((it, i) => caseItemKey(it, i));
+    // §5.7's re-run rule: an item already under review is skipped, not re-cased. The handler answers in CASE
+    // keys, so translate back to this run's positional ids rather than comparing the two vocabularies directly —
+    // which is what "position 3 is already open" used to mean, i.e. nothing.
     let alreadyOpen = [];
     try {
       const oi = await _orchReq('PIPELINE_OPEN_ITEMS', { pipeline });
-      alreadyOpen = (oi && oi.success && Array.isArray(oi.itemIds)) ? oi.itemIds : [];
+      const openKeys = new Set((oi && oi.success && Array.isArray(oi.itemIds)) ? oi.itemIds.map(String) : []);
+      alreadyOpen = _caseKeys.map((k, i) => (openKeys.has(String(k)) ? String(i) : null)).filter((v) => v !== null);
     } catch { alreadyOpen = []; }
     markAlreadyOpen(run, alreadyOpen);
+
+    // v2.74.2156 — THE RUN'S DIVISION, read ONCE, here, while it is still true. `_contextDivision()` is bounded by
+    // the follow-up TTL and moves with the last grounded read, so reading it at CLICK time (v2155) asked the wrong
+    // question at the wrong moment. Read at case-creation it is seconds old and describes the very read these rows
+    // came from. Per row, the each-tag still wins (below): a cross-division sweep tags every row with its own
+    // division (chat.js:14497 — `{ [noun]: it.label, ...row }`), and one run-level value cannot speak for 9.
+    const _runDiv = (() => { try { return _contextDivision() || ''; } catch { return ''; } })();
 
     for (let i = 0; i < results.length; i++) {
       if (_walkAbortFlag.requested) break;
@@ -6213,8 +6241,39 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
       closeItem(run, id, r.outcome === 'arm' ? 'done' : r.outcome === 'none' ? 'skipped' : 'blocked', r.why);
 
       try {
-        await _orchReq('PIPELINE_RECORD_ITEM', {
-          pipeline, itemId: id, label: _rowLabel(r.item, srcLeg), runId: run.runId,
+        const _wrote = await _orchReq('PIPELINE_RECORD_ITEM', {
+          // v2.74.2172 — the case is keyed by the RECORD, not by `id` (this run's array position). See
+          // Core/pipelineCase.js `caseItemKey`: position-as-identity is what produced 200 chimera cases and the
+          // `divbanked 2/2` / `divsrc=none` contradiction.
+          pipeline, itemId: _caseKeys[i] || id, label: _rowLabel(r.item, srcLeg), runId: run.runId,
+          // v2.74.2150 — POPULATE THE SOURCE RECORD REF. §5.7 asks for "label + source record ref" and
+          // pipelineCase.js has carried the slot since v1665 ("the record REFERENCE, never the record body") —
+          // this branch never filled it, so every case knew WHAT was decided and not WHICH task it came from.
+          // `itemId` is the array INDEX, not the task, so it cannot stand in. This is what lets a rail case card
+          // offer "Show task" (DESIGN_audit.md §12.8.2) without duplicating state the sidecar already owns.
+          // v2.74.2156 — `_row` WAS NOT DEFINED IN THIS SCOPE. The only `_row` in this function is the `let` inside
+          // the rail-case loop 60 lines below, a different block — so this arrow threw `ReferenceError: _row is not
+          // defined` on its first evaluation, inside the try that counts case failures. Every pipeline case write
+          // has failed since v2150. Proven from the fleet, not inferred: 2026-08-10 14:57:32.771Z
+          // `PIPELINE ▸ cases 0 opened · 2 failed`, against `2 opened · 0 failed` on the same flow at 00:54Z. The
+          // tally line added at v2137 ("a swallowed write is indistinguishable from a write that happened") is what
+          // made it visible; nothing else did, because the rail cases opened fine and the reply looked correct.
+          record: (() => {
+            const _it = (r && r.item) || {};
+            const _ref = String((_it.TaskId ?? _it.TicketId ?? _it.TaskNumber) ?? '').trim();
+            if (!_ref) return null;
+            // The DIVISION, narrowest source first. The row's own each-tag is authoritative — it names the cell the
+            // row was actually read from — and beats any run-level value for a cross-division sweep.
+            const _div = String(_it.__division ?? _it.division ?? _it.Division ?? _it.DivisionName ?? _runDiv ?? '').trim();
+            // v2.74.2170 — the TALLY moved to the response (below). Counting here counted the payload, and the
+            // store was discarding it: `upsertCase`'s append branch wrote only the timeline and the run id, so a
+            // case opened before `division` joined the whitelist could never gain one however many times the flow
+            // re-ran. `div 2/2` and `divsrc=none` were therefore BOTH honest, about two different things. This
+            // line keeps only the diagnostic that is genuinely panel-side: which row keys were on offer when the
+            // panel had no division to send at all.
+            if (!_div && !_caseDivMiss) _caseDivMiss = Object.keys(_it).slice(0, 12).join(',') || '(no keys)';
+            return { ref: _ref, host: String((srcLeg && (srcLeg.host || (srcLeg.tool && srcLeg.tool.host))) || ''), url: '', division: _div };
+          })(),
           // v2.74.2118 — the warranty CAUSE rides with the arm. "contact homeowner" names the arm but not the
           // question a person must answer, and the four causes need genuinely different human work (asking "how
           // many?" is not routing an outlets task to another trade). Without it the case says someone owes a
@@ -6234,10 +6293,21 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
         // 13 done" while the case store stayed empty, and the only surface that could have said otherwise threw
         // the response away. A swallowed write is indistinguishable from a write that happened.
         _caseOk++;
+        // v2.74.2170 — the STORE's answer, not the panel's intention. `divisionBanked` is read back from the
+        // record the store actually holds after the upsert, so this counter now means what the drive needs it to
+        // mean: how many of these cases the "Show task" button can resolve a division from.
+        if (_wrote && _wrote.divisionBanked) _caseDiv++;
       } catch (e) { _caseFail++; _caseErr = _caseErr || String((e && e.message) || e); }
     }
     try {
-      _orchLog(`PIPELINE ▸ cases ${_caseOk} opened · ${_caseFail} failed · ${_caseSkipped} not cased (a create, not a decision) (pipeline "${pipeline}")`);
+      // v2.74.2156 — SAY WHY IT FAILED. `_caseErr` has been captured since v2137 and never printed, so the one
+      // line that could have named `_row is not defined` reported only a count — and a count reads as "the store
+      // was busy", which is why the ReferenceError above survived six versions. The first error is enough: these
+      // fail as a class, not one at a time.
+      // v2.74.2170 — `div` → `divbanked`, and the rename is the point: the old token counted the payload and the
+      // new one counts the store, so a trace is never ambiguous about which meaning a given line carries. Reading
+      // `div 2/2` in an old window still means "2 divisions were SENT" and nothing more.
+      _orchLog(`PIPELINE ▸ cases ${_caseOk} opened · ${_caseFail} failed${_caseFail && _caseErr ? ` (${_caseErr.slice(0, 120)})` : ''} · ${_caseSkipped} not cased (a create, not a decision) · divbanked ${_caseDiv}/${_caseOk + _caseFail}${_caseDivMiss ? ` (no div; row keys: ${_caseDivMiss})` : ''} (pipeline "${pipeline}")`);
     } catch { /* */ }
 
     // v2.74.2139 — SPAWN THE RAIL CASES. Until now the branch recorded PIPELINE cases (rows in the
@@ -6300,7 +6370,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
               focus: null,
             });
           }
-          const { created, skipped } = await _createSubTasks(app, _items, { brief: false });
+          const { created, skipped, existingCount } = await _createSubTasks(app, _items, { brief: false });
           lines.push('', `_Opened ${created.length} case${created.length === 1 ? '' : 's'} under **${app.title}**${skipped ? ` (${skipped} already open)` : ''} — nested under the view in the rail._`);
           // v2.74.2144 — say WHAT the card carries. The grader could prove the narrative generator stopped
           // running (0 CASE_BRIEF hits post-082d3bf) but not that the review card rendered in its place: "no
@@ -6308,7 +6378,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
           // one. `card=review` plus per-case facts (channel, contact count, whether a draft is attached) makes
           // the claim trace-gradeable — deliberately on the EXISTING PIPELINE marker, since decisionMarkers.js
           // is currently held by the parallel lane and a new marker would mean editing a contended file.
-          try { _orchLog(`PIPELINE ▸ rail cases ${created.length} opened · ${skipped} already open (desk "${app.title}") card=review [${_cardFacts.join(' · ')}]`); } catch { /* */ }
+          try { _orchLog(`PIPELINE ▸ rail cases ${created.length} opened · ${skipped} already open of ${existingCount} live child case(s) (desk "${app.title}") card=review [${_cardFacts.join(' · ')}]`); } catch { /* */ }
         }
       }
     } catch (e) {
@@ -7813,7 +7883,13 @@ async function _contactsForRecordEntry(entry, statusMsg = null) {
 // CONTACTS FOR EACH ROW of a focused list — the distributive ask. A focus list entry carries its `rows` (with the
 // drill's join field) and the provenance above, so this is one sidecar read per row, capped and abort-aware.
 // Rows that fail still appear in the roster, empty — the renderer SAYS so rather than shortening the list.
-async function _contactsForListRows(entry, statusMsg = null, cap = 6) {
+// v2.74.2157 — the cap was 6, silently. A 13-row warranty queue is the ORDINARY case, not the long tail, so the
+// default answered fewer than half the records the ask was about and said nothing about it (live 2026-08-10:
+// "who is the CSR for each?" over 13 rows → six lines; "who are the coordinators" → "5 of 6"). 25 covers a real
+// queue at one sidecar read per row — the each-sweep already spends 121 reads without ceremony — and the cap that
+// remains is now REPORTED by renderContactRoster rather than hidden.
+const _ROSTER_CAP = 25;
+async function _contactsForListRows(entry, statusMsg = null, cap = _ROSTER_CAP) {
   const prov = (entry && entry.provenance) || null;
   const rows = (entry && Array.isArray(entry.rows)) ? entry.rows.slice(0, cap) : [];
   const dj = prov && prov.drill;
@@ -7850,7 +7926,13 @@ async function _resolveTicketRecord(ticket, statusMsg = null) {
   const tid = String(ticket || '').trim();
   if (!tid) return null;
   let found = null;
-  const why = { leg: false, invoked: 0, blocked: 0, rows: 0, hits: 0 };   // named in the log line: a miss must say WHICH miss
+  // v2.74.2168 — `div` joins the miss record. The refusal said "isn't in the warranty list I can see" without
+  // naming the ONE division it searched, so a ticket that exists in another division read as a ticket that does
+  // not exist. Grader, live 2026-08-08 20:54-20:58: the ACT door escalated 121x4 cells and found the ticket in
+  // Columbus/93, while this door searched 6 status buckets of Greensboro/35 (277 rows, 0 hits) and refused —
+  // same ask, same session, opposite answers. Naming the scope does not close that gap; it stops the refusal
+  // overstating itself while the escalation question is decided.
+  const why = { leg: false, invoked: 0, blocked: 0, rows: 0, hits: 0, div: '' };   // named in the log line: a miss must say WHICH miss
   try {
     for (const g of (await _cachedArmedGrounds())) {
       if (!g || !g.host || !g.gid || found) continue;
@@ -7865,6 +7947,7 @@ async function _resolveTicketRecord(ticket, statusMsg = null) {
       const enums = (slot && Array.isArray(slot.enum)) ? slot.enum.map(String) : [];
       const statuses = enums.length ? [...enums.filter((s) => s === 'open'), ...enums.filter((s) => s !== 'open')] : [null];
       const div = _contextDivision();
+      if (div && !why.div) why.div = String(div);
       for (const st of statuses) {
         if (found) break;
         let params = { [dj.matchOn]: tid };
@@ -9976,7 +10059,19 @@ async function _showSection(word) {
   const m = appendMessage({ role: 'assistant', body: '' });   // v2.74.1554 — the user's words were echoed at ENTRY (invariant #4); no per-intercept echo
   const url = `https://${best.host}${best.path.startsWith('/') ? best.path : '/' + best.path}`;
   const res = await _orchReq('SHOW_SOURCES', { origin: best.host, urls: [url] });
-  _setMessageBody(m, res && res.success !== false ? `${res.reused ? 'Focused' : 'Opened'} the ${best.host} tab on its ${w} page.` : `Couldn’t open ${best.host} — ${_errWord(res && res.error)}.`);
+  // v2.74.2158 — NAME THE PAGE WE REACHED, not the word that was typed. `show task` replied "Focused the …
+  // tab on its task page" while sitting on `/#warranty`: there is no task page, and the sentence invented one by
+  // echoing `w`. The match came through the META branch — `vs_warranty_tasks` is named "Warranty tasks by
+  // status", so the token `task` hit a LIST LEG's name and inherited that leg's SECTION path. That is the exact
+  // trap the v1897 comment fifteen lines up already names ("a does-line is prose about what a leg accepts; a
+  // path is the page itself"), landing here one case over: the guard stopped the wrong NAVIGATION and left the
+  // wrong SENTENCE. Reported twice by the user as "show task … only opens /#warranty" — the navigation was
+  // arguably right per the verb ruling; the claim about it was not.
+  const _secWord = (best.path.split(/[#/?]/).filter(Boolean).pop() || '').replace(/[-_]+/g, ' ').trim();
+  const _named = _secWord && _secWord.toLowerCase() !== w.toLowerCase()
+    ? `${_secWord} page (there's no separate “${w}” page on ${best.host} — that's the section it lives in)`
+    : `${w} page`;
+  _setMessageBody(m, res && res.success !== false ? `${res.reused ? 'Focused' : 'Opened'} the ${best.host} tab on its ${_named}.` : `Couldn’t open ${best.host} — ${_errWord(res && res.error)}.`);
   _orchFinalize(m);
   return true;
 }
@@ -12024,10 +12119,452 @@ function _railRecordCard(e, fmtTime) {
   pbits.push('click to open →');
   peek.textContent = pbits.join(' · ');
   card.appendChild(peek);
+  // AU-2 (v2.74.2147) — the EYE: view this record on the system that owns it. The card's own click still drills
+  // into Orchard's history of it, so the two verbs stay distinct and neither steals the other's gesture:
+  //   card body → what ORCHARD knows about this record   ·   eye → the record ITSELF, on its native platform
+  // stopPropagation is load-bearing — the button sits inside a role=button card, so without it one click fires
+  // both and the drill overlay opens behind the tab switch.
+  const _url = _recordOpenUrl(e);
+  if (_url) {
+    const acts = document.createElement('div'); acts.className = 'rail-record-acts';
+    const _host = String(e.system || 'the site').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+    acts.appendChild(_mkIconBtn('eye', `View this ${e.kind || 'record'} on ${_host}`, (btn, ev) => {
+      try { ev.stopPropagation(); } catch { /* */ }
+      void _openRecordLink(_url, btn);
+    }, { title: `Open ${e.label || e.id || 'this record'} on ${_host}` }));
+    card.appendChild(acts);
+  }
   const open = () => _openRecordDrill(e, fmtTime);
   card.addEventListener('click', open);
   card.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
   return card;
+}
+
+/**
+ * v2.74.2150 (DESIGN_audit.md §12.8.2) — the CASE rail card's action row.
+ *
+ * "Rails have buttons, timelines do not" (ruling 2026-08-10). The review card's `[ Send to … ] [ Edit the draft ]`
+ * row renders as MARKDOWN in the case body and none of it was ever wired — because it was built on the wrong
+ * surface. The markdown stays a read-only account of what is owed; the ACTIONS live here, in the same
+ * `_mkIconBtn` vocabulary the workflow card and the Records card already use.
+ *
+ * v1 wires the REFERENCE control only (`Show task`). That is deliberate and it is the safe half: a `reference`
+ * control mutates nothing (Core/contactReview.js), so a mis-click costs nothing. The mutating controls — above
+ * all `send`, which emails a homeowner — share a confirm/gate seam that is not designed yet, and the money rule
+ * (human-click, never auto) says that seam gets designed before it gets built, not during a render pass.
+ */
+function _attachCaseActs(el, conv) {
+  // v2.74.2152 — RENDER FROM THE CONVERSATION, nothing else. v2150 gated this on a sidecar join + a banked
+  // `record.ref`, which gave the button four ways to silently not appear (no ref on older cases, a label-join
+  // miss, an empty sidecar read, a stale cache) — and it did not appear. Live report: "no buttons on case rail
+  // card. just add the buttons on the case rail cards!" Correct: the case TITLE already carries both the id and
+  // the address ("#4888221 · 7356 AXEL CREEK ST"), which is exactly the free-text value the drill matches on, so
+  // the sidecar was never needed for THIS button. Every case row gets it, unconditionally.
+  if (!el || !conv) return;
+  const title = String(conv.title || '').trim();
+  if (!title) return;
+  const ref = (title.match(/#\s*([\w-]+)/) || [])[1] || title;   // the leading #id, for the label + log
+  const acts = document.createElement('div');
+  acts.className = 'rail-record-acts';    // reuse the Records card's row verbatim — one action vocabulary
+  const site = 'vendorsuite.drhorton.com';
+  acts.appendChild(_mkIconBtn('eye', `Show task ${ref} on ${site}`, (btn, ev) => {
+    try { ev.stopPropagation(); } catch { /* */ }   // the rail row itself opens the case — the button must not
+    // v2.74.2151 — hand the drill the LABEL, not the bare ref. `drill.matchOn:'address'` is a free-text ADDRESS
+    // filter (chat.js:14070 "the drill's free-text filter slot (e.g. address)"), and v2150 passed the TaskId —
+    // so it searched for "4899327" among addresses, matched nothing, and left the user on `/#warranty`. That is
+    // the live report. `_rowLabel` composes id + address ("#4899327 — 7048 Eclipse Trail"), so the label is the
+    // richest match value the case already holds.
+    // v2.74.2154 — FIND is the ROW TEXT the built-in artifact clicks: `vsd_open_task_row` documents it as "a
+    // street address as displayed, or a task/claim number". The case title is "#4888221 · 7356 AXEL CREEK ST",
+    // so the address is everything after the separator; fall back to the id when a title carries no address.
+    const addr = (title.split('·')[1] || '').trim();
+    // v2.74.2156 — the TITLE rides along as the join key to the banked case. The pipeline case's `label` and this
+    // rail case's `title` are the same string by construction (both `_rowLabel(r.item, srcLeg)`), so the lookup is
+    // an equality, not a heuristic. It stays a CLICK-time read: v2150's mistake was gating the button's RENDER on
+    // a sidecar join, which gave it four ways to silently not appear. Here a miss costs a fallback, not a button.
+    void _driveToSourceTask(addr || ref, ref, site, btn, { title });
+  }, { title: `Show task ${ref} — drives your ${site} tab` }));
+  el.appendChild(acts);
+}
+
+/**
+ * v2.74.2150 — DRIVE to the inciting task. VendorSuite has no per-record URL (`itemUrl: '/#warranty'` is the
+ * SECTION), so this cannot be a link — it is the deterministic drill: read the task, take its address, navigate
+ * the ground's tab to `listUrl`, text-click the row. That artifact ALREADY EXISTS as `_openRecordOnSite`
+ * (chat.js, the ask path) and `vs_warranty_tasks` already declares the config it selects on
+ * (`drill.matchOn:'address'` + `listUrl:'/#warranty'`) — its own `does` advertises the behaviour ("say 'on the
+ * site' … to open that record on the warranty page itself"). So this REUSES the drill rather than minting a
+ * second drive.
+ *
+ * Invariant #2 is the drill's own responsibility at the seam that drives the clicks (SHOW_SOURCES busy-marks its
+ * driven navigation, connector.js:785) — this entry point adds no new click emitter of its own.
+ */
+/**
+ * v2.74.2156 — the BANKED division for a case. Best-effort by design: a miss returns '' and the caller falls
+ * back to the live context, so this can never stop the drive from being attempted.
+ * v2.74.2172 — by REF first, by label second. See the join comment below.
+ */
+async function _bankedCaseDivision(title, ref = '') {
+  const t = String(title || '').trim().toLowerCase();
+  const wantRef = String(ref || '').trim();
+  if (!t && !wantRef) return '';
+  try {
+    const r = await _orchReq('PIPELINE_CASES', {});
+    const cases = (r && r.success !== false && Array.isArray(r.cases)) ? r.cases : [];
+    // v2.74.2172 — JOIN ON THE REF FIRST. The label join was never the right instrument: a label is display text
+    // that has already drifted twice in this arc (the v1617 claim-sequence "01"/"03", the v2160 division
+    // corruption), while `record.ref` is the task id the case banked. Live 13:09:21 proved the label join can
+    // even SUCCEED and still be wrong — `matched=y div=""` found a case carrying the wanted label from an older
+    // run while the division sat on a different case entirely. The ref is now also the case's own itemId
+    // (v2172), so this is a lookup by identity rather than by resemblance. The label stays as the fallback for
+    // cases banked before v2172, which have no reliable ref.
+    const byRef = wantRef
+      ? cases.filter((c) => c && c.record && String(c.record.ref || '').trim() === wantRef)
+        .sort((a, b) => (Number(b.openedAt) || 0) - (Number(a.openedAt) || 0))[0]
+      : null;
+    if (byRef && String((byRef.record && byRef.record.division) || '').trim()) {
+      return String(byRef.record.division).trim();
+    }
+    // v2.74.2170 — JOIN ON THE SAME TRUNCATION THE TITLE GOT. Both sides start as `_rowLabel(r.item, srcLeg)`,
+    // but they are stored at DIFFERENT widths: `upsertCase` keeps 120 (Core/pipelineCase.js), while
+    // `planSubTasks` writes the conversation title as `item.label.slice(0, 60)` (Core/appDef.js:268). Today's
+    // labels ("#4888221 · 7356 AXEL CREEK ST") are ~30 chars so this is not what broke the live join — that was
+    // the store discarding the record on append, fixed at v2170 — but as a JOIN RULE the equality was wrong by
+    // construction and would have failed silently on the first long address. Applying the same transform to both
+    // sides costs nothing and makes the comparison exact rather than incidentally true.
+    // Newest first: a re-run over the same list appends to the OPEN case, but a closed-then-reopened item has two.
+    const hit = cases.filter((c) => c && String(c.label || '').slice(0, 60).trim().toLowerCase() === t)
+      .sort((a, b) => (Number(b.openedAt) || 0) - (Number(a.openedAt) || 0))[0];
+    const div = String((hit && hit.record && hit.record.division) || '').trim();
+    // v2.74.2166 — SAY WHY THE JOIN MISSED. `PIPELINE ▸ cases … div 2/2` proves the WRITE end banks the division,
+    // and the very next click still reads `divsrc=none`, so the failure is here — in the label equality — and I
+    // have now guessed at it twice (title truncation, then store shape) without evidence. One line ends that:
+    // the title searched for, whether a case matched, and the labels actually present. A LLM re-title
+    // (`titledByLlm`) or any separator drift would be visible immediately instead of inferred.
+    if (!div) {
+      // v2.74.2172 — the ref arm rides the line too. The v2166 version reported only the label join, so
+      // `matched=y div=""` read as "the join works, the write is broken" when the truth was "the join matched a
+      // DIFFERENT case". Saying which of the two arms matched is what separates those.
+      try { _orchLog(`AUDIT ▸ case division lookup MISS want="${t.slice(0, 48)}" ref="${wantRef}" byref=${byRef ? `y div="${(byRef.record && byRef.record.division) || ''}"` : 'n'} bylabel=${hit ? `y div="${(hit.record && hit.record.division) || ''}"` : 'n'} of ${cases.length} case(s); labels: ${cases.slice(0, 4).map((c) => `"${String((c && c.label) || '').slice(0, 40)}"`).join(' · ')}`); } catch { /* */ }
+    }
+    return div;
+  } catch { return ''; }
+}
+
+// v2.74.2184 — when the drive last reloaded a crashed VendorSuite tab. Module-scoped on purpose: the false
+// signed-out verdict lands on a LATER click than the one that reloaded, so the two calls have to share it.
+let _lastCrashReloadAt = 0;
+
+// v2.74.2190 — WHAT WE LAST DROVE TO, and whether we already told the user it was open.
+//
+// The re-click problem, from the code: clicking the eye on an ALREADY-OPEN task re-runs the whole ~15s walk and
+// lands in the same place. It is harmless — TYPE clears before typing (contentScript `setValue('')`), the group
+// expand only matches a COLLAPSED chevron, the row click re-selects the same row — but the open task closes, the
+// list re-renders, and it re-opens fifteen seconds later, which reads as the panel forgetting what it was doing.
+//
+// This uses ONLY OUR OWN STATE. The detail pane cannot identify its task — its text is Issued Date / Task Status
+// / Priority / Eligible for Payment / Close of Escrow / Instructions, with no id and no address (user read,
+// 2026-08-10) — so "is THIS task open?" is not answerable from the page without another guess, and guesses about
+// this page have cost six versions today. What we can say with certainty is "we drove to this ref, on this tab,
+// and nothing has happened since". Its worst case is a wrong skip that SAYS what it did, and one more click
+// overrides it.
+let _lastDrive = { ref: '', tabId: null, at: 0, told: false };
+const _DRIVE_SKIP_WINDOW_MS = 120000;   // beyond this, re-walk rather than trust a stale belief
+
+async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
+  const was = btn ? btn.title : '';
+  // v2.74.2192 — MARK THE ROW EXPLICITLY, from JS. v2190 styled the running state with `:has(button[data-busy])`
+  // and assumed the row carries `.rail-item`; live, nothing showed. Rather than guess which of those two
+  // assumptions failed, set the class on whatever row actually contains the button and insert a real caption
+  // element — no `:has()`, no assumption about the row's class, and the caption is a node you can see in the
+  // inspector rather than a pseudo-element that may or may not be laying out.
+  const _row = btn ? btn.closest('.rail-item, .rail-record-card, li, div') : null;
+  let _cap = null;
+  if (btn) {
+    btn.disabled = true; btn.title = `Opening ${ref} on ${site}…`; btn.dataset.busy = '1';
+    if (_row) _row.classList.add('is-driving');
+    try {
+      _cap = document.createElement('span');
+      _cap.className = 'drive-running-cap';
+      _cap.textContent = `opening ${ref} on the site…`;
+      if (btn.parentElement) btn.parentElement.insertBefore(_cap, btn);
+    } catch { _cap = null; }
+  }
+  const _clearRunning = () => {
+    if (btn) { btn.disabled = false; delete btn.dataset.busy; }
+    if (_row) _row.classList.remove('is-driving');
+    if (_cap && _cap.parentElement) { try { _cap.remove(); } catch { /* */ } }
+  };
+  try {
+    // v2.74.2190 — ALREADY OPEN? Say so instead of re-walking. Four conditions, all of them ours or the
+    // browser's, none of them a claim about the page's contents: same ref · same tab · recent · and the tab is
+    // still on the warranty section. A SECOND click overrides (`told`), so the user is never stuck with a wrong
+    // belief — the first click reports, the next one re-drives. That escape hatch is the reason this can be a
+    // heuristic at all: it is one click from being corrected, and it says out loud what it did.
+    if (_lastDrive.ref === String(ref) && _lastDrive.tabId != null
+        && (Date.now() - _lastDrive.at) < _DRIVE_SKIP_WINDOW_MS && !_lastDrive.told) {
+      let _stillThere = '';
+      try { const _t = await chrome.tabs.get(_lastDrive.tabId); _stillThere = String((_t && _t.url) || ''); } catch { _stillThere = ''; }
+      if (/#warranty\b/i.test(_stillThere)) {
+        _lastDrive.told = true;
+        try { await chrome.tabs.update(_lastDrive.tabId, { active: true }); } catch { /* focus is a courtesy */ }
+        try { _orchLog(`AUDIT ▸ show task ${ref} on ${site} → already open (drove here ${Math.round((Date.now() - _lastDrive.at) / 1000)}s ago) — focused the tab; click again to re-open`); } catch { /* */ }
+        if (btn) btn.title = `${ref} is already open — click again to re-open it`;
+        return;
+      }
+    }
+    // 1. Open the warranty section on the ground's own tab (reuse-then-navigate — the same SHOW_SOURCES the
+    //    built-in drive legs use at chat.js:15606).
+    // v2.74.2186 — `focusOnly`, so we NEVER rewrite the hash of a tab the user already has open. This is the
+    // last half of the v2185 finding and it was sitting in an existing flag the whole time.
+    //
+    // Live: starting from `/#settings`, the eye fails with a DIFFERENT crash than the one v2185 fixed —
+    // `AppHeader.render` reading `.length` of undefined, not `DivisionMenuContainer.reduce`. The order explains
+    // it: SHOW_SOURCES hash-changed the tab #settings → #warranty BEFORE any of our clicks ran, the app tried to
+    // render the warranty route without the data that route needs, and the header threw. v2185's nav click then
+    // executed against an already-unmounted tree, which is why "we click it now" was necessary and not sufficient.
+    //
+    // It also explains the case that DID work: with the tab already on `/#warranty`, that same navigation is a
+    // no-op, so nothing broke — "works from /#warranty" was never about the page being warm, it was about the
+    // hash write being a no-op.
+    //
+    // `focusOnly` (CX-9l, v2.74.1448) already means exactly this — its own comment says a reused tab "is FOCUSED,
+    // never re-navigated (a 'go to <known site>' must not blow away the page the user's live tab is on)". A
+    // FRESH tab still opens `/#warranty` directly, which is a full document load and boots the app normally.
+    // So: reuse → focus, and F1's nav click performs the navigation the way the app expects.
+    // v2.74.2188 — REVERTED to the plain v2185 call, at the user's direction: "still doesn't work, just
+    // revert to when it worked for other tabs."
+    //
+    // What is being given up, stated plainly so the next reader does not rediscover it: a tab sitting on ANOTHER
+    // section (e.g. /#settings) gets a hash-only change, which makes the app render the warranty route without
+    // the data that route needs and throw (AppHeader '.length' of undefined; DivisionMenuContainer '.reduce'
+    // elsewhere). That defect is real and unfixed — v2186 traded it for a worse one (no navigation at all) and
+    // v2187's set-URL-then-reload did not fix it either. Two attempts, both regressions; the known-good
+    // behaviour is worth more than a third guess, and the crash is at least reported honestly now (v2182) and
+    // self-heals on the next click (v2183's tab reload).
+    // v2.74.2189 — `focusOnly` again, and THIS time the thing that made it fail is fixed. User's instruction:
+    // "just have the workflow always trigger a physical click on the warranty tab regardless of starting
+    // position." That is exactly right, and v2186's attempt at it regressed for a reason I misattributed: the
+    // nav click never ran. `_settleDriveSection` (sg.js) required the URL to already contain `#warranty` and
+    // rejected the tab before hydrating anything — "the page section never became ready", the walk stopped with
+    // zero steps executed. So the gate was demanding the destination as a precondition for the walk that
+    // reaches it. v2189 relaxes that gate (off-section but PAINTED is ready, after a 3s grace) and only then is
+    // focus-don't-navigate safe.
+    //
+    // Reused tab → focused, hash untouched → no route render without data → no crash. F1's first step clicks the
+    // Warranty nav item, which is how a person gets there and the only way that has ever worked from another
+    // section. A FRESH tab still opens `/#warranty` directly (full document load, normal boot).
+    const r = await _orchReq('SHOW_SOURCES', { origin: site, urls: [`https://${site}/#warranty`], focusOnly: true });
+    if (!r || r.success === false || typeof r.tabId !== 'number') {
+      _orchLog(`AUDIT ▸ show task ${ref} → could not open ${site}`);
+      if (btn) btn.title = `Couldn’t open ${site}`;
+      return;
+    }
+    // 2. Walk it with the BUILT-IN artifact. `vsd_review_warranty_task` (tier 2) composes exactly the four steps
+    //    the user named — select division → open status tab → open the task row — and its fragments click by
+    //    LABEL, never by position.
+    //
+    // v2.74.2155 — DIVISION IS RESOLVED, NOT BLANK. v2154 sent '' on the reasoning that "blank keeps the current
+    // one", which quietly guaranteed the Columbus/Greensboro failure: a task outside the currently-shown division
+    // is not on the page, so no FIND can click it. `_contextDivision()` already returns the human LABEL
+    // ("Raleigh") precisely so CLICK_BY_LABEL contains-matches the on-page "Raleigh - 495" (chat.js:15071) — it is
+    // the right shape for `vsd_select_division`, and using it is strictly better than blank.
+    //
+    // v2.74.2156 — THE BANKED DIVISION WINS, and that is the follow-up rung v2155 named. The case recorded its
+    // division at CREATION time, when the read that produced the row had just run; `_contextDivision()` answers
+    // for NOW, and after a cross-division read ("13 tasks across all 121 divisions") now is null or stale —
+    // precisely the cases this button exists for. Context survives only as the fallback, for cases banked before
+    // this version and for a lookup that misses.
+    // v2.74.2172 — `ref` is the task id parsed off the case title, and it is now the case's own itemId, so the
+    // lookup can join on identity instead of on display text.
+    const _banked = await _bankedCaseDivision(title, ref);
+    const _ctxDiv = (() => { try { return _contextDivision() || ''; } catch { return ''; } })();
+    const _div = _banked || _ctxDiv;
+    // v2.74.2158 — RESOLVE THE GROUND. `groundId: null` was a placeholder that could never work: the handler's
+    // FIRST line is `if (!groundId || !driveId) → 'groundId + driveId required'` (sg.js:1403), and the catalog
+    // read under it (`_readDriveArtifactsMerged(groundId, origin)`) is ground-scoped, so there is no null-ground
+    // path to fall back to. Every click since v2154 died there before the walk began — which is exactly the
+    // symptom the user reported twice ("it only opens /#warranty"): SHOW_SOURCES opened the section, the drive
+    // was refused, and the tab sat on the section page looking like a half-finished navigation.
+    //
+    // PROVEN FROM THE FLEET, not inferred: five `AUDIT ▸ show task … → stopped — groundId + driveId required`
+    // lines on 2026-08-10 (15:36:07, 15:36:11, 15:36:55, 15:56:09, 16:23:06). The honest-outcome log added at
+    // v2154 is the only reason this is one grep instead of another guessing pass — v2150-53 would have printed
+    // `→ driven` for every one of them.
+    //
+    // ENSURE_GROUND_FOR_URL is dedup-before-mint (G1-1), so this reuses the site's existing ground and mints only
+    // when there is none; it is the same hop `_cachedHostRecipes` and the drill path already make.
+    let _gid = '';
+    try { const _g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${site}/` }); _gid = (_g && _g.groundId) || ''; } catch { _gid = ''; }
+    if (!_gid) {
+      _orchLog(`AUDIT ▸ show task ${ref} on ${site} → stopped — no ground for ${site} (the drive is ground-scoped)`);
+      if (btn) btn.title = `Couldn’t resolve ${site} — open the site once, then retry`;
+      return;
+    }
+    // v2.74.2164 — A BLANK DIVISION MUST NOT RUN THE COMPOSITE, and the catalog said so before this arc began.
+    // `vsd_select_division`'s own comment: "the RISK this leaves is a blank {{DIVISION}}: its label-click skips
+    // (the v877 contract) and the opened menu could overlay fragment 2. Watch the next trace for a status-tab
+    // mis-click." That is exactly what has been happening, and it explains "it always just goes to /#warranty"
+    // end to end:
+    //   1. CLICK the division toggle (optional:true) — OPENS the division menu
+    //   2. CLICK_BY_LABEL '{{DIVISION}}' — blank → SKIPS, so the menu is left OPEN over the page
+    //   3. the status tab and the row then CLICK_BY_LABEL into that open MENU, not into the task list
+    // With FIND="Las Vegas" step 3 found "Las Vegas" IN THE OPEN MENU, clicked it, and returned success
+    // (16:51:18). With FIND="1565 Fairlie Way" the menu had no such label and the list underneath was covered —
+    // `Available: "toggle menu", "Download CSV"` (16:51:27). One cause, both observations.
+    //
+    // So: with a division, run the composite. Without one, run the ROW fragment ALONE — it opens no menu, and if
+    // the task happens to be in the division already on screen it simply works. Never open a menu that nothing
+    // will close.
+    const _drive = _div ? 'vsd_review_warranty_task' : 'vsd_open_task_row';
+    const d = await _orchReq('INVOKE_DRIVE_ARTIFACT', {
+      groundId: _gid, driveId: _drive, tabId: r.tabId, origin: site,
+      // v2.74.2174 — STATUS IS NO LONGER SENT, and the reason is a state change I cannot predict. Live 13:21:48
+      // proved the status click LANDS: `CLICK_BY_LABEL → success "open"` · `CLICK landed on <div> "Open"`. But
+      // "Open" is very likely the filter already active (the task list defaults to open work), and clicking an
+      // active filter commonly TOGGLES IT OFF — which would empty the list. That is consistent with what
+      // followed: the division was picked successfully ("Columbus - 559") and the row wait then timed out at 8s
+      // with no rows on the page.
+      //
+      // UNPROVEN — I am not claiming the toggle happened. The rule is v2164's, and it does not need proof: do not
+      // take a state-changing step whose effect you cannot predict when it is only a CONVENIENCE. The row is the
+      // goal; narrowing by status was always optional; an unbound param SKIPS (the v877 contract), so the
+      // composite still runs division → row and simply performs one fewer mutation of the page.
+      // v2.74.2176 — SEARCH BY THE TASK NUMBER. The list renders collapsed into project groups, so the row does
+      // not exist in the DOM until something narrows it; the page ships an `input[type=search]` placeholdered
+      // "Find a ticket or task…", and `ref` is exactly that — the id parsed off the case title. FIND stays the
+      // ADDRESS for the click, because that is the row text a human reads and it survives the search either way.
+      params: { ...(_div ? { DIVISION: _div } : {}), SEARCH: String(ref || ''), FIND: String(find) },
+    });
+    // HONEST OUTCOME. v2150-53 logged "→ driven" whenever the CALL returned, which reported success for a walk
+    // that had stopped on the section page — the user saw the wrong page and a log that said it worked.
+    const ok = !!(d && d.success !== false && d.ok);
+    // v2.74.2164 — WHERE DID THE TAB ACTUALLY END UP? `ok` is the ExecutionEngine's opinion of its own run, and
+    // this arc has now proved that opinion unreliable: the 16:51:18 call returned success while
+    // `vsd_select_division` was SKIPPED (unbound param → skip, the v877 contract) and CLICK_BY_LABEL matched the
+    // literal string "Las Vegas" against something on the page. Engine-success is not arrival, and the user
+    // watched it land on the section page every time while the code called it done.
+    // `vsd_open_task_row` proves it clicked A label, never THE row. Until the artifact declares a real
+    // postcondition (`postconditions: []` is a slot the catalog ships EMPTY — Core/driveArtifacts.js:294), the
+    // landing URL is the only independent witness available, so it rides the line. Hash/path only — no query.
+    let _end = '';
+    try { const _t = await chrome.tabs.get(r.tabId); const _u = new URL(String((_t && _t.url) || '')); _end = `${_u.pathname}${_u.hash}`; } catch { _end = ''; }
+    // v2.74.2156 — the division's SOURCE rides the line. "div=Greensboro" cannot distinguish a banked value from a
+    // context value that happens to agree, and those two have different failure modes — the whole point of this
+    // rung is that banked is right when context is stale, which a trace can only show if it says which one ran.
+    // v2.74.2161 — `tab=` records whether SHOW_SOURCES REUSED the tab, because that decides whether a navigation
+    // happened at all. `/#warranty` differs from the tab's current URL only in the HASH on a reused tab, and
+    // `chrome.tabs.update({url})` on a hash-only change does no document load — `_waitTabComplete` returns at
+    // once because the tab never left 'complete' (connector.js:789-792). So the walk can begin against a page
+    // left in whatever state the LAST walk abandoned it in, which is the best explanation on hand for three
+    // consecutive clicks reporting three different pages: division picker timeout (16:38:42) → two chrome
+    // labels (16:39:07) → `Available: (none found)` after ONE step (16:39:59). Hypothesis, not a finding — this
+    // field is what will confirm or kill it, and it costs one word per line.
+    // v2.74.2164 — "walked to the row" IS RETIRED as a claim. It was derived from `d.ok` alone, so it asserted
+    // arrival on exactly the evidence that has been shown not to establish it — the same dishonest-success shape
+    // as v2150-53's `→ driven`, which this line was written to replace. It now reports the two things actually
+    // known and separates them: the engine's verdict, and where the tab ended.
+    // v2.74.2182 — NAME THE SITE CRASH. `Available: (none found); searched 0: (nothing with text)` means the
+    // container query ran against a page with NOTHING on it, and the browser console says why: VendorSuite's
+    // `DivisionMenuContainer` renders with `menuItems: undefined`, `.reduce` throws, and with no error boundary
+    // React unmounts the whole tree. It is triggered by OUR toggle click landing inside the 7-12s window while
+    // `/api/VendorSuite/State` (which carries the division list) is still in flight — the very number this
+    // codebase prints on every ask ("the cold read is ~7-12s").
+    //
+    // This is the site's defect, not ours, and no selector or wait on our side repairs a missing error boundary.
+    // What we CAN stop doing is reporting it as a mysterious stall: the raw message reads like our walk lost the
+    // page, when the page destroyed itself. An empty body after a successful earlier step is the signature, and
+    // it is worth saying in words a person can act on — the action is simply to retry once the tab is warm.
+    // v2.74.2184 — DO NOT TELL A SIGNED-IN USER THEY ARE SIGNED OUT. v2183's crash-reload works (live 21:31-21:32:
+    // two SITE PAGE BLANK failures, a reload, then `engine ok` twice), but the click that lands DURING the reload
+    // hits a page still running its auth bootstrap, and `_settleDriveSection` reads that as signed-out —
+    // 21:31:50 reported "you appear to be signed out of vendorsuite.drhorton.com — sign in and I'll retry" to a
+    // user who was signed in the whole time. That is a false alarm I introduced, and it is the worst kind: it
+    // asks for an action that is neither needed nor possible, about a session that is fine.
+    // Inside the reload window the honest reading is "the site is still coming back", not "you are logged out".
+    let _reason = (d && (d.reason || d.error)) || 'a step failed';
+    const _siteCrashed = /Available: \(none found\); searched 0/.test(_reason);
+    if ((d && d.signedOut) && (Date.now() - _lastCrashReloadAt) < 45000) {
+      _reason = `${site} is still reloading after its page crashed — try again in a few seconds (you are not signed out)`;
+    }
+    // v2.74.2183 — A CRASHED TAB STAYS CRASHED, so un-poison it. React unmounted the tree; nothing re-mounts it,
+    // and the tab is dead for every later attempt until someone reloads. The trace shows exactly that progression
+    // in one window: 21:17:00 Columbus → engine ok · 21:17:15 Las Vegas → blank · 21:18:15 Greensboro → blank ·
+    // 21:22:10 Columbus → blank — the SAME division that had worked five minutes earlier, now failing because the
+    // page it was walking no longer existed. Read as a per-division problem it makes no sense; read as "the first
+    // crash killed the tab" it is exactly right, and it is why this looked like the drive "just stopped working".
+    //
+    // Reloading is restorative, not destructive: the page is provably blank (`searched 0: nothing with text`), so
+    // there is no state to lose, and it is precisely what a person does when a tab goes white. It cannot rescue
+    // THIS walk — the fragment already failed — but it means the next click starts from a live page instead of
+    // inheriting a corpse. Best-effort: a reload that fails must never mask the real reason above.
+    if (_siteCrashed && typeof r.tabId === 'number') {
+      try { await chrome.tabs.reload(r.tabId); _lastCrashReloadAt = Date.now(); } catch { /* the message below still tells the user to retry */ }
+    }
+    _orchLog(`AUDIT ▸ show task ${ref} on ${site} div="${_div || '(current)'}" divsrc=${_banked ? 'banked' : (_ctxDiv ? 'context' : 'none')} tab=${r.reused ? 'reused' : 'new'} drive=${_drive === 'vsd_review_warranty_task' ? 'composite' : 'row-only'} FIND="${String(find).slice(0, 48)}" → ${ok ? 'engine ok' : `stopped — ${_siteCrashed ? 'SITE PAGE BLANK (its own script threw — division data not loaded yet; retry on a warm tab) — ' : ''}${_reason}`} end="${_end || '(unknown)'}"`);
+    // The BUTTON must not claim it either. A tab still sitting on the bare section did not reach the task,
+    // whatever the engine returned — so the tooltip says so rather than quietly reverting to its resting text.
+    // v2.74.2190 — remember what we drove to, so a second click on the same eye can say "already open" instead
+    // of re-running the walk. Recorded only on a run the engine reported OK; a failed walk leaves no belief.
+    if (ok) _lastDrive = { ref: String(ref), tabId: r.tabId, at: Date.now(), told: false };
+    const _arrived = ok && !!_end && !/^\/?(?:#warranty)?\/?$/i.test(_end);
+    // v2.74.2182 — the TOOLTIP says the same thing the log does. "The page is where it stopped" invites the
+    // reader to look for our mistake; when the site's own script has blanked the page, the honest instruction is
+    // to try again once its data has loaded.
+    if (btn) {
+      btn.title = _arrived ? was
+        : _siteCrashed ? `${site} went blank — its page errored before its division data loaded. Try again in a few seconds.`
+          : `Opened ${site} but couldn’t reach ${ref} — the page is where it stopped`;
+    }
+  } catch (e) {
+    _orchLog(`AUDIT ▸ show task ${ref} FAILED — ${(e && e.message) || e}`);
+    if (btn) btn.title = `Couldn’t open ${ref}`;
+  } finally { _clearRunning(); }   // v2.74.2192 — one exit point for the running state: button, row class and caption all clear together
+}
+
+// AU-2 — resolve a stored row to its absolute page. The catalog lookup is HERE (the panel has CONNECTOR_RECIPES)
+// and the decision is in the pure `recordOpenUrl`, so the rule stays unit-testable and this stays a lookup.
+function _recordOpenUrl(e) {
+  try {
+    const rec = (CONNECTOR_RECIPES || []).find((r) => r && r.id === (e && e.recipeId));
+    return recordOpenUrl(e, (rec && rec.itemUrl) || '', fillEndpoint);
+  } catch { return ''; }
+}
+
+/**
+ * AU-2 — open a created record on its native platform, REUSING an already-open tab before minting one (user
+ * direction 2026-08-10). Three rungs, narrowest first:
+ *   1. a tab already on that exact URL  → just focus it (the record is already open; a second tab is clutter)
+ *   2. a tab on the same HOST           → navigate it (the admin session is warm there; a new tab re-authenticates
+ *                                         and can land on a login interstitial)
+ *   3. nothing on that host             → create one
+ * Focus goes through FOCUS_TAB, never a raw `chrome.tabs.update({active:true})` — FM-1 makes that the ONE focus
+ * policy so every activation lands in the `FOCUS ▸` audit; a card that bypassed it would move the user's window
+ * invisibly to the trace.
+ */
+async function _openRecordLink(url, btn) {   // NOT _openRecordOnSite — that name is taken (chat.js:15003, the ASK path that walks a site to find a record). This one opens a URL we already hold.
+  let host = '';
+  try { host = new URL(url).host; } catch { /* a malformed url cannot be opened; fall through to the failure below */ }
+  if (!host) { if (btn) btn.title = 'That record has no openable link'; return; }
+  try {
+    const exact = await chrome.tabs.query({ url: url.split('#')[0] });        // 1 — already open on this record
+    const hit = (exact || []).find((t) => t && typeof t.id === 'number');
+    if (hit) { await _orchReq('FOCUS_TAB', { tabId: hit.id, reason: 'record-open' }); _orchLog(`AUDIT ▸ open record → reused tab ${hit.id} (already on it) ${url}`); return; }
+  } catch { /* query can throw on an odd pattern — fall through to the host rung */ }
+  try {
+    const same = await chrome.tabs.query({ url: `*://${host}/*` });           // 2 — same host, warm session
+    const t = (same || []).find((x) => x && typeof x.id === 'number');
+    if (t) {
+      await chrome.tabs.update(t.id, { url });                               // navigate (not activate — FOCUS_TAB owns that)
+      await _orchReq('FOCUS_TAB', { tabId: t.id, reason: 'record-open' });
+      _orchLog(`AUDIT ▸ open record → reused ${host} tab ${t.id} ${url}`);
+      return;
+    }
+  } catch { /* */ }
+  try {                                                                       // 3 — nothing to reuse
+    const t = await chrome.tabs.create({ url, active: true });
+    _orchLog(`AUDIT ▸ open record → new tab ${(t && t.id) ?? '?'} ${url}`);
+  } catch { if (btn) btn.title = 'Couldn’t open that record'; }
 }
 
 // DRILL-IN (§6.1) — the record's timeline in the run-history overlay idiom. v1 captures creates only, so the
@@ -12077,19 +12614,42 @@ async function _renderRailAutomations(opts = {}) {
   // spin for as long as the pointer parked in the rail. The swap-time check below stays as the belt.
   if (!opts.force && (live.matches(':hover') || live.matches(':focus-within')) && _autoEngagedDefer(opts.force)) return;
   const container = document.createElement('div');
-  let all = [];
-  try { all = await ConversationStore.list(); } catch { /* */ }
+  // v2.74.2173 — A FAILED READ MUST NOT RENDER AS AN EMPTY STORE. Both reads on this path swallowed their error,
+  // and the empty state then told the user something false in the most alarming possible way: "create a view in
+  // Chat first" to someone who already has views and workflows. That message is reached ONLY when
+  // `desks.length === 0`, so a thrown `ConversationStore.list()` is indistinguishable from having no views at
+  // all — and a thrown `listAllWorkflows()` silently drops every bank while the desks still render.
+  // Same class as v2137's swallowed case write, on the read side and in front of the user rather than in a log.
+  let all = []; let _listErr = '';
+  try { all = await ConversationStore.list(); } catch (e) { _listErr = String((e && e.message) || e); }
   const desks = all.filter((c) => c && c.appId && !c.parentId && c.kind !== 'dev');
   // v2.74.1934 — ALL workflows (not just scheduled), grouped BY DESK: resolve every bank to its owning desk
   // (the class-key sweep, mirrored from _renderRailListNow). Ownerless banks show nowhere (v1814).
   const wfByDesk = new Map();   // deskConv.id → { desk, wfs: [] }
+  let _bankErr = ''; let _bankCount = 0;
+  const _orphanWfs = []; const _orphanSeen = new Set();   // v2.74.2175 — shown, not counted-and-dropped
   try {
     const banks = await listAllWorkflows();
+    _bankCount = Array.isArray(banks) ? banks.length : 0;
     for (const b of banks) {
       if (!b || !Array.isArray(b.items) || !b.items.length) continue;
       const key = String(b.appId);
       const owner = desks.find((c) => String(c.instanceId) === key || String(c.appId) === key);
-      if (!owner) continue;
+      // v2.74.2175 — COLLECT the ownerless banks; do not drop them. WF-3's own header states the contract this
+      // tab was breaking: "Workflows already outlived desk deletion; they were just UNREACHABLE… Data intact,
+      // permanently invisible: the same felt outcome as deletion." `_loadWorkflowsMerged` (chat.js:11154) has
+      // honoured that since v1722 — it merges orphaned banks so "every reader sees them as ordinary workflows,
+      // tagged with their origin desk". THIS tab never did, and it is the surface whose entire job is listing
+      // workflows. `_railWorkflowRow` already renders the provenance (`· from “Warranty”`, chat.js:11481) and
+      // both its `parentConv` reads are null-guarded, so the row builder needs nothing new.
+      if (!owner) {
+        for (const w of b.items) {
+          if (!w || _orphanSeen.has(w.id)) continue;
+          _orphanSeen.add(w.id);
+          _orphanWfs.push(w.appId ? w : { ...w, appId: key });
+        }
+        continue;
+      }
       let g = wfByDesk.get(owner.id);
       if (!g) { g = { desk: owner, wfs: [] }; wfByDesk.set(owner.id, g); }
       for (const w of b.items) {
@@ -12098,22 +12658,41 @@ async function _renderRailAutomations(opts = {}) {
         if (!g.wfs.some((x) => x.id === wf.id)) g.wfs.push(wf);
       }
     }
-  } catch { /* */ }
+  } catch (e) { _bankErr = String((e && e.message) || e); }
   // parked runs (cross-desk)
   let parked = [];
   try { const r = await _orchReq('WORKFLOW_PARKED', {}); parked = (r && r.success !== false && Array.isArray(r.parked)) ? r.parked : []; } catch { /* */ }
   _wfNoteOpenParks(parked);   // WFP-5 — refresh the open-parks map (▶ routing + auto-runner skip)
 
   const groups = [...wfByDesk.values()].filter((g) => g.wfs.length);
-  if (!parked.length && !groups.length) {
+  // v2.74.2173 — ONE line that says what this tab actually saw. There was no marker for the Automate render at
+  // all, so "my workflow is gone" had no trace evidence on either side: not whether the store read, not how many
+  // banks came back, not how many were dropped as ownerless. Every one of those is a different bug with the same
+  // appearance. `WORKFLOW ▸` is already in Core/decisionMarkers.js, so this reaches a decisions download too.
+  try {
+    _orchLog(`WORKFLOW ▸ automate tab — ${desks.length} view(s) · ${_bankCount} bank(s) → ${groups.length} group(s) · ${_orphanWfs.length} orphaned (shown) · ${parked.length} parked${_listErr ? ` · VIEW READ FAILED: ${_listErr.slice(0, 100)}` : ''}${_bankErr ? ` · BANK READ FAILED: ${_bankErr.slice(0, 100)}` : ''}`);
+  } catch { /* */ }
+  // v2.74.2175 — orphans are CONTENT, so they keep this out of the empty branch.
+  if (!parked.length && !groups.length && !_orphanWfs.length) {
     // CN-1.2 (user directive) — the EMPTY Automate tab keeps a REACHABLE ＋ Workflow (it was text-only, pointing
     // elsewhere). Creation is per-view, so offer a ＋ Workflow row for each existing view (recency-ordered); with no
     // views yet, point to creating one in Chat first (a workflow has to live in a view).
     const empty = document.createElement('div');
     empty.className = 'rail-automations-empty';
-    empty.textContent = desks.length
-      ? 'No workflows yet — save a multi-step task you run often (it can run on a schedule). Add one to a view:'
-      : 'No workflows yet. A workflow lives in a view — create a view in Chat first, then add one here.';
+    // v2.74.2173 — the READ-FAILED wording comes first and never says "create a view": telling someone with
+    // saved work that they have none is worse than saying nothing, because it reads as data loss. Nothing has
+    // been deleted in this branch — a render could not see it — and the text now says exactly that.
+    empty.textContent = (_listErr || _bankErr)
+      ? `Couldn’t read your ${_listErr ? 'views' : 'workflows'} just now — nothing has been deleted. ${(_listErr || _bankErr).slice(0, 120)}. Reopen the panel to retry.`
+      : desks.length
+        ? 'No workflows yet — save a multi-step task you run often (it can run on a schedule). Add one to a view:'
+        : 'No workflows yet. A workflow lives in a view — create a view in Chat first, then add one here.';
+    // v2.74.2175 — the v2173 "N are attached to a view that no longer exists" wording is GONE, and its removal is
+    // the point: it was an accurate description of a behaviour that should not exist. Telling someone their work
+    // is intact but unreachable is better than lying to them, and worse than showing it. It also MASKED the
+    // view count — with the orphan branch first, this message could no longer distinguish "no views" from
+    // "views exist", which is the very signal that located the bug. Orphans now render below; this branch is
+    // reached only when there is genuinely nothing to show.
     container.appendChild(empty);
     for (const desk of desks.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) container.appendChild(_railWfAddRow(desk, { named: true }));
     // RB-1 (rail review) — swap-time fence: the awaits above let a run start after the entry check; swapping
@@ -12190,6 +12769,25 @@ async function _renderRailAutomations(opts = {}) {
     for (const wf of g.wfs) container.appendChild(_railWorkflowRow({ wf, wfKey: wf.appId }, g.desk));
     // ＋ Workflow — creation stays reachable per view (the desk-row ＋ Workflow row is gone from Conversations)
     container.appendChild(_railWfAddRow(g.desk));
+  }
+  // v2.74.2175 — ORPHANED BANKS, last and named. A workflow whose view is gone is still the user's work: 33 runs
+  // of teaching does not stop counting because a conversation record went away. Rendered with the SAME
+  // `_railWorkflowRow` as every other card (it already appends `· from “<desk>”` from the WF-3 stamp), under
+  // their own group, after the live views so nothing outranks a working desk.
+  //
+  // NOT auto-re-homed. Which live view should inherit them is the user's call — `_wfScheduleBar` already re-keys
+  // one on the single occasion it MUST (arming a schedule needs a live owner, chat.js:12911), and doing it
+  // silently on render would move ownership behind the user's back for no forced reason.
+  if (_orphanWfs.length) {
+    const h = document.createElement('div'); h.className = 'rail-auto-group';
+    h.textContent = 'From a removed view';
+    container.appendChild(h);
+    _orphanWfs.sort((a, b) => {
+      const ad = (a.trigger && a.trigger.enabled && a.trigger.nextDue) || Infinity;
+      const bd = (b.trigger && b.trigger.enabled && b.trigger.nextDue) || Infinity;
+      return ad - bd;
+    });
+    for (const wf of _orphanWfs) container.appendChild(_railWorkflowRow({ wf, wfKey: wf.appId }, null));
   }
   if (!live.isConnected) return;
   // RB-1 (rail review) — swap-time fence re-check: three awaits sit between the entry fence and this swap; a ▶
@@ -14819,7 +15417,36 @@ async function _maybeWidenUnscoped(msg, { leg, ask, tabId, groundId, params, val
           if (_mode === 'first') { if (!hit) hit = { label: c.label ?? c.value, value: c.value, row: rows[0], more: rows.length - 1 }; }
           else {
             recCount += rows.length; recGroups.push({ label: String(c.label ?? c.value), n: rows.length });
-            for (const _r of rows) { if (recRows.length >= _ALL_ROWS_CAP) break; recRows.push(_r); }   // v2.74.2097 — rows kept as READ (unmodified: an injected key would confuse field resolution)
+            // v2.74.2160 — TAG EACH ROW WITH THE CELL IT CAME FROM. v2097 kept rows "as READ (unmodified: an
+            // injected key would confuse field resolution)" — a reasonable caution that turned out to cost the
+            // one fact a swept row can never recover on its own. A cross-division sweep is the ONLY reader that
+            // knows which division a row belongs to: the row itself carries no division field (proven from the
+            // payload shape — SearchField · TaskId · TicketId · BusinessUnitId · TaskNumber · … · AddressLine1,
+            // no division), and by the time a case is opened from these rows the axis is long gone.
+            //
+            // Downstream that absence is fatal, not cosmetic: the case banks division '' (v2156), the Show-task
+            // drive sends DIVISION '' (`divsrc=none`), `vsd_select_division` has nothing to pick, and the walk
+            // reaches a warranty list whose only clickable labels are "toggle menu" and "Download CSV" — live
+            // 2026-08-10 16:39:07. An unpopulated list is what "no option matched" actually meant.
+            //
+            // The shape is NOT new and the caution is answered by precedent: the FAN path has shallow-tagged its
+            // rows this exact way since v1552 (chat.js:14497, `{ [noun]: it.label, ...row }`) — same key, same
+            // precedence, copies not mutations, and a row that carries its own `division` still wins. Making the
+            // widen path agree with the fan removes an inconsistency rather than adding a risk.
+            // v2.74.2163 — CORRECTS v2160, and v2097's caution was RIGHT. Tagging with a bare `division` key
+            // FIRST put it at the head of the row's enumeration, and `itemFields(o, {max:2})` takes the first two
+            // fields to build a label — so `_rowLabel` produced "#4888221 · Las Vegas" instead of
+            // "#4888221 · 7356 AXEL CREEK ST", the case title carried a DIVISION where its address belongs, and
+            // the drive searched the page for "Las Vegas" (live 16:51:18, `FIND="Las Vegas"`). "An injected key
+            // would confuse field resolution" was exactly the failure, one hop further along than I read it.
+            //
+            // Two changes, either of which would do, both because the cost of being wrong here is a corrupted
+            // case title: the key is `__division` (the `__contacts` convention — double-underscore marks a
+            // panel-attached field, not a record one), and it is spread LAST so a row's own fields always come
+            // first in enumeration order. The fan path's bare-`[noun]`-first form (chat.js:14497) renders its
+            // groups immediately and never reaches _rowLabel, which is why it has been safe there and was not
+            // here — the idiom did not transfer, and "the sibling already does it" was not sufficient reason.
+            for (const _r of rows) { if (recRows.length >= _ALL_ROWS_CAP) break; recRows.push({ ..._r, __division: String(c.label ?? c.value ?? '') }); }
           }
         }
       }
@@ -17069,11 +17696,13 @@ async function sendChatMessage(textOverride = null) {
             _turnLock();
             try { _roster = await _contactsForListRows(_list, mR); } finally { _turnUnlock(); }
             if (_roster) {
-              _setMessageBody(mR, renderContactRoster({ items: _roster, role: _cr.role, want: _cr.want }), { markdown: true });
+              // v2.74.2157 — the LIST's length rides to the renderer, so a capped read says so in the answer.
+              const _tot = (_list.rows || []).length;
+              _setMessageBody(mR, renderContactRoster({ items: _roster, role: _cr.role, want: _cr.want, total: _tot }), { markdown: true });
               _orchFinalize(mR);
               try {
                 const _with = _roster.filter((r) => selectContacts(r.people, _cr.role).length).length;
-                _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} each=${_roster.length} row(s) → ${_with} with a match`);
+                _orchLog(`CONTACT ▸ role=${_cr.role} want=${_cr.want} each=${_roster.length}/${_tot} row(s) → ${_with} with a match${_tot > _roster.length ? ` · CAPPED (${_tot - _roster.length} not read)` : ''}`);
               } catch { /* logging is best-effort */ }
               return;
             }
@@ -17135,10 +17764,10 @@ async function sendChatMessage(textOverride = null) {
               ? `I couldn't read the warranty list for #${_cr.ticket} — it needs a division and I don't have one in context. Name it (e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`), or open the record first.`
               : (_m.hits > 1)
                 ? `More than one warranty task matches #${_cr.ticket}, so I won't guess which one's ${_said} you mean. Open the record you want first.`
-                : `#${_cr.ticket} isn't in the warranty list I can see (${_m.rows} task(s) searched across ${_m.invoked} status bucket(s)). If it's in another division, name it — e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`.`;
+                : `#${_cr.ticket} isn't in the warranty list I can see — I searched ${_m.rows} task(s) across ${_m.invoked} status bucket(s)${_m.div ? ` in **${_m.div}** only` : ''}, not every division. If it's in another one, name it — e.g. \`who is the ${_cr.role} on #${_cr.ticket} in Raleigh\`.`;
           _setMessageBody(mC, _text, { markdown: true });
           _orchFinalize(mC);
-          try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (leg=${_m.leg ? 'y' : 'n'} invoked=${_m.invoked || 0} blocked=${_m.blocked || 0} rows=${_m.rows || 0} hits=${_m.hits || 0})`); } catch { /* */ }
+          try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (leg=${_m.leg ? 'y' : 'n'} invoked=${_m.invoked || 0} blocked=${_m.blocked || 0} rows=${_m.rows || 0} hits=${_m.hits || 0} div=${_m.div || '(none)'} scope=division-local)`); } catch { /* */ }
           return;
         }
       }

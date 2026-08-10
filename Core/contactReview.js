@@ -80,6 +80,25 @@ export function contactLines(people = []) {
 }
 
 /**
+/**
+ * v2.74.2149 (DESIGN_audit.md §12.8.2) — `reference`: a FOURTH kind, and the distinction is load-bearing.
+ *
+ * `primary` / `secondary` / `override` all DECIDE or MUTATE. Showing the task decides nothing: it can be taken
+ * freely, any number of times, at any point in the review, and it leaves the case exactly as it was. That is a
+ * real safety property for a reviewer whose pointer is two positions from a `danger` control, so it is ENCODED
+ * rather than left to styling — a renderer may never give a `reference` control the danger treatment, and a
+ * mis-click costs nothing.
+ *
+ * On EVERY channel, not just `email`. The motivating case is AMBIGUOUS warranty instructions, which resolves to
+ * the `unresolved` channel — the row where reading the source task matters most.
+ *
+ * Ordered LAST so the channel's primary stays the dominant control: the decision is the point of the card, the
+ * reference is support. The drive itself is the renderer's job (this module is pure); it routes to the existing
+ * `drill.matchOn` walk, which means Invariant #2 busy-marking is REQUIRED at that seam.
+ */
+const SHOW_TASK = Object.freeze({ id: 'show-task', kind: 'reference', label: 'Show task' });
+
+/**
  * The controls for one card. PURE.
  *
  * The primary control is the ACT; the others are the override. Every channel has exactly one primary, so a
@@ -93,6 +112,7 @@ export function controlsFor(channel, { email = '', phone = '' } = {}) {
       { id: 'edit', kind: 'secondary', label: 'Edit the draft' },
       { id: 'to-call', kind: 'override', label: 'Call instead' },
       { id: 'to-unresolved', kind: 'override', label: 'Leave unresolved' },
+      SHOW_TASK,
     ];
   }
   if (c === 'call') {
@@ -101,12 +121,14 @@ export function controlsFor(channel, { email = '', phone = '' } = {}) {
       { id: 'called', kind: 'primary', label: phone ? `Mark called — ${phone}` : 'Mark called' },
       { id: 'to-email', kind: 'override', label: 'Email instead' },
       { id: 'to-unresolved', kind: 'override', label: 'Leave unresolved' },
+      SHOW_TASK,
     ];
   }
   return [
     { id: 'close', kind: 'primary', label: 'Close — nothing owed to the homeowner' },
     { id: 'to-email', kind: 'override', label: 'Email them anyway' },
     { id: 'to-call', kind: 'override', label: 'Call them anyway' },
+    SHOW_TASK,
   ];
 }
 

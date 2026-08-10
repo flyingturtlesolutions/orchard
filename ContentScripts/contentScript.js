@@ -2437,9 +2437,14 @@ async function handleClickByLabel(selector, value) {
     const available = _listAvailableLabels(container);
     const sample = available.slice(0, 8).map(s => `"${s}"`).join(', ');
     const more = available.length > 8 ? ` (and ${available.length - 8} more)` : '';
+    // v2.74.2167 — report BOTH spaces. `Available:` is the clickable group and stops at the first non-empty
+    // priority level; `searched:` samples the all-descendants space the matcher's last resort actually covers.
+    // Without the second, a page of non-clickable list rows is indistinguishable from an empty page.
+    const searched = _listSearchedLabels(container);
+    const sSample = searched.slice(0, 8).map(s => `"${s}"`).join(', ');
     return {
       success: false,
-      error: `CLICK_BY_LABEL: no option matched "${value}" in container "${selector.slice(0, 80)}". Available: ${sample || '(none found)'}${more}`,
+      error: `CLICK_BY_LABEL: no option matched "${value}" in container "${selector.slice(0, 80)}". Available: ${sample || '(none found)'}${more}; searched ${searched.length}: ${sSample || '(nothing with text)'}`,
     };
   }
 
@@ -2573,6 +2578,33 @@ function _listAvailableLabels(container) {
       }
     }
     if (out.length > 0) return out;   // first non-empty priority level wins
+  }
+  return out;
+}
+
+/**
+ * v2.74.2167 — WHAT THE MATCHER ACTUALLY SEARCHED, which is not what `_listAvailableLabels` reports.
+ *
+ * `_listAvailableLabels` stops at the first NON-EMPTY priority group, but `_findLabelMatches` stops only at the
+ * first group containing a MATCH and otherwise falls through to `querySelectorAll('*')`. So on a page holding two
+ * buttons and fifty list rows, a failed match reports `Available: "toggle menu", "Download CSV"` — true of the
+ * clickable group, and badly misleading about the candidate space. Live cost (2026-08-10): several passes read
+ * that line as "the task list is empty" and diagnosed a division/menu-overlay problem, when all it established
+ * was that no BUTTON matched. The row text may simply differ from the value being searched for.
+ *
+ * This samples the SAME all-descendants space the matcher's last resort uses, filtered to leaf-ish text so the
+ * sample is rows rather than nested wrappers repeating their children's text.
+ */
+function _listSearchedLabels(container) {
+  const seen = new Set();
+  const out = [];
+  for (const el of container.querySelectorAll('*')) {
+    if (el.children.length > 2) continue;                 // a wrapper echoes its descendants' text — not a label
+    const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+    if (!text || text.length >= 80 || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+    if (out.length >= 12) break;
   }
   return out;
 }
@@ -6584,6 +6616,87 @@ var MESSAGE_HANDLERS = {
     }
   },
 
+
+  // v2.74.2190 — DRIVE_BANNER: an on-page marker that says the engine is driving THIS tab.
+  //
+  // Why on the page and not in the panel: every observation that moved this arc came from the user watching
+  // VendorSuite, not Orchard. A drive takes ~15s and moves the page under them; the panel-side signal (a
+  // disabled button and a hover TOOLTIP) is invisible to someone looking at the site. There is also a plainer
+  // reason — software clicking inside an authenticated session should say so on the surface it is clicking.
+  //
+  // Deliberately small and non-blocking: `pointer-events: none` so it can never intercept a click the walk is
+  // about to make, and no page CSS is touched (all inline on our own node). Text is OURS, set via textContent,
+  // never page-derived (the §9 injection boundary).
+  // v2.74.2191 — TOP-RIGHT in the app accent, user's call. I had argued bottom-right on the grounds that this
+  // app's header is where it crashes; that reasoning does not actually survive contact — the banner never
+  // receives pointer events, so overlaying the header cannot cause or worsen anything, and top-right is where a
+  // person looks. The original objection was about a risk the `pointer-events:none` already rules out.
+  'DRIVE_BANNER': (message, _sender, sendResponse) => {
+    const ID = '__orchard_drive_banner';
+    try {
+      // v2.74.2193 — TOP FRAME ONLY, enforced here as well as at the sender. This script runs in EVERY frame,
+      // so a broadcast produced one banner per frame — each `position:fixed` to its own viewport, which the user
+      // saw as a second pill mid-screen. The sender now targets `frameId: 0`; this guard means no future caller
+      // can reintroduce it, and it costs one comparison.
+      if (window.top !== window) { sendResponse({ success: true, shown: false, skipped: 'subframe' }); return false; }
+      const on = !!(message?.payload?.on);
+      const label = String(message?.payload?.label ?? 'Orchard is driving this page').slice(0, 120);
+      let el = document.getElementById(ID);
+      if (!on) { if (el) el.remove(); sendResponse({ success: true, shown: false }); return false; }
+      if (!el) {
+        el = document.createElement('div');
+        el.id = ID;
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        // v2.74.2191 — TOP-RIGHT, in the app accent (user's call). The accent is `--c-accent: #d97757`
+        // (assets/chat.css:28) written as a LITERAL: this node lives in the SITE's document, which has none of
+        // our custom properties, so a `var(--c-accent)` here would silently resolve to nothing.
+        // `pointer-events:none` still holds, so sitting over the app's header cannot intercept a click.
+        el.style.cssText = [
+          'position:fixed', 'right:16px', 'top:16px', 'z-index:2147483647',
+          'pointer-events:none', 'max-width:360px',
+          'font:500 12px/1.45 system-ui,-apple-system,Segoe UI,sans-serif',
+          'color:#fff', 'background:#d97757', 'padding:8px 12px',
+          'border-radius:999px', 'box-shadow:0 4px 14px rgba(0,0,0,.28)',
+          'display:flex', 'align-items:center', 'gap:8px',
+        ].join(';');
+        const dot = document.createElement('span');
+        // White on the accent, so the dot reads at any app background — a green dot on #d97757 muddies.
+        dot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.9);flex:0 0 auto';
+        // v2.74.2194 — IT IS AN ALERT, SO IT BLINKS (user's call). A static pill reads as page furniture; this
+        // has to say "something is driving your browser RIGHT NOW", and the whole point is that the user is
+        // looking at the site, not at us.
+        //
+        // Web Animations API rather than a keyframes rule: injecting a <style> into someone's page means naming
+        // a global animation that could collide with theirs, and it outlives the element unless we clean it up.
+        // `el.animate` is scoped to this node and dies with it — no page CSS touched, which is the same rule the
+        // rest of this banner already follows.
+        //
+        // Two channels at once because either alone is easy to miss: opacity (a blink) and an expanding ring
+        // (motion at the edge, which catches peripheral vision where a static badge does not).
+        try {
+          const _reduce = (() => { try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
+          // Honour reduced-motion: someone who has asked the OS to stop animations means it, and this is a
+          // notification, not a control — losing the blink costs them nothing they cannot see in the text.
+          if (!_reduce && typeof el.animate === 'function') {
+            el.animate([
+              { opacity: 1,   boxShadow: '0 4px 14px rgba(0,0,0,.28), 0 0 0 0 rgba(217,119,87,.65)' },
+              { opacity: .5,  boxShadow: '0 4px 14px rgba(0,0,0,.28), 0 0 0 12px rgba(217,119,87,0)' },
+              { opacity: 1,   boxShadow: '0 4px 14px rgba(0,0,0,.28), 0 0 0 0 rgba(217,119,87,0)' },
+            ], { duration: 1100, iterations: Infinity, easing: 'ease-in-out' });
+          }
+        } catch { /* an un-animated banner still says the true thing */ }
+        const txt = document.createElement('span');
+        txt.id = `${ID}_t`;
+        el.append(dot, txt);
+        (document.body || document.documentElement).appendChild(el);
+      }
+      const t = document.getElementById(`${ID}_t`);
+      if (t) t.textContent = label;
+      sendResponse({ success: true, shown: true });
+    } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'banner-failed' }); }
+    return false;
+  },
 
   'CHECK_ELEM': (message, _sender, sendResponse) => {
     const { type, payload } = message; void type; void payload;

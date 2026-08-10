@@ -10,7 +10,9 @@ import {
   classifyCreate, createRecordFrom, auditSucceeded, customerLabelFrom,
   auditEntry, appendCreate, truncationNotice, describeCreate,
   parseCreatesAsk, createsScopeWindow, filterCreatesByScope, renderCreatesAnswer,
+  recordOpenUrl,
 } from './audit.js';
+import { fillEndpoint } from './connectorRecipes.js';   // AU-2 — the real substituter, injected exactly as chat.js injects it
 
 // ── Fixtures: the mutation reply shapes the seam actually hands recordCreate ──
 const CUSTOMER_OK = { data: { customerCreate: { customer: { id: 'gid://shopify/Customer/8675309' }, userErrors: [] } } };
@@ -198,5 +200,61 @@ describe('renderCreatesAnswer — the markdown answer (AU-3)', () => {
     const out = renderCreatesAnswer({ items, total: 2 }, { fmtTime });
     assert.match(out, /You've created 1 record:/);
     assert.doesNotMatch(out, /delete/);
+  });
+});
+
+// ── AU-2 (v2.74.2147) — recordOpenUrl: the eye button's destination ─────────────────────────────────────────
+// The rule that matters is the LAST one: an unfilled placeholder must yield '' (no button) rather than a URL
+// containing a literal "{handle}". A dead link on a record the user is trying to verify is worse than no link.
+describe('AU-2 recordOpenUrl', () => {
+  const DRAFT_TPL = '/store/{handle}/draft_orders/{id}';
+  const draft = (extra = {}) => auditEntry({
+    at: 1, system: 'admin.shopify.com', kind: 'draft', id: '1099', label: '#D1099', who: 'gate',
+    recipeId: 'shopify_create_order', urlArgs: { handle: 'deako' }, ...extra,
+  });
+
+  it('fills the catalog template from urlArgs + id', () => {
+    assert.equal(recordOpenUrl(draft(), DRAFT_TPL, fillEndpoint),
+      'https://admin.shopify.com/store/deako/draft_orders/1099');
+  });
+  it('a banked ABSOLUTE itemUrl wins over the template (the writer knew the exact page)', () => {
+    assert.equal(recordOpenUrl(draft({ itemUrl: 'https://admin.shopify.com/store/x/draft_orders/7' }), DRAFT_TPL, fillEndpoint),
+      'https://admin.shopify.com/store/x/draft_orders/7');
+  });
+  it('a banked RELATIVE itemUrl is still filled + hosted', () => {
+    assert.equal(recordOpenUrl(draft({ itemUrl: '/store/{handle}/draft_orders/{id}' }), '', fillEndpoint),
+      'https://admin.shopify.com/store/deako/draft_orders/1099');
+  });
+  it('UNFILLED placeholder → "" (no button beats a 404)', () => {
+    assert.equal(recordOpenUrl(auditEntry({ at: 1, system: 'admin.shopify.com', kind: 'draft', id: '1', who: 'gate' }), DRAFT_TPL, fillEndpoint), '');
+  });
+  it('no template and no banked url → ""', () => {
+    assert.equal(recordOpenUrl(draft(), '', fillEndpoint), '');
+  });
+  it('no system → "" (nothing to host the path on)', () => {
+    assert.equal(recordOpenUrl(auditEntry({ at: 1, system: '', kind: 'draft', id: '9', who: 'gate' }), DRAFT_TPL, fillEndpoint), '');
+  });
+  it('a zendesk ticket resolves on its own host, same rule', () => {
+    const t = auditEntry({ at: 1, system: 'deako.zendesk.com', kind: 'ticket', id: '68482', who: 'human' });
+    assert.equal(recordOpenUrl(t, '/agent/tickets/{id}', fillEndpoint), 'https://deako.zendesk.com/agent/tickets/68482');
+  });
+  it('null/garbage entry → "" rather than throwing', () => {
+    assert.equal(recordOpenUrl(null, DRAFT_TPL, fillEndpoint), '');
+    assert.equal(recordOpenUrl(undefined, DRAFT_TPL, fillEndpoint), '');
+  });
+  // v2.74.2149 — a SECTION route is not a record link. `/#warranty` has no placeholder to leave unfilled, so the
+  // unfilled-guard above passes it and it opens the warranty LIST while claiming to be task #4899327.
+  it('a SECTION route with no {id} → "" (the VendorSuite trap)', () => {
+    const task = auditEntry({ at: 1, system: 'vendorsuite.drhorton.com', kind: 'record', id: '4899327', who: 'gate' });
+    assert.equal(recordOpenUrl(task, '/#warranty', fillEndpoint), '');
+    assert.equal(recordOpenUrl(task, '/#dashboard', fillEndpoint), '');
+  });
+  it('…and a banked RELATIVE itemUrl gets the same treatment (no {id} ⇒ no link)', () => {
+    const task = auditEntry({ at: 1, system: 'vendorsuite.drhorton.com', kind: 'record', id: '4899327', who: 'gate', itemUrl: '/#warranty' });
+    assert.equal(recordOpenUrl(task, '', fillEndpoint), '');
+  });
+  it('a banked ABSOLUTE url is still honoured — it already identifies the record', () => {
+    const task = auditEntry({ at: 1, system: 'vendorsuite.drhorton.com', kind: 'record', id: '4899327', who: 'gate', itemUrl: 'https://vendorsuite.drhorton.com/task/4899327' });
+    assert.equal(recordOpenUrl(task, '/#warranty', fillEndpoint), 'https://vendorsuite.drhorton.com/task/4899327');
   });
 });

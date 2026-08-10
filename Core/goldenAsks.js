@@ -188,6 +188,9 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'start a new conversation', expect: { legId: 'NEW_CONVERSATION' } },
   { ask: 'clear this chat', expect: { legId: 'CLEAR_CHAT' } },
   { ask: 'show my conversation history', expect: { legId: 'OPEN_HISTORY' } },
+  // v2.74.2104 — OPEN_DESK. The negative matters more than the positive: "open the warranty desk" must not be
+  // read as opening a CASE or a record. A desk is a view you already have; OPEN_CASE mints a review record.
+  { ask: 'open the warranty desk', expect: { legId: 'OPEN_DESK' }, mustNotResolve: ['OPEN_CASE'] },
   { ask: 'delete all conversations', expect: { legId: 'DELETE_ALL_CONVERSATIONS' }, mustBeGated: true },
   { ask: 'open studio', expect: { legId: 'OPEN_STUDIO' } },
   { ask: 'open the ground panel', expect: { legId: 'OPEN_GROUND' } },

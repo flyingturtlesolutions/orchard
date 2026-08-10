@@ -1829,6 +1829,37 @@ textarea {
 .rail-record-peek { max-height: 0; opacity: 0; overflow: hidden; margin-top: 0; font-size: 11px; color: var(--c-text-subtle); word-break: break-all; transition: max-height 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease, margin-top 240ms ease; }
 .rail-record-card:hover .rail-record-peek, .rail-record-card:focus-within .rail-record-peek { max-height: 3em; opacity: 1; margin-top: var(--sp-1); transition-delay: 120ms; }
 @media (prefers-reduced-motion: reduce) { .rail-record-peek { transition: none; } }
+/* AU-2 (v2.74.2147) — the eye button row. Reuses .wf-card-act verbatim (the workflow-card chip), so the record
+   card and the automation card share one action vocabulary; only the row placement is local. It rides the SAME
+   hover/focus curve as the peek above rather than sitting there permanently: the card's resting state stays the
+   quiet three lines it is today, and the affordances arrive together when the pointer does. Keyboard users reach
+   it via :focus-within, so it is never hover-only. */
+.rail-record-acts { display: flex; justify-content: flex-end; gap: var(--sp-1); max-height: 0; opacity: 0; overflow: hidden; transition: max-height 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease, margin-top 240ms ease; }
+/* v2.74.2151 — the reveal must name EVERY card that hosts the row, not just the one it was written for. The acts
+   row was reused verbatim on the case rail card (`.rail-item.is-subtask`), which has no `.rail-record-card`
+   ancestor — so the buttons rendered into the DOM and stayed `max-height:0; opacity:0` FOREVER. Live report:
+   "no buttons on case rail card". Reusing a class means inheriting its containing selector too. */
+.rail-record-card:hover .rail-record-acts, .rail-record-card:focus-within .rail-record-acts,
+.rail-item:hover .rail-record-acts, .rail-item:focus-within .rail-record-acts { max-height: 34px; opacity: 1; margin-top: var(--sp-1); transition-delay: 120ms; }
+@media (prefers-reduced-motion: reduce) { .rail-record-acts { transition: none; } }
+/* v2.74.2190 — a RUNNING drive is visible in the panel too. The eye already disabled itself, but the only other
+   signal was a hover TOOLTIP, which nobody sees while watching the site tab. A drive takes ~15s; the row keeps
+   its acts revealed and the button pulses for the whole span, so the case card shows work in progress instead of
+   looking inert. The on-page banner (contentScript DRIVE_BANNER) is the primary signal; this is its panel twin. */
+/* v2.74.2192 — driven by an EXPLICIT `.is-driving` class set from JS on whatever row holds the button, not by
+   `:has()` plus an assumption that the row is a `.rail-item`. v2190 used both and nothing rendered live; rather
+   than work out which assumption failed, the state is now stated rather than inferred. The caption is a real
+   element (`.drive-running-cap`) so it is inspectable, and `!important` on the reveal beats the hover rule's
+   `max-height: 0` without depending on source order. */
+.is-driving .rail-record-acts { max-height: 34px !important; opacity: 1 !important; margin-top: var(--sp-1); }
+.is-driving { box-shadow: inset 2px 0 0 0 var(--c-accent); }
+.drive-running-cap { display: inline-flex; align-items: center; margin-right: auto; padding-left: var(--sp-1);
+  font-size: 11px; color: var(--c-accent); white-space: nowrap; animation: orch-drive-pulse 1.2s ease-in-out infinite; }
+.wf-card-act[data-busy] { opacity: 1; animation: orch-drive-pulse 1.2s ease-in-out infinite; }
+@keyframes orch-drive-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .drive-running-cap, .wf-card-act[data-busy] { animation: none; opacity: 1; }
+}
 /* DRILL overlay detail rows (reuses the .wf-history-* shell). */
 .rail-record-drill-line { display: flex; gap: var(--sp-2); padding: 3px 0; font-size: 12px; border-bottom: 1px solid var(--c-border); }
 .rail-record-drill-key { flex: none; width: 84px; color: var(--c-text-subtle); }

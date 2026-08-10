@@ -77,9 +77,42 @@ export function readContacts(row) {
     };
     if (person.name || person.email || person.phone) out.push(person);
   }
+  // v2.74.2157 — ONE PERSON, ONE ROW. Live (2026-08-10, #4888221): the card listed
+  //   Mary Klotz — Primary homeowner   (909) …-0963 (cell) · <same email>
+  //   mary Klotz — Secondary homeowner (909) …-0963 (cell) · <same email>
+  // — one human, entered twice in the source with different capitalisation, one row flagged IsPrimary and one
+  // not. §19's rule ("no IsBuyer means co-buyer, not 'not a homeowner'") is what makes the second row a person
+  // at all, and it is right — but it cannot tell a real co-buyer from the same buyer typed twice. Rendered, that
+  // invents a second homeowner: `who are the homeowners` names them twice, and the channel decision would queue
+  // a call or an email to one person as if they were two.
+  //
+  // The merge test is deliberately the CONSERVATIVE one, because the invariant on the other side is the one that
+  // costs a person: the co-buyer must never be dropped. So names must match case-insensitively AND a contact
+  // channel must match. A genuine co-buyer (a different name on a shared household line) fails the name test and
+  // survives untouched — sharing a phone with your spouse does not merge you.
+  //
+  // STAFF ARE EXEMPT, and that is not an oversight: one person is often both the CSR and the coordinator, and
+  // those two rows carry different AssignmentTypes. Merging them would DROP a role, which is the same class of
+  // defect one layer over. Only rows with no stated assignment — i.e. homeowners — can merge.
+  const _norm = (s) => _s(s).toLowerCase().replace(/\s+/g, ' ');
+  const _sameHomeowner = (a, b) => a.isHomeowner && b.isHomeowner && !a.roleStated && !b.roleStated
+    && !!_norm(a.name) && _norm(a.name) === _norm(b.name)
+    && ((!!a.email && a.email.toLowerCase() === b.email.toLowerCase()) || (!!a.phone && a.phone === b.phone));
+  const deduped = [];
+  for (const p of out) {
+    const hit = deduped.find((q) => _sameHomeowner(q, p));
+    if (!hit) { deduped.push({ ...p, phones: [...p.phones] }); continue; }
+    // Order-independent: whichever row carries IsPrimary decides the role and the spelling of the name, so the
+    // merged person reads the same whether the flagged row came first or second in the source.
+    if (p.isPrimary && !hit.isPrimary) { hit.isPrimary = true; hit.role = 'Primary homeowner'; if (p.name) hit.name = p.name; }
+    for (const ph of p.phones) if (!hit.phones.some((x) => x.number === ph.number && x.label === ph.label)) hit.phones.push(ph);
+    hit.email = hit.email || p.email;
+    hit.prefers = hit.prefers || p.prefers;
+    if (!hit.phone && hit.phones.length) { hit.phone = hit.phones[0].number; hit.phoneLabel = hit.phones[0].label; }
+  }
   // Homeowners first (primary ahead of co-buyer), staff after — every caller reads top-down.
   const rank = (p) => (p.isHomeowner ? (p.isPrimary ? 0 : 1) : 2);
-  return out.map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map((x) => x.p);
+  return deduped.map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map((x) => x.p);
 }
 
 /** The people matching one role name. PURE. Unknown role → []. */
@@ -209,7 +242,7 @@ export function answerContactRole(row, ask, { recordLabel = '' } = {}) {
  * Every row is named even when it has nobody in the role, because "3 tasks, here are the 2 I could answer" is the
  * honest shape and a silently shortened list reads as a complete one. `items` = [{label, people}].
  */
-export function renderContactRoster({ items = [], role = '', want = 'name' } = {}) {
+export function renderContactRoster({ items = [], role = '', want = 'name', total = 0 } = {}) {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return `I don't have any records in hand to read the ${_said(role)} from.`;
   const said = _said(role);
@@ -231,8 +264,16 @@ export function renderContactRoster({ items = [], role = '', want = 'name' } = {
       : (people.length ? `no ${said} listed (${people.length} contact(s) on it)` : 'no contacts on the record');
     out.push(`- **${_s(it && it.label) || '(unlabelled)'}** — ${who}`);
   }
+  // v2.74.2157 — SAY WHAT WAS NOT READ. `total` is the length of the LIST the ask was about; `rows` is what the
+  // reader actually got through. Live (2026-08-10): a 13-row list answered with six lines under the header "The
+  // CSR on each:", and the follow-up read "5 of 6 have a coordinator listed" — a denominator of 6 for a list of
+  // 13. Both sentences are true of what was read and false of what was asked, which is the worst shape a count
+  // can take: the reader has no way to know seven records were never opened. The repo's own rule (no silent
+  // caps — SCOPE ▸ all rows logs its drops for exactly this reason) applies to the sentence, not just the log.
+  const _total = Number.isFinite(total) && total > rows.length ? total : rows.length;
+  const _cut = _total > rows.length ? ` _(read the first ${rows.length} of ${_total} — narrow the list to cover the rest)_` : '';
   const head = answered === rows.length
-    ? `The ${said} on each:`
-    : `${answered} of ${rows.length} have a ${said} listed:`;
+    ? `The ${said} on each:${_cut}`
+    : `${answered} of ${rows.length} have a ${said} listed:${_cut}`;
   return [head, ...out].join('\n');
 }

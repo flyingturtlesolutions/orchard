@@ -688,7 +688,13 @@ export const CONNECTOR_RECIPES = [
   // the money step and stays HUMAN-CLICK, never a recipe). The FOC/warranty-replacement path: pass a 100%
   // PERCENTAGE `applied_discount` + a zero `shipping_line`. Nested structures ride as WHOLE object params (sole
   // placeholders → native value; unfilled → dropped), so an ordinary paid draft omits them cleanly.
-  { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, gql: false, persistedOp: 'DraftOrderCreate',
+  // AU-2 (v2.74.2147) — `itemUrl`: the draft's own admin page, so the created record is openable from the Records
+  // card's eye button. Every OTHER Shopify write already carried one (customer create/edit, :647/:676) and the
+  // draft-order create — the write this workflow exists to make — did not, so the one create a warranty run
+  // produces was the one create with nowhere to go. Draft orders live at /draft_orders/, NOT /orders/: a draft is
+  // a distinct admin object until it is completed, which is the same distinction the user's "the order needs to be
+  // completed by a human" ruling turns on.
+  { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, gql: false, persistedOp: 'DraftOrderCreate', itemUrl: '/store/{handle}/draft_orders/{id}',
     does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; reversible via the delete-draft action (shopify_delete_order, human-confirmed) if it should not stand; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
     // v2.74.2067 RC-1/RC-2 — LOOKUP resolution (Core/lookupRun.js): users type a customer EMAIL and a product
     // NAME, never gids. IN-PLACE: an email in `customer_gid` resolves via shopify_customer_by_email; a name/sku in

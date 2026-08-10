@@ -607,3 +607,479 @@ store idiom (WorkflowRunStore.js, runHistory.js:26/:148/:196, ActionLedgerStore.
 StoragePaths SYNCABLE_KINDS), and the surface (vitals.js:562, vitalsDashboard.js). The store decision reconciles the
 two scout recommendations — a sibling book (Scout B) over the action ledger, carrying Scout C's local-only /
 not-sync / body-blind-marker posture as fields rather than a key.*
+
+---
+
+## 12. Record LIFECYCLE (AU-6 substrate) — the watch, the hand-off, the decay
+
+*(v2.74.2148. Rulings 2026-08-10, recorded inline. Stages 0–2 are BUILT; this section specs 3–8.)*
+
+### 12.0 The principle everything else follows from
+
+**A ledger row is one of ORCHARD'S ACTS. `kind` and `id` are the CURRENT STATE of the artifact that act
+produced.** Ruled 2026-08-10: when draft `#D1099` is completed into order `#1234`, **no new row is created** — it
+is the same record changing kind.
+
+Orchard created one thing. A human completing it did not make Orchard create a second thing; Shopify minted an
+Order as a consequence of a *human* act. A second row would double-count an act that happened once, and would
+corrupt the AU-3 answer ("you've created 12 records" becoming 24 because half completed). It also matches where
+§7's AU-8 always pointed — *one entity → its create→update→delete timeline*. **A completion is an EVENT, not a
+row.**
+
+### 12.1 Identity — the vendor id stops being the key
+
+Today `auditEntry.id` is both the vendor's id and the row's identity. Under §12.0 those separate, because the
+vendor id CHANGES (`DraftOrder/1099` → `Order/1234`). The row needs a stable key while `kind`/`id` move.
+
+Cheapest form, and it needs **no migration of existing rows**: keep the row keyed by its **original create id**
+(already banked, already the drill's join key) and add the current pointer plus the event timeline (§12.1a).
+
+    id            '29685'        // IMMUTABLE. the create id. the row's identity, forever.
+    kind          'draft'        // IMMUTABLE. what Orchard CREATED. never rewritten.
+    currentId     '1234'         // the artifact NOW (absent until a hand-off)
+    currentKind   'order'        // the artifact's type NOW (absent until a hand-off)
+    events        [ … ]          // append-only. ONE timeline. §12.1a
+    source        {…}            // what CAUSED this act. §12.8
+    watch         'warm'|'cold'|'gone'
+    warmUntil     <ms>           // when warm decays; absent when cold/gone
+    lastSeenAt    <ms>           // when state was last CONFIRMED (drives "as of", §12.6)
+    outwardAt     <ms>           // §13 — when something left the boundary on this record
+
+### 12.1a ONE timeline, not three arrays
+
+An earlier draft of this section carried a `chain[]` of prior kinds and would have grown a second array for
+observed values. That is two mechanisms for one idea. A record has **one append-only `events[]`**, and every
+entry is `{at, type, …}`:
+
+    { at, type:'create',     kind, id, label }
+    { at, type:'update',     fields:{…} }              // §12.9 — observed values changed
+    { at, type:'transition', fromKind, fromId, toKind, toId }
+    { at, type:'gone',       why:'404'|'deleted' }
+
+`currentKind`/`currentId` are a **derived cache** of the newest `transition`; the timeline is the truth. This is
+exactly what §7's AU-8 named as the destination — *one entity → its create→update→delete timeline* — and it means
+AU-6's `verb` generalization and this section's watch machinery produce entries in the SAME list rather than two
+parallel histories that can disagree. Capped like `TIMELINE_CAP`, oldest non-`create` evicted first (the `create`
+entry is never evicted — it is the row's reason for existing).
+
+`kind` and `currentKind` are **both** kept because one value cannot do both jobs: `describeCreate` renders `kind`,
+and a completed draft rendering as `order` would report that you created an order, which you did not. The card
+renders the transition — `draft → order #1234` — which is also the warranty question answered at a glance (the
+replacement actually went out).
+
+**Consequence — a live defect in AU-2 as shipped.** `_recordOpenUrl` resolves `itemUrl` from `recipeId`
+(`shopify_create_order` → `/store/{handle}/draft_orders/{id}`). After a hand-off that builds a **draft URL
+carrying an order id** — not a visible 404, potentially a different record. The link must resolve from
+`currentKind || kind` (kind `order` → `shopify_order` → `/store/{handle}/orders/{id}`), so it follows the
+artifact rather than freezing at the act. **This lands WITH AU-6 or the eye silently misleads.**
+
+### 12.2 The state machine — three states, and only observed facts leave
+
+       create ──▶ WARM ◀──────── re-warm (any observed change)
+                   │                        ▲
+                   │ warm window elapses     │
+                   ▼                        │
+                 COLD ─────────────────────┘
+                   │
+                   │ observed non-existence (404 / delete confirmed)
+                   ▼
+                 GONE   (terminal; the only eviction)
+
+**There is no `settled`.** An earlier draft of this spec had one, derived from a status enum meaning "this can
+never change again." Ruled out 2026-08-10: *an order can be returned after it ships.* `settled` was a
+**prediction**, and Orchard cannot know a record's future from its present — the same class of error as reporting
+a decided row as `not run`. Refunds, unarchives and chargebacks all falsify it.
+
+Dropping it costs **nothing**, which is what makes the ruling free rather than a trade: `cold` is view-only
+(§12.3), so a cold record consumes zero background work, and `AUDIT_CAP` already bounds the book at 500 with a
+visible notice. Eviction was never needed for cost control.
+
+**GONE is an observation, never a forecast** — the object returned 404, or a delete we performed succeeded.
+
+**Hand-off is NOT an exit.** Under §12.0 it is a `transition` event on a surviving row (§12.1a): `currentKind`/
+`currentId` advance, the timeline appends, and the warm window RESTARTS (something just changed). This also
+removes the blind-spot risk of migrating a watch to a different row and abandoning the original.
+
+The **tracking-number case is why this matters concretely**: the number appears on the ORDER, days after the
+DRAFT was created. A model that ended the draft's life at completion would stop watching immediately before the
+thing worth seeing happened.
+
+### 12.3 Triggers — four, cheapest first; the poll is the BACKSTOP
+
+| trigger | cost | catches | fires when cold? |
+|---|---|---|---|
+| tee hint — `harvestTee` `{method,url,status}` | free | the human changing it **in this browser** | **yes** |
+| navigation — `webNavigation` onto the record's `itemUrl` | free | them looking at it | **yes** |
+| verify-at-view — Records tab render / eye click | 1 read, on demand | whatever is true right now | **yes** |
+| collection poll | 1 read for **N** records | changes made **elsewhere** | **yes** — see below |
+| targeted per-record re-read | 1 read **per record** | confirming one row | **no** |
+
+**`cold` suppresses PER-RECORD reads, not collection reconciliation.** *(Corrected 2026-08-10 — the tracking-number
+case falsified the first version of this rule, which said cold suppressed the poll outright.)*
+
+The reasoning: a collection read (`orders updated since X`) is **O(1) in records** — covering a cold row costs
+nothing extra, because it is the same single request either way. Excluding cold rows from reconciliation saves
+zero and buys a blind spot precisely where it hurts: a draft that sat long enough to go cold, then was completed
+on someone else's machine, would go unseen until a human opened the Records tab. So the poll runs on its leg
+cadence and its results are reconciled against **every** row; `warm`/`cold` governs only the reads whose cost
+scales per record.
+
+**Nothing suppresses OBSERVATION at any tier.** A return processed in this browser lands immediately on a record
+cold for months. That is what makes view-only decay safe (ruling 2026-08-10, open question 1).
+
+The tee is **body-blind by construction** (`DESIGN_llm_privacy.md`): it yields *"something changed"*, never a
+value. That is the correct primitive — it triggers a targeted re-read without ever reading a body.
+
+### 12.4 Cadence attaches to the LEG, not the record
+
+Ruled 2026-08-10. Neither "one cadence for every record" (re-reads records that cannot change) nor "a bespoke
+cadence per record" (config nobody maintains — the chore burden the iron principle forbids).
+
+- **The unit of polling is the COLLECTION.** `shopify_draft_orders` (`DraftOrderList`) answers for N drafts in ONE
+  request; per-record polling is O(N) requests on a live user session and is untenable near the 500 cap.
+- **The `pulse: {kind, scope, status}` marker already on recipes is the descriptor** — "the read's GENERIC digest
+  semantics, as DATA" (connectorRecipes.js:257). Reuse it; do not invent a parallel one.
+- **The warm window is recipe DATA, not code**: `warm: '60d'`. An order's meaningful window tracks the merchant's
+  return policy, which is not derivable and differs per store; a ticket's is days. Declared, visible, editable.
+- **A per-record override may exist, but never as the mechanism** (ruling: "agree") — only once someone asks.
+
+**Reuse the scanner; do NOT add an alarm.** `vitals:tick` is explicitly *"one alarm — the window is the cadence,
+the tick is just the scanner"* and already absorbed `conn:heartbeat`; a second alarm regresses that
+consolidation, and under MV3 alarms are the only durable timer. The precedents to extend, not re-derive:
+
+- `dueForDaily(recipes, now, windowMs)` (Core/vitals.js:73) — the staleness gate
+- `kaCadenceMs(rec)` (Core/vitals.js:303) — **learned** cadence, and its `futile === true → null` is already the
+  "stop probing this" shape
+- `invokeRideRecipe` — the shared runner the canary and workflow steps both use
+
+### 12.5 The transition adapter — the seam the HAR gap hides behind
+
+The completed-draft reply shape, the transition field, and the delete reply are **LIVE-UNVERIFIED**; §10.3's rule
+is never to code them blind, and a real order must be created first. That must not block the design, so the
+unknown is isolated behind ONE per-platform function:
+
+    readTransition(replyOrRecord, { kind, id }) -> null | { toKind, toId, at }
+
+- **If the reply carries the new order id** → the hand-off is recorded free, at the write seam.
+- **If it does not** → the tee hint says *something changed* and we do ONE targeted re-read (§12.3's C1→A1 path,
+  already specced).
+
+**The unknown therefore fails toward a RE-READ, never toward a guess** — the same fail-open posture as
+`tools/glf/precheck.cjs`. When the HAR lands it either deletes a read or confirms one is needed; nothing else in
+this section changes. A hand-off must be **observed** (an `order` link populated), never inferred from a status
+string, and the `transition` event records what it handed off to so the change is auditable rather than assumed.
+
+### 12.6 Staleness is rendered, never implied
+
+Under session-ride the poll runs ONLY while the user has a live session, so a cadence is a **ceiling, never a
+guarantee** — "at most every N", not "every N". Every surface therefore renders **"as of \<lastSeenAt\>"**, the
+same visible-total honesty §4 forces on `truncationNotice`. A record may have changed without Orchard knowing;
+the surface must not imply completeness it does not have.
+
+### 12.7 Per-rung tests (pure half, unit-gated)
+
+- `nextWatch(row, now)` → warm→cold at the window; any change re-warms; gone is terminal and absorbing
+- `applyTransition(row, {toKind,toId,at})` → same `id`, `kind` UNCHANGED, `currentKind`/`currentId` set, a
+  `transition` event appended, `warmUntil` restarted — and asserts **no second row**
+- `recordOpenUrl` resolves from `currentKind` after a hand-off (the §12.1 defect, as a regression test)
+- `describeCreate` still reports what was CREATED after a hand-off (never "you created an order")
+- a cold row still accepts an observed change, AND is still reconciled by a collection poll (§12.3)
+- `sourceRef` survives the three hops and is never invented when the caller supplied none (§12.8)
+- `observeFields` extracts declared paths only; an absent path yields no key, never `undefined` (§12.9)
+- an `update` event is appended only when a watched value CHANGED — a re-read that confirms the same tracking
+  number must not grow the timeline (§12.9)
+
+### 12.8 PROVENANCE — the record must name what caused it
+
+*(Pulled forward 2026-08-10. §7's AU-7 is `corrKeys` — fuzzy grouping on a shared email via `toWorkItem`. This is
+a DIFFERENT, stronger thing: a direct causal pointer. Specced as **AU-7a**, ahead of the correlation work, because
+four separate design questions have now stalled on it.)*
+
+Today a row knows the Shopify chain (`draft → order`) and nothing about WHY it exists. A tracking number for
+order `#1234` with no link to warranty task `#4899327` has nowhere to go — and the same gap blocks "which
+homeowner is this for", "show me everything this task produced", and any future write-back.
+
+    source: { system:'vendorsuite.drhorton.com', kind:'task', id:'4899327', label:'#4899327', url?:'…' }
+
+**Available at the write seam, merely unthreaded.** When `_runBranchClause` invokes the draft-order create it is
+iterating warranty rows and already holds the item — `PIPELINE_RECORD_ITEM` carries `record:{ref,host,url}` for
+the same reason. Three hops, named so none is forgotten (the invariant-#3 discipline):
+
+1. the panel puts `source` on the invoke payload at the call site
+2. `connector.js` passes it into `recordCreate(evt)` beside `recipeId`/`urlArgs`
+3. `auditEntry` whitelists it — unknown shapes dropped, strings capped, exactly like `urlArgs`
+
+**Never inferred.** If the caller supplied no source, the row has none; a guessed provenance is worse than an
+absent one, because everything downstream would trust it. Ad-hoc chat creates legitimately have no source.
+
+**Privacy** — ids and a short label only, never a contact block. §5's local-only / un-redacted-at-rest posture
+applies unchanged; nothing here reaches a wire.
+
+#### 12.8.1 Viewing the INCITING object — the asymmetry with the eye
+
+Provenance implies the symmetric affordance: AU-2 lets a user view the object Orchard CREATED on its native
+platform, so they must also be able to view the object that CAUSED it. Same intent, and — for VendorSuite —
+**a fundamentally different mechanism**, which is the whole content of this subsection.
+
+**VendorSuite has no per-record URL.** `vs_warranty_task` declares `itemUrl: '/#warranty'` — the SPA's warranty
+*section*, not task `#4899327`. Every `vs_*` URL template is a section route (`/#warranty`, `/#dashboard`).
+
+> **This defeats AU-2's guard, and that is a live trap.** `recordOpenUrl` refuses a template with an UNFILLED
+> `{…}` placeholder ("no button beats a 404"). `/#warranty` has no placeholder to leave unfilled, so it fills
+> cleanly, returns a valid-looking absolute URL, and opens the warranty LIST while claiming to open the task. The
+> failure is invisible — the user lands on a real page and has to notice it is the wrong one. **A source whose
+> `itemUrl` carries no record-identifying placeholder must be treated as HAVING NO LINK**, not as having a
+> working one; the eye is suppressed and the drive (below) is offered instead.
+
+**The drive already exists — do not build a second one.** `_openRecordOnSite` (chat.js:15003) is the deterministic
+drill: *API read → navigate to `listUrl` → text-click the row*, explicitly described there as "landmark-free — the
+RELIABLE path", serving as both the cold route and the fallback when a taught capability fails to replay. It
+selects any leg carrying `drill.matchOn` + `listUrl`, and **VendorSuite already satisfies it**:
+
+    vs_warranty_tasks:  listUrl: '/#warranty',
+      drill: { via:'vs_warranty_task', param:'taskId', from:'TaskId', matchOn:'address',
+               label:['AddressLine1','CityStateZip','TaskNumber',…,'SearchField'], also:['vs_task_contacts'] }
+
+The leg's own `does` already advertises it — *"or say 'on the site' / 'on vendorsuite' to open that record on the
+warranty page itself instead"*. So the button is a **new ENTRY POINT to an existing capability**, not a new
+artifact. `source.id` (the TaskId) is sufficient: the drill reads the task, takes its address, and matches the row
+by `matchOn:'address'` — the id is not visible on the page, the address is, which is why that config reads the way
+it does.
+
+**Consequences that must not be skipped:**
+
+- **Invariant #2 — busy-mark the tab.** This drive is ENGINE-driven clicks on a user tab. Every such emitter wraps
+  its span in `markEngineBusy(tabId, true/false)` in a `try/finally` (connector.js:745/785, explore.js:59). A new
+  entry point that forgets it re-introduces phantom `INTERACTION hit/miss` lines in the trace — the exact failure
+  that was re-diagnosed four times (§Invariant 2). The card button is not the user demonstrating; it is the engine
+  driving.
+- **It is SLOW and it MOVES THE USER'S TAB.** Unlike the eye's instant link, this is a read plus a navigation plus
+  a click, and it can fail. The control must show in-flight state and report failure honestly ("couldn't find that
+  row on the warranty page") rather than appearing to do nothing.
+- **Tab discipline is already solved** — `SHOW_SOURCES { focusOnly: true }` ensures/focuses the ground's tab and
+  deliberately does NOT navigate an existing one (v1555 navigated to the site root, a full reload that broke a
+  hash-route start). Reuse it; do not re-derive tab handling.
+
+**Surface.** The card's action row keeps ONE eye — the created object, the primary act. Provenance rides the card
+as a TEXT chip on the meta line ("from #4899327"), not a second identical eye: two eyes side by side cannot say
+which is which, and the icon registry has no honest glyph for "the thing that caused this" (`back` is reserved by
+§5.4's fixed dismiss metaphors). The chip states its cost in its title — *"Open warranty task #4899327 on
+VendorSuite (drives your VendorSuite tab)"* — and the drill overlay renders the full `source` line with the same
+action, where there is room for the explanation.
+
+**Generalization.** A source is viewable by LINK when its kind resolves a record-identifying `itemUrl`, and by
+DRIVE when its ground has a `drill.matchOn` + `listUrl` leg. Neither → no affordance, and the drill overlay says
+why. Zendesk sources take the link path (`/agent/tickets/{id}` — a real per-record URL); VendorSuite takes the
+drive. The record card never encodes which platform is which.
+
+#### 12.8.2 The SAME affordance on a desk CASE — `Show task`
+
+*(Ruling 2026-08-10. The record card is not the only surface that owes "view the inciting object": a case opened
+because warranty instructions were AMBIGUOUS is precisely where a human needs the task in front of them.)*
+
+`Core/contactReview.js` `controlsFor(channel, …)` today yields three sets, all of them **mutating**:
+
+    email       [ Send to <email> ]* [ Edit the draft ] [ Call instead ] [ Leave unresolved ]
+    call        [ Mark called — <phone> ] [ Email instead ] [ Leave unresolved ]
+    unresolved  [ Close — nothing owed ] [ Email them anyway ] [ Call them anyway ]
+
+**`Show task` is a fourth `kind`, and the distinction is load-bearing.** The existing kinds — `primary`,
+`secondary`, `override` — all decide or mutate. Showing the task decides nothing: it can be taken freely, any
+number of times, at any point in the review, and it leaves the case exactly as it was. That is a real safety
+property for a reviewer facing a `danger` control two positions away, so it is encoded rather than left to
+styling:
+
+    { id:'show-task', kind:'reference', label:'Show task' }
+
+**`reference` controls mutate nothing** — a renderer may never give one the `danger` treatment, and a mis-click
+costs nothing.
+
+**It belongs on ALL THREE channels, not just `email`.** The motivating case is *ambiguous instructions*, which
+resolves to the `unresolved` channel — the row where reading the task matters most. A reviewer needs the source
+regardless of which way the decision went.
+
+**Ordering:** after the decision controls in DOM order so the primary stays dominant, and rendered plainly rather
+than as a competing chip. The decision is the point of the card; the reference is support.
+
+**No new plumbing — this is buildable NOW.** Unlike the record card (which waits on §12.8's three hops), a case is
+already born FROM the warranty row: `PIPELINE_RECORD_ITEM` carries `record:{ref,host,url}` for exactly this
+reason. The case surface therefore already holds what the drive needs.
+
+**Same drive, same obligations.** It routes to `_openRecordOnSite`'s drill (§12.8.1), so: Invariant #2
+busy-marking is REQUIRED (engine-driven clicks on a user tab), `SHOW_SOURCES {focusOnly:true}` owns the tab, and
+failure is reported honestly on the card rather than silently doing nothing. `contactReview.js` stays PURE — it
+emits the control descriptor; the renderer performs the drive.
+
+**Test delta:** `controlsFor` gains a case per channel asserting the `reference` control is present in all three,
+that it is never `danger`, and that it never appears before the channel's `primary`.
+
+### 12.9 OBSERVED FIELDS — the payload dimension (tracking, and its kind)
+
+*(Folded in 2026-08-10. §12.0–12.7 track lifecycle STATE; a tracking number is DATA. That was a hole in this
+section, not merely an unbuilt rung: nothing said "capture this value when it appears.")*
+
+#### 12.9.1 Why a flat `{name: path}` map is wrong
+
+The first draft of this subsection was `observe: { tracking: 'fulfillments[].trackingInfo.number', … }`. That
+handles exactly ONE shape — a scalar — and silently mangles the rest. Three real observation shapes exist, and the
+Zendesk-reply and return-status cases are the second and third:
+
+| shape | example | what a flat map does |
+|---|---|---|
+| a **scalar** moves | `displayFulfillmentStatus: UNFULFILLED → FULFILLED` | works |
+| a **collection gains a member** | a Zendesk ticket gets a reply | diffs whole arrays — pagination and re-ordering read as change; the NEW member is never isolated |
+| a **member's own state moves** | `returns[].status: REQUESTED → CLOSED` | cannot express it at all: there is no per-member identity to hang the change on |
+
+So `observe` is not a path map. It is a set of **observers, each declaring its KIND**, and the vocabulary is the
+one `lookup` already established (`rows` / `pick` / `id` / `each`) rather than a new one.
+
+#### 12.9.2 The three observer kinds
+
+**A · `field` — a scalar on the record.**
+
+    shipStatus: { of:'field', at:'displayFulfillmentStatus' }
+    tracking:   { of:'field', at:'fulfillments[].trackingInfo.number' }
+
+Emits `{type:'update', fields:{shipStatus:'FULFILLED'}}` when the value changes, absent→present included.
+
+**B · `set` — a collection whose MEMBERS are the news.** (the Zendesk reply case)
+
+    replies: { of:'set', rows:'comments[]', id:'id',
+               keep:{ author:'author_id', at:'created_at', public:'public' } }
+
+Emits `{type:'update', added:[{id, author, at, public}]}` for members never seen before.
+
+- **`id` is REQUIRED.** Without member identity you cannot distinguish an append from a re-order, and every poll
+  looks like change.
+- **Additions only, by default.** A member that vanishes is far more often pagination (`first: 10`) or a filter
+  change than a deletion. Concluding "removed" from a truncated read manufactures false events — the same
+  silent-truncation failure §5.6 exists to prevent. A removal that MATTERS is its own `gone`-shaped observation,
+  declared explicitly.
+
+**C · `member` — a collection whose members have their own state.** (the return-status case)
+
+    returns: { of:'member', rows:'returns[].edges[].node', id:'id',
+               track:{ status:'status' } }
+
+Emits `{type:'update', changed:[{id, status:'CLOSED'}]}` when a tracked field on an ALREADY-KNOWN member moves.
+This is B composed with A, which is why it needs no third mechanism — a new member arrives via the `set` rule, and
+its subsequent state changes via this one.
+
+#### 12.9.3 Non-goal: no predicates, no derived values
+
+`observe` will NOT gain a comparison/predicate syntax (`shipped: 'displayFulfillmentStatus == FULFILLED'`, counts,
+computed booleans). That is the first step of a query DSL, and a DSL needs its own parser, tests, docs and error
+surface — and then someone puts business logic in a recipe string where no test can see it.
+
+**Observe raw values; let the RENDER decide what to say.** "Shipped" is a rendering of `shipStatus === 'FULFILLED'`,
+in code, next to `describeCreate` — pure functions over stored facts, unit-tested. Counts are derivable from a
+`set`'s member list and need no kind of their own.
+
+#### 12.9.4 Which leg carries `observe` — the READ leg, not the create
+
+Ambiguous in the first draft, and it matters because the record's kind changes. `observe` lives on the leg that
+**refreshes** a kind, not the one that made it: `shopify_order` (kind `order`), not `shopify_create_order`. So
+after the draft→order hand-off the record is read — and observed — through the leg appropriate to its CURRENT
+kind, the same resolution §12.1 already forces on `itemUrl`. A kind with no read leg is simply unobservable, and
+says so, rather than silently observing nothing.
+
+**No new read is needed for the worked case.** `shopify_order`'s existing query already returns
+`fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } }` and a
+`returns(first:10){ … status … }` block (connectorRecipes.js:126) — `observe` only names which of those to keep.
+
+#### 12.9.5 Rules common to all three kinds
+
+- **Named fields only, never the whole record.** `at` / `keep` / `track` ARE the minimization boundary; a record
+  body is never banked because one field was wanted (§5).
+- **Metadata by default for free text.** A `set` over ticket comments keeps `{id, author, at}` — knowing a reply
+  HAPPENED is the observation; its prose is customer correspondence. Banking a body requires naming it explicitly
+  in `keep`, and it stays display+comparison only: observed values never widen the LLM or wire path
+  (`DESIGN_llm_privacy.md` channel map).
+- **An unchanged re-read appends NOTHING.** Otherwise a daily poll manufactures a timeline of identical entries.
+- **Absent yields no key** — never `undefined`, never `''`. "Not shipped yet" and "we did not look" must stay
+  distinguishable, the rule §5.7 applies to a stage that never ran.
+- **A partial read is not a change.** If the reply is truncated or errored, observers emit nothing rather than
+  inferring absence. Fail toward silence, since a false event is worse than a late one.
+- **Per-event cap.** A busy ticket must not append fifty `added` members in one entry; cap the members carried per
+  event and state the overflow in it, never drop silently (§4's visible-total posture).
+- **Surfacing** (ruling: *"listing the tracking info on the record updates is good enough for now"*): the drill
+  renders `events[]` as dated lines — *"12 Aug · shipped · 1Z999AA10123456784 (UPS)"*, *"12 Aug · 1 reply"*,
+  *"14 Aug · return CLOSED"* — and the card's meta may carry the newest material one. The tracking URL rides the
+  existing eye idiom rather than a new control.
+
+#### 12.9.6 Tests
+
+- `field`: absent→present emits; unchanged emits nothing; present→absent emits nothing (a partial read)
+- `set`: a new member emits once and never again; a re-ordered array emits nothing; a truncated array emits
+  nothing; a member with no `id` is refused at config validation, not silently skipped at runtime
+- `member`: a tracked field moving on a known member emits; an untracked field moving emits nothing; a NEW member
+  routes to the `set` rule, not `changed`
+- all three: an errored/partial reply emits nothing; `keep`/`track` extract only declared paths
+
+**Explicitly OUT of scope** (ruling 2026-08-10): acting on the value — writing it back onto the warranty task, or
+emailing the homeowner. VendorSuite has **no write leg** today (all seven `vs_*` legs are reads), so write-back is
+blocked until VendorSuite writes are tackled; and an email is an `outward` act which would set `outwardAt` and
+suppress the undo (§13). Detection and display land now; delivery is a later, separately-gated rung.
+
+---
+
+## 13. The REVERSAL affordance (AU-5 surface) — when a record card may offer to un-make it
+
+*(Answers "should a delete button be added to the record card?", 2026-08-10.)*
+
+### 13.1 Three questions that get conflated
+
+1. **CAN it be un-made?** — does a reversal leg exist for the record's *current* kind?
+2. **SHOULD it be?** — has anything already left the boundary on this record?
+3. **Is it STILL un-makeable?** — does current state still match what that leg can act on?
+
+### 13.2 The derivation — the button is DERIVED, never decided per kind in the UI
+
+    offer reversal  ⟺  reversalLeg(currentKind || kind) exists
+                    ∧  outwardAt is unset            (nothing has left the boundary)
+                    ∧  state is fresh                (verified read, not a cached row)
+                    ∧  watch !== 'gone'
+
+### 13.3 Why the leg axes alone are NOT sufficient — the finding
+
+The recipes already declare `write` / `reversible` / `outward` / `destructive`, and `pipelineGate` already gates
+on `outward || !reversible`. It is tempting to derive the button from those alone. **It does not work**, and the
+reason generalizes:
+
+> **The declared axes describe the ACT, not the RECORD'S HISTORY.**
+
+`delete_ticket` (connectorRecipes.js:410) is `destructive: true, outward: false` — and it is right to be, because
+*deleting* is an internal act. But the TICKET may have accumulated an outward effect since creation: the warranty
+contact arm **emails the homeowner**. Deleting the ticket does not unsend that email; it only destroys the record
+of a message the customer already holds.
+
+So propriety cannot be read off the delete leg. The RECORD must carry `outwardAt`, accumulated from its own
+events (§12) — set the moment any `outward: true` act touches it. This is the second input the axes cannot give.
+
+### 13.4 The cases, resolved by one rule
+
+| record | reversal leg? | outward? | offer |
+|---|---|---|---|
+| **Shopify draft order** | yes — `shopify_delete_order`, already named as the reverser in the create recipe's `does` | no — a draft is not sent | **shown** |
+| **Shopify draft, invoice sent** | yes | **yes** — the invoice email left | **suppressed** (same rule, non-Zendesk — evidence it generalizes) |
+| **Sent Zendesk ticket** | yes — `delete_ticket` exists | **yes** — the reply was emailed | **suppressed** |
+| **Shopify order** | **no** — no reversal leg for kind `order`; cancel/refund is a DIFFERENT act with different semantics, not an undo | n/a | **no button** |
+
+### 13.5 Suppression must EXPLAIN itself
+
+A card that silently lacks a button teaches nothing, and the iron principle is *zero chore visits, decisions
+always VISIBLE*. But a permanently disabled button is clutter.
+
+**Resolution:** no dead control on the card; the **drill overlay** states the reversal status in words —
+*"Reversible until completed"* · *"Can't be undone — the invoice was sent 12 Aug"* · *"Orders can't be deleted;
+refund or cancel on Shopify"*. The eye keeps working in every case, so there is always a way to go look.
+
+### 13.6 Naming and gate
+
+- **The verb is UNDO, not Delete.** The ledger is "what Orchard made", so the reversal is un-making Orchard's act;
+  `trash` (already in the registry) is honest as its icon precisely because the button only appears when the act
+  *is* a delete. The concrete act is named in the confirm ("Delete draft #D1099 on admin.shopify.com").
+- **Freshness is REQUIRED, not optional.** Offering undo on an already-completed draft is worse than offering
+  nothing, so the control is gated on a verify-at-view read (§12.3), never on the cached row.
+- **Human-click only, never auto** — money = human-click (§6, PP-4). The gate *requires* the click; the card only
+  *offers*.

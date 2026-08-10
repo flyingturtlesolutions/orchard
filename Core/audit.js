@@ -176,6 +176,44 @@ export function appendCreate(list, entry, { cap = AUDIT_CAP } = {}) {
 export { truncationNotice } from './runHistory.js';
 
 /**
+ * AU-2 AT RENDER (v2.74.2147) — the absolute URL of the record on the system that owns it, or '' when none can be
+ * built. PURE. This is the resolve half of §7's "durable link"; the eye button on the record card is its surface.
+ *
+ * RESOLVED AT RENDER, NOT BANKED AT WRITE — deliberately, and it is the reason `urlArgs` exists (see auditEntry).
+ * §11 planned to fill once via `fillEndpoint({...urlArgs, id})` and store the string; storing it freezes the row at
+ * the template that existed the day it was written. Resolving from the CATALOG each time means a corrected
+ * `itemUrl` reaches rows already on disk — the same catalog-upgradeable posture invariant #3 forces on ride
+ * recipes. A row that banked a literal `itemUrl` still wins (below): a caller that knew the exact URL beats a
+ * template we re-derive.
+ *
+ * @param entry     a stored auditEntry
+ * @param template  the recipe's `itemUrl` (e.g. '/store/{handle}/draft_orders/{id}'); '' when the leg has none
+ * @param fill      the `{name}` substituter (fillEndpoint, injected to keep this module dependency-free)
+ */
+export function recordOpenUrl(entry, template = '', fill = null) {
+  const e = (entry && typeof entry === 'object') ? entry : null;
+  if (!e) return '';
+  const banked = _str(e.itemUrl);
+  if (/^https?:\/\//i.test(banked)) return banked;                      // an absolute link the writer already knew
+  const host = _str(e.system).replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  if (!host) return '';
+  const tpl = _str(banked || template);                                 // a banked RELATIVE path still beats the catalog
+  if (!tpl) return '';
+  // v2.74.2149 — THE TEMPLATE MUST IDENTIFY THE RECORD. A SECTION route is not a record link, and the
+  // unfilled-placeholder guard below does NOT catch it: `vs_warranty_task` declares `itemUrl: '/#warranty'`, which
+  // has no `{…}` to leave unfilled, so it fills cleanly, returns a valid-looking URL, and opens the warranty LIST
+  // while claiming to open task #4899327. The user lands on a real page and has to NOTICE it is the wrong one —
+  // the worst failure shape available, worse than a 404. Every genuine record template carries `{id}`
+  // (`/store/{handle}/draft_orders/{id}`, `/agent/tickets/{id}`); a section route does not. No `{id}` ⇒ no link,
+  // and the caller offers the DRIVE instead (DESIGN_audit.md §12.8.1).
+  if (!/\{id\}/.test(tpl)) return '';
+  const args = { ...(e.urlArgs && typeof e.urlArgs === 'object' ? e.urlArgs : {}), id: _str(e.id) };
+  const path = typeof fill === 'function' ? fill(tpl, args) : tpl;
+  if (/\{[a-zA-Z_][\w-]*\}/.test(path)) return '';                      // an UNFILLED placeholder is a dead link — say nothing rather than open a 404
+  return `https://${host}${path.startsWith('/') ? '' : '/'}${path}`;
+}
+
+/**
  * The one-line audit row (AU-3 surface / the "what have I created" answer). "admin.shopify.com · draft · #D29685 ·
  * created 16:11 · you". PURE — `clock` is the caller's formatted time. `who`: 'human' → "you", 'gate' → "auto".
  */

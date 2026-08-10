@@ -36,6 +36,50 @@ export const TIMELINE_CAP = 24;     // per-case stage/action entries (newest kep
 /** Terminal states. `blocked` is distinct from `failed`: we REFUSED to act, rather than tried and could not. */
 export const CASE_STATES = Object.freeze(['open', 'done', 'failed', 'blocked', 'closed']);
 
+/**
+ * The record REFERENCE whitelist — never the record body (§5.7: "label + source record ref"). Copying the body
+ * would duplicate customer data into a second store and put it on every render path.
+ *
+ * `division` (v2.74.2156) is a REFERENCE field, not body: on VendorSuite a task is addressable only as
+ * (division, row text) — the division is the SCOPE half of the ref, the way `host` is for a URL-addressable
+ * record. Without it a banked case can name its task and still not reach it.
+ *
+ * v2.74.2170 — shared by create AND append so the two shapes cannot drift; a field added here reaches both.
+ */
+export const CASE_REF_FIELDS = Object.freeze(['ref', 'host', 'url', 'division']);
+
+/** Project a caller-supplied record to the reference whitelist, every field a string. PURE. */
+function _recordRef(record) {
+  if (!record || typeof record !== 'object') return null;
+  const out = {};
+  for (const k of CASE_REF_FIELDS) out[k] = _str(record[k]);
+  return out;
+}
+
+/**
+ * v2.74.2172 — THE ITEM KEY: a case's identity is its RECORD, never its position in the run.
+ *
+ * The caller was passing the array INDEX as `itemId` (`const id = String(i)`), so `caseId` resolved to
+ * `pc_<pipeline>_<position>`. Every consequence of that is visible in one live line:
+ *   `AUDIT ▸ case division lookup MISS want="#[ticket] · [address]" matched=y div="" of 200 case(s);
+ *    labels: "03" · "01" · "01" · "01"`
+ * — 200 cases at CASE_CAP, the oldest still carrying the v1617 claim-sequence labels, and a case that matched
+ * the wanted label while holding no division. With position as identity:
+ *   · index 3 of today's list is a DIFFERENT task from index 3 of yesterday's, so a re-run APPENDS one task's
+ *     run onto another task's case — a chimera whose label came from one row and whose record came from another;
+ *   · the backfill added at v2170 then writes today's division onto yesterday's label, which is exactly the
+ *     `divbanked 2/2` + `divsrc=none` pair: both true, of two different cases;
+ *   · `openItemIds` reads as "position 3 is under review", which is meaningless across runs.
+ *
+ * The rule: the record's own id when it has one, else a positional fallback that is explicitly MARKED as one so
+ * a reader can never mistake it for a record key. PURE.
+ */
+export function caseItemKey(row, index = 0) {
+  const r = (row && typeof row === 'object') ? row : {};
+  const ref = _str(r.TaskId ?? r.TicketId ?? r.TaskNumber ?? r.ClaimNumber ?? r.id ?? r.Id);
+  return ref ? ref : `idx:${Number(index) || 0}`;
+}
+
 /** The deterministic id — one case per (pipeline, item), which is what makes the re-run rule checkable. */
 export function caseId(pipeline, itemId) {
   const p = _str(pipeline).replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 24) || 'pipeline';
@@ -53,7 +97,7 @@ export function caseId(pipeline, itemId) {
  */
 export function upsertCase(list, { pipeline, itemId, label = '', runId = '', record = null, line = '', now = 0 } = {}) {
   const l = _arr(list).slice();
-  if (!_str(pipeline) || !_str(itemId)) return { list: l, opened: false, id: '' };
+  if (!_str(pipeline) || !_str(itemId)) return { list: l, opened: false, id: '', record: null };
   const id = caseId(pipeline, itemId);
   const i = l.findIndex((x) => x && x.id === id && x.state === 'open');
 
@@ -61,20 +105,39 @@ export function upsertCase(list, { pipeline, itemId, label = '', runId = '', rec
     const c = { ...l[i] };
     if (line) c.timeline = [..._arr(c.timeline), { at: Number(now) || 0, line: _str(line).slice(0, 160) }].slice(-TIMELINE_CAP);
     if (runId) c.runIds = [...new Set([..._arr(c.runIds), _str(runId)])].slice(-8);
+    // v2.74.2170 — BACKFILL THE REFERENCE. Until now the append branch wrote only the timeline and the run id, so
+    // a case's `label` and `record` were frozen at the shape they had the FIRST time the item was seen — and a
+    // re-run is the norm here, not the exception. That is why `PIPELINE ▸ cases … div 2/2` and `divsrc=none` were
+    // both true at once: the panel BUILT a division and sent it, the store found the case already open, and threw
+    // the payload's record away. Every case in the live store was opened before `division` joined this whitelist,
+    // so no amount of re-running could ever have banked one.
+    //
+    // FILL BLANKS ONLY, never overwrite. A stored non-empty value is the reading taken when the row was first
+    // read; a later run that has lost the division (stale context, a narrower read) must not be able to erase it.
+    // That makes the merge MONOTONE — it can only ever add information — which is the property that lets it run
+    // unconditionally on every append without a policy about which read wins.
+    if (!_str(c.label) && _str(label)) c.label = _str(label).slice(0, 120);
+    const inc = _recordRef(record);
+    if (inc) {
+      const cur = _recordRef(c.record);
+      if (!cur) c.record = inc;
+      else {
+        const merged = {}; let changed = false;
+        for (const k of CASE_REF_FIELDS) { merged[k] = cur[k] || inc[k]; if (merged[k] !== cur[k]) changed = true; }
+        if (changed) c.record = merged;
+      }
+    }
     l[i] = c;
-    return { list: l, opened: false, id };
+    return { list: l, opened: false, id, record: c.record || null };
   }
 
+  const _rec = _recordRef(record);   // the whitelist lives in CASE_REF_FIELDS — create and append share it
   l.push({
     id,
     pipeline: _str(pipeline),
     itemId: _str(itemId),
     label: _str(label).slice(0, 120),
-    // The record REFERENCE, never the record body. §5.7 wants "label + source record ref"; copying the body
-    // would duplicate customer data into a second store and put it on every render path.
-    record: record && typeof record === 'object'
-      ? { ref: _str(record.ref), host: _str(record.host), url: _str(record.url) }
-      : null,
+    record: _rec,
     state: 'open',
     verdict: '',
     branch: null,
@@ -92,7 +155,9 @@ export function upsertCase(list, { pipeline, itemId, label = '', runId = '', rec
     if (j < 0) break;
     l.splice(j, 1);
   }
-  return { list: l, opened: true, id };
+  // `record` rides the return so the CALLER can report what the STORE holds rather than what it sent — the v2137
+  // lesson ("a swallowed write is indistinguishable from a write that happened") one layer down.
+  return { list: l, opened: true, id, record: _rec };
 }
 
 /** Record the BRANCH outcome on a case — arm | none | unknown, with the reason and any arms it also matched. */

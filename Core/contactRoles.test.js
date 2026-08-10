@@ -191,3 +191,81 @@ describe('contactRoles — the DISTRIBUTIVE ask (v2.74.2116)', () => {
     assert.match(renderContactRoster({ items: [], role: 'csr' }), /don't have any records in hand/);
   });
 });
+
+// v2.74.2157 — the live #4888221 shape: ONE human entered twice, different capitalisation, one row flagged
+// IsPrimary and one not. Shape verbatim from the rendered card (2026-08-10); values are fixtures.
+const DUPE_ROW = {
+  TicketId: 4888221,
+  __contacts: [
+    { Email: 'm.klotz@example.com', CellPhone: '909-555-0963', ContactMethod: 'Text', IsPrimary: true, IsDrHorton: false, IsBuyer: true, AssignmentType: null, Id: 1, FullName: 'Mary Klotz' },
+    { Email: 'm.klotz@example.com', CellPhone: '909-555-0963', ContactMethod: '-1', IsDrHorton: false, AssignmentType: null, Id: 2, FullName: 'mary Klotz' },
+  ],
+};
+
+describe('contactRoles — one person, one row (v2.74.2157)', () => {
+  it('the same buyer entered twice is ONE homeowner, not a primary plus an invented co-buyer', () => {
+    const people = readContacts(DUPE_ROW);
+    assert.equal(people.length, 1, 'a case-variant duplicate must not render as a second homeowner');
+    assert.equal(people[0].name, 'Mary Klotz', 'the IsPrimary row decides the spelling');
+    assert.equal(people[0].role, 'Primary homeowner');
+    assert.equal(selectContacts(people, 'secondary').length, 0, 'there is no co-buyer on this record');
+    assert.equal(selectContacts(people, 'homeowner').length, 1, 'who are the homeowners must not name them twice');
+  });
+
+  it('merges order-independently — the IsPrimary row wins whichever way round the source lists them', () => {
+    const flipped = { ...DUPE_ROW, __contacts: [...DUPE_ROW.__contacts].reverse() };
+    const people = readContacts(flipped);
+    assert.equal(people.length, 1);
+    assert.equal(people[0].isPrimary, true);
+    assert.equal(people[0].name, 'Mary Klotz');
+    assert.equal(people[0].prefers, 'Text', 'the richer row keeps its stated preference');
+  });
+
+  it('a REAL co-buyer is never merged, even sharing a household line — that is the invariant on the other side', () => {
+    const shared = { __contacts: [
+      { Email: 'house@example.com', CellPhone: '919-555-0142', IsPrimary: true, IsDrHorton: false, IsBuyer: true, FullName: 'Dana Reyes' },
+      { Email: 'house@example.com', CellPhone: '919-555-0142', IsDrHorton: false, FullName: 'Marcus Reyes' },
+    ] };
+    assert.equal(readContacts(shared).length, 2, 'different names are different people, shared contact details or not');
+  });
+
+  it('staff are EXEMPT from the merge — one person can be both CSR and coordinator', () => {
+    const both = { __contacts: [
+      { Email: 'lee@drhorton.com', CellPhone: '919-555-0177', IsDrHorton: true, AssignmentType: 'CSR', FullName: 'Lee Ortiz' },
+      { Email: 'lee@drhorton.com', CellPhone: '919-555-0177', IsDrHorton: true, AssignmentType: 'COORDINATOR', FullName: 'Lee Ortiz' },
+    ] };
+    const people = readContacts(both);
+    assert.equal(people.length, 2, 'merging staff rows would DROP a role');
+    assert.equal(selectContacts(people, 'csr').length, 1);
+    assert.equal(selectContacts(people, 'coordinator').length, 1);
+  });
+
+  it('the four-row real payload is unchanged by the merge', () => {
+    assert.equal(readContacts(ROW).length, 4);
+  });
+});
+
+describe('contactRoles — a capped roster says so (v2.74.2157)', () => {
+  const items = [
+    { label: '#1 · A St', people: readContacts(ROW) },
+    { label: '#2 · B St', people: readContacts(ROW) },
+  ];
+
+  it('names the denominator the ASK was about, not the one it got through', () => {
+    const out = renderContactRoster({ items, role: 'csr', total: 13 });
+    assert.match(out, /read the first 2 of 13/, 'seven unread records must not vanish from the sentence');
+  });
+
+  it('says nothing about a cap when there was none', () => {
+    const out = renderContactRoster({ items, role: 'csr', total: 2 });
+    assert.equal(/read the first/.test(out), false);
+    assert.match(out, /The CSR on each:/);
+  });
+
+  it('a partial-match header still carries the cap', () => {
+    const mixed = [items[0], { label: '#3 · C St', people: [] }];
+    const out = renderContactRoster({ items: mixed, role: 'coordinator', total: 13 });
+    assert.match(out, /1 of 2 have a coordinator listed/);
+    assert.match(out, /read the first 2 of 13/);
+  });
+});

@@ -153,6 +153,16 @@ export const DECISION_MARKERS = [
   { key: 'map', src: "MAP ▸" },
   { key: 'field-read', src: "FIELD_READ ▸" },
   { key: 'contact-role', src: "CONTACT ▸" },   // v2.74.2112 — which contact ROLE an ask named, and who the record's flags said holds it
+  // v2.74.2104 (user directive) — the ASK and the REPLY themselves. Every other marker records what the agent
+  // DECIDED; these two record what was actually said, which is the half no marker could carry: graders kept
+  // reporting "VALUE panel-half UNOBSERVABLE — reply prose does not cross the message-only fleet wire", and the
+  // user was hand-pasting chat contents to grade every [human] step. Listed here per invariant #1, so a
+  // `-decisions-` download carries the conversation beside the reasoning instead of the reasoning alone.
+  { key: 'chat', src: "CHAT ▸" },
+  // v2.74.2104 — OPEN_DESK. WHICH desk an ask named and which one it landed on (or why it refused). Load-bearing
+  // for the exerciser: every later step in a test runs in whatever desk this line chose, so a wrong choice is
+  // the one failure that would corrupt the rest of a run while leaving a clean-looking trace.
+  { key: 'desk', src: "DESK ▸" },
   { key: 'context', src: "CONTEXT ▸" },
   { key: 'payload', src: "PAYLOAD ▸" },
   { key: 'find', src: "FIND ▸" },

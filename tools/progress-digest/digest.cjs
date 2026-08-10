@@ -44,7 +44,9 @@ const cp = require('child_process');
 // Paths & constants
 // ---------------------------------------------------------------------------
 const REPO = path.resolve(__dirname, '..', '..');          // tools/progress-digest → repo root
-const FINDINGS_PATH = path.join(REPO, 'logs', 'run', 'findings.md');
+// v2.74.2104 (audit item 3′) — the journal lives in the sibling repo `apps/orchard-journal`; the resolver keeps
+// the legacy in-repo path working for a fresh clone. See tools/journalPath.cjs for the order.
+const FINDINGS_PATH = require('../journalPath.cjs').journalPath();
 const MANIFEST_PATH = path.join(REPO, 'manifest.json');
 const STATE_PATH = path.join(REPO, 'logs', 'run', '.progress-digest.state.json'); // git-ignored under logs/
 const DEFAULT_DIGEST_REL = 'project-catalog/digests/webpilot.md';

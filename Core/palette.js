@@ -37,6 +37,17 @@ export const BUILTIN_LEGS = [
   // v2.74.1354 — "clear chat" fell through to the TEACH offer (a panel action can't be demonstrated on a page).
   { key: 'CLEAR_CHAT',               name: 'Clear this chat',      does: 'wipe THIS conversation’s message history and start it fresh — the app itself (seed, connections, learned memory, pending proposals) is KEPT; asks before wiping. For "clear chat", "clear this conversation", "start over", "wipe the thread"', mode: 'act', domain: 'self', safety: 'auto', params: [], requires: [] },
   { key: 'OPEN_HISTORY',             name: 'Conversation history', does: 'show the list of past conversations',                   mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  // v2.74.2104 (DESIGN_exerciser_mvp.md §5b) — SWITCHING DESKS WAS CLICK-ONLY. `_selectConvForInput` was
+  // reachable from a Rail click and from case-spawn, and from no ask — so every "in the Warranty desk, …" step
+  // in every bus test was human for want of a door, not for want of judgement (49 of 192 human steps are
+  // `open …`). That is §3.2 ruling 4 read in the mirror: a surface reachable only by CLICK is unshipped
+  // navigation just as surely as one reachable only by a typed command.
+  { key: 'OPEN_DESK', name: 'Open a desk', mode: 'act', domain: 'self', safety: 'auto', source: 'builtin',
+    does: 'switch to one of YOUR OWN desks/views by name, so what you ask next runs there. For "open the warranty desk", "switch to Warranty", "go to the vendorsuite desk". This moves between views you already have — it does NOT create one, and it is not a way to open a record, a case or a page on a website.',
+    params: ['name'],
+    paramSchema: { type: 'object', properties: {
+      name: { type: 'string', description: "the desk/view name as the user says it (e.g. 'warranty', 'Call Manager')" },
+    }, required: ['name'] } },
   { key: 'DELETE_ALL_CONVERSATIONS', name: 'Delete all conversations', does: 'delete every saved conversation (irreversible)',    mode: 'act', domain: 'self', safety: 'gated',   params: [], requires: [] },
   { key: 'OPEN_STUDIO',              name: 'Open Studio',          does: 'open the Studio authoring tab',                        mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
   { key: 'OPEN_GROUND',              name: 'Open Ground panel',    does: 'open the Ground monitoring side panel',                mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },

@@ -1044,6 +1044,7 @@ export function createSgMessageHandlers(ctx) {
       } catch { /* presence is advisory — never block a walk on a registry read */ }
     }
     const deadline = Date.now() + 12000;
+    const _graceUntil = Date.now() + 3000;   // v2.74.2189 — prefer a real route arrival before accepting off-section
     const _probe = async (selector) => {
       try {
         const p = await chrome.tabs.sendMessage(tabId, { type: 'WAIT_FOR_PROBE', payload: { selector } });
@@ -1072,6 +1073,25 @@ export function createSgMessageHandlers(ctx) {
       // first step is `WAIT_FOR #divisionMenu` (15s), so any real absence is caught there — as a NAMED step
       // failure the user can act on, instead of an opaque pre-gate timeout.
       if (hashOk && painted) return { ok: true, viaRoute: true };
+      // v2.74.2189 — OFF-SECTION IS NOT NOT-READY, and this gate's own v1800 note is the argument: "a readiness
+      // gate must never be STRICTER than the recovery behind it." That was written about `#divisionMenu`; it now
+      // applies to `hashOk`. The walk's FIRST STEP clicks the section's nav item (v2185), so the walk can reach
+      // `#warranty` from anywhere in the app — and this gate was refusing to let it try, demanding the URL
+      // already be there.
+      //
+      // Live, user-directed: from `/#settings` the eye reported "the page section never became ready" and the
+      // walk never ran a single step, while the user doing the SAME thing by hand — click Warranty, then the eye
+      // — worked every time. Their instruction: "just have the workflow always trigger a physical click on the
+      // warranty tab regardless of starting position." This is what was stopping that.
+      //
+      // GRACE FIRST: for 3s prefer the real thing (the hash arriving on its own, e.g. a navigation already in
+      // flight). Only after that do we accept "the app is loaded and painted" and hand off to the nav click.
+      // Never accept a BLANK page — `painted` is the same selector-free `body > *` probe, so a crashed/unmounted
+      // tree still fails here rather than starting a walk into nothing.
+      if (painted && Date.now() > _graceUntil) {
+        Logger.info('drive', `DRIVE ▸ section-wait: off-section but painted (${urlLc.slice(0, 60)}) — proceeding; the walk's first step clicks the section's nav item`);
+        return { ok: true, viaNav: true };
+      }
       await new Promise((r) => setTimeout(r, 350));
     }
     // v2.74.1796 — PRECONDITION, not a capability verdict. This wait failing means the PAGE never became ready
@@ -1396,6 +1416,29 @@ export function createSgMessageHandlers(ctx) {
     INVOKE_DRIVE_ARTIFACT: async (payload, _sender, sendResponse) => {
       const _busyTab = (typeof payload?.tabId === 'number') ? payload.tabId : null;
       if (_busyTab != null) markEngineBusy(_busyTab, true);
+      // v2.74.2190 — the on-page banner rides the SAME bracket as the busy mark (Invariant #2), so it is on for
+      // exactly the span the engine is driving and cannot drift into a second source of truth. Fire-and-forget
+      // both ways: a tab that cannot take the message is a tab we still have to drive, and the `finally` below
+      // clears it on every exit path including a throw.
+      // v2.74.2192 — ENSURE THE CONTENT SCRIPT FIRST. Live: the banner appeared only on the SECOND eye click.
+      // Cause: `ensureContentScript` is first called inside `_settleDriveSection` (sg.js:1029), which runs AFTER
+      // this point, so on the first drive of a session there is no receiver and `sendMessage` rejects — into my
+      // own `.catch(() => {})`. The second click found the script already injected by the first, which is
+      // exactly the "works the second time" signature. Fire-and-forget is right for a cosmetic banner; swallowing
+      // the error while ALSO sending before the receiver exists is what made it look intermittent.
+      const _banner = (on, label) => {
+        if (_busyTab == null) return;
+        (async () => {
+          try { if (on) await ctx.ensureContentScript(_busyTab); } catch { /* a tab we cannot inject is still a tab we drive */ }
+          // v2.74.2193 — TOP FRAME ONLY. `chrome.tabs.sendMessage(tabId, msg)` BROADCASTS to every frame in the
+          // tab, and the content script runs in each one — so an iframe rendered its own banner, `position:fixed`
+          // to ITS viewport, which the user saw as a second pill mid-screen. `frameId: 0` addresses the top
+          // document alone. (The content script also refuses to render outside the top frame now, so any other
+          // caller gets the same guarantee without having to know this.)
+          try { await chrome.tabs.sendMessage(_busyTab, { type: 'DRIVE_BANNER', payload: { on, label } }, { frameId: 0 }); } catch { /* */ }
+        })();
+      };
+      _banner(true, 'Orchard is opening a task on this page…');
       try {
         const groundId = String(payload?.groundId ?? '').trim();
         const driveId = String(payload?.driveId ?? '').trim();
@@ -1442,12 +1485,26 @@ export function createSgMessageHandlers(ctx) {
           catch (e) { sendResponse({ success: false, error: `drive run failed: ${e.message}` }); return; }
         } else { sendResponse({ success: false, error: 'artifact hydrated without a runnable entity' }); return; }
         const ok = !!(result && result.success);
-        // v2.74.1556 — SELF-STAMP the recorded start on LEGACY capabilities (accepted before startUrl existed):
-        // a successful run proves the pre-run page was a working start — bank it (raw, hash intact) so the next
-        // replay can start-establish instead of depending on where the tab happens to sit.
-        if (ok && !cap.startUrl && liveUrl && (!cap.localeUrl || _orig(liveUrl) === _orig(cap.localeUrl))) {
-          try { await ctx.writeSgCapability(groundId, { ...cap, startUrl: liveUrl }); Logger.info('background', `REPLAY_SG_CAPABILITY — startUrl self-stamped (${_pageHash(liveUrl) || '/'})`); } catch { /* best-effort */ }
-        }
+        // v2.74.2163 — THE v1556 SELF-STAMP BLOCK IS DELETED FROM THIS HANDLER, and it was turning every
+        // SUCCESSFUL drive into a reported failure.
+        //
+        // It read `cap.startUrl`, and there is no `cap` in this handler's scope: the only declaration is a
+        // `const cap` inside the `if (ok)` promotion block BELOW, a nested block that binds nothing here. So the
+        // line threw `ReferenceError: cap is not defined` — and it threw ONLY when `ok` was true, i.e. only when
+        // the walk had just worked. The outer catch converted that into
+        // `{success:false, error:'cap is not defined'}`, so the panel logged `→ stopped — cap is not defined`
+        // for a drive that had reached its target. Live 2026-08-10 16:51:18, and it is the reason the drive has
+        // looked broken while succeeding.
+        //
+        // Deleted rather than repaired: the block is a copy of REPLAY_SG_CAPABILITY's, where `cap` is a real SG
+        // capability record. A DRIVE ARTIFACT is not one — `stamped` is a drive record and has no `startUrl`
+        // contract — so there is nothing correct for it to stamp here. It has never once executed without
+        // throwing, so removing it cannot regress behaviour that ever worked. The promotion block below is
+        // unaffected: it reads its OWN `cap` from readSgCapabilities(groundId), correctly scoped.
+        //
+        // Same defect FAMILY as the `_row` ReferenceError found at the top of this session: an identifier read
+        // in one block, declared in a sibling/nested one, invisible to `npm run undef` because that checker
+        // treats a `let`/`const` as binding for the whole function.
         // Verify-on-first-use promotion: a clean run upgrades 'observed' → 'trial-pass' (the run IS the trial —
         // the same doctrine as PS-3's staged caps) + healthStatus 'ready' on the backing records. A failure
         // leaves the verdict honest; nothing is silently promoted.
@@ -1471,7 +1528,7 @@ export function createSgMessageHandlers(ctx) {
       } catch (err) {
         Logger.error('background', `INVOKE_DRIVE_ARTIFACT failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
-      } finally { if (_busyTab != null) markEngineBusy(_busyTab, false); }
+      } finally { _banner(false); if (_busyTab != null) markEngineBusy(_busyTab, false); }   // v2.74.2190 — the banner clears on EVERY exit, including a throw
     },
 
     // §17 (DESIGN_connectors.md) — BANK already-captured network reads into the Ground's ride-recipe collection (the
@@ -3711,7 +3768,14 @@ export function createSgMessageHandlers(ctx) {
     // a turn took + its cues) into the SAME persisted ring buffer the background uses — the sidepanel's own console
     // isn't ring-buffered, so a chat-side decision was previously invisible in the downloaded trace.
     ORCH_LOG: async (payload, _sender, sendResponse) => {
-      try { const line = payload && payload.line; if (typeof line === 'string' && line) Logger.info('background', line.slice(0, 300)); } catch { /* never let a log break the turn */ }
+      // v2.74.2159 — 300 → 1200. The cap decapitated the one payload a failure line exists to carry: live
+      // 2026-08-10 16:33:35 the first drive that ever RAN reported
+      // `CLICK_BY_LABEL: no option matched "[addr]" in container "body". Availab` — cut mid-word at exactly 300
+      // chars, discarding the list of what WAS on the page, which is the whole diagnostic. The guard against a
+      // runaway line is worth keeping; 300 is not the right number for it. Background-emitted lines in the same
+      // hour-file already run to 1741 chars, so a panel-emitted decision line is no more dangerous than the ones
+      // beside it — the asymmetry was accidental, not a policy.
+      try { const line = payload && payload.line; if (typeof line === 'string' && line) Logger.info('background', line.slice(0, 1200)); } catch { /* never let a log break the turn */ }
       sendResponse({ success: true });
     },
 

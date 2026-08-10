@@ -7,8 +7,15 @@ Chrome side-panel agent that learns to operate websites. MV3 extension; no build
 - **Undef gate:** `npm run undef` covers `background/handlers/*.js` and the page scripts. Known pre-existing FALSE POSITIVE: 3 findings in `Core/rideCache.js` (default-valued params in object-literal shorthand methods) — present on HEAD, not a regression.
 - **Syntax-check edited JS:** `node --check <file>` before relying on a change (ESM files: `node --input-type=module --check < <file>`).
 - **Scratch goes to the OS temp dir, never the repo root.** The repo root IS the unpacked-extension root (no build step), and Chrome refuses to load a directory containing any `_`-prefixed file (`_metadata`/`_locales` are reserved) — so a stray `_tmp_*.mjs` probe at root breaks `Load unpacked` entirely. Write probes/one-offs to `%TEMP%` (e.g. `C:\Users\Divine\AppData\Local\Temp`). `.gitignore` ignores root `/_*` so they can't be committed, but an untracked one still blocks the load until deleted.
-- **Version:** bump `manifest.json` (`v2.74.X`) on every behavior change — it's the join key between `logs/build/` (the conversation), `logs/run/` (traces + `findings.md`), and commit messages. Never ship a behavior change without a bump. *(v2.74.1138 — **version-at-land** exception: a dev-bridge **`merge`** now stamps `main`'s version to current+1 automatically at land (`bridge/setVersion.cjs`, `docs/DESIGN_surfaces.md` §4.2), so don't hand-bump `manifest.json` on `dev/…` branches — the land owns the number and overwrites the branch's; inline `v2.74.X` markers there are author annotations only. Direct-to-`main` work, like this high-level chat, still bumps by hand.)*
+- **Version:** bump `manifest.json` (`v2.74.X`) on every behavior change — it's the join key between `logs/build/` (the conversation), `logs/run/` (traces), `../orchard-journal/findings.md` (the journal), and commit messages. Never ship a behavior change without a bump. *(v2.74.1138 — **version-at-land** exception: a dev-bridge **`merge`** now stamps `main`'s version to current+1 automatically at land (`bridge/setVersion.cjs`, `docs/DESIGN_surfaces.md` §4.2), so don't hand-bump `manifest.json` on `dev/…` branches — the land owns the number and overwrites the branch's; inline `v2.74.X` markers there are author annotations only. Direct-to-`main` work, like this high-level chat, still bumps by hand.)*
 - **`bcp`** = bug pass → commit → push (diff review + syntax + `npm test`, then commit/push only on green).
+- **The journal lives OUTSIDE this repo** *(v2.74.2104, audit item 3′)*: `../orchard-journal/findings.md`, its own
+  local git repo (no remote — publishing is a separate call). It moved because this repo has no build step, so the
+  root IS the unpacked-extension root and 2.9 MB of build narrative rode in the bundle; and because one copy with
+  no history made a bad edit or scrub regression unrecoverable. Tools resolve it via `tools/journalPath.cjs`
+  (`$ORCHARD_JOURNAL` → sibling → legacy `logs/run/findings.md`, which is now a do-not-append stub). At pass end:
+  `node tools/glf/scrub.cjs ../orchard-journal/findings.md --apply` then
+  `git -C ../orchard-journal add findings.md && git -C ../orchard-journal commit -m "journal: <version> <slug>"`.
 
 ## Layout
 `Core/` engine + matching · `Services/` (incl. `Services/Chat/`, `Services/Engine/`) · `background/` (SW + `background/handlers/`, e.g. `sg.js`, `explore.js`) · `Studio/` + `studio.js` · `Sidepanel/` · `ContentScripts/` · `docs/` design specs · `logs/` git-ignored build/run journals.
@@ -17,7 +24,7 @@ Chrome side-panel agent that learns to operate websites. MV3 extension; no build
 
 # Invariants — add to these, don't relearn them
 
-Three failure *families* below have each been re-diagnosed from scratch several times (see `logs/run/findings.md`). They are checklist-shaped: a new code path silently breaks a contract that no test covers. Before finishing any change that touches the listed trigger, confirm the paired rule.
+Three failure *families* below have each been re-diagnosed from scratch several times (see `../orchard-journal/findings.md`). They are checklist-shaped: a new code path silently breaks a contract that no test covers. Before finishing any change that touches the listed trigger, confirm the paired rule.
 
 ## 1. New decision marker → add it to `_DECISION_RE`
 **Trigger:** you add or rename a decision-worthy log marker (anything a `-decisions-` download should surface — `ROUTE ▸`, `ORCH_MATCH`, `WALK ▸`, `RICH_INTENTS ▸`, `INTENT_MENU ▸`, `ACCEPT_SG_TRIAL`, `INTERACTION_OUTCOMES ▸`, etc.).

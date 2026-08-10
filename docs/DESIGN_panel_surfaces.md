@@ -157,6 +157,24 @@ intent-flag. Placeholder-as-instruction is invisible the moment anything refills
 3. **Locked means labeled.** A disabled input ALWAYS has a visible chip stating who locked it and how to exit.
    `disabled` without a chip is a bug by definition (a conformance check greps for the pairing, §6.3).
 
+### 4.3 HIDING the composer on non-chat surfaces — investigated 2026-08-08, NOT ruled
+
+Asked: should the input hide itself on tabs/pages that "do not accept chat"? Investigated; **not adopted, pending
+the user's call**. Full analysis in `logs/run/findings.md` (2026-08-08 entry). The three load-bearing facts:
+
+- No panel surface lacks a consumer for typed text — rail tabs and overlays route to the conversation beneath, and
+  wizard/setup PAGES use the composer as their sole text entry. The real defect behind the question is that a send
+  from a covering surface lands in an **occluded** Thread (`.rail` is `inset:0 / z20` over `#app-body`; overlays
+  z18; `sendChatMessage` closes neither on entry).
+- Hiding contradicts §1.3's invariant (the composer is chrome no surface may cover) and re-opens two fixed bug
+  classes: the hover-peek would blink the input in and out on a mouse graze (RB-5/RB-6), and `openPanelOverlay`'s
+  `$('chat-input').focus()` close-fallback would strand focus at `<body>` (RB-3/RB-6).
+- §4.2/3 already ruled on the weaker form — a merely *disabled* input must carry an explaining chip. A hidden one
+  cannot carry it.
+
+Standing preference if the question returns: **reveal the outcome, don't remove the input** — release the covering
+surface on send; scope with `claimComposer` + chip, never by hiding.
+
 ---
 
 ## 5. One icon system

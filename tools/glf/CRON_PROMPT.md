@@ -2,7 +2,7 @@
 
 The fixed prompt the 5-minute cron fires. **This file is the source of truth**; update the cron job from it.
 Human paste shortcuts to *start* a session live in [`SHORTCUTS.md`](SHORTCUTS.md): `run glf grader` / `run glf builder`.
-Changes here are numbered against the audit that produced them (see `logs/run/findings.md`, the 2026-08-03 entries).
+Changes here are numbered against the audit that produced them (see `../orchard-journal/findings.md`, the 2026-08-03 entries).
 v2.74.2014 adds the **test bus** (`../orchard-logs/tests/` + `results/`, via `tools/glf/testbus.cjs`): open
 assertions now live as test files any builder session can write, and this loop â€” the **grader** â€” answers them
 through append-only result files. Roles are claimed, not assigned: builder is whoever changed the code (stamped
@@ -86,7 +86,7 @@ auto-acked as `seen` at write time so this inbox does not re-diagnose them next 
 
 `git pull` in `apps/orchard-logs` (tail the summary line only). Find the newest UTC hour-file(s) across **all**
 install dirs (`logs/<newest date>/*/*/*.txt` â€” never hardcode one install; a new `pk_`/`ins_` dir must not be
-missed). Compare the latest event stamp against the last entry in `logs/run/findings.md`.
+missed). Compare the latest event stamp against the last entry in `../orchard-journal/findings.md`.
 
 Note the archive is a ~48h ring **and rewrites in place**: hour-files are re-exported hourly with only the header
 changing, and old files retro-truncate (one sweep deleted 243 lines from a 48-hour-old file; fleet totals shrank
@@ -169,7 +169,7 @@ touched file, `npm test` to green. **Do not commit or push.**
 Append ONE findings entry with `INCIDENT[...]` tags, then run:
 
 ```bash
-node tools/glf/scrub.cjs logs/run/findings.md --apply
+node tools/glf/scrub.cjs ../orchard-journal/findings.md --apply
 ```
 
 **No PII in the journal, ever.** `logs/.gitignore` is the only thing between it and every install: this repo has

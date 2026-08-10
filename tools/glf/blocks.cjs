@@ -20,7 +20,9 @@
 
 const fs = require('fs');
 
-const FINDINGS = 'logs/run/findings.md';
+// v2.74.2104 (audit item 3′) — the journal moved to the sibling repo; resolve it instead of hardcoding.
+const { journalPath } = require('../journalPath.cjs');
+const FINDINGS = journalPath();
 const RE_BLOCK = /^VALIDATE\[v(\d+\.\d+\.\d+)\s*[—-]\s*([^\]]*)\]:/;
 const RE_RETIRED = /^RETIRED\[v(\d+\.\d+\.\d+)\s*[—-]\s*(PASS|FAIL|SUPERSEDED|WONTFIX)\b([^\]]*)\]/;
 // A block's BUILD is captured when the block is WRITTEN — while the fix is still uncommitted. The moment that

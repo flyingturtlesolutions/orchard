@@ -59,6 +59,35 @@ describe('contactReview — one primary control per channel, and the button name
   it('unresolved leads with closing it, since nothing is owed to the homeowner', () => {
     assert.equal(controlsFor('unresolved')[0].id, 'close');
   });
+
+  // v2.74.2149 (DESIGN_audit.md §12.8.2) — the `reference` kind: decides nothing, so it is always safe to click.
+  describe('Show task — the reference control', () => {
+    it('is offered on EVERY channel (ambiguous instructions resolve to `unresolved`, where it matters most)', () => {
+      for (const ch of ['email', 'call', 'unresolved']) {
+        const b = controlsFor(ch, { email: 'd@e.com', phone: '336-555-0142' });
+        const st = b.find((x) => x.id === 'show-task');
+        assert.ok(st, `${ch} must offer Show task`);
+        assert.equal(st.kind, 'reference');
+        assert.equal(st.label, 'Show task');
+      }
+    });
+    it('is NEVER danger — a reference control mutates nothing, so a mis-click costs nothing', () => {
+      for (const ch of ['email', 'call', 'unresolved']) {
+        assert.notEqual(controlsFor(ch, {}).find((x) => x.id === 'show-task').danger, true);
+      }
+    });
+    it('never precedes the channel PRIMARY — the decision stays the dominant control', () => {
+      for (const ch of ['email', 'call', 'unresolved']) {
+        const b = controlsFor(ch, {});
+        assert.ok(b.findIndex((x) => x.id === 'show-task') > b.findIndex((x) => x.kind === 'primary'), ch);
+      }
+    });
+    it('is the ONLY non-mutating control — every other kind decides or edits', () => {
+      const b = controlsFor('email', { email: 'd@e.com' });
+      assert.deepEqual(b.filter((x) => x.kind === 'reference').map((x) => x.id), ['show-task']);
+      assert.equal(b.filter((x) => x.kind === 'primary').length, 1, 'still exactly one primary');
+    });
+  });
   it('EVERY channel offers the other two as overrides — the allow-list errs toward caution', () => {
     for (const ch of ['email', 'call', 'unresolved']) {
       const ids = controlsFor(ch).map((b) => b.id);

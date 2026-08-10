@@ -6,6 +6,13 @@ SGV — and a longer owed list sits behind them. This doc is the ORDER with the 
 adds contract text of its own (it does, twice — marked **[arc-owned]**), that is this doc's design to defend,
 not a citation.
 
+**Sibling arc:** `docs/BUILD_ARC_exec_channel.md` sequences the remote-exerciser work specced in
+`DESIGN_exec_channel.md`. No shared *rungs* — but **one shared directory**: both arcs write in
+`background/handlers/` (rung 1 below edits `cadence.js`; the exec arc adds `exec.js`). Different files, so
+`git add` by name separates them cleanly, but a lane running both at once must not `git add -A`. Everything else
+is disjoint (`orchard-cloud`, `Core/execCommand.js`, `tools/`). *(Corrected 2026-08-08 — the first version of
+this line claimed the surfaces were fully disjoint, which was wrong.)*
+
 **The organizing principle:** cheapest-and-closing first, the governor last-and-largest — because the pause arc
 already broke ground on the seams SGV-1 needs (stated precisely in rung 5, with the overclaims from review
 removed). The arc's destination is the iron principle — *"Orchard fails if the user becomes a state manager"* —

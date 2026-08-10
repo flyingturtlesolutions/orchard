@@ -286,3 +286,44 @@ What to look for in `logs/run/cron.out` after the first overnight:
 `node tools/glf/report.cjs duty --hours 24` grades the recovery numerically. Until 1–3 are observed, F5's status
 is honestly "MECH proven, VALUE pending" — the same half-hit distinction the loop itself grades by (v2.74.2024),
 applied to the loop's own scheduler.
+
+### 9.3a OBSERVED — the overnight of 2026-08-07→08 (v2.74.2104)
+
+The unobserved scenario finally ran: the machine slept with no session open and woke with none. Evidence from
+`logs/run/cron.out` (firing headers) and `logs/run/loop-ticks.jsonl`:
+
+```
+last pre-sleep firing    Sat 08/08  0:04:01 CDT   (05:04Z)
+── sleep, ~12h, no firings ──
+first post-wake firing   Sat 08/08 12:09:02 CDT   (17:09Z)   ← unattended
+then                     12:14 · 12:24 · 12:29 · 12:34 · 12:39 · 12:44
+DUTY ▸ 374/289 ticks over 24h · 1 gap >15min · 718min lost · max 718min
+```
+
+| # | Criterion | Verdict |
+|---|---|---|
+| 1 | firing gap covers the sleep, not a bug | **PASS** — 0:04 → 12:09 CDT, no firings between |
+| 2 | first post-wake firing resumes alone, `LOOP GAP` honestly sized | **PARTIAL** — see below |
+| 3 | that firing does real work unattended | **PASS** — lease claimed by `lane-cron`, grade-pending read, `v2.74.2009` graded INCONCLUSIVE with the no-duplicate-state rule correctly applied, census written |
+| 4 | failure signatures absent | **ONE FOUND** — the evidence-banking denial (§9.3b) |
+
+**Why 2 is only partial.** The 718-minute gap IS recorded honestly — but on the `17:05:19Z` ledger row, which is
+not the headless task's (its first firing ticked at `17:09:21Z` and read `gapMin: 4`). So the loop's books are
+right while the session that exists to *announce* the gap saw a small number and reported it as routine. The
+`LOOP GAP` verdict is computed from the previous LEDGER row, not from the previous row *of the same lane* — with
+several sessions sharing one ledger (duty read 129.4%, i.e. >100%), whoever ticks first after a gap absorbs it,
+and it can be a session that has no idea an absence occurred. Not fixed here; recorded as the residual.
+
+### 9.3b The failure signature it did surface — evidence banking was structurally impossible
+
+The 12:45 firing reported: *"File-copy to `logs/run/` was blocked by the sandbox both ways (`cp` and
+`Copy-Item`), so evidence is quoted inline rather than banked."* Cause: `headless-tick.cmd`'s allowlist granted
+`Edit(logs/run/**)` and **Edit cannot create a file** — while this same header had claimed "writes are scoped to
+logs/run/ (evidence + **copied windows**)" since v2044. The doc described a capability the mechanism never had,
+and nothing noticed until a grader tried to use it. Cost: the 17:38/17:43 warranty classifications were cited
+inline only, and the 17:00Z hour-file rewrote twice within ten minutes.
+
+Fixed at v2.74.2104 (user-authorized): `Write(logs/run/**)` added to the allowlist, plus an explicit BANK-THE-
+WINDOW rule in `HEADLESS_PROMPT.md` §6 naming the Write tool (since `cp`/`Copy-Item` remain, correctly, off the
+list). **Status after this: F5 is VALUE-proven for sleep/wake recovery, with the §9.3a-2 gap-attribution residual
+open.**

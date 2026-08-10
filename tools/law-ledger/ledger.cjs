@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // tools/law-ledger/ledger.cjs — v2.74.1855 — the quantified instrument for the falsification protocol (README.md).
 // Local TOOLCHAIN (progress-digest precedent): never the shipped bundle. Reads ONLY structured data — the
-// INCIDENT[...] tags in logs/run/findings.md plus the frozen tools/law-ledger/baseline.csv — and prints per-stage
+// INCIDENT[...] tags in the journal (../orchard-journal/findings.md, resolved by tools/journalPath.cjs) plus the frozen tools/law-ledger/baseline.csv — and prints per-stage
 // failure rates, lifetimes, and the pre-registered Poisson verdicts. Prose never enters a computation.
 //
 // Tag grammar (one line inside a findings entry, same family as LESSON[...]):
@@ -11,7 +11,7 @@
 // `passes` on the closing line, else the count of tag lines in the episode.
 //
 // Usage:
-//   node tools/law-ledger/ledger.cjs [--findings logs/run/findings.md] [--baseline tools/law-ledger/baseline.csv]
+//   node tools/law-ledger/ledger.cjs [--findings <path>] [--baseline tools/law-ledger/baseline.csv]
 //                                    [--from-v N] [--to-v N] [--json]
 
 'use strict';
@@ -140,7 +140,8 @@ function main() {
   const args = process.argv.slice(2);
   const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
   const root = path.resolve(__dirname, '..', '..');
-  const findingsPath = path.resolve(root, opt('--findings', 'logs/run/findings.md'));
+  // v2.74.2104 (audit item 3′) — default resolves to the sibling journal repo; --findings still overrides.
+  const findingsPath = path.resolve(root, opt('--findings', require('../journalPath.cjs').journalPath()));
   const baselinePath = path.resolve(root, opt('--baseline', 'tools/law-ledger/baseline.csv'));
 
   let findingsText = ''; try { findingsText = fs.readFileSync(findingsPath, 'utf8'); } catch { /* absent is legal (fresh clone) */ }

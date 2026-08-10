@@ -154,10 +154,14 @@ export function createPipelineHandlers() {
           for (const s of (Array.isArray(p.stages) ? p.stages : [])) l = addStage(l, up.id, s);
           for (const a of (Array.isArray(p.actions) ? p.actions : [])) l = addAction(l, up.id, a);
           if (p.close && typeof p.close === 'object') l = closeCase(l, up.id, { ...p.close, now: Date.now() });
-          return { list: l, opened: up.opened, id: up.id };
+          return { list: l, opened: up.opened, id: up.id, record: up.record || null };
         });
 
-        sendResponse({ success: true, id: r.id, opened: r.opened });
+        // v2.74.2170 — ECHO WHAT LANDED, not what arrived. The panel's `div N/M` counted the division it BUILT,
+        // which is a count of the payload and says nothing about the store — and for six versions the store was
+        // discarding it on every append. The stored reference rides the response so the caller's tally can be
+        // about the store; `divisionBanked` is the one field the "Show task" drive actually joins on.
+        sendResponse({ success: true, id: r.id, opened: r.opened, divisionBanked: !!(r.record && r.record.division) });
       } catch (e) { sendResponse({ success: false, error: String((e && e.message) || e) }); }
     },
 
