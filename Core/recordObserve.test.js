@@ -224,3 +224,38 @@ describe('recordObserve — §12.3 reconcileCollection', () => {
     assert.deepEqual(reconcileCollection([row()], [null, 'x', 7], { leg: sel, now: T0 }), []);
   });
 });
+
+// v2.74.2212 — THE POLL WAS REFUSED BEFORE THE NETWORK, every tick, in silence. `shopify_draft_orders` carries
+// `{query}` IN ITS URL; the sweep sent no params, so the executor blocked it (`needs query`, connector.js:1156)
+// and the sweep counted one unreadable collection and moved on. Live: a draft completed in Shopify at 17:13 and
+// its record still read `draft` after a forced re-check.
+describe('recordObserve — pollPlan sends the leg’s declared params, blank', () => {
+  const leg = { id: 'coll', appHost: 'admin.shopify.com', watches: ['draft'], observe: { s: { of: 'field', at: 's' } },
+    params: [{ name: 'query', required: false }] };
+
+  it('an optional param rides as BLANK — which is what these legs’ own hints call the default scope', () => {
+    const plan = pollPlan([row()], { catalog: [leg], now: T0 });
+    assert.deepEqual(plan[0].params, { query: '' });
+  });
+
+  it('a leg with a REQUIRED param is not pollable — nothing in a sweep can fill one', () => {
+    const req = { ...leg, params: [{ name: 'order', required: true }] };
+    assert.deepEqual(pollPlan([row()], { catalog: [req], now: T0 }), [], 'and sending "" would query for the empty string');
+  });
+
+  it('a leg with no params at all still plans, with an empty bag', () => {
+    const bare = { ...leg, params: undefined };
+    assert.deepEqual(pollPlan([row()], { catalog: [bare], now: T0 })[0].params, {});
+  });
+
+  it('THE REGRESSION, against the shipped catalog: the draft-orders URL fills completely', async () => {
+    const { CONNECTOR_RECIPES, fillEndpoint } = await import('./connectorRecipes.js');
+    const plan = pollPlan([row()], { catalog: CONNECTOR_RECIPES, now: T0 });
+    const step = plan.find((p) => p.recipeId === 'shopify_draft_orders');
+    assert.ok(step, 'the draft list is planned for a draft record');
+    const real = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_draft_orders');
+    const left = fillEndpoint(real.endpoint, step.params).match(/\{[a-zA-Z_][\w-]*\}/g) || [];
+    // {op_sha} and {handle} are the executor's to fill (the op bank and the ride tab's store handle).
+    assert.deepEqual(left.sort(), ['{handle}', '{op_sha}'], 'no DECLARED param may be left unfilled — that is a refusal, not a request');
+  });
+});

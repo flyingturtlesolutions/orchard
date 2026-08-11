@@ -301,6 +301,23 @@ export function pollPlan(rows, { catalog = [], now = 0, lastPollAt = {}, gapMs =
   const seenAt = _isObj(lastPollAt) ? lastPollAt : {};
   const out = [];
   for (const leg of legs) {
+    // v2.74.2212 — SEND THE LEG'S DECLARED PARAMS, BLANK. A poll wants the collection's DEFAULT scope, and these
+    // legs say so themselves: `shopify_draft_orders`' own hint is "blank for the most recent drafts". But its
+    // `{query}` sits IN THE URL, and an unfilled `{…}` is refused before the network (`needs query`,
+    // connector.js:1156) — so passing nothing meant every poll was blocked, counted as one unreadable
+    // collection, and moved past in silence. Live: a draft completed in Shopify at 17:13 and the record still
+    // read `draft` after a forced re-check.
+    //
+    // A REQUIRED param makes a leg unpollable, and that is the honest verdict rather than a blank guess: nothing
+    // in a collection sweep can supply one, and sending '' would query for the empty string.
+    const _params = {};
+    let _blocked = false;
+    for (const p of (Array.isArray(leg.params) ? leg.params : [])) {
+      const n = _str(p && p.name); if (!n) continue;
+      if (p && p.required === true) { _blocked = true; break; }
+      _params[n] = '';
+    }
+    if (_blocked) continue;
     const host = _str(leg.appHost);
     const kinds = new Set(leg.watches.map((k) => _str(k)));
     const live = list.filter((r) => _str(r.system) === host && _str(r.watch) !== 'gone'
@@ -309,7 +326,7 @@ export function pollPlan(rows, { catalog = [], now = 0, lastPollAt = {}, gapMs =
     const gap = _num(leg.pollGapMs) || _num(gapMs) || POLL_GAP_MS;
     const last = _num(seenAt[_str(leg.id)]);
     if (last && (_num(now) - last) < gap) continue;                         // inside its window — the tick is the scanner, the window is the cadence
-    out.push({ recipeId: _str(leg.id), host, rowIds: live.map((r) => _str(r.currentId) || _str(r.id)), why: last ? 'window elapsed' : 'never polled' });
+    out.push({ recipeId: _str(leg.id), host, params: _params, rowIds: live.map((r) => _str(r.currentId) || _str(r.id)), why: last ? 'window elapsed' : 'never polled' });
   }
   return out;
 }

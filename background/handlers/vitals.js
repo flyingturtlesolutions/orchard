@@ -323,7 +323,7 @@ async function _recordWatchSweep({ force = false } = {}) {
       if (!groundId) continue;
       let reply = null;
       try {
-        reply = await invokeRideRecipe({ id: leg.id, ...leg }, groundId, { invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...payload, headless: true }) });
+        reply = await invokeRideRecipe({ id: leg.id, ...leg }, groundId, { params: step.params || {}, invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...payload, headless: true }) });
       } catch { reply = null; }
       polled++;
       if (!reply || !reply.ok) { failed++; continue; }   // a signed-out or 404 collection says nothing about its members
@@ -390,7 +390,11 @@ async function _recordWatchSweep({ force = false } = {}) {
     try { await StorageManager.set(WATCH_KEY, { lastPollAt, lastProbeAt, seenBy }); } catch { /* */ }
     // BODY-BLIND like every other audit line: counts and leg ids, never a value that was observed.
     try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) + ${probed} record read(s) over ${rows.length} row(s) → ${updated} updated · ${handed} handed off · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
+    // v2.74.2212 — THE CALLER GETS THE TALLY, because a surface that says 're-checked' on a sweep where every read
+    // was refused is the dishonest-indicator class this ledger keeps correcting (`→ driven`, `arrived`, '5 of 6').
+    return { polled, probed, updated, handed, gone, failed };
   } catch { /* fail-safe — the watch must never break the tick */ }
+  return null;
 }
 
 /**
@@ -697,7 +701,7 @@ export function createVitalsHandlers() {
      */
     RECORD_VERIFY_NOW: (_payload, _sender, sendResponse) => {
       (async () => {
-        try { await _recordWatchSweep({ force: true }); sendResponse({ success: true }); }
+        try { const t = await _recordWatchSweep({ force: true }); sendResponse({ success: true, tally: t }); }
         catch (e) { sendResponse({ success: false, error: (e && e.message) || 'verify failed' }); }
       })();
       return true;

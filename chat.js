@@ -13224,7 +13224,21 @@ function _openRecordDrill(e, fmtTime) {
       void (async () => {
         try {
           const r = await _orchReq('RECORD_VERIFY_NOW', {});
-          if (r && r.success !== false) { try { s.textContent = `State: ${_as} · re-checked just now`; } catch { /* */ } void _renderActiveRailTab({ force: true }); }
+          if (!r || r.success === false) return;
+          // v2.74.2212 — SAY WHAT THE CHECK ACTUALLY DID. This said "re-checked just now" whenever the message
+          // round-tripped — including when every read was REFUSED before the network, which is exactly what was
+          // happening: `shopify_draft_orders` carries `{query}` in its URL and the poll sent no params, so the
+          // executor blocked it (`needs query`) on every tick while the card claimed a fresh look. A draft
+          // completed in Shopify at 17:13 sat unchanged behind that sentence.
+          //
+          // Same family as `→ driven`, `arrived`, and "5 of 6": a surface reporting the ATTEMPT as the OUTCOME.
+          const t = (r && r.tally) || null;
+          const _said = !t ? 'nothing to re-check'
+            : (t.handed || t.updated) ? 'just updated it'
+              : (t.polled || t.probed) ? `re-checked just now${t.failed ? ` · ${t.failed} unreadable` : ' · no change'}`
+                : t.failed ? `couldn’t re-check — ${t.failed} unreadable` : 'nothing to re-check';
+          try { s.textContent = `State: ${_as} · ${_said}`; } catch { /* */ }
+          if (t && (t.handed || t.updated || t.gone)) void _renderActiveRailTab({ force: true });
         } catch { /* the banked state is still on screen and still honest */ }
       })();
     }
