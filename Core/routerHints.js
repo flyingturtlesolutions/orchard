@@ -55,6 +55,7 @@ export const ROUTER_HINTS = Object.freeze({
   shopify_create_order: 'create a DRAFT order (variant id + qty) for a human to complete — free replacement: 100% discount + zero shipping',
   // v2.74.2069 — the draft-orders search read (the delete lookup viaLeg) + the destructive draft delete.
   shopify_draft_orders: 'search DRAFT orders (open/pending, not yet completed): number #D…, status, customer, total; blank = the newest drafts',
+  shopify_draft_order: 'read ONE draft order by its internal id: number, status, and the ORDER it became once completed — "what happened to this draft?"',
   shopify_delete_order: 'DELETE a DRAFT order by its #D number — IRREVERSIBLE, human-confirmed; unsent drafts only, never a completed or paid order',
 
   // ── VendorSuite ────────────────────────────────────────────────────────────────────────────────────────────

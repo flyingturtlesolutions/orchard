@@ -28,8 +28,8 @@ import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   //
 // the pure planner/reconciler, and the state-machine functions it applies. No new alarm, no second clock owner.
 import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';
 import { loadCreates, updateCreate } from '../../Services/Storage/AuditCreateStore.js';
-import { pollPlan, reconcileCollection, rowsAt } from '../../Core/recordObserve.js';
-import { applyGone, applyUpdate, applyTransition, warmWindowMs } from '../../Core/recordLife.js';
+import { pollPlan, reconcileCollection, rowsAt, probePlan, probeParams, readTransition, observeFields, hasNews, newsToFields } from '../../Core/recordObserve.js';
+import { applyGone, applyUpdate, applyTransition, warmWindowMs, nextWatch } from '../../Core/recordLife.js';
 
 const TICK_ALARM = 'vitals:tick';
 const CONFIRM_PREFIX = 'vitals:confirm:';
@@ -313,7 +313,7 @@ async function _recordWatchSweep({ force = false } = {}) {
     // the window exists to bound BACKGROUND cost, and a person asking is not background cost.
     const plan = pollPlan(rows, { catalog: CONNECTOR_RECIPES, now: Date.now(), lastPollAt: force ? {} : lastPollAt });
     if (!plan.length) return;
-    let polled = 0; let updated = 0; let gone = 0; let handed = 0; let failed = 0;
+    let polled = 0; let updated = 0; let gone = 0; let handed = 0; let probed = 0; let failed = 0;
     for (const step of plan) {
       const leg = (CONNECTOR_RECIPES || []).find((r) => r && r.id === step.recipeId);
       if (!leg) continue;
@@ -340,6 +340,16 @@ async function _recordWatchSweep({ force = false } = {}) {
             const r = await updateCreate(ref, (row) => applyTransition(row, { toKind: a.toKind, toId: a.toId, at: a.at, windowMs: warmWindowMs(leg) }));
             if (r.changed) handed++;
           }
+          // §12.5, second branch — the collection can see THAT something happened and not WHAT. It asks; one
+          // targeted read answers. (Shopify's DraftOrderList carries `status` and no `order` — HAR 2026-08-11.)
+          else if (a.kind === 'probe') {
+            const got = await _probeOne(a.via, { id: a.id, label: '' }, Date.now());
+            if (got && got.handOff) {
+              const r = await updateCreate(ref, (row) => applyTransition(row, { ...got.handOff, at: a.at, windowMs: got.windowMs }));
+              if (r.changed) handed++;
+            }
+            probed++;
+          }
           else {
             const r = await updateCreate(ref, (row) => applyUpdate(row, { fields: a.fields, at: a.at, windowMs: warmWindowMs(leg) }));
             if (r.changed) { updated++; seenBy[a.key] = a.seenNext; }
@@ -348,10 +358,78 @@ async function _recordWatchSweep({ force = false } = {}) {
       }
       lastPollAt[leg.id] = Date.now();
     }
-    try { await StorageManager.set(WATCH_KEY, { lastPollAt, seenBy }); } catch { /* */ }
+
+    // ── §12.3's PER-RECORD tier. Priced at "1 read per record", so it is warm-gated — unlike a collection read,
+    // this one's cost scales with the book. It exists because a collection cannot always host the watch: an
+    // order's tracking lives on the order, and the only orders collection that returns tracking is the
+    // UNFULFILLED queue, which an order LEAVES at the moment it ships (v2209, from the same capture).
+    const fresh = (await loadCreates()).items || rows;
+    const lastProbeAt = _isPlain(book.lastProbeAt) ? book.lastProbeAt : {};
+    const perRecord = probePlan(fresh, {
+      catalog: CONNECTOR_RECIPES, now: Date.now(), lastProbeAt: force ? {} : lastProbeAt,
+      watchOf: (row) => nextWatch(row, Date.now()),
+    });
+    for (const step of perRecord) {
+      const [atStr, ...idParts] = String(step.key).split('|');
+      const ref = { at: Number(atStr) || 0, id: idParts.join('|') };
+      try {
+        const got = await _probeOne(step.recipeId, { id: step.id, label: step.label }, Date.now(), seenBy[step.key] || null);
+        if (!got) { failed++; continue; }
+        probed++;
+        lastProbeAt[step.key] = Date.now();
+        if (got.handOff) {
+          const r = await updateCreate(ref, (row) => applyTransition(row, { ...got.handOff, at: Date.now(), windowMs: got.windowMs }));
+          if (r.changed) handed++;
+        } else if (got.fields) {
+          const r = await updateCreate(ref, (row) => applyUpdate(row, { fields: got.fields, at: Date.now(), windowMs: got.windowMs }));
+          if (r.changed) { updated++; seenBy[step.key] = got.seenNext; }
+        }
+      } catch { /* one row's failure must not stop the rest */ }
+    }
+
+    try { await StorageManager.set(WATCH_KEY, { lastPollAt, lastProbeAt, seenBy }); } catch { /* */ }
     // BODY-BLIND like every other audit line: counts and leg ids, never a value that was observed.
-    try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) over ${rows.length} row(s) → ${updated} updated · ${handed} handed off · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
+    try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) + ${probed} record read(s) over ${rows.length} row(s) → ${updated} updated · ${handed} handed off · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
   } catch { /* fail-safe — the watch must never break the tick */ }
+}
+
+/**
+ * AU-6 (v2.74.2209) — READ ONE RECORD through a declared leg, and return what its declarations found. The single
+ * executor behind BOTH per-record paths: the hand-off probe a collection asks for, and the per-record observe
+ * tier. One function, because they are the same act with different triggers — and two copies would drift.
+ *
+ * Everything it does is declared BY THE LEG: `probe` says how to address the record (a gid to rebuild, or a name
+ * to strip to digits), `rows` says where the record is in the reply, `handOff` says where the new address lives,
+ * `observe` says what counts as news. This function contributes no knowledge of any platform.
+ */
+async function _probeOne(recipeId, { id = '', label = '' } = {}, now = 0, seen = null) {
+  const leg = (CONNECTOR_RECIPES || []).find((r) => r && r.id === String(recipeId || ''));
+  if (!leg) return null;
+  const params = probeParams(leg, { id, label });
+  if (!params) return null;                                   // no way to address it → no read, rather than a wrong one
+  let groundId = '';
+  try { groundId = (await _ctx.invokeSgHandler('ENSURE_GROUND_FOR_URL', { url: `https://${leg.appHost}/` }))?.groundId || ''; } catch { groundId = ''; }
+  if (!groundId) return null;
+  let reply = null;
+  try {
+    // The SHARED runner, with the record's key as its params — the same call the canary makes, one argument
+    // richer. NOT `literalSafeParams`: that strip exists to drop model-minted `resolve`/`lookup` phrases the SW
+    // cannot resolve, and this value is neither — it is an id we banked from a vendor reply.
+    reply = await invokeRideRecipe({ id: leg.id, ...leg }, groundId, {
+      params,
+      invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...payload, headless: true }),
+    });
+  } catch { reply = null; }
+  if (!reply || !reply.ok) return null;
+  const one = rowsAt(reply.value, leg.rows)[0];
+  if (!one) return null;
+  const windowMs = warmWindowMs(leg);
+  const ho = readTransition(one, leg.handOff);
+  if (ho) return { handOff: ho, windowMs };
+  if (!leg.observe) return { windowMs };
+  const obs = observeFields(one, leg.observe, seen);
+  if (!hasNews(obs)) return { windowMs };
+  return { fields: newsToFields(obs), seenNext: obs.seenNext, windowMs };
 }
 
 const _isPlain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);

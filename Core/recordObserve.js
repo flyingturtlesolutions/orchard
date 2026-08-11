@@ -167,7 +167,91 @@ export function readTransition(obj, decl) {
   const toId = _str(raw).split('/').pop();                     // gid://shopify/Order/1234 → 1234, matching what a create banks
   const toKind = _str(d.toKind);
   if (!toId || !toKind) return null;
-  return { toKind, toId };
+  // v2.74.2209 — the NAME at the new address, when the declaration names a path to it. Optional by design: a
+  // source that does not carry one yields a hand-off without a label rather than no hand-off at all.
+  const lab = d.label ? extractValue(o, _str(d.label)) : null;
+  return { toKind, toId, ...(lab ? { toLabel: _str(lab).slice(0, 80) } : {}) };
+}
+
+/**
+ * v2.74.2209 (§12.3's targeted per-record re-read) — DOES THIS ROW OWE A PROBE? PURE.
+ *
+ * The HAR of 2026-08-11 settled why this exists: Shopify's draft LIST carries `status` but NOT `order`, so the
+ * collection poll can see THAT a draft completed and never WHAT it became. §12.5 anticipated exactly this — "if
+ * it does not [carry the id] … we do ONE targeted re-read" — and this is the trigger for that read.
+ *
+ * TRIGGERED BY STATE, NOT BY THE CHANGE, and that is the load-bearing choice. Firing on "status just became
+ * COMPLETED" would fire once and never again, so a probe lost to a transport blip would strand the record as a
+ * draft forever. Firing on "status IS COMPLETED and this record has not handed off yet" is idempotent: it retries
+ * until it succeeds and stops the moment it does, because the hand-off itself is what makes the condition false.
+ *
+ * @param decl  the collection's `handOffProbe`: { when: {field, is}, via: '<recipeId>' }
+ * @returns {{via:string}|null}
+ */
+export function probeDue(row, vendorRow, decl) {
+  const d = _isObj(decl) ? decl : null;
+  const r = _isObj(row) ? row : null;
+  const v = _isObj(vendorRow) ? vendorRow : null;
+  if (!d || !r || !v || !_str(d.via)) return null;
+  if (_str(r.currentKind) && _str(r.currentKind) !== _str(r.kind)) return null;   // already handed off — nothing pending
+  const w = _isObj(d.when) ? d.when : null;
+  if (w) {
+    const got = extractValue(v, _str(w.field));
+    if (got == null || String(got) !== String(w.is)) return null;
+  }
+  return { via: _str(d.via) };
+}
+
+/**
+ * v2.74.2209 (§12.3) — THE PER-RECORD TIER: which rows are worth one read of their own right now. PURE.
+ *
+ * This is the tier §12.3 prices at "1 read PER record", and it is `warm`-gated for exactly that reason — unlike a
+ * collection read, its cost scales with the book. A cold row is not probed; an observed change re-warms it, so a
+ * record stays watched precisely while it is doing something.
+ *
+ * It exists because a collection cannot always answer. A Shopify ORDER's tracking lives on the order, and the
+ * only orders collection we have that returns tracking is the UNFULFILLED queue — which an order LEAVES at the
+ * moment it ships, i.e. at the moment the tracking number appears. So the shipping watch has to be per-record.
+ *
+ * @returns {Array<{key, recipeId, kind, id, label, why}>}
+ */
+export function probePlan(rows, { catalog = [], now = 0, lastProbeAt = {}, gapMs = POLL_GAP_MS, watchOf = null } = {}) {
+  const list = (Array.isArray(rows) ? rows : []).filter(_isObj);
+  const legs = (Array.isArray(catalog) ? catalog : []).filter((r) => _isObj(r) && _str(r.reads) && _isObj(r.observe));
+  const seenAt = _isObj(lastProbeAt) ? lastProbeAt : {};
+  const state = typeof watchOf === 'function' ? watchOf : () => 'warm';
+  const out = [];
+  for (const row of list) {
+    if (_str(row.watch) === 'gone') continue;
+    const kind = _str(row.currentKind) || _str(row.kind);
+    const leg = legs.find((l) => _str(l.reads) === kind && _str(l.appHost) === _str(row.system));
+    if (!leg) continue;
+    if (state(row) !== 'warm') continue;                        // COLD suppresses per-record reads — the one thing it does suppress
+    const key = `${_num(row.at)}|${_str(row.id)}`;
+    const gap = _num(leg.pollGapMs) || _num(gapMs) || POLL_GAP_MS;
+    const last = _num(seenAt[key]);
+    if (last && (_num(now) - last) < gap) continue;
+    out.push({ key, recipeId: _str(leg.id), kind, id: _str(row.currentId) || _str(row.id), label: _str(row.currentLabel) || _str(row.label), why: last ? 'window elapsed' : 'never probed' });
+  }
+  return out;
+}
+
+/**
+ * v2.74.2209 — the ONE value a probe leg needs, from the record. PURE.
+ * Declared per leg because the same record id is spelled differently per read: Shopify's draft detail takes a
+ * full `gid://shopify/DraftOrder/<id>`, while its order read searches `name:<digits>` — so what to send is a
+ * property of the LEG, not something a caller can infer from the record.
+ */
+export function probeParams(leg, { id = '', label = '' } = {}) {
+  const l = _isObj(leg) ? leg : {};
+  const p = _isObj(l.probe) ? l.probe : null;
+  if (!p || !_str(p.param)) return null;
+  let v = _str(p.from) === 'label' ? _str(label) : _str(id);
+  if (!v) return null;
+  if (p.digits) v = v.replace(/\D+/g, '');                      // "DEAKO#72044" → "72044" (the leg's own does-line: digits, not the store prefix)
+  if (p.gid && !/^gid:\/\//.test(v)) v = `gid://shopify/${_str(p.gid)}/${v}`;
+  if (!v) return null;
+  return { [_str(p.param)]: v };
 }
 
 /** Is there anything to report? PURE — so a caller can skip a write rather than append an empty event. */
@@ -277,9 +361,13 @@ export function reconcileCollection(rows, observedRows, { leg = null, now = 0, s
     // business; reporting a status change on it first would be describing a record at its old address.
     const ho = readTransition(hit, l.handOff);
     if (ho && (ho.toKind !== (_str(row.currentKind) || _str(row.kind)) || ho.toId !== want)) {
-      out.push({ key, at: _num(now), kind: 'transition', toKind: ho.toKind, toId: ho.toId });
+      out.push({ key, at: _num(now), kind: 'transition', toKind: ho.toKind, toId: ho.toId, ...(ho.toLabel ? { toLabel: ho.toLabel } : {}) });
       continue;                                                 // the pointer moves; the new collection reads it next tick
     }
+    // The collection may only be able to say SOMETHING happened (Shopify's draft list carries `status` and not
+    // `order`). Then it asks for one targeted read rather than guessing — §12.5's second branch.
+    const pr = probeDue(row, hit, l.handOffProbe);
+    if (pr) out.push({ key, at: _num(now), kind: 'probe', via: pr.via, id: want });
     if (!decl) continue;
     const obs = observeFields(hit, decl, seen[key] || null);
     if (!hasNews(obs)) continue;

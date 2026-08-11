@@ -154,7 +154,23 @@ describe('recordLife — the pointer, and the AU-2 defect it closes (§12.1a)', 
   it('after a hand-off it names the ARTIFACT, not the act', () => {
     const r = applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY });
     assert.deepEqual(currentRef(r), { kind: 'order', id: '1234' });
-    assert.deepEqual(handOff(r), { fromKind: 'draft', fromId: '29685', toKind: 'order', toId: '1234' });
+    assert.deepEqual(handOff(r), { fromKind: 'draft', fromId: '29685', toKind: 'order', toId: '1234', toLabel: '' });
+  });
+
+  it('carries the artifact’s NAME when the observation had one — a person reads DEAKO#72044, not an id', () => {
+    // v2.74.2209: the label also does a second job. A per-record re-read of the new artifact often needs the
+    // NAME as its key (Shopify's order read searches `name:`), and a hand-off yields a gid — so the one moment
+    // the name is in hand is the moment to bank it.
+    const r = applyTransition(draft(), { toKind: 'order', toId: '1234', toLabel: 'DEAKO#72044', at: T0 + DAY });
+    assert.equal(r.currentLabel, 'DEAKO#72044');
+    assert.equal(handOff(r).toLabel, 'DEAKO#72044');
+    assert.match(describeEvent(r.events[1], '10:00'), /Became a order \(DEAKO#72044\), from draft/);
+  });
+
+  it('and renders the id when there was no name — absent, never invented', () => {
+    const r = applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY });
+    assert.equal('currentLabel' in r, false);
+    assert.match(describeEvent(r.events[1], ''), /Became a order \(#1234\)/);
   });
 
   it('handOff is null when nothing moved — the card must not invent an arrow', () => {

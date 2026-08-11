@@ -97,6 +97,14 @@ const ENTRY_FIELD_MAP = new Set([
   // record's pointer when the vendor names what it became. Catalog-read like its four neighbours above, and for
   // the same fail-safe reason — dropping it stops a hand-off being noticed, it cannot cause a wrong one.
   'handOff',
+  // AU-6 (v2.74.2209) — the PER-RECORD probe trio, catalog-read by the same poll:
+  //   reads        — this leg reads ONE record of a kind (the tier §12.3 prices at '1 read per record')
+  //   probe        — HOW to address one: which param, and whether the id needs a gid wrapper or a digits strip.
+  //                  Declared because the same record is spelled differently per read — Shopify's draft detail
+  //                  wants gid://shopify/DraftOrder/<id>, its order read searches name:<digits>.
+  //   handOffProbe — a COLLECTION saying 'I can see that something happened, ask this leg what'. The 2026-08-11
+  //                  HAR is why it exists: DraftOrderList carries `status` and not `order`.
+  'reads', 'probe', 'handOffProbe',
 ]);
 
 const ENTRIES = CONNECTOR_RECIPES.filter((e) => e && e.id && e.appHost);

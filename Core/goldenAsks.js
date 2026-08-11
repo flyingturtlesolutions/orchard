@@ -110,6 +110,11 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   // v2.74.2069 — the draft-orders search read (the delete lookup viaLeg) + the destructive draft delete (gated,
   // like delete_ticket): the reversal for create-draft, one confirmed action at a time.
   { ask: 'show me the open draft orders', expect: { legId: 'shopify_draft_orders' }, mintedAt: 'v2.74.2069' },
+  // AU-6 §12.5 (v2.74.2209) — the single-draft read. It exists for the hand-off probe (a machine caller), and it
+  // gets an ask anyway BECAUSE of the unreachable-clause ruling: a capability nobody can name is worse than an
+  // absent one, and this one answers a question a person genuinely asks. `accept` the list leg — "what happened
+  // to this draft" through the search read is a defensible resolve, the same tolerance the warranty drill has.
+  { ask: 'what happened to draft order #D29685', expect: { legId: 'shopify_draft_order' }, accept: ['shopify_draft_orders'], mintedAt: 'v2.74.2209' },
   { ask: 'delete draft order #D1023', expect: { legId: 'shopify_delete_order' }, mustBeGated: true, mintedAt: 'v2.74.2069' },
   // ── VendorSuite (trace-verbatim where live asks exist) ────────────────────────────────────────────────────
   { ask: 'show my vendorsuite state', expect: { legId: 'vs_state' } },

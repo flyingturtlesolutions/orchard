@@ -102,7 +102,7 @@ export function reWarm(row, { at = 0, windowMs = DEFAULT_WARM_MS } = {}) {
  * Returns the row UNCHANGED when the transition is a no-op or malformed: a hand-off must be OBSERVED (§12.5 — an
  * order link populated), never inferred, so a call with nothing new in it must not grow the timeline.
  */
-export function applyTransition(row, { toKind = '', toId = '', at = 0, windowMs = DEFAULT_WARM_MS } = {}) {
+export function applyTransition(row, { toKind = '', toId = '', toLabel = '', at = 0, windowMs = DEFAULT_WARM_MS } = {}) {
   const r = _isObj(row) ? row : {};
   if (_str(r.watch) === 'gone') return r;                                   // gone is absorbing
   const k = _str(toKind).trim();
@@ -112,11 +112,17 @@ export function applyTransition(row, { toKind = '', toId = '', at = 0, windowMs 
   const fromId = _str(r.currentId) || _str(r.id);
   if (fromKind === k && fromId === i) return r;                             // already there — a re-read confirming the same state is not an event
   const t = _num(at);
+  // v2.74.2209 — the artifact's NAME at its new address, when the observation carried one. Two jobs, and both
+  // are why it is worth banking rather than deriving: a person reads "#DEAKO72044", not an internal id; and a
+  // per-record re-read of the new artifact often needs the NAME as its key (Shopify's order read searches
+  // `name:`, while what a hand-off yields is a gid). Absent when the source did not say — never invented.
+  const lbl = _str(toLabel).slice(0, 80);
   return {
     ...r,
     currentKind: k,
     currentId: i,
-    events: appendEvent(r.events, { at: t, type: 'transition', fromKind, fromId, toKind: k, toId: i }),
+    ...(lbl ? { currentLabel: lbl } : {}),
+    events: appendEvent(r.events, { at: t, type: 'transition', fromKind, fromId, toKind: k, toId: i, ...(lbl ? { toLabel: lbl } : {}) }),
     watch: 'warm',
     warmUntil: t + Math.max(0, _num(windowMs) || DEFAULT_WARM_MS),
     lastSeenAt: t,
@@ -185,7 +191,7 @@ export function handOff(row) {
   const k = _str(r.currentKind); const i = _str(r.currentId);
   if (!k || !i) return null;
   if (k === _str(r.kind) && i === _str(r.id)) return null;
-  return { fromKind: _str(r.kind), fromId: _str(r.id), toKind: k, toId: i };
+  return { fromKind: _str(r.kind), fromId: _str(r.id), toKind: k, toId: i, toLabel: _str(r.currentLabel) };
 }
 
 /**
@@ -278,7 +284,7 @@ export function describeEvent(evt, clock = '') {
   const t = _str(e.type);
   let text = '';
   if (t === 'create') text = `Created${_str(e.kind) ? ` as a ${_str(e.kind)}` : ''}${_str(e.label) ? ` — ${_str(e.label)}` : ''}`;
-  else if (t === 'transition') text = `Became a ${_str(e.toKind) || 'record'}${_str(e.toId) ? ` (#${_str(e.toId)})` : ''}${_str(e.fromKind) ? `, from ${_str(e.fromKind)}` : ''}`;
+  else if (t === 'transition') text = `Became a ${_str(e.toKind) || 'record'}${_str(e.toLabel) || _str(e.toId) ? ` (${_str(e.toLabel) || `#${_str(e.toId)}`})` : ''}${_str(e.fromKind) ? `, from ${_str(e.fromKind)}` : ''}`;
   else if (t === 'gone') text = e.why === '404' ? 'No longer on the site' : 'Deleted';
   else if (t === 'update') {
     const f = _isObj(e.fields) ? e.fields : {};

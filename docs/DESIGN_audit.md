@@ -646,16 +646,27 @@ not-sync / body-blind-marker posture as fields rather than a key.*
 > this browser) and the `webNavigation` trigger (free, catches them looking at it). Both are cheap and neither is
 > load-bearing now that the poll exists: they would make a change VISIBLE SOONER, not visible at all.
 >
-> **v2.74.2208 — §12.5 IS BUILT, as a DECLARATION rather than the per-platform function this section assumed.**
-> `handOff: { at: 'order.id', toKind: 'order' }` on the draft list; the poll reads that path and moves the
-> record's pointer only if a value is actually there. That satisfies §10.3 without a live completed order: it
-> names a path, it does not guess a shape, and an absent field leaves the record exactly as it was. Data beats a
-> function here — a second platform costs a line, and the declaration cannot drift from the read it sits on.
+> **v2.74.2209 — §12.5 IS BUILT AND GROUNDED IN A CAPTURE** (admin.shopify.com.har, 2026-08-11, the real
+> draft→completed-order flow). The adapter is a DECLARATION, not the per-platform function this section assumed:
+> catalog data, so a second platform costs a line and the declaration cannot drift from the read it sits on.
 >
-> With it, the SHIPPING WATCH is reachable: `shopify_orders_queue` declares `watches:['order']` plus a `set` of
-> parcels (keyed by tracking number) and a `member` observer for their delivery — so a split shipment reports each
-> box, and §12.2's motivating case (the tracking number that lands on the ORDER days after the DRAFT) completes
-> on ONE row. Every path was already returned by that leg's existing query: no new request, no new field.
+> **What the capture settled, and it corrected a guess.** v2208 put `handOff: {at:'order.id'}` on the draft LIST.
+> `DraftOrderList` returns `id, name, poNumber, purchasingEntity, hasTimelineComment, note2, status,
+> totalPriceSet, updatedAt` — and no `order`, so that declaration was INERT. It shipped harmless rather than
+> wrong, which is the fail-toward-nothing posture earning its keep. Three more facts came out of the same read:
+> a COMPLETED draft REMAINS in the list; the draft DETAIL read carries `order`; and that detail is a
+> document-in-body POST, so the query is ours to write (five fields, not their ~400-line one).
+>
+> So the shape is §12.5's SECOND branch, exactly as written: the collection raises the signal it can see
+> (`status: COMPLETED`) and ONE targeted re-read answers what it became. The probe is STATE-triggered, not
+> change-triggered — it fires while the question is pending and stops when the hand-off makes it false, so a
+> probe lost to a blip retries instead of stranding the record.
+>
+> **The per-record tier (§12.3) is built with it**, warm-gated, and the shipping watch MOVED onto it. v2208 had
+> put the tracking observers on `shopify_orders_queue`, which cannot work: that query is fixed at
+> `fulfillment_status:unfulfilled`, so an order leaves the collection at the moment it ships — the moment the
+> tracking number appears. They now sit on `shopify_order` (one order by name, any fulfillment status, and the
+> most live-proven read in the catalog).
 >
 > **Still not built:** the tee hint and the `webNavigation` trigger (2 of 5 — both free, both would make a change
 > visible SOONER rather than visible at all).

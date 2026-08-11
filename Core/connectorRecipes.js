@@ -123,6 +123,11 @@ export function isReadOnlyGql(query) {
 const _GQL_CUSTOMERS = 'query Customers($q: String!, $n: Int!) { customers(first: $n, query: $q) { edges { node { id firstName lastName email phone numberOfOrders tags defaultAddress { city province country } } } } }';
 // CX-7c (v2.74.1388) — order read now carries RETURNS (return/exchange status + reverse tracking — the "where's my
 // exchange?" question) and the refund AMOUNT (totalRefundedSet), plus the fulfillment event timeline. Spec §3.
+// AU-6 §12.5 (v2.74.2209) — the HAND-OFF read: five fields, because that is the whole question. `order` is the
+// answer (null until the draft is completed), `name` labels it for a human, `completedAt`/`status` say when and
+// whether. Deliberately NOT the admin's ~400-line DraftOrderDetails document: a smaller ask is a smaller thing
+// to be wrong about, and every field here is attested in the 2026-08-11 capture.
+const _GQL_DRAFT_ONE = 'query DraftOrderDetails_0($id: ID!) { draftOrder(id: $id) { id name status completedAt order { id name } } }';
 const _GQL_ORDERS = 'query Orders($q: String!, $n: Int!) { orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true) { edges { node { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } customer { email } lineItems(first: 10) { edges { node { title quantity } } } fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } events(first: 10) { edges { node { status happenedAt } } } } returns(first: 10) { edges { node { id status returnLineItems(first: 10) { edges { node { quantity } } } reverseFulfillmentOrders(first: 5) { edges { node { reverseDeliveries(first: 5) { edges { node { deliverable { ... on ReverseDeliveryShippingDeliverable { tracking { carrierName number url } } } } } } } } } } } } refunds { createdAt note totalRefundedSet { shopMoney { amount currencyCode } } } tags note } } } }';
 // v2.74.1904 — `sortKey: RELEVANCE`, from ADMIN-UI ground truth (user-supplied, 2026-07-31): the search bar's top
 // five for "smart switch" were Smart Switch · Gen 2 · Bundle · Scene Controller · Gen 1 Refurbished, while this query
@@ -467,6 +472,29 @@ export const CONNECTOR_RECIPES = [
     does: 'fetch one Shopify order by its ORDER NUMBER (digits, e.g. 69872 — not the DEAKO# prefix): status, totals, line items, fulfillment/tracking, refunds — riding your admin login',
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
     body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'name:{order}', n: 3 } },
+    // AU-6 (v2.74.2209, §12.9) — THE SHIPPING WATCH LIVES HERE, on the per-record read, because no collection we
+    // have can host it: the unfulfilled queue loses an order exactly when it ships. This leg reads ONE order by
+    // name and sees it at any fulfillment status — and it is the most live-proven read in this catalog (40 ok
+    // invocations in the local traces), so `_GQL_ORDERS`' fulfillment/tracking fields are attested, not hoped for.
+    //
+    // TWO KINDS OVER THE SAME ROWS, deliberately (§12.9.2's composition). A `field` observer reads the FIRST
+    // fulfillment and is wrong the moment an order ships in two boxes; `set` reports each parcel as it appears
+    // (keyed by its tracking number — one parcel, one number) and `member` reports that parcel later being
+    // delivered. Split shipments and re-deliveries fall out of the same two rules.
+    //
+    // `probe.from: 'label'` + `digits` is the id-shape seam, and it is declared rather than inferred: a hand-off
+    // yields a gid, this leg searches `name:`, and this leg's own does-line states the form (digits, never the
+    // DEAKO# prefix). The 2026-08-11 capture shows the order name as `DEAKO#72044`, so the strip is required.
+    reads: 'order', rows: 'data.orders.edges[].node', rowId: 'id',
+    probe: { param: 'order', from: 'label', digits: true },
+    observe: {
+      shipStatus: { of: 'field', at: 'displayFulfillmentStatus' },
+      parcels: { of: 'set', rows: 'fulfillments', id: 'trackingInfo.number',
+        keep: { carrier: 'trackingInfo.company', eta: 'estimatedDeliveryAt' } },
+      progress: { of: 'member', rows: 'fulfillments', id: 'trackingInfo.number',
+        track: { status: 'displayStatus', deliveredAt: 'deliveredAt' } },
+    },
+    warm: '60d',   // §12.4 — an order's meaningful window tracks the merchant's return policy; declared, not derived
     params: [{ name: 'order', type: 'string', required: true }] },
   // v2.74.1921 — THE ORDER TIMELINE, HAR-authored (admin.shopify.com.har #2, 2026-08-01; entry 116 is the order
   // page's own Timeline fetch). The timeline section LAZY-LOADS on scroll — which is why the first HAR carried
@@ -618,23 +646,12 @@ export const CONNECTOR_RECIPES = [
     displayId: ['name'], joinKey: ['customer.email'],
     drill: { via: 'shopify_order', param: 'order', from: 'name', matchOn: 'order', label: ['name', 'id', 'displayFulfillmentStatus', 'displayFinancialStatus'] },
     does: 'THE fulfillment queue: open orders not yet (fully) fulfilled, newest first — number, date, payment/fulfillment status, total, customer email, line items, tracking. Give an order number to drill straight into that one; say "on the site" to open it on the admin orders page. Fans out: "open each in a case"',
-    // AU-6 (v2.74.2208, §12.9) — THE SHIPPING WATCH. Where a record ARRIVES after a draft hands off, and the
-    // reason the whole lifecycle exists: the tracking number appears on the ORDER, days after the DRAFT was
-    // created (§12.2's motivating case). Everything below is already in _GQL_ORDERS — no new request, no new
-    // field; this only names which of the fields it ALREADY returns count as news.
-    //
-    // TWO KINDS OVER THE SAME ROWS, deliberately. A single `field` observer reads the FIRST fulfillment, which
-    // is wrong the moment an order ships in two boxes. `set` reports each parcel as it appears (keyed by its
-    // tracking number — one parcel, one number) and `member` reports that parcel later being delivered. That is
-    // §12.9.2's composition doing its job rather than a special case for split shipments.
-    watches: ['order'], rowId: 'id', rows: 'data.orders.edges[].node',
-    observe: {
-      shipStatus: { of: 'field', at: 'displayFulfillmentStatus' },
-      parcels: { of: 'set', rows: 'fulfillments', id: 'trackingInfo.number',
-        keep: { carrier: 'trackingInfo.company', eta: 'estimatedDeliveryAt' } },
-      progress: { of: 'member', rows: 'fulfillments', id: 'trackingInfo.number',
-        track: { status: 'displayStatus', deliveredAt: 'deliveredAt' } },
-    },
+    // AU-6 (v2.74.2209) — THE SHIPPING WATCH IS NOT HERE, and this note is why, so nobody puts it back. v2208
+    // declared `watches:['order']` + tracking observers on THIS leg, which cannot work: the query is fixed at
+    // `status:open fulfillment_status:unfulfilled`, so an order LEAVES this collection at the moment it ships —
+    // precisely the moment a tracking number appears. A watch whose subject exits the read before the watched
+    // event is structurally blind, not merely unlucky. The observers moved to `shopify_order`, which reads ONE
+    // order by name and therefore sees it whatever its fulfillment status.
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
     body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'status:open fulfillment_status:unfulfilled', n: 10 } },
     params: [
@@ -779,6 +796,35 @@ export const CONNECTOR_RECIPES = [
   // variables scaffold below is HAR-era hand-authoring modeled on OrderListData's sibling shape — the pinned document
   // may use plain `first`/`query` instead of `draftOrdersFirst`, and whether its `query` field-matches on a draft
   // NAME is unproven. Both fail LOUDLY (server userErrors / empty edges), never silently; first live run is the proof owed.
+  // AU-6 §12.5 (v2.74.2209) — ONE DRAFT, read to answer ONE question: what did it become? HAR-AUTHORED
+  // (admin.shopify.com.har, 2026-08-11, entry 92): the admin's own single-draft read is a DOCUMENT-IN-BODY POST
+  // to `/api/shopify/{handle}?operation=DraftOrderDetails_0&type=query` — NOT a persisted-op hash call (those go
+  // to /api/operations/<hash>/<Name>/...). So the document is ours to write, and this one asks for five fields
+  // instead of replaying their ~400-line one.
+  //
+  // THE OPERATION NAME IS THEIRS, DELIBERATELY. The BFF ROUTES on `?operation=<name>` (SH const, RH-0a: an
+  // anonymous doc gets a live http-404-empty), so the name has to be one it knows — `DraftOrderDetails_0` is
+  // what the capture shows for this exact read. If it turns out the BFF also validates the body against a pinned
+  // document for that name, this 404s LOUDLY and the fix is to paste their full query from the HAR; it cannot
+  // fail quietly.
+  //
+  // `order` was null in the capture (that draft was OPEN) — the FIELD is what the capture proves, and null is
+  // exactly what an un-completed draft should return. The completion reply seen at entry 122 confirms the shape
+  // it takes when set: `draftOrder.order = { id: gid://shopify/Order/… }`.
+  { ...SH, id: 'shopify_draft_order', name: 'Read one Shopify draft order',
+    does: 'read ONE draft order by its internal id — its number, status, and (once completed) the ORDER it became. Used to answer \u0027what happened to this draft?\u0027; for a list of drafts use the draft-orders search',
+    endpoint: '/api/shopify/{handle}?operation=DraftOrderDetails_0&type=query',
+    body: { operationName: 'DraftOrderDetails_0', query: _GQL_DRAFT_ONE, variables: { id: '{draft_gid}' } },
+    itemUrl: '/store/{handle}/draft_orders/{id}', displayId: ['name'],
+    // AU-6 — what this leg is FOR, as data. `reads` marks it a per-record read of one draft; `probe` says how to
+    // address one (a full gid, rebuilt from the numeric tail a create banks — the same rebuild the delete path
+    // already makes); `handOff` names where the answer lives, with the order's NAME so a person reads
+    // 'DEAKO#72044' and the order re-read has the key it searches by.
+    reads: 'draft', rows: 'data.draftOrder',
+    probe: { param: 'draft_gid', gid: 'DraftOrder' },
+    handOff: { at: 'order.id', label: 'order.name', toKind: 'order' },
+    params: [{ name: 'draft_gid', type: 'string', required: true, gid: 'DraftOrder',
+      hint: 'the draft\u0027s internal id or full gid — not its #D number' }] },
   { ...SH, id: 'shopify_draft_orders', name: 'Search Shopify draft orders', method: 'GET', gql: false, persistedOp: 'DraftOrderList',
     listUrl: '/store/{handle}/draft_orders', displayId: ['name'], joinKey: ['customer.email'], coverage: 'selection',
     does: 'search DRAFT orders — open/pending drafts not yet completed: number (#D…), status, customer, total; blank = the most recent drafts — riding your admin login. First use may need the Drafts list opened by hand once to bank the operation',
@@ -795,12 +841,18 @@ export const CONNECTOR_RECIPES = [
     // three innocent explanations (completed into an order, past `first: 50`, a filter moved), so absence here
     // must never be read as deletion. reconcileCollection enforces that; the marker is how it knows.
     watches: ['draft'], rowId: 'id', rows: 'data.draftOrders.edges[].node',
-    // §12.5 (v2.74.2208) — WHAT THIS DRAFT BECAME. The transition adapter, as DATA: name the path, and act only
-    // if a value is actually there. If the pinned DraftOrderList document does not return `order`, this resolves
-    // to nothing and the record simply stays a draft — no guess, no false hand-off, which is how it satisfies
-    // §10.3's rule against coding a reply shape blind. Reading the ID and not `status === COMPLETED` is the
-    // point: a status says something happened, an id says WHAT IT BECAME, and only the second is a hand-off.
-    handOff: { at: 'order.id', toKind: 'order' },
+    // §12.5 (v2.74.2209) — SETTLED BY THE HAR (admin.shopify.com.har, 2026-08-11). v2208 declared
+    // `handOff: {at:'order.id'}` here on the guess that the list might carry it. IT DOES NOT: the pinned
+    // DraftOrderList document returns exactly
+    //     id, name, poNumber, purchasingEntity, hasTimelineComment, note2, status, totalPriceSet, updatedAt
+    // — so that declaration was INERT (it resolved to null every time, which is why it shipped harmless rather
+    // than wrong: the fail-toward-nothing posture earned its keep).
+    //
+    // What the list CAN say is `status`, and the same capture proves two more things that make this work:
+    // a COMPLETED draft REMAINS in the list (statuses seen: COMPLETED, INVOICE_SENT, OPEN), and the draft DETAIL
+    // read does carry `order`. So the list raises the signal and one targeted re-read answers it — exactly
+    // §12.5's second branch. State-triggered, not change-triggered, so a probe lost to a blip simply retries.
+    handOffProbe: { when: { field: 'status', is: 'COMPLETED' }, via: 'shopify_draft_order' },
     observe: {
       status: { of: 'field', at: 'status' },          // OPEN → INVOICE_SENT → COMPLETED — the hand-off's own tell
       total: { of: 'field', at: 'totalPrice' },
