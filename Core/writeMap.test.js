@@ -447,3 +447,41 @@ describe('writeMap — buildWriteProposals carries incitedBy onto the proposal (
     assert.equal(unproposable.length, 1);
   });
 });
+
+// v2.74.2202 — a proposal must freeze what will actually be SENT. The per-item act resolves a row's human values
+// to ids before queuing (email → Customer gid, product name → variant gid); re-deriving them from the row here
+// would bake the phrase into the proposal and send an invalid id at approval time. Live proof of the shape it
+// prevents (gl 07:40): `Invalid global id 'Simple Rocker Switch (Single-Pole & Multiway)'`, three times.
+describe('writeMap — pre-resolved params win over re-derivation', () => {
+  it('a carried params bag is used verbatim for the params it names', () => {
+    const pre = { email: 'gid://shopify/Customer/99', first_name: 'RESOLVED' };
+    const { proposals } = buildWriteProposals([{ row, label: 'x', value: 'v', params: pre }], { leg: createLeg, declared });
+    assert.equal(proposals[0].params.email, 'gid://shopify/Customer/99');
+    assert.equal(proposals[0].params.first_name, 'RESOLVED');
+  });
+
+  it('params it does NOT name still resolve from the row — it is an override, not a replacement', () => {
+    const { proposals } = buildWriteProposals([{ row, label: 'x', value: 'v', params: { email: 'gid://x/1' } }], { leg: createLeg, declared });
+    assert.equal(proposals[0].params.last_name, 'Reyes', 'the declaration still fills everything else');
+  });
+
+  it('an EMPTY carried value defers to the row rather than freezing a blank', () => {
+    const { proposals } = buildWriteProposals([{ row, label: 'x', value: 'v', params: { email: '' } }], { leg: createLeg, declared });
+    assert.equal(proposals[0].params.email, 'dana@example.com');
+  });
+
+  it('no carried params at all behaves exactly as before', () => {
+    const a = buildWriteProposals([{ row, label: 'x', value: 'v' }], { leg: createLeg, declared });
+    const b = buildWriteProposals([{ row, label: 'x', value: 'v', params: null }], { leg: createLeg, declared });
+    assert.deepEqual(a.proposals[0].params, b.proposals[0].params);
+  });
+
+  it('a carried REQUIRED param clears the unproposable check — it is filled, just not from the row', () => {
+    const thin = { AddressLine1: 'x', __contacts: [] };
+    const { proposals, unproposable } = buildWriteProposals(
+      [{ row: thin, label: 'thin', value: 'v', params: { first_name: 'A', last_name: 'B', email: 'a@b.c', phone: '+15550100', address1: 'x', city: 'Y', province: 'NC', zip: '27610', country: 'US' } }],
+      { leg: createLeg, declared });
+    assert.equal(unproposable.length, 0);
+    assert.equal(proposals.length, 1);
+  });
+});

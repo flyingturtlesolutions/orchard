@@ -6558,9 +6558,42 @@ async function _runArmActClause(msg, wr, { tabId, goal = '', branchRun = null } 
     const it = use[i];
     const id = String(i);
     const label = _rowLabel(it.row, srcLeg);
-    const { params } = armActParams(it.row, _declared, _paramDefs);
+    const { params: _human } = armActParams(it.row, _declared, _paramDefs);
     _setMessageBody(msg, `Drafting ${i + 1} of ${use.length}…`);
-    if (gate.decision === 'queued') { queuedRows.push({ row: it.row, label, value: '', incitedBy: _incitedByForRow(it.row, i, srcLeg, label) }); recordStage(run, id, { name: 'write', verdict: 'queued', detail: gate.why }); closeItem(run, id, 'blocked', 'queued for approval'); continue; }
+    // v2.74.2202 — RESOLVE THE HUMAN VALUES TO IDS, per item, before anything is sent or queued.
+    //
+    // The declaration deliberately names what a person says — an EMAIL for the customer, a product NAME for the
+    // line item — because that is what a warranty row carries and what `shopify_create_order`'s own param hints
+    // promise ("their EMAIL … is resolved to the Customer id for you"). Something has to keep that promise, and
+    // it is `_resolveRideParamsCore`: the seam that invokes the search legs, ranks under `require`, and fills the
+    // gid (Core/lookupRun.js, RC-1/RC-2). v2200 called `_rideExecOnce` directly and skipped it, so three live
+    // creates went to the wire with the literal strings — `Invalid global id 'Simple Rocker Switch (Single-Pole
+    // & Multiway)'`, `Invalid global id '<email>'`, three times (gl 07:40).
+    //
+    // FAIL CLOSED, and that is the RC-1 contract rather than a choice made here: ambiguous / none / out-of-stock
+    // ASK, never guess. A batch cannot ask per row, so an unresolved row FAILS with the reason and the candidates
+    // named — and the resolution failure is reported at the row that has it, not as a wire error the reader has
+    // to decode. Sending the raw phrase anyway is not a fallback; it is a known-bad payload.
+    let params = _human;
+    let _lookupWhy = '';
+    try {
+      const _rp = await _resolveRideParamsCore(createLeg, _human, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null });
+      if (_rp && _rp.needs) {
+        const _c = (_rp.needs.candidates || []).map((c) => c.label).filter(Boolean).slice(0, 3).join(', ');
+        _lookupWhy = `couldn’t resolve ${_rp.needs.noun || _rp.needs.param} “${String(_rp.needs.raw || '').slice(0, 40)}” — ${_rp.needs.reason}${_c ? ` (closest: ${_c})` : ''}`;
+      } else if (_rp && _rp.params) params = _rp.params;
+    } catch (e) { _lookupWhy = `lookup failed — ${(e && e.message) || 'threw'}`; }
+    if (_lookupWhy) {
+      failed.push({ label, why: _lookupWhy });
+      recordStage(run, id, { name: 'write', verdict: 'failed', detail: _lookupWhy });
+      closeItem(run, id, 'failed', _lookupWhy);
+      try { _orchLog(`ARM_ACT ▸ ${label} → ${_lookupWhy}`); } catch { /* */ }
+      continue;
+    }
+    // The QUEUED road takes the RESOLVED params too: a proposal freezes what the human will approve, and the
+    // preview IS the truth (the v2020 rule). Approving a draft whose product still reads as a phrase would send
+    // the same invalid id an approval later.
+    if (gate.decision === 'queued') { queuedRows.push({ row: it.row, label, value: '', params, incitedBy: _incitedByForRow(it.row, i, srcLeg, label) }); recordStage(run, id, { name: 'write', verdict: 'queued', detail: gate.why }); closeItem(run, id, 'blocked', 'queued for approval'); continue; }
     try {
       // §12.8.1 — the provenance rides, so the created draft can name the warranty task that caused it. This is
       // the FIRST path that will actually exercise it: no create has ever run on either road.

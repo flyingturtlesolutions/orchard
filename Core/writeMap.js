@@ -245,10 +245,18 @@ export function buildWriteProposals(missRows, {
   for (const entry of use) {
     const row = entry && entry.row ? entry.row : entry;             // accept either a raw row or a map result entry
     const label = _str(entry && entry.label) || _str(row && (row.__label || row.Title || row.Name)) || sourceName;
+    // v2.74.2202 — PRE-RESOLVED PARAMS WIN. The per-item act (Core/armWrite.js) resolves a row's human values to
+    // ids BEFORE queuing — an email to a Customer gid, a product name to a variant gid — and re-deriving them
+    // from the row here would throw that resolution away and freeze the human phrase into the proposal. A
+    // proposal is what the person approves, and the preview IS the truth (the v2020 rule): approving a draft
+    // whose product still reads as a phrase would send an invalid id at approval time instead of at mint time.
+    // Carried, never computed — the same posture `incitedBy` takes two fields below.
+    const _pre = (entry && entry.params && typeof entry.params === 'object' && !Array.isArray(entry.params)) ? entry.params : null;
     const filled = {};
     const missing = [];
     for (const p of params) {
       const name = _str(p && p.name); if (!name) continue;
+      if (_pre && _pre[name] !== undefined && _pre[name] !== '') { filled[name] = _pre[name]; continue; }
       const v = resolveWriteValue(row, name, declared);
       if (v) filled[name] = v;
       else if (p && p.required) missing.push(name);
