@@ -244,6 +244,9 @@ export function markOutward(row, at = 0) {
  * still unbuilt there is nothing a user could do to refresh it, so a hard block would be a dead end rather than a
  * safeguard. `stale` therefore still offers, and says what it does not know. When verify-at-view lands, `stale`
  * becomes a re-read instead of a caveat, and this function is the only thing that changes.
+ * (v2.74.2217 — DELIVERED, one seam over: a forced sweep now re-reads cold rows too, so the card open that
+ * renders this sentence has already asked for the refresh. The sentence stays for the gap between the ask and
+ * the answer.)
  *
  * `why` is the SENTENCE a surface renders (§13.5: "no dead control on the card; the drill overlay states the
  * reversal status in words"). It is written here, not at the surface, because a suppression that explains itself

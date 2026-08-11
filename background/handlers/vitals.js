@@ -28,7 +28,7 @@ import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   //
 // the pure planner/reconciler, and the state-machine functions it applies. No new alarm, no second clock owner.
 import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';
 import { loadCreates, updateCreate } from '../../Services/Storage/AuditCreateStore.js';
-import { pollPlan, reconcileCollection, rowsAt, probePlan, probeParams, readTransition, observeFields, hasNews, newsToFields } from '../../Core/recordObserve.js';
+import { pollPlan, reconcileCollection, rowsAt, probePlan, probeParams, readTransition, observeFields, hasNews, newsToFields, destinationWarmMs } from '../../Core/recordObserve.js';   // v2217 — the hand-off grants the DESTINATION kind's warm window
 import { applyGone, applyUpdate, applyTransition, warmWindowMs, nextWatch } from '../../Core/recordLife.js';
 
 const TICK_ALARM = 'vitals:tick';
@@ -351,8 +351,10 @@ async function _recordWatchSweep({ force = false } = {}) {
           if (a.kind === 'gone') { const r = await updateCreate(ref, (row) => applyGone(row, { why: a.why || '404', at: a.at })); if (r.changed) gone++; }
           // §12.5/§12.0 — the HAND-OFF: the same row changes kind, the timeline records both ends, and the warm
           // window RESTARTS because the thing worth seeing (a tracking number) usually arrives AFTER it.
+          // v2.74.2217 — restarts with the DESTINATION kind's window (the order leg's declared 60d), not the
+          // observing collection's: the thing worth seeing arrives on the NEW kind's timescale.
           else if (a.kind === 'transition') {
-            const r = await updateCreate(ref, (row) => applyTransition(row, { toKind: a.toKind, toId: a.toId, at: a.at, windowMs: warmWindowMs(leg) }));
+            const r = await updateCreate(ref, (row) => applyTransition(row, { toKind: a.toKind, toId: a.toId, at: a.at, windowMs: destinationWarmMs(CONNECTOR_RECIPES, { toKind: a.toKind, host: leg.appHost }) }));
             if (r.changed) handed++;
           }
           // §12.5, second branch — the collection can see THAT something happened and not WHAT. It asks; one
@@ -380,9 +382,16 @@ async function _recordWatchSweep({ force = false } = {}) {
     // UNFULFILLED queue, which an order LEAVES at the moment it ships (v2209, from the same capture).
     const fresh = (await loadCreates()).items || rows;
     const lastProbeAt = _isPlain(book.lastProbeAt) ? book.lastProbeAt : {};
+    // v2.74.2217 — UNDER FORCE, COLD ROWS ARE RE-READ. `force` means a human is looking (verify-at-view), and
+    // reversalOffer promised at v2206 that "when verify-at-view lands, `stale` becomes a re-read instead of a
+    // caveat" — verify-at-view landed at v2212 and the promise didn't: the warm gate still suppressed cold rows
+    // even on a card open, so a draft past its window that THEN completed could never hand off (the collection
+    // cannot see COMPLETED drafts — v2215). Cold-suppression exists to bound BACKGROUND cost, and a person
+    // asking is not background cost — the same reasoning `force` already applies to the poll windows above.
+    // Banked-`gone` rows stay excluded either way (probePlan's own first check).
     const perRecord = probePlan(fresh, {
       catalog: CONNECTOR_RECIPES, now: Date.now(), lastProbeAt: force ? {} : lastProbeAt,
-      watchOf: (row) => nextWatch(row, Date.now()),
+      watchOf: force ? () => 'warm' : (row) => nextWatch(row, Date.now()),
     });
     for (const step of perRecord) {
       const [atStr, ...idParts] = String(step.key).split('|');
@@ -449,7 +458,12 @@ async function _probeOne(recipeId, { id = '', label = '' } = {}, now = 0, seen =
   if (!one) return null;
   const windowMs = warmWindowMs(leg);
   const ho = readTransition(one, leg.handOff);
-  if (ho) return { handOff: ho, windowMs };
+  // v2.74.2217 — a hand-off re-warms on the DESTINATION kind's timescale. This leg's own window (the draft
+  // detail declares none → 14d default) was granted to the ORDER the record became, so a shipment slower than
+  // 14 quiet days went cold before its tracking number existed — and cold suppresses the very read that would
+  // have seen it. The order leg's `warm: '60d'` now applies from the moment of the hand-off, not from its first
+  // lucky observation.
+  if (ho) return { handOff: ho, windowMs: destinationWarmMs(CONNECTOR_RECIPES, { toKind: ho.toKind, host: leg.appHost }) };
   if (!leg.observe) return { windowMs };
   const obs = observeFields(one, leg.observe, seen);
   if (!hasNews(obs)) return { windowMs };

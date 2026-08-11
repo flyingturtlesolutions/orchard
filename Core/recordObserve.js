@@ -6,10 +6,31 @@
 // deletion" rule a file away from the extractor whose output it judges.
 
 import { extractValue } from './peritemMap.js';
+import { warmWindowMs } from './recordLife.js';
 
 const _str = (v) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
 const _isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const _num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+/**
+ * v2.74.2217 — THE WARM WINDOW A HAND-OFF SHOULD GRANT belongs to the DESTINATION kind, not to whichever leg
+ * happened to observe the transition. PURE.
+ *
+ * The defect this closes: `applyTransition` took `windowMs` from the observing leg — the draft DETAIL read (no
+ * `warm:` declared → 14d default) — so a record handed off to an order got 14 days, not the 60 the order leg
+ * declares. `shopify_order`'s `warm: '60d'` ("tracks the merchant's return policy") only took effect after the
+ * first observed change, which for a slow shipment may never come: an order quiet for 14 days went cold, cold
+ * suppresses the per-record read, and the tracking number — the thing AU-6 exists to reach — was structurally
+ * unobservable for exactly the slow shipments where it matters.
+ *
+ * Resolution mirrors probePlan's own leg lookup: the per-record read (`reads`) for the NEW kind on the same
+ * host. No such leg → the default window, which is at least honest about not knowing.
+ */
+export function destinationWarmMs(catalog, { toKind = '', host = '' } = {}) {
+  const dest = (Array.isArray(catalog) ? catalog : []).find((r) =>
+    _isObj(r) && _str(r.reads) === _str(toKind) && _str(r.appHost) === _str(host));
+  return warmWindowMs(dest || null);
+}
 
 /**
  * Walk a rows path to EVERY match — `data.draftOrders.edges[].node`, `fulfillments`, `returns.edges[].node`. PURE.

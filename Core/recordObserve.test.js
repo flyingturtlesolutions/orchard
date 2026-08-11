@@ -224,6 +224,16 @@ describe('recordObserve — §12.3 reconcileCollection', () => {
     assert.deepEqual(reconcileCollection([row()], [null, 'x', 7], { leg: sel, now: T0 }), []);
   });
 
+  it('v2.74.2217 — a hand-off grants the DESTINATION kind’s warm window, not the observing leg’s', async () => {
+    const { destinationWarmMs } = await import('./recordObserve.js');
+    const { DEFAULT_WARM_MS } = await import('./recordLife.js');
+    const catalog = [{ id: 'ord', reads: 'order', appHost: 'admin.shopify.com', warm: '60d', observe: {} }];
+    assert.equal(destinationWarmMs(catalog, { toKind: 'order', host: 'admin.shopify.com' }), 60 * 86400000,
+      'the order leg’s declared 60d, from the moment of the hand-off — not after its first lucky observation');
+    assert.equal(destinationWarmMs(catalog, { toKind: 'order', host: 'other.host' }), DEFAULT_WARM_MS, 'wrong host → the honest default');
+    assert.equal(destinationWarmMs([], { toKind: 'order', host: 'admin.shopify.com' }), DEFAULT_WARM_MS, 'no destination leg → the honest default');
+  });
+
   it('v2.74.2214 — `stats` names which kind of NOTHING happened: absent-from-reply vs present-but-condition-unmet', () => {
     // Live 2026-08-11: #D29741 sat COMPLETED in Shopify through two green polls and `0 handed off` could not say
     // whether the row was missing from our reply or present with a status the probe declaration did not expect.

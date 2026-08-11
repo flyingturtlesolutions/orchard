@@ -224,6 +224,40 @@ describe('AU-6 sweep — the LIVE 2026-08-11 shape: the completed draft is NOT i
   });
 });
 
+describe('AU-6 sweep — a COLD draft, completed: the forced sweep is its only way home', () => {
+  // v2.74.2217 — the blind spot the AU-6 review named: a draft past its warm window that THEN completes could
+  // never hand off. Cold suppresses the per-record read, the collection cannot see COMPLETED drafts (v2215),
+  // and `force` bypassed only the poll windows — so not even a human opening the card could rescue it. A
+  // forced sweep now re-reads cold rows ("a person asking is not background cost").
+  const NOW = Date.now();
+  before(async () => {
+    installChrome();
+    await initOnce();
+    asked = [];
+    listHasDraft = false;
+    store[AUDIT_KEY] = { items: [auditEntry({
+      at: NOW - 20 * 86_400_000, system: 'admin.shopify.com', kind: 'draft', id: '1144819318918', label: '#D29741',
+      who: 'human', recipeId: 'shopify_create_order', warmUntil: NOW - 6 * 86_400_000,   // cold for six days
+    })], total: 1, updatedAt: NOW - 20 * 86_400_000 };
+    delete store['audit:watch'];
+  });
+  after(() => { listHasDraft = true; restoreChrome(); });
+
+  it('hands off on the forced (human-is-looking) sweep, despite being cold', async () => {
+    const r = await verify();   // RECORD_VERIFY_NOW → force: true
+    assert.equal(r.tally.handed, 1, `a cold row must be re-read when a person asks: ${JSON.stringify(r.tally)}`);
+    assert.equal(rows()[0].currentKind, 'order');
+  });
+
+  it('and re-warms on the ORDER’s declared 60d window, not the draft leg’s', () => {
+    // v2.74.2217 — the destination-window fix, asserted through the SHIPPED catalog: shopify_order declares
+    // `warm: '60d'`. Under the old code this was the observing leg's window instead, and an order quiet past
+    // it went cold before its tracking number existed.
+    const w = rows()[0].warmUntil;
+    assert.ok(w > NOW + 59 * 86_400_000, `warmUntil grants the order's horizon, got +${Math.round((w - NOW) / 86_400_000)}d`);
+  });
+});
+
 describe('AU-6 sweep — an empty book is a no-op, not a failure', () => {
   before(async () => {
     installChrome();

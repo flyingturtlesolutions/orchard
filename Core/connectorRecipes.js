@@ -838,6 +838,11 @@ export const CONNECTOR_RECIPES = [
     // directly — the hand-off stops depending on the collection, which keeps only the cheap breadth watch on
     // drafts it CAN see.
     observe: { status: { of: 'field', at: 'status' } },   // OPEN → INVOICE_SENT — the pre-completion news this read can see
+    // v2.74.2217 — a draft's meaningful window is how long it plausibly waits to be completed, and a warranty
+    // draft waits on a HOMEOWNER — weeks are normal. Undeclared it fell to the 14d default, and a draft
+    // completed on day 15 could never hand off in the background: cold suppresses this read, and the collection
+    // cannot see COMPLETED drafts (v2215). 60d matches the order leg's declared horizon.
+    warm: '60d',
     params: [{ name: 'draft_gid', type: 'string', required: true, gid: 'DraftOrder',
       hint: 'the draft\u0027s internal id or full gid — not its #D number' }] },
   { ...SH, id: 'shopify_draft_orders', name: 'Search Shopify draft orders', method: 'GET', gql: false, persistedOp: 'DraftOrderList',
