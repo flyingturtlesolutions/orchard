@@ -828,6 +828,16 @@ export const CONNECTOR_RECIPES = [
     reads: 'draft', rows: 'data.draftOrder',
     probe: { param: 'draft_gid', gid: 'DraftOrder' },
     handOff: { at: 'order.id', label: 'order.name', toKind: 'order' },
+    // v2.74.2215 — `observe` is what makes this leg a PER-RECORD WATCH candidate at all: probePlan requires
+    // `reads` AND `observe` (recordObserve.js), and without this block the leg was reachable ONLY as the
+    // collection's handOffProbe target — which mattered the moment the collection went blind. Live 2026-08-11
+    // (v2214's reconcile counts): our DraftOrderList poll (query:'' + savedViewId:null — the page's own proven
+    // request rides a store-specific saved view we cannot hardcode) returned 50 drafts NOT including #D29741,
+    // completed 30 minutes earlier. `matched=0`: the collection cannot see a completed draft in our request
+    // shape, so the signal §12.5 expected it to raise never fires. A WARM draft now gets this one-row read
+    // directly — the hand-off stops depending on the collection, which keeps only the cheap breadth watch on
+    // drafts it CAN see.
+    observe: { status: { of: 'field', at: 'status' } },   // OPEN → INVOICE_SENT — the pre-completion news this read can see
     params: [{ name: 'draft_gid', type: 'string', required: true, gid: 'DraftOrder',
       hint: 'the draft\u0027s internal id or full gid — not its #D number' }] },
   { ...SH, id: 'shopify_draft_orders', name: 'Search Shopify draft orders', method: 'GET', gql: false, persistedOp: 'DraftOrderList',
@@ -857,6 +867,13 @@ export const CONNECTOR_RECIPES = [
     // a COMPLETED draft REMAINS in the list (statuses seen: COMPLETED, INVOICE_SENT, OPEN), and the draft DETAIL
     // read does carry `order`. So the list raises the signal and one targeted re-read answers it — exactly
     // §12.5's second branch. State-triggered, not change-triggered, so a probe lost to a blip simply retries.
+    //
+    // v2.74.2215 — ⚠ THE CLAIM ABOVE WAS PROVEN AGAINST A REQUEST WE CANNOT REPRODUCE. The HAR's request rides
+    // `query:null` + a STORE-SPECIFIC saved view (`savedViewId: gid://shopify/SavedView/…` — the admin's "All"
+    // view); our poll sends `query:'' , savedViewId:null`, and live (v2214 reconcile counts: vendor=50
+    // matched=0) that reply did NOT contain a draft completed 30 minutes earlier. So this probe is kept as a
+    // free extra trigger for whatever this collection does see, but the hand-off no longer depends on it: the
+    // draft DETAIL leg above now declares `observe`, making a warm draft a per-record watch of its own.
     handOffProbe: { when: { field: 'status', is: 'COMPLETED' }, via: 'shopify_draft_order' },
     observe: {
       status: { of: 'field', at: 'status' },          // OPEN → INVOICE_SENT → COMPLETED — the hand-off's own tell

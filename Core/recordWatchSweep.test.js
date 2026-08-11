@@ -49,14 +49,20 @@ const draftRow = () => auditEntry({
 
 // What the fake Shopify answered, per leg, and what it was ASKED — the wire is half the assertion.
 let asked = [];
+// v2.74.2215 — the LIVE reply shape: our poll's request (query:'' + no saved view) returned 50 drafts NOT
+// including the completed one (v2214 reconcile counts, matched=0). The first suite keeps the draft present
+// (the collection-raised path stays covered); the last suite drops it, which is the shape that actually ships.
+let listHasDraft = true;
 function answer(payload) {
   asked.push(payload);
   const u = String((payload && (payload.endpoint || payload.url)) || '');
   if (/DraftOrderList/i.test(u)) {
-    // The draft is COMPLETED — and per the 2026-08-11 capture it REMAINS in the list, carrying `status` and no
-    // `order`. That is precisely the state that must raise a probe rather than a hand-off.
-    return { success: true, value: { data: { draftOrders: { edges: [
+    // When present, the draft is COMPLETED with `status` and no `order` (the 2026-08-11 capture) — the state
+    // that must raise a probe rather than a hand-off.
+    return { success: true, value: { data: { draftOrders: { edges: listHasDraft ? [
       { node: { id: 'gid://shopify/DraftOrder/1144819318918', name: '#D29741', status: 'COMPLETED' } },
+    ] : [
+      { node: { id: 'gid://shopify/DraftOrder/999', name: '#D99999', status: 'OPEN' } },
     ] } } } };
   }
   if (/DraftOrderDetails_0/i.test(u)) {
@@ -172,6 +178,49 @@ describe('AU-6 sweep — it actually runs (the gate node --check and undef canno
     const before = rows()[0].events.length;
     await verify();
     assert.equal(rows()[0].events.length, before, 'a re-read that confirms is not an event');
+  });
+});
+
+describe('AU-6 sweep — the LIVE 2026-08-11 shape: the completed draft is NOT in the collection reply', () => {
+  // v2.74.2215 — the defect this suite pins: #D29741 sat COMPLETED in Shopify through green polls because our
+  // DraftOrderList request (query:'' + savedViewId:null) does not return it — the §12.5 signal the collection
+  // was trusted to raise CANNOT fire. The draft detail leg now declares `observe`, so probePlan plans a warm
+  // draft its own one-row read, and the hand-off happens without the collection's help.
+  const NOW = Date.now();
+  before(async () => {
+    installChrome();
+    await initOnce();
+    asked = [];
+    listHasDraft = false;
+    // A recent, warm draft — the shape the real create banks (born warm; the per-record tier is warm-gated).
+    store[AUDIT_KEY] = { items: [auditEntry({
+      at: NOW - 3600_000, system: 'admin.shopify.com', kind: 'draft', id: '1144819318918', label: '#D29741',
+      who: 'human', recipeId: 'shopify_create_order', warmUntil: NOW + 86_400_000,
+    })], total: 1, updatedAt: NOW - 3600_000 };
+    delete store['audit:watch'];
+  });
+  after(() => { listHasDraft = true; restoreChrome(); });
+
+  it('hands off through the PER-RECORD detail read, with the collection blind', async () => {
+    const r = await verify();
+    assert.equal(r.tally.handed, 1, `the hand-off must not depend on the collection: ${JSON.stringify(r.tally)}`);
+    const detail = asked.find((p) => /DraftOrderDetails_0/i.test(String(p.endpoint || p.url || '')));
+    assert.ok(detail, 'the draft DETAIL was read per-record');
+    assert.equal(String((detail.args || {}).draft_gid || ''), 'gid://shopify/DraftOrder/1144819318918',
+      'addressed by the rebuilt gid, from the numeric id the create banked');
+    const row = rows()[0];
+    assert.equal(row.currentKind, 'order');
+    assert.equal(row.currentLabel, 'DEAKO#72046');
+    assert.deepEqual(row.events.map((e) => e.type), ['create', 'transition']);
+  });
+
+  it('and the NEXT sweep watches the order it became', async () => {
+    asked = [];
+    await verify();
+    assert.ok(asked.find((p) => /operation=Orders/i.test(String(p.endpoint || p.url || ''))), 'the order is read per-record');
+    const row = rows()[0];
+    assert.match(JSON.stringify(row.observed || {}), /1Z999AA/, 'the tracking number reaches the record');
+    assert.deepEqual(row.events.map((e) => e.type), ['create', 'transition', 'update']);
   });
 });
 
