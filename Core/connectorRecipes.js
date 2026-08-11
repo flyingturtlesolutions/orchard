@@ -806,7 +806,12 @@ export const CONNECTOR_RECIPES = [
   // anonymous doc gets a live http-404-empty), so the name has to be one it knows — `DraftOrderDetails_0` is
   // what the capture shows for this exact read. If it turns out the BFF also validates the body against a pinned
   // document for that name, this 404s LOUDLY and the fix is to paste their full query from the HAR; it cannot
-  // fail quietly.
+  // fail quietly — and the fallback is already in the repo: docs/REFERENCE_shopify_draft_order_document.md holds
+  // their full 393-line document verbatim, lifted out of the capture so it does not live in a Downloads folder.
+  //
+  // The assumption is a reasonable one, not a hope: `shopify_order`, `shopify_customer_by_email` and
+  // `shopify_search_products` all send OUR OWN documents under Shopify operation names, and the first is
+  // live-proven 40 times — so the BFF routes on the NAME and runs whatever document it is handed.
   //
   // `order` was null in the capture (that draft was OPEN) — the FIELD is what the capture proves, and null is
   // exactly what an un-completed draft should return. The completion reply seen at entry 122 confirms the shape
