@@ -25,6 +25,8 @@
 const _str = (v) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
 const _isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const _num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+// v2.74.2216 — "Became a order (DEAKO#72046)" reached a live card. Kinds are nouns; nouns take articles.
+const _an = (w) => (/^[aeiou]/i.test(_str(w)) ? 'an' : 'a');
 
 export const WATCH_STATES = Object.freeze(['warm', 'cold', 'gone']);
 export const EVENT_TYPES = Object.freeze(['create', 'update', 'transition', 'gone']);
@@ -255,6 +257,17 @@ export function reversalOffer(row, { hasLeg = false, now = 0, kindLabel = '' } =
   const r = _isObj(row) ? row : {};
   const state = nextWatch(r, now);
   if (state === 'gone') return { offer: 'no', why: 'Already gone — there is nothing left to undo.' };
+  // v2.74.2216 — A HANDED-OFF RECORD IS NOT REVERSIBLE, and the caller cannot know that: `_recordUndoLeg`
+  // resolves the undo through the CREATE's recipe (`hasLeg` is about what was made), so the first live hand-off
+  // (#D29741 → DEAKO#72046) showed "Reversible — nothing has left the boundary yet" on a draft that had become a
+  // real order. The declared reversal both refuses a COMPLETED draft (the delete leg's own `require`) and would
+  // not un-make the order if it ran — the §13.4 class exactly: destroying our record of a thing that now exists.
+  const _ho = handOff(r);
+  if (_ho) {
+    const noun = _str(_ho.toKind) || 'record';
+    const ref = _str(_ho.toLabel) || (_str(_ho.toId) ? `#${_str(_ho.toId)}` : '');
+    return { offer: 'no', why: `Can’t be undone — it became ${_an(noun)} ${noun}${ref ? ` (${ref})` : ''}. Un-making that would be a different act with its own consequences, not an undo.` };
+  }
   const outAt = _num(r.outwardAt);
   if (outAt) {
     // The §13.4 row that proves the rule generalizes: a draft whose invoice was sent, a ticket whose reply was
@@ -283,8 +296,8 @@ export function describeEvent(evt, clock = '') {
   const when = _str(clock);
   const t = _str(e.type);
   let text = '';
-  if (t === 'create') text = `Created${_str(e.kind) ? ` as a ${_str(e.kind)}` : ''}${_str(e.label) ? ` — ${_str(e.label)}` : ''}`;
-  else if (t === 'transition') text = `Became a ${_str(e.toKind) || 'record'}${_str(e.toLabel) || _str(e.toId) ? ` (${_str(e.toLabel) || `#${_str(e.toId)}`})` : ''}${_str(e.fromKind) ? `, from ${_str(e.fromKind)}` : ''}`;
+  if (t === 'create') text = `Created${_str(e.kind) ? ` as ${_an(_str(e.kind))} ${_str(e.kind)}` : ''}${_str(e.label) ? ` — ${_str(e.label)}` : ''}`;
+  else if (t === 'transition') text = `Became ${_an(_str(e.toKind) || 'record')} ${_str(e.toKind) || 'record'}${_str(e.toLabel) || _str(e.toId) ? ` (${_str(e.toLabel) || `#${_str(e.toId)}`})` : ''}${_str(e.fromKind) ? `, from ${_str(e.fromKind)}` : ''}`;
   else if (t === 'gone') text = e.why === '404' ? 'No longer on the site' : 'Deleted';
   else if (t === 'update') {
     const f = _isObj(e.fields) ? e.fields : {};

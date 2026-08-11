@@ -164,13 +164,13 @@ describe('recordLife — the pointer, and the AU-2 defect it closes (§12.1a)', 
     const r = applyTransition(draft(), { toKind: 'order', toId: '1234', toLabel: 'DEAKO#72044', at: T0 + DAY });
     assert.equal(r.currentLabel, 'DEAKO#72044');
     assert.equal(handOff(r).toLabel, 'DEAKO#72044');
-    assert.match(describeEvent(r.events[1], '10:00'), /Became a order \(DEAKO#72044\), from draft/);
+    assert.match(describeEvent(r.events[1], '10:00'), /Became an order \(DEAKO#72044\), from draft/);
   });
 
   it('and renders the id when there was no name — absent, never invented', () => {
     const r = applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY });
     assert.equal('currentLabel' in r, false);
-    assert.match(describeEvent(r.events[1], ''), /Became a order \(#1234\)/);
+    assert.match(describeEvent(r.events[1], ''), /Became an order \(#1234\)/);
   });
 
   it('handOff is null when nothing moved — the card must not invent an arrow', () => {
@@ -285,9 +285,15 @@ describe('recordLife — markOutward + reversalOffer (§13.2/§13.3)', () => {
   });
 
   it('a HANDED-OFF row is judged on where it IS, not what it was', () => {
-    const done = applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY });
-    const r = reversalOffer(done, { hasLeg: false, now: T0 + 2 * DAY, kindLabel: currentRef(done).kind });
-    assert.match(r.why, /^Orders/, 'the draft became an order; the draft’s reverser is irrelevant');
+    // v2.74.2216 — and the judgment lives in THIS function now, because the caller cannot make it: chat.js
+    // resolves `hasLeg` through the CREATE's recipe (`shopify_create_order → undoLeg`), so the first live
+    // hand-off (#D29741 → DEAKO#72046) arrived here with hasLeg:true and read "Reversible — nothing has left
+    // the boundary yet" on a draft that had become a real order. The kindLabel path below it never fired live.
+    const done = applyTransition(draft(), { toKind: 'order', toId: '1234', toLabel: 'DEAKO#72046', at: T0 + DAY });
+    const r = reversalOffer(done, { hasLeg: true, now: T0 + 2 * DAY, kindLabel: currentRef(done).kind });
+    assert.equal(r.offer, 'no', 'whatever the caller believes about the create’s reverser');
+    assert.match(r.why, /became an order \(DEAKO#72046\)/, 'names what it became, article and all');
+    assert.match(r.why, /not an undo/, 'and says why un-making that is out of scope');
   });
 
   it('GONE → nothing to undo, and it says so rather than offering', () => {
@@ -327,7 +333,7 @@ describe('recordLife — describeEvent: the timeline the drill promises (§12.1a
     assert.equal(describeEvent({ at: T0, type: 'create', kind: 'draft', label: '#D29685' }, '10:04'),
       '10:04 — Created as a draft — #D29685');
     assert.equal(describeEvent({ at: T0, type: 'transition', fromKind: 'draft', toKind: 'order', toId: '1234' }, '11:00'),
-      '11:00 — Became a order (#1234), from draft');
+      '11:00 — Became an order (#1234), from draft');
     assert.equal(describeEvent({ at: T0, type: 'gone', why: '404' }, '12:00'), '12:00 — No longer on the site');
     assert.equal(describeEvent({ at: T0, type: 'gone', why: 'deleted' }, '12:00'), '12:00 — Deleted');
     assert.match(describeEvent({ at: T0, type: 'update', fields: { tracking: '1Z999' } }, '13:00'), /Changed — tracking 1Z999/);
@@ -342,6 +348,6 @@ describe('recordLife — describeEvent: the timeline the drill promises (§12.1a
   it('a real row’s whole timeline renders, newest-last in storage order', () => {
     const r = applyGone(applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY }), { why: '404', at: T0 + 2 * DAY });
     const lines = r.events.map((ev) => describeEvent(ev, '')).filter(Boolean);
-    assert.deepEqual(lines, ['Created as a draft — #D29685', 'Became a order (#1234), from draft', 'No longer on the site']);
+    assert.deepEqual(lines, ['Created as a draft — #D29685', 'Became an order (#1234), from draft', 'No longer on the site']);
   });
 });

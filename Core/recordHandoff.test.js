@@ -212,7 +212,7 @@ describe('the story end to end — draft → order → shipped → delivered, on
     assert.deepEqual(r.events.map((e) => e.type), ['create', 'transition', 'update', 'update'], 'ONE timeline, four entries, one row');
     assert.deepEqual(handOff(r), { fromKind: 'draft', fromId: '29685', toKind: 'order', toId: '1234567534', toLabel: 'DEAKO#72044' });
     const told = r.events.map((e) => describeEvent(e, '')).filter(Boolean);
-    assert.match(told[1], /Became a order \(DEAKO#72044\), from draft/);
+    assert.match(told[1], /Became an order \(DEAKO#72044\), from draft/);
     assert.match(told[2], /1Z999/);
     assert.match(told[3], /1Z999→DELIVERED/);
   });
