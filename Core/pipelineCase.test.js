@@ -81,7 +81,7 @@ describe('pipelineCase — open-or-append (the vitals shape, §9.3)', () => {
   it('stores a record REFERENCE, never the record body', () => {
     const r = mk({ record: { ref: 'gid://1', host: 'x.com', url: 'https://x.com/1', Instructions: 'SECRET', Address: '12 Elm St' } });
     const rec = r.list[0].record;
-    assert.deepEqual(Object.keys(rec).sort(), ['division', 'host', 'ref', 'url']);
+    assert.deepEqual(Object.keys(rec).sort(), ['division', 'host', 'ref', 'status', 'url']);
     assert.equal(JSON.stringify(rec).includes('SECRET'), false, 'the body must not be duplicated into a second store');
     assert.equal(JSON.stringify(rec).includes('Elm'), false);
   });
@@ -89,8 +89,13 @@ describe('pipelineCase — open-or-append (the vitals shape, §9.3)', () => {
   // v2.74.2156 — the SCOPE half of the ref. A VendorSuite task has no per-record URL; it is reachable only as
   // (division, row text), so a case that banks the id and drops the division banked half a reference.
   it('banks the record DIVISION — the scope half of a ref with no URL', () => {
-    const r = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' } });
+    const r = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: '' } });
     assert.equal(r.list[0].record.division, 'Greensboro');
+  });
+
+  it('banks the record STATUS — the filter half of a VendorSuite ref (v2.74.2218)', () => {
+    const r = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: 'open' } });
+    assert.equal(r.list[0].record.status, 'open');
   });
 
   it('a record with no division banks an empty one, never undefined', () => {
@@ -107,7 +112,7 @@ describe('pipelineCase — open-or-append (the vitals shape, §9.3)', () => {
     assert.equal(first.list[0].record.division, '');
     const again = upsertCase(first.list, {
       pipeline: 'warranty', itemId: '10834758', now: 200,
-      record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' },
+      record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: '' },
     });
     assert.equal(again.opened, false, 'still one case — the backfill must not mint a second');
     assert.equal(again.list[0].record.division, 'Greensboro', 'a re-run is how an older case gains a new ref field');
@@ -118,16 +123,16 @@ describe('pipelineCase — open-or-append (the vitals shape, §9.3)', () => {
     assert.equal(first.list[0].record, null);
     const again = upsertCase(first.list, {
       pipeline: 'warranty', itemId: '10834758', now: 200,
-      record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' },
+      record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: '' },
     });
-    assert.deepEqual(again.list[0].record, { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' });
+    assert.deepEqual(again.list[0].record, { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: '' });
   });
 
   // MONOTONE: fill blanks only. A later run that has lost the division (stale context, a narrower read) must not
   // be able to erase the reading taken when the row was first read — that property is what lets the merge run
   // unconditionally on every append without a policy about which read wins.
   it('an APPEND never overwrites a banked value — not with a blank, not with a different one', () => {
-    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' } });
+    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: '' } });
     const blanked = upsertCase(first.list, { pipeline: 'warranty', itemId: '10834758', now: 200, record: { ref: '10834758', division: '' } });
     assert.equal(blanked.list[0].record.division, 'Greensboro', 'a blank must not erase');
     assert.equal(blanked.list[0].record.host, 'vendorsuite.example', 'nor may an omitted field');
@@ -136,9 +141,9 @@ describe('pipelineCase — open-or-append (the vitals shape, §9.3)', () => {
   });
 
   it('an APPEND with no record at all leaves the banked one untouched', () => {
-    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' } });
+    const first = mk({ record: { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: '' } });
     const again = upsertCase(first.list, { pipeline: 'warranty', itemId: '10834758', now: 200, line: 'run 2' });
-    assert.deepEqual(again.list[0].record, { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro' });
+    assert.deepEqual(again.list[0].record, { ref: '10834758', host: 'vendorsuite.example', url: '', division: 'Greensboro', status: '' });
   });
 
   it('an APPEND backfills an EMPTY label — a case must not stay nameless because its first write had none', () => {

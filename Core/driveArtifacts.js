@@ -49,7 +49,7 @@ function _host(origin) { return String(origin || '').replace(/^https?:\/\//i, ''
 //                               references, so declare it on the atomic entry that reaches the destination.
 //   write                     — true → safetyClass 'gated' (slice 1 ships READ-shaped review flows only).
 
-const VSD = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', sectionPath: '/#warranty', catalogVersion: 15 });   // v2.74.2185 — 14→15: F1 CLICKS the Warranty nav item first, so the app runs its own route transition instead of inheriting an external hash change; v2.74.2183 — 13→14: F1 waits for the division NAME to be populated (:not(:empty)) before opening the menu — opening it while State is in flight crashes the site; v2.74.2180 — 12→13: F1 waits for the warranty VIEW (input[type=search]) before the app-header division control, so a cold start no longer clicks into a blank page; v2.74.2179 — 11→12: the expand step targets the chevron SPAN; :has() is REFUSED by resolveElement (contentScript.js:631) so v2178 never matched anything; v2.74.2177 — 10→11: after the search, EXPAND the collapsed result group (:has(.dhicon-down-open), so it can never collapse an open one); v2.74.2176 — 9→10: the row step SEARCHES first (the list renders collapsed into project groups, so the rows do not exist until narrowed); v2.74.2175 — 8→9: the status step is scoped to the OPTION list (ul.item-list.collapse-list); the old div.vertical-list matched the TRIGGER and opened the menu without selecting; v2.74.2174 — 7→8: the container is `ul.item-list.grouped`; `section.item-column ul.item-list` resolved to the status FILTER list (live: Available "Open","Closed","Fixed","New","Payment Requested"); v2.74.2172 — 6→7: the container scope moved from `ul.item-list` (generic — it is also the division dropdown) to `section.item-column ul.item-list`; v2.74.2171 — 5→6 re-invalidates the entities hydrated from the F2/F3 steps, re-authored below from a LOADED-LIST DOM read; v2.74.1812 — 4→5 for the previous F2/F3 pass; v2.74.1804 — 3→4 INVALIDATES the entities hydrated from the broken #divisionMenu steps; without the bump the stale fragments would replay forever
+const VSD = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', sectionPath: '/#warranty', catalogVersion: 16 });   // v2.74.2218 — 15→16: F2 is an OPEN+PICK pair (status filter was deferred since v2175; live 18:24 failed when the dropdown was on the wrong status and SEARCH found nothing); v2.74.2185 — 14→15: F1 CLICKS the Warranty nav item first; v2.74.2183 — 13→14: F1 waits for the division NAME; v2.74.2180 — 12→13: F1 waits for the warranty VIEW; v2.74.2179 — 11→12: expand targets the chevron SPAN; v2.74.2177 — 10→11: EXPAND the collapsed result group; v2.74.2176 — 9→10: SEARCH first; v2.74.2175 — 8→9: status scoped to OPTION list; v2.74.2174 — 7→8: container is `ul.item-list.grouped`; v2.74.2172 — 6→7; v2.74.2171 — 5→6; v2.74.1812 — 4→5; v2.74.1804 — 3→4
 
 // ── v2.74.2171 — THE LOADED-LIST DOM, and it settles three things the catalog had been guessing ─────────────
 // Read supplied by the user at `/#warranty` with task rows ON SCREEN and one task open (masked; the shapes are
@@ -111,12 +111,19 @@ const VSD_TASK_ROW_READY = 'ul.item-list.grouped li.pointer-select span.bold, ul
 //    it: "status menu is opened then nothing after". The real options are `<li data-value>` inside the ul above,
 //    and they are a different element entirely.
 //
-// SCOPED TO THE OPTION LIST, and that choice is deliberately PICK-ONLY: this container exists only while the
-// menu is open, so a closed menu yields "no container matched" → the step is optional → it skips. The step can
-// therefore never OPEN a menu, which is the v2164 rule (an optional open paired with a skippable close leaks the
-// open state) enforced by construction rather than by care. Making status narrowing actually WORK needs an
-// explicit trigger-click + option-click pair that cannot half-run; that is deferred, and it costs nothing today
-// because the drive no longer sends STATUS at all (chat.js) and the ROW is the goal.
+// v2.74.2218 — THE OPEN+PICK PAIR that v2175 deferred. Live 18:24: with STATUS="" the status fragment was a
+// no-op, SEARCH typed the ticket number, and the grouped list stayed empty — the page's status dropdown was on
+// the wrong filter, so the row never existed for the search to find. The trigger is the attested filter-button
+// chain (loaded-list DOM above); the pick is CLICK_BY_LABEL on the OPTION list (li data-value), NOT on the
+// trigger — clicking the trigger's own "Open" text only opens the menu (v2175 live: "status menu is opened then
+// nothing after"). Dropdown option semantics SET the filter; they do not toggle an already-selected value off
+// the way a filter-button re-click can (the v2174 hazard that stopped us sending STATUS).
+//
+// HALF-RUN GUARD: chat.js only composes this fragment when STATUS is bound (a separate composite omits it).
+// An optional open + skippable pick with STATUS blank would open the menu and leave it over the page — the
+// v2164 leak, by construction. So the trigger stays optional (menu already open / shape change), the pick is
+// REQUIRED, and the fragment is simply not in the walk when there is nothing to pick.
+const VSD_STATUS_TRIGGER = 'div.vertical-list.collapsed.immediate-collapse .filter-button';
 const VSD_STATUS_LIST = 'ul.item-list.collapse-list';
 // Live DOM (v1456): `#divisionMenu` is the OPEN dropdown list (`ul.item-list` of divisions), NOT the header toggle.
 // The toggle is the sibling `.self-stretch…pointer-select` showing the current division name + chevron.
@@ -204,26 +211,19 @@ export const DRIVE_ARTIFACTS = Object.freeze([
       { action: 'CLICK', selector: VSD_DIVISION_TOGGLE, optional: true },
       { action: 'CLICK_BY_LABEL', selector: 'body', value: '{{DIVISION}}' },
     ] },
-  // F2 — atomic: open one of the warranty status tabs (label-scoped click — no brittle tablist proto).
+  // F2 — atomic: set the warranty status filter (open the dropdown, then pick the option).
   { ...VSD, id: 'vsd_open_status_tab', tier: 1, name: 'Open a warranty status tab',
-    does: 'click the new / open / fixed / closed status tab on the live VendorSuite warranty page — a visual step, returns no data',
-    params: [{ name: 'STATUS', enum: ['new', 'open', 'fixed', 'closed'], hint: 'which status tab to open' }],
+    does: 'set the new / open / fixed / closed status filter on the live VendorSuite warranty page — opens the status dropdown then picks the option; a visual step, returns no data',
+    params: [{ name: 'STATUS', enum: ['new', 'open', 'fixed', 'closed'], hint: 'which status filter to select' }],
     steps: [
-      // v2.74.2171 — `.nav-tabs, [role="tablist"]` IS DELETED, not re-pointed. Three consecutive DOM reads put
-      // `tablist: 0` on this page: there is no tab strip and there never was, so both halves of that OR were
-      // dead selectors burning their budget (they were optional, so they burned it silently).
-      //
-      // What the statuses actually are: `.filter-button`s inside `div.vertical-list.collapsed.immediate-collapse`
-      // — a COLLAPSED filter list. The container scope below is a real narrowing over `body` (which is how
-      // "no option matched 'open' in container 'body'" happened, and how a stray `body` match on a division
-      // name produced the false success of 16:51:18). It is NOT a fix: `collapsed` most likely means the
-      // buttons are not visible, and clicking a hidden element does nothing.
-      //
-      // NOT GUESSED AT FURTHER, deliberately. Making this work needs an EXPAND click paired with the collapse,
-      // and v2164's lesson is precisely that an optional OPEN with a skippable CLOSE is a leak by construction.
-      // Narrowing by status is a CONVENIENCE anyway; the goal is the ROW (F3). So this stays optional and
-      // degrades, and the walk's success no longer depends on it at all now that F3 has a postcondition.
-      { action: 'CLICK_BY_LABEL', selector: VSD_STATUS_LIST, value: '{{STATUS}}', optional: true },
+      // v2.74.2218 — OPEN then PICK. v2171–v2175 left this as a pick-only optional that could never open the
+      // menu; chat.js then stopped sending STATUS (v2174) so the fragment became a permanent no-op. Live 18:24
+      // with STATUS="": SEARCH typed the ticket, the grouped list stayed empty — wrong filter on the page.
+      { action: 'CLICK', selector: VSD_STATUS_TRIGGER, optional: true },
+      { action: 'WAIT_FOR', selector: VSD_STATUS_LIST, value: '3000', optional: true },
+      // REQUIRED: when this fragment is in the walk, STATUS is bound (chat.js omits the fragment otherwise).
+      // Empty-label would still skip (v877) — the omit is what prevents the open-without-pick leak.
+      { action: 'CLICK_BY_LABEL', selector: VSD_STATUS_LIST, value: '{{STATUS}}' },
     ] },
   // F3 — atomic: open ONE task row by visible text (the durable form of v1453's generic text-click).
   { ...VSD, id: 'vsd_open_task_row', tier: 1, name: 'Open a warranty task row',
@@ -321,6 +321,15 @@ export const DRIVE_ARTIFACTS = Object.freeze([
     opens: 'task',
     name: 'Review a warranty task on the page',
     does: 'OPEN the live VendorSuite site and visually walk to one warranty task — pick the division, open the status tab, open the task row. Use this to SHOW/REVIEW a task on screen (so you can eyeball or act on it); use the warranty-task data reads to ANSWER questions.' },
+  // v2.74.2218 — DIVISION + ROW only. Used when STATUS is unknown: composing F2 with a blank STATUS would open
+  // the status menu (optional trigger) and skip the pick (v877 empty label) — the v2164 open-without-close leak.
+  // `recordOpenerForHost` still points at the full composite; chat.js picks this id when it has a division but
+  // no status, the same way it falls to `vsd_open_task_row` when it has neither.
+  // No `opens:` — this is an internal fallback id that chat.js picks; `recordOpenerForHost` must keep naming
+  // the full composite (the noun + the preferred walk). Two `opens:'task'` entries would race on first-wins.
+  { ...VSD, id: 'vsd_review_warranty_task_no_status', tier: 2, compose: ['vsd_select_division', 'vsd_open_task_row'],
+    name: 'Review a warranty task on the page (no status filter)',
+    does: 'OPEN the live VendorSuite site and walk to one warranty task without changing the status filter — pick the division, open the task row. Prefer the full review walk when the task status is known.' },
 ]);
 
 // ── Catalog → per-Ground record (hop 1 of the seeded path) ────────────────────────────────────────────────

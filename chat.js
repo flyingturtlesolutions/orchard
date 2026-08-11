@@ -6293,6 +6293,9 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
             // The DIVISION, narrowest source first. The row's own each-tag is authoritative — it names the cell the
             // row was actually read from — and beats any run-level value for a cross-division sweep.
             const _div = String(_it.__division ?? _it.division ?? _it.Division ?? _it.DivisionName ?? _runDiv ?? '').trim();
+            // v2.74.2218 — STATUS rides with the case ref for the same reason division does: the drive needs it
+            // to set the warranty filter before SEARCH can find the row.
+            const _status = _warrantyStatusOf(_it);
             // v2.74.2170 — the TALLY moved to the response (below). Counting here counted the payload, and the
             // store was discarding it: `upsertCase`'s append branch wrote only the timeline and the run id, so a
             // case opened before `division` joined the whitelist could never gain one however many times the flow
@@ -6300,7 +6303,7 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
             // line keeps only the diagnostic that is genuinely panel-side: which row keys were on offer when the
             // panel had no division to send at all.
             if (!_div && !_caseDivMiss) _caseDivMiss = Object.keys(_it).slice(0, 12).join(',') || '(no keys)';
-            return { ref: _ref, host: String((srcLeg && (srcLeg.host || (srcLeg.tool && srcLeg.tool.host))) || ''), url: '', division: _div };
+            return { ref: _ref, host: String((srcLeg && (srcLeg.host || (srcLeg.tool && srcLeg.tool.host))) || ''), url: '', division: _div, ...( _status ? { status: _status } : {}) };
           })(),
           // v2.74.2118 — the warranty CAUSE rides with the arm. "contact homeowner" names the arm but not the
           // question a person must answer, and the four causes need genuinely different human work (asking "how
@@ -6478,8 +6481,25 @@ function _incitedByForRow(row, i, srcLeg, label) {
     const kind = (recordOpenerForHost(sys) || {}).noun
       || (/task/i.test(_rcp) ? 'task' : /ticket/i.test(_rcp) ? 'ticket' : 'record');
     const div = String((row && (row.__division ?? row.division ?? row.Division)) || '').trim();
-    return { system: sys, kind, id: rid, label: String(label || ''), ...(div ? { args: { division: div } } : {}) };
+    // v2.74.2218 — STATUS is the other half of VendorSuite addressability (with division). The warranty list is
+    // partitioned by the status dropdown; a drive that omits it fails when the page isn't already on the right
+    // filter (live 18:24: SEARCH typed the ticket, grouped list stayed empty). Same bank-at-create rule as
+    // division — the row is in scope here, and the back-arrow cannot look it up later.
+    const status = _warrantyStatusOf(row);
+    const args = { ...(div ? { division: div } : {}), ...(status ? { status } : {}) };
+    return { system: sys, kind, id: rid, label: String(label || ''), ...(Object.keys(args).length ? { args } : {}) };
   } catch { return null; }   // provenance is an affordance; a case that cannot carry it must still create
+}
+
+/**
+ * v2.74.2218 — VendorSuite warranty status as the drive's STATUS enum expects it. PURE.
+ * `TaskStatus` is PascalCase on the row ("Open"); the artifact enum is lowercase. Anything outside
+ * new/open/fixed/closed (e.g. "Payment Requested") returns '' — the drive then omits the status fragment
+ * rather than clicking a label the menu does not carry.
+ */
+function _warrantyStatusOf(row) {
+  const raw = String((row && (row.TaskStatus ?? row.taskStatus ?? row.status ?? row.Status)) || '').trim().toLowerCase();
+  return ({ new: 'new', open: 'open', fixed: 'fixed', closed: 'closed' })[raw] || '';
 }
 
 /**
@@ -12509,7 +12529,9 @@ function _railRecordCard(e, fmtTime) {
           // one's corrections, and the first time the parse itself stopped being copied.
           const _p = parseRowLabel(_inc.label || '');
           void _driveToSourceTask(_p.find || _inc.id, _p.ref || _inc.id, _inc.system, btn,
-            { title: _inc.label || '', division: String((_inc.args && _inc.args.division) || '') });
+            { title: _inc.label || '',
+              division: String((_inc.args && _inc.args.division) || ''),
+              status: String((_inc.args && _inc.args.status) || '') });
         }
         else void _openRecordLink(_inc.url, btn);
       }, { title: `Show ${_what} on ${_inc.system}` }));
@@ -12633,14 +12655,18 @@ function _attachCaseActs(el, conv) {
  * driven navigation, connector.js:785) — this entry point adds no new click emitter of its own.
  */
 /**
- * v2.74.2156 — the BANKED division for a case. Best-effort by design: a miss returns '' and the caller falls
- * back to the live context, so this can never stop the drive from being attempted.
+ * v2.74.2156 — the BANKED drive args for a case (division + status). Best-effort by design: a miss returns
+ * blanks and the caller falls back to live context / omits the status fragment, so this can never stop the
+ * drive from being attempted.
  * v2.74.2172 — by REF first, by label second. See the join comment below.
+ * v2.74.2218 — returns `{division, status}`; status is the warranty filter the drive must set before SEARCH
+ * can find the row (same addressability class as division).
  */
-async function _bankedCaseDivision(title, ref = '') {
+async function _bankedCaseDriveArgs(title, ref = '') {
   const t = String(title || '').trim().toLowerCase();
   const wantRef = String(ref || '').trim();
-  if (!t && !wantRef) return '';
+  const empty = { division: '', status: '' };
+  if (!t && !wantRef) return empty;
   try {
     const r = await _orchReq('PIPELINE_CASES', {});
     const cases = (r && r.success !== false && Array.isArray(r.cases)) ? r.cases : [];
@@ -12655,8 +12681,13 @@ async function _bankedCaseDivision(title, ref = '') {
       ? cases.filter((c) => c && c.record && String(c.record.ref || '').trim() === wantRef)
         .sort((a, b) => (Number(b.openedAt) || 0) - (Number(a.openedAt) || 0))[0]
       : null;
-    if (byRef && String((byRef.record && byRef.record.division) || '').trim()) {
-      return String(byRef.record.division).trim();
+    const from = (c) => ({
+      division: String((c && c.record && c.record.division) || '').trim(),
+      status: String((c && c.record && c.record.status) || '').trim().toLowerCase(),
+    });
+    if (byRef) {
+      const got = from(byRef);
+      if (got.division || got.status) return got;
     }
     // v2.74.2170 — JOIN ON THE SAME TRUNCATION THE TITLE GOT. Both sides start as `_rowLabel(r.item, srcLeg)`,
     // but they are stored at DIFFERENT widths: `upsertCase` keeps 120 (Core/pipelineCase.js), while
@@ -12668,20 +12699,20 @@ async function _bankedCaseDivision(title, ref = '') {
     // Newest first: a re-run over the same list appends to the OPEN case, but a closed-then-reopened item has two.
     const hit = cases.filter((c) => c && String(c.label || '').slice(0, 60).trim().toLowerCase() === t)
       .sort((a, b) => (Number(b.openedAt) || 0) - (Number(a.openedAt) || 0))[0];
-    const div = String((hit && hit.record && hit.record.division) || '').trim();
+    const got = from(hit);
     // v2.74.2166 — SAY WHY THE JOIN MISSED. `PIPELINE ▸ cases … div 2/2` proves the WRITE end banks the division,
     // and the very next click still reads `divsrc=none`, so the failure is here — in the label equality — and I
     // have now guessed at it twice (title truncation, then store shape) without evidence. One line ends that:
     // the title searched for, whether a case matched, and the labels actually present. A LLM re-title
     // (`titledByLlm`) or any separator drift would be visible immediately instead of inferred.
-    if (!div) {
+    if (!got.division) {
       // v2.74.2172 — the ref arm rides the line too. The v2166 version reported only the label join, so
       // `matched=y div=""` read as "the join works, the write is broken" when the truth was "the join matched a
       // DIFFERENT case". Saying which of the two arms matched is what separates those.
       try { _orchLog(`AUDIT ▸ case division lookup MISS want="${t.slice(0, 48)}" ref="${wantRef}" byref=${byRef ? `y div="${(byRef.record && byRef.record.division) || ''}"` : 'n'} bylabel=${hit ? `y div="${(hit.record && hit.record.division) || ''}"` : 'n'} of ${cases.length} case(s); labels: ${cases.slice(0, 4).map((c) => `"${String((c && c.label) || '').slice(0, 40)}"`).join(' · ')}`); } catch { /* */ }
     }
-    return div;
-  } catch { return ''; }
+    return got;
+  } catch { return empty; }
 }
 
 // v2.74.2184 — when the drive last reloaded a crashed VendorSuite tab. Module-scoped on purpose: the false
@@ -12713,7 +12744,7 @@ const _DRIVE_SKIP_WINDOW_MS = 120000;   // beyond this, re-walk rather than trus
  * separate from `ok`: v2164 established that engine-success is not arrival, and a sentence that conflates them
  * is the dishonest-success shape this whole arc has been unlearning.
  */
-async function _driveToSourceTask(find, ref, site, btn, { title = '', division = '' } = {}) {
+async function _driveToSourceTask(find, ref, site, btn, { title = '', division = '', status = '' } = {}) {
   const was = btn ? btn.title : '';
   // v2.74.2192 — MARK THE ROW EXPLICITLY, from JS. v2190 styled the running state with `:has(button[data-busy])`
   // and assumed the row carries `.rail-item`; live, nothing showed. Rather than guess which of those two
@@ -12823,9 +12854,14 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '', division =
     // provenance at creation (§12.8.1's `args`); asking the CASE store for it is both slower and wrong, since a
     // record-card provenance has no case. Skipping the lookup when we have the answer also stops the honest-but
     // -useless `case division lookup MISS … of 200 case(s)` line the live trace filled with.
-    const _banked = division || await _bankedCaseDivision(title, ref);
+    // Skip the case-store round-trip only when BOTH are already in hand (record-card provenance after v2218).
+    // Division alone is not enough: older provenance banks division without status, and the case may still hold it.
+    const _banked = (division && status) ? { division, status } : await _bankedCaseDriveArgs(title, ref);
     const _ctxDiv = (() => { try { return _contextDivision() || ''; } catch { return ''; } })();
-    const _div = _banked || _ctxDiv;
+    const _div = division || _banked.division || _ctxDiv;
+    // Caller-supplied status (record-card provenance) outranks the case bank; the bank fills it for case-card
+    // clicks after v2218. Unknown → the no-status composite (never open the filter menu without a pick).
+    status = String(status || _banked.status || '').trim().toLowerCase();
     // v2.74.2158 — RESOLVE THE GROUND. `groundId: null` was a placeholder that could never work: the handler's
     // FIRST line is `if (!groundId || !driveId) → 'groundId + driveId required'` (sg.js:1403), and the catalog
     // read under it (`_readDriveArtifactsMerged(groundId, origin)`) is ground-scoped, so there is no null-ground
@@ -12862,25 +12898,28 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '', division =
     // So: with a division, run the composite. Without one, run the ROW fragment ALONE — it opens no menu, and if
     // the task happens to be in the division already on screen it simply works. Never open a menu that nothing
     // will close.
-    const _drive = _div ? 'vsd_review_warranty_task' : 'vsd_open_task_row';
+    //
+    // v2.74.2218 — STATUS IS SENT AGAIN, and the fragment is an OPEN+PICK pair (driveArtifacts F2). v2174 stopped
+    // sending it because clicking an already-active filter-button looked like a toggle hazard; live 18:24 showed
+    // the opposite cost: with STATUS="" and the page's dropdown on the wrong filter, SEARCH typed the ticket and
+    // the grouped list stayed empty. The pick now targets the OPTION list (`ul.item-list.collapse-list`), which
+    // SETs rather than toggles. When STATUS is unknown, use the no-status composite — composing F2 with a blank
+    // STATUS would open the menu (optional trigger) and skip the pick (v877), the v2164 leak.
+    const _status = String(status || '').trim().toLowerCase();
+    const _statusOk = ({ new: 1, open: 1, fixed: 1, closed: 1 })[_status] ? _status : '';
+    const _drive = !_div ? 'vsd_open_task_row'
+      : (_statusOk ? 'vsd_review_warranty_task' : 'vsd_review_warranty_task_no_status');
     const d = await _orchReq('INVOKE_DRIVE_ARTIFACT', {
       groundId: _gid, driveId: _drive, tabId: r.tabId, origin: site,
-      // v2.74.2174 — STATUS IS NO LONGER SENT, and the reason is a state change I cannot predict. Live 13:21:48
-      // proved the status click LANDS: `CLICK_BY_LABEL → success "open"` · `CLICK landed on <div> "Open"`. But
-      // "Open" is very likely the filter already active (the task list defaults to open work), and clicking an
-      // active filter commonly TOGGLES IT OFF — which would empty the list. That is consistent with what
-      // followed: the division was picked successfully ("Columbus - 559") and the row wait then timed out at 8s
-      // with no rows on the page.
-      //
-      // UNPROVEN — I am not claiming the toggle happened. The rule is v2164's, and it does not need proof: do not
-      // take a state-changing step whose effect you cannot predict when it is only a CONVENIENCE. The row is the
-      // goal; narrowing by status was always optional; an unbound param SKIPS (the v877 contract), so the
-      // composite still runs division → row and simply performs one fewer mutation of the page.
       // v2.74.2176 — SEARCH BY THE TASK NUMBER. The list renders collapsed into project groups, so the row does
       // not exist in the DOM until something narrows it; the page ships an `input[type=search]` placeholdered
       // "Find a ticket or task…", and `ref` is exactly that — the id parsed off the case title. FIND stays the
       // ADDRESS for the click, because that is the row text a human reads and it survives the search either way.
-      params: { ...(_div ? { DIVISION: _div } : {}), SEARCH: String(ref || ''), FIND: String(find) },
+      params: {
+        ...(_div ? { DIVISION: _div } : {}),
+        ...(_statusOk ? { STATUS: _statusOk } : {}),
+        SEARCH: String(ref || ''), FIND: String(find),
+      },
     });
     // HONEST OUTCOME. v2150-53 logged "→ driven" whenever the CALL returned, which reported success for a walk
     // that had stopped on the section page — the user saw the wrong page and a log that said it worked.
@@ -12970,7 +13009,9 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '', division =
     // `AUDIT ▸ show task … FAILED — Cannot access '_arrived' before initialization`. The walk itself had already
     // run — SHOW_SOURCES and INVOKE_DRIVE_ARTIFACT are both above this — so the tab moved and the reply then said
     // it had failed, which is the v2198 defect's own shape wearing a different hat.
-    _orchLog(`AUDIT ▸ show task ${ref} on ${site} div="${_div || '(current)'}" divsrc=${division ? 'provenance' : (_banked ? 'banked' : (_ctxDiv ? 'context' : 'none'))} tab=${r.reused ? 'reused' : 'new'} drive=${_drive === 'vsd_review_warranty_task' ? 'composite' : 'row-only'} FIND="${String(find).slice(0, 48)}" → ${ok ? 'engine ok' : `stopped — ${_siteCrashed ? 'SITE PAGE BLANK (its own script threw — division data not loaded yet; retry on a warm tab) — ' : ''}${_reason}`} end="${_end || '(unknown)'}" arrived=${_arrived ? 'y' : 'n'} by=${_contract.declared ? 'postcondition' : 'url'}`);
+    const _driveKind = _drive === 'vsd_review_warranty_task' ? 'composite'
+      : (_drive === 'vsd_review_warranty_task_no_status' ? 'composite-no-status' : 'row-only');
+    _orchLog(`AUDIT ▸ show task ${ref} on ${site} div="${_div || '(current)'}" divsrc=${division ? 'provenance' : (_banked.division ? 'banked' : (_ctxDiv ? 'context' : 'none'))} status="${_statusOk || '(none)'}" tab=${r.reused ? 'reused' : 'new'} drive=${_driveKind} FIND="${String(find).slice(0, 48)}" → ${ok ? 'engine ok' : `stopped — ${_siteCrashed ? 'SITE PAGE BLANK (its own script threw — division data not loaded yet; retry on a warm tab) — ' : ''}${_reason}`} end="${_end || '(unknown)'}" arrived=${_arrived ? 'y' : 'n'} by=${_contract.declared ? 'postcondition' : 'url'}`);
     // v2.74.2190 — remember what we drove to, so a second click on the same eye can say "already open" instead
     // of re-running the walk. Recorded only on a run the engine reported OK; a failed walk leaves no belief.
     if (ok) _lastDrive = { ref: String(ref), tabId: r.tabId, at: Date.now(), told: false };

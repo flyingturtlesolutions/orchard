@@ -44,9 +44,13 @@ export const CASE_STATES = Object.freeze(['open', 'done', 'failed', 'blocked', '
  * (division, row text) — the division is the SCOPE half of the ref, the way `host` is for a URL-addressable
  * record. Without it a banked case can name its task and still not reach it.
  *
+ * `status` (v2.74.2218) is the same class: the warranty list is PARTITIONED by status filter (new / open /
+ * fixed / closed). Search only finds a row when that filter is on the right value, so a drive that omits it
+ * fails whenever the page's dropdown isn't already there. Banked at case-open from the row's `TaskStatus`.
+ *
  * v2.74.2170 — shared by create AND append so the two shapes cannot drift; a field added here reaches both.
  */
-export const CASE_REF_FIELDS = Object.freeze(['ref', 'host', 'url', 'division']);
+export const CASE_REF_FIELDS = Object.freeze(['ref', 'host', 'url', 'division', 'status']);
 
 /** Project a caller-supplied record to the reference whitelist, every field a string. PURE. */
 function _recordRef(record) {

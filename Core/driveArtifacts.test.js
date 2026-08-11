@@ -12,9 +12,9 @@ const VS_ORIGIN = 'vendorsuite.drhorton.com';
 const seed = () => seedFromCatalog(DRIVE_ARTIFACTS, { groundId: 'g1', origin: VS_ORIGIN });
 
 describe('DRIVE_ARTIFACTS — catalog integrity', () => {
-  it('ships the vendorsuite review set: three tier-1 fragments + the tier-2 review composite', () => {
+  it('ships the vendorsuite review set: three tier-1 fragments + the tier-2 review composites', () => {
     const ids = DRIVE_ARTIFACTS.map((e) => e.id);
-    for (const id of ['vsd_select_division', 'vsd_open_status_tab', 'vsd_open_task_row', 'vsd_review_warranty_task']) {
+    for (const id of ['vsd_select_division', 'vsd_open_status_tab', 'vsd_open_task_row', 'vsd_review_warranty_task', 'vsd_review_warranty_task_no_status']) {
       assert.ok(ids.includes(id), `${id} present`);
     }
     const s1 = DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_review_warranty_task');
@@ -188,13 +188,29 @@ describe('DRIVE_ARTIFACTS — catalog integrity', () => {
     assert.ok(f3.postcondition[0].selector.includes('warrantyTaskDetails'), 'the pane an open task renders');
   });
 
-  it('F2 carries no dead tab selectors and stays optional (v2.74.2171)', () => {
+  it('F2 is an OPEN+PICK pair — trigger optional, pick required (v2.74.2218)', () => {
     const f2 = DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_open_status_tab');
+    assert.ok(f2.catalogVersion >= 16, 'a step fix must bump catalogVersion so stale hydrations are invalidated');
     const all = JSON.stringify(f2.steps);
     assert.ok(!/nav-tabs|role=\\?"tablist/.test(all), 'three DOM reads put tablist at 0 — there is no tab strip');
-    for (const s of f2.steps) assert.equal(s.optional, true, 'narrowing by status is a convenience; the ROW is the goal');
-    const click = f2.steps.find((s) => s.action === 'CLICK_BY_LABEL');
-    assert.notEqual(click.selector, 'body', 'scoped to the filter list, not the whole page');
+    const open = f2.steps.find((s) => s.action === 'CLICK' && /filter-button/.test(s.selector || ''));
+    assert.ok(open, 'the status dropdown must be opened before an option can be picked');
+    assert.equal(open.optional, true, 'menu already open / shape change degrades');
+    const pick = f2.steps.find((s) => s.action === 'CLICK_BY_LABEL');
+    assert.equal(pick.selector, 'ul.item-list.collapse-list', 'pick the OPTION list, not the trigger (v2175)');
+    assert.equal(pick.value, '{{STATUS}}');
+    assert.notEqual(pick.optional, true, 'when F2 is in the walk, STATUS is bound — the pick is the point');
+    const idx = (pred) => f2.steps.findIndex(pred);
+    assert.ok(idx((s) => s === open) < idx((s) => s === pick), 'open precedes pick');
+  });
+
+  it('a no-status composite exists so a blank STATUS cannot open the menu without a pick (v2.74.2218)', () => {
+    const full = DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_review_warranty_task');
+    const noSt = DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_review_warranty_task_no_status');
+    assert.ok(noSt, 'chat.js falls to this when STATUS is unknown');
+    assert.deepEqual(full.compose, ['vsd_select_division', 'vsd_open_status_tab', 'vsd_open_task_row']);
+    assert.deepEqual(noSt.compose, ['vsd_select_division', 'vsd_open_task_row']);
+    assert.ok(!noSt.compose.includes('vsd_open_status_tab'));
   });
 
   // The tier-2 composite must NOT restate the postcondition: it references the fragment, so it inherits one.
@@ -257,8 +273,8 @@ describe('driveFromCatalogEntry — catalog → per-Ground record (hop 1, invoca
 
 describe('seedFromCatalog — origin matching', () => {
   it('seeds the vendorsuite set for the vendorsuite origin (subdomains ride, foreign hosts do not)', () => {
-    assert.equal(seed().length, 4);
-    assert.equal(seedFromCatalog(DRIVE_ARTIFACTS, { groundId: 'g', origin: 'sub.vendorsuite.drhorton.com' }).length, 4, 'a subdomain rides its appHost (the ride matching rule)');
+    assert.equal(seed().length, 5);
+    assert.equal(seedFromCatalog(DRIVE_ARTIFACTS, { groundId: 'g', origin: 'sub.vendorsuite.drhorton.com' }).length, 5, 'a subdomain rides its appHost (the ride matching rule)');
     assert.equal(seedFromCatalog(DRIVE_ARTIFACTS, { groundId: 'g', origin: 'example.com' }).length, 0);
     assert.equal(seedFromCatalog(DRIVE_ARTIFACTS, { groundId: 'g', origin: 'drhorton.com' }).length, 0, 'the parent domain alone does not match the deeper appHost');
   });
@@ -303,7 +319,7 @@ describe('mergeArtifacts — re-seed preserves user state AND hydration stamps',
 describe('seededDriveLegs — record → OfferedLeg (hop 3, the palette projection)', () => {
   it('projects an armable record as a connector-domain ACT leg with the drive impl marker', () => {
     const legs = seededDriveLegs(seed(), { host: VS_ORIGIN, groundId: 'g1' });
-    assert.equal(legs.length, 4);
+    assert.equal(legs.length, 5);
     const s1 = legs.find((l) => l.tool.driveId === 'vsd_review_warranty_task');
     assert.equal(s1.mode, 'act');
     assert.equal(s1.domain, 'connector');
@@ -321,7 +337,7 @@ describe('seededDriveLegs — record → OfferedLeg (hop 3, the palette projecti
     recs[0] = { ...recs[0], enabled: false };
     recs[1] = { ...recs[1], reviewState: 'pending' };
     const legs = seededDriveLegs(recs, { host: VS_ORIGIN, groundId: 'g1' });
-    assert.equal(legs.length, 2);
+    assert.equal(legs.length, 3);
   });
 
   it('dedups via seenKeys and marks a hydrated record on the leg', () => {
