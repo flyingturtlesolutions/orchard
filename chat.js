@@ -102,7 +102,7 @@ import { evaluatePinBank, refinePinBankAfterStore } from './Core/workflowPinBank
 import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun, explainPartialWhy, normalizeHistoryTrace, formatTraceLines } from './Core/runHistory.js';   // CD-6; v2027 items; v2029 partial why; v2030 banked trace
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { loadCreates, removeCreate, updateCreate } from './Services/Storage/AuditCreateStore.js';
-import { nextWatch, applyGone, applyTransition, currentRef, handOff, asOfLine, warmWindowMs } from './Core/recordLife.js';   // AU-6 (v2204, DESIGN_audit.md §12) — the record LIFECYCLE: one row per ACT, kind/id immutable, currentKind/currentId follow the artifact, one append-only timeline   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
+import { nextWatch, applyGone, currentRef, handOff, asOfLine } from './Core/recordLife.js';   // v2205 (bug pass) — applyTransition/warmWindowMs are NOT imported here: nothing in the panel observes a hand-off yet (§12.5's adapter is unbuilt) and the warm window is resolved at the write seam. An unused import implies a wiring that does not exist.   // AU-6 (v2204, DESIGN_audit.md §12) — the record LIFECYCLE: one row per ACT, kind/id immutable, currentKind/currentId follow the artifact, one append-only timeline   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
@@ -12518,10 +12518,17 @@ function _railRecordCard(e, fmtTime) {
 const CASE_SOURCE_FALLBACK_HOST = 'vendorsuite.drhorton.com';
 function _caseSourceHost(conv) {
   try {
-    for (const e of (Array.isArray(conv && conv.focus) ? conv.focus : [])) {
-      const h = e && e.kind === 'record' && e.provenance && e.provenance.host;
+    const _recs = (Array.isArray(conv && conv.focus) ? conv.focus : []).filter((e) => e && e.kind === 'record');
+    for (const e of _recs) {
+      const h = e.provenance && e.provenance.host;
       if (h && recordOpenerForHost(h)) return String(h);
     }
+    // v2.74.2205 (bug pass) — A CASE THAT KNOWS ITS PROVENANCE IS NEVER GUESSED AT. The fallback below exists for
+    // PRE-v2196 cases, which carry no focus at all; applying it to a case that DOES carry a record — just not one
+    // on a drivable host — would put a VendorSuite button on, say, a Zendesk-born case, and typing `show ticket`
+    // there would walk the warranty site searching for an id that was never on it. Wrong site, confidently.
+    // Having the provenance and ignoring it is worse than not having it.
+    if (_recs.length) return '';
   } catch { /* a malformed focus entry must not cost the button */ }
   return CASE_SOURCE_FALLBACK_HOST;
 }

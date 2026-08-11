@@ -282,3 +282,16 @@ describe('armWrite — the shipped warranty declaration fills the shipped create
     }
   });
 });
+
+// v2.74.2205 (bug pass) — found by fuzzing the module's exports, not by a call site: a parameter default fires
+// only on `undefined`, so an explicit `null` threw here while every peer tolerated it.
+describe('armWrite — armActTally survives junk', () => {
+  it('null / undefined / a non-object read as an empty tally', () => {
+    for (const junk of [null, undefined, 0, '', [], 'x']) {
+      assert.equal(armActTally(junk), 'nothing to do — of 0 items.');
+    }
+  });
+  it('non-numeric counts read as zero rather than printing NaN', () => {
+    assert.equal(armActTally({ created: 'two', total: null }), 'nothing to do — of 0 items.');
+  });
+});

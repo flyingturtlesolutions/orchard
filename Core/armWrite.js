@@ -174,8 +174,19 @@ export function selectArmItems(items, { arm = '', declared = null, paramDefs = [
   return { use, skipped };
 }
 
-/** The one-line tally, so a run that acted on 3 of 5 says so. PURE. */
-export function armActTally({ created = 0, queued = 0, failed = 0, skipped = 0, total = 0 } = {}) {
+/**
+ * The one-line tally, so a run that acted on 3 of 5 says so. PURE.
+ * v2.74.2205 (bug pass) — takes the bag and reads it, rather than destructuring in the signature: a parameter
+ * default only fires on `undefined`, so `armActTally(null)` threw while every peer in this module tolerated the
+ * same input. Found by fuzzing the module's exports, not by a call site — the call sites all pass a literal.
+ */
+export function armActTally(counts) {
+  const c = _isObj(counts) ? counts : {};
+  const created = Number(c.created) || 0;
+  const queued = Number(c.queued) || 0;
+  const failed = Number(c.failed) || 0;
+  const skipped = Number(c.skipped) || 0;
+  const total = Number(c.total) || 0;
   const bits = [];
   if (created) bits.push(`**${created}** created`);
   if (queued) bits.push(`**${queued}** queued for approval`);
