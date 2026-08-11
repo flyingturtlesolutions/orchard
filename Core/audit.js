@@ -187,6 +187,11 @@ export function auditEntry(f = {}) {
     // moves in `currentKind`/`currentId` and `events`. Collapsing the two would make a completed draft report as
     // "you created an order", which is false, and would corrupt the AU-3 count (§12.0).
     watch: 'warm',
+    // §13.3 (v2.74.2206) — WHEN SOMETHING LEFT THE BOUNDARY, and absent when nothing has. It is a field of the
+    // RECORD rather than a property read off the delete leg, because the declared axes describe the ACT and not
+    // the record's history: a ticket is internally deletable and may still have emailed the homeowner. The
+    // reversal offer reads this, so a create by an `outward: true` leg is un-undoable from birth.
+    ...(Number.isFinite(f.outwardAt) && f.outwardAt > 0 ? { outwardAt: f.outwardAt } : {}),
     ...(Number.isFinite(f.warmUntil) && f.warmUntil > 0 ? { warmUntil: f.warmUntil } : {}),
     lastSeenAt: at,
     events: [{ at, type: 'create', kind: AUDIT_KINDS.includes(f.kind) ? f.kind : 'record', id: _str(f.id).slice(0, 80), label: _str(f.label).slice(0, 80) }],

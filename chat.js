@@ -102,7 +102,7 @@ import { evaluatePinBank, refinePinBankAfterStore } from './Core/workflowPinBank
 import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun, explainPartialWhy, normalizeHistoryTrace, formatTraceLines } from './Core/runHistory.js';   // CD-6; v2027 items; v2029 partial why; v2030 banked trace
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { loadCreates, removeCreate, updateCreate } from './Services/Storage/AuditCreateStore.js';
-import { nextWatch, applyGone, currentRef, handOff, asOfLine } from './Core/recordLife.js';   // v2205 (bug pass) — applyTransition/warmWindowMs are NOT imported here: nothing in the panel observes a hand-off yet (§12.5's adapter is unbuilt) and the warm window is resolved at the write seam. An unused import implies a wiring that does not exist.   // AU-6 (v2204, DESIGN_audit.md §12) — the record LIFECYCLE: one row per ACT, kind/id immutable, currentKind/currentId follow the artifact, one append-only timeline   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
+import { nextWatch, applyGone, currentRef, handOff, asOfLine, reversalOffer, describeEvent } from './Core/recordLife.js';   // v2206 — reversalOffer (§13.2, four conditions + the suppression sentence) + describeEvent (§12.1a, the timeline the drill has been promising)   // v2205 (bug pass) — applyTransition/warmWindowMs are NOT imported here: nothing in the panel observes a hand-off yet (§12.5's adapter is unbuilt) and the warm window is resolved at the write seam. An unused import implies a wiring that does not exist.   // AU-6 (v2204, DESIGN_audit.md §12) — the record LIFECYCLE: one row per ACT, kind/id immutable, currentKind/currentId follow the artifact, one append-only timeline   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
@@ -12459,7 +12459,12 @@ function _railRecordCard(e, fmtTime) {
   // of records will be permanent"). Offered only where the catalog declares a reversal for what was created, so
   // a record whose create cannot be undone shows no button rather than one that fails on click.
   const _undo = _recordUndoLeg(e);
-  if (_url || _inc.how !== 'none' || _undo) {
+  // §13.2 (v2.74.2206) — THE BUTTON IS DERIVED, never decided here. Four conditions, one pure function, and the
+  // suppression carries its own sentence (§13.5) so the drill can say WHY instead of leaving a card silently
+  // short of a control. v2203 offered the button whenever a reversal leg existed, which is one of the four.
+  const _rev = reversalOffer(e, { hasLeg: !!_undo, now: Date.now(), kindLabel: (currentRef(e).kind || e.kind || 'record') });
+  const _canUndo = !!_undo && _rev.offer !== 'no';
+  if (_url || _inc.how !== 'none' || _canUndo) {
     const acts = document.createElement('div'); acts.className = 'rail-record-acts';
     const _host = String(e.system || 'the site').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
     if (_url) {
@@ -12484,11 +12489,11 @@ function _railRecordCard(e, fmtTime) {
         else void _openRecordLink(_inc.url, btn);
       }, { title: `Show ${_what} on ${_inc.system}` }));
     }
-    if (_undo) {
+    if (_canUndo) {
       acts.appendChild(_mkIconBtn('trash', `Delete this ${e.kind || 'record'} on ${_host}`, async (btn, ev) => {
         try { ev.stopPropagation(); } catch { /* */ }   // the card body opens the drill — the button must not
         void _undoRecordCreate(e, _undo, btn, card);
-      }, { title: `Delete ${e.label || e.id || 'this record'} on ${_host} — permanent, and removes this row` }));
+      }, { title: `Delete ${e.label || e.id || 'this record'} on ${_host} — permanent, and removes this row${_rev.offer === 'stale' ? `. ${_rev.why}` : ''}` }));
     }
     card.appendChild(acts);
   }
@@ -13135,10 +13140,45 @@ function _openRecordDrill(e, fmtTime) {
   }
   row.appendChild(detail);
   body.appendChild(row);
+  // AU-6 (v2.74.2206, §12.1a) — THE TIMELINE, which this overlay has been promising in words since AU-8 while
+  // rendering nothing: "Updates and deletions to this record will appear here as they're captured". Once
+  // `events[]` began carrying real entries that note became a promise with data behind it and no renderer — the
+  // `captured ≠ visible` gap, second instance. Every entry is one sentence from the pure `describeEvent`, so the
+  // wording lives beside the state machine that produces it rather than in the DOM.
+  const _events = (Array.isArray(e.events) ? e.events : []).filter((x) => x && typeof x === 'object');
+  if (_events.length) {
+    const tl = document.createElement('div'); tl.className = 'wf-history-row';
+    const th = document.createElement('div'); th.className = 'wf-history-summary'; th.textContent = 'What has happened to it';
+    tl.appendChild(th);
+    const td = document.createElement('div'); td.className = 'wf-history-detail';
+    // Newest FIRST — a reader opening this asks "what happened lately", and the create is the one entry they
+    // already know about (it is the summary line above).
+    for (const ev of [..._events].reverse()) {
+      const line = describeEvent(ev, fmtTime(ev.at));
+      if (!line) continue;
+      const el = document.createElement('div'); el.className = 'rail-record-drill-line';
+      const v = document.createElement('span'); v.className = 'rail-record-drill-val'; v.textContent = line;
+      el.appendChild(v); td.appendChild(el);
+    }
+    tl.appendChild(td);
+    body.appendChild(tl);
+  }
+  // §13.5 (v2.74.2206) — SUPPRESSION EXPLAINS ITSELF. "A card that silently lacks a button teaches nothing, and
+  // the iron principle is zero chore visits, decisions always VISIBLE. But a permanently disabled button is
+  // clutter." So: no dead control on the card, and the status stated here in words. The sentence comes from
+  // `reversalOffer` — one wording, so the card's tooltip and this line can never disagree.
+  const _revNote = reversalOffer(e, { hasLeg: !!_recordUndoLeg(e), now: Date.now(), kindLabel: (currentRef(e).kind || e.kind || 'record') });
   const note = document.createElement('div');
   note.className = 'rail-record-drill-note';
-  note.textContent = 'Updates and deletions to this record will appear here as they’re captured.';
+  note.textContent = _revNote.why;
   body.appendChild(note);
+  // The as-of line (§12.6) — a cadence is a CEILING, never a guarantee, so the overlay says when this was last
+  // confirmed rather than implying it is current.
+  const _as = asOfLine(e, e.lastSeenAt ? fmtTime(e.lastSeenAt) : '', Date.now());
+  if (_as) {
+    const s = document.createElement('div'); s.className = 'rail-record-drill-note'; s.textContent = `State: ${_as}`;
+    body.appendChild(s);
+  }
 }
 
 async function _renderRailAutomations(opts = {}) {

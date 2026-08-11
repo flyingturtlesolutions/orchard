@@ -37,6 +37,7 @@ export async function recordCreate(evt) {
     let label = rec.label;
     if (kind === 'customer') { const cl = customerLabelFrom(e.inputParams); if (cl) label = cl; }   // §10.5 minimal human label
     const who = (e.who === 'human') ? 'human' : 'gate';
+    const _recipe = (CONNECTOR_RECIPES || []).find((r) => r && r.id === e.recipeId) || null;   // the leg that wrote it — its declared warm window and outward axis
     const fields = {
       at: Date.now(),                                           // the seam owns the clock (Core/audit stays clock-free)
       system: e.origin || '',
@@ -52,7 +53,12 @@ export async function recordCreate(evt) {
       // parses it and falls back rather than throwing, so a malformed catalog string costs a default window and
       // never the create. A leg that declares nothing gets DEFAULT_WARM_MS — warm decays either way, which is
       // the point: a record nobody has looked at in weeks must stop costing per-record reads.
-      warmUntil: Date.now() + warmWindowMs((CONNECTOR_RECIPES || []).find((r) => r && r.id === e.recipeId)),
+      warmUntil: Date.now() + warmWindowMs(_recipe),
+      // §13.3 (v2.74.2206) — DID THIS ACT LEAVE THE BOUNDARY? Stamped at birth when the creating leg declares
+      // `outward: true`, because that record was outward-facing from the moment it existed (a sent SMS, an
+      // emailed reply) and no undo can call it back. Absent otherwise, and a LATER outward act touching the same
+      // record stamps it through `markOutward` — which is the case the axes alone cannot see.
+      ...(_recipe && _recipe.outward === true ? { outwardAt: Date.now() } : {}),
     };
     await appendCreateEntry(fields);
     // AUDIT ▸ — BODY-BLIND (§5/§7-7): system · verb · kind · who only, NEVER the id/label. Registered metric:true

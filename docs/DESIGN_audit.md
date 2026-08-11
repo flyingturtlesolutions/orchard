@@ -634,6 +634,13 @@ not-sync / body-blind-marker posture as fields rather than a key.*
 > change made ELSEWHERE, and therefore the one that makes the watch mean anything against another machine.
 > Until it lands, Orchard learns of a vendor-side change only when it did the change itself.
 >
+> **v2.74.2206 added:** the drill overlay RENDERS the timeline (§12.1a) — it had promised that in words since
+> AU-8 while rendering nothing — and the reversal offer is now DERIVED from §13.2's four conditions rather than
+> from 'a delete leg exists', with `outwardAt` stamped at the write seam (§13.3) and the suppression sentence
+> rendered in the drill (§13.5). One deviation, deliberate: §13.2 makes freshness a conjunct of the offer, which
+> would hide the control on every cold row while §12.3's verify-at-view read is unbuilt — so a cold row returns
+> `stale`, still offers, and states what it does not know. When that read lands, `stale` becomes a re-read.
+>
 > **Also not built:** §12.5's `readTransition` adapter (still LIVE-UNVERIFIED per §10.3 — a real order must be
 > created first) and §12.9's `observe` extractor. `applyUpdate` accepts the fields §12.9 would produce; nothing
 > produces them yet.

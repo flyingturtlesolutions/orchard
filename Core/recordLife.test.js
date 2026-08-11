@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 import {
   nextWatch, reWarm, applyTransition, applyUpdate, applyGone, appendEvent,
-  currentRef, handOff, asOfLine, mayRead, warmWindowMs,
+  currentRef, handOff, asOfLine, mayRead, warmWindowMs, markOutward, reversalOffer, describeEvent,
   WATCH_STATES, EVENT_CAP, DEFAULT_WARM_MS,
 } from './recordLife.js';
 import { auditEntry, describeCreate, recordOpenUrl } from './audit.js';
@@ -235,5 +235,97 @@ describe('recordLife — staleness is RENDERED, never implied (§12.6)', () => {
 
   it('NEVER confirmed → says nothing rather than inventing a freshness', () => {
     assert.equal(asOfLine({ kind: 'draft', id: '1' }, '10:04', T0), '');
+  });
+});
+
+// §13 (v2.74.2206) — WHEN MAY A RECORD BE UN-MADE. The finding this encodes (§13.3): the declared axes describe
+// the ACT, not the RECORD'S HISTORY. `delete_ticket` is internal and correct to be; the ticket may still have
+// emailed the homeowner, and deleting it destroys our record of a message the customer already holds.
+describe('recordLife — markOutward + reversalOffer (§13.2/§13.3)', () => {
+  it('markOutward stamps once — it answers “has anything been sent”, not “how many”', () => {
+    const a = markOutward(draft(), T0 + DAY);
+    assert.equal(a.outwardAt, T0 + DAY);
+    assert.equal(markOutward(a, T0 + 9 * DAY), a, 'the first one wins, unchanged object');
+  });
+
+  it('a fresh reversible record with nothing sent → OFFER', () => {
+    const r = reversalOffer(draft(), { hasLeg: true, now: T0 + DAY });
+    assert.equal(r.offer, 'yes');
+    assert.match(r.why, /Reversible/);
+  });
+
+  it('OUTWARD suppresses it, whatever the delete leg declares — the §13.3 case', () => {
+    const sent = markOutward(draft(), T0 + DAY);
+    const r = reversalOffer(sent, { hasLeg: true, now: T0 + 2 * DAY });
+    assert.equal(r.offer, 'no');
+    assert.match(r.why, /already left for the customer/);
+    assert.match(r.why, /destroy our record/, 'says what deleting would actually accomplish');
+  });
+
+  it('NO reversal leg → no button, and the sentence names the kind (§13.4 “orders can’t be deleted”)', () => {
+    const r = reversalOffer({ ...draft(), kind: 'order' }, { hasLeg: false, now: T0 + DAY });
+    assert.equal(r.offer, 'no');
+    assert.match(r.why, /^Orders can’t be un-made/);
+  });
+
+  it('a HANDED-OFF row is judged on where it IS, not what it was', () => {
+    const done = applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY });
+    const r = reversalOffer(done, { hasLeg: false, now: T0 + 2 * DAY, kindLabel: currentRef(done).kind });
+    assert.match(r.why, /^Orders/, 'the draft became an order; the draft’s reverser is irrelevant');
+  });
+
+  it('GONE → nothing to undo, and it says so rather than offering', () => {
+    const r = reversalOffer(applyGone(draft(), { at: T0 }), { hasLeg: true, now: T0 + DAY });
+    assert.equal(r.offer, 'no');
+    assert.match(r.why, /nothing left to undo/);
+  });
+
+  it('COLD → STALE, not hidden: it still offers, and states what it does not know', () => {
+    // §13.2 writes freshness as a conjunct, which would hide the control on every cold row — and with §12.3's
+    // verify-at-view read unbuilt there is nothing a user could do to refresh it. `stale` offers and explains;
+    // when that read lands, this outcome becomes a re-read and nothing else changes.
+    const r = reversalOffer({ ...draft(), warmUntil: T0 }, { hasLeg: true, now: T0 + DAY });
+    assert.equal(r.offer, 'stale');
+    assert.match(r.why, /last confirmed a while ago/);
+  });
+
+  it('the ORDER of the conditions is load-bearing: gone and outward outrank a missing leg', () => {
+    const g = applyGone(markOutward(draft(), T0), { at: T0 });
+    assert.match(reversalOffer(g, { hasLeg: false, now: T0 }).why, /nothing left to undo/);
+    assert.match(reversalOffer(markOutward(draft(), T0), { hasLeg: false, now: T0 }).why, /already left/);
+  });
+
+  it('every outcome carries a sentence — a suppression that cannot explain itself is a silent gap (§13.5)', () => {
+    for (const row of [draft(), markOutward(draft(), T0), applyGone(draft(), { at: T0 }), { ...draft(), warmUntil: T0 }]) {
+      for (const hasLeg of [true, false]) {
+        const r = reversalOffer(row, { hasLeg, now: T0 + DAY });
+        assert.ok(r.why && r.why.length > 10, 'never an empty explanation');
+        assert.ok(['yes', 'stale', 'no'].includes(r.offer));
+      }
+    }
+  });
+});
+
+describe('recordLife — describeEvent: the timeline the drill promises (§12.1a)', () => {
+  it('renders each type as a sentence, with the caller’s clock', () => {
+    assert.equal(describeEvent({ at: T0, type: 'create', kind: 'draft', label: '#D29685' }, '10:04'),
+      '10:04 — Created as a draft — #D29685');
+    assert.equal(describeEvent({ at: T0, type: 'transition', fromKind: 'draft', toKind: 'order', toId: '1234' }, '11:00'),
+      '11:00 — Became a order (#1234), from draft');
+    assert.equal(describeEvent({ at: T0, type: 'gone', why: '404' }, '12:00'), '12:00 — No longer on the site');
+    assert.equal(describeEvent({ at: T0, type: 'gone', why: 'deleted' }, '12:00'), '12:00 — Deleted');
+    assert.match(describeEvent({ at: T0, type: 'update', fields: { tracking: '1Z999' } }, '13:00'), /Changed — tracking 1Z999/);
+  });
+
+  it('an unknown or junk entry renders NOTHING rather than a shrug', () => {
+    assert.equal(describeEvent({ at: T0, type: 'invented' }, '10:04'), '');
+    assert.equal(describeEvent(null, '10:04'), '');
+    assert.equal(describeEvent({ type: 'update', fields: {} }, ''), 'Changed');
+  });
+
+  it('a real row’s whole timeline renders, newest-last in storage order', () => {
+    const r = applyGone(applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY }), { why: '404', at: T0 + 2 * DAY });
+    const lines = r.events.map((ev) => describeEvent(ev, '')).filter(Boolean);
+    assert.deepEqual(lines, ['Created as a draft — #D29685', 'Became a order (#1234), from draft', 'No longer on the site']);
   });
 });
