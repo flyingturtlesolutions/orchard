@@ -1,3 +1,9 @@
+// v2.74.2200 — ONE definition of "this declaration reads a branch verdict", imported rather than restated. The
+// predicate decides target selection on BOTH sides (arm-act picks these, this file excludes them), so two copies
+// would be two rules that agree until one is edited. No cycle: armWrite → writeMap → {peritemMap, connectorLeg,
+// geoResolve}, none of which reach back here.
+import { declarationReadsOutcome as _readsOutcome } from './armWrite.js';
+
 /**
  * Core/writeClause.js — PP-2 (v2.74.1681): the per-item WRITE clause, pure half.
  *
@@ -69,7 +75,18 @@ export function writePreflight({ misses = [], sourceLeg = null, want = '' } = {}
   const rows = Array.isArray(misses) ? misses : [];
   if (!rows.length) return { ok: false, reason: 'no-candidates' };
   const wmap = (sourceLeg && sourceLeg.tool && sourceLeg.tool.writeMap) || null;
-  const ids = (wmap && typeof wmap === 'object') ? Object.keys(wmap) : [];
+  // v2.74.2200 — EXCLUDE the branch-arm targets. A declaration carrying an `outcome` rung reads the per-item
+  // verdict a BRANCH produced (Core/armWrite.js `declarationReadsOutcome`), and this function's candidates are a
+  // LOOKUP's unmatched rows, which carry no verdict — so such a target could never be filled from here.
+  //
+  // It is a correctness fix, not a tidy-up. The moment `vs_warranty_tasks` declared a second target, "create the
+  // missing ones in shopify" tokenised to {create, missing, ones, shopify} and BOTH ids contain "create" and
+  // "shopify" — so `find(some)` returned whichever was declared first. That is the silent guess between two
+  // write kinds the v1683 note above exists to prevent, re-entering through the back door as soon as a source
+  // declared more than one write. Filtering by what the input can actually fill removes the tie instead of
+  // ranking it.
+  const _all = (wmap && typeof wmap === 'object') ? Object.keys(wmap) : [];
+  const ids = _all.filter((id) => !_readsOutcome(wmap[id]));
   if (!ids.length) return { ok: false, reason: 'no-declaration' };
 
   // v2.74.1683 — DISAMBIGUATE, do not take the first.

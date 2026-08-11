@@ -850,6 +850,28 @@ export const CONNECTOR_RECIPES = [
         zip: { cityStateZip: 'CityStateZip', part: 'zip' },
         country: { literal: 'US' },        // VendorSuite is a US homebuilder feed; the code, not the name
       },
+      // v2.74.2200 — how a CLASSIFIED warranty row fills a Shopify DRAFT ORDER (Core/armWrite.js). This is the
+      // declaration the per-item act reads; without it 'draft the replacements' has no target and correctly
+      // refuses rather than guessing which create a warranty row fills.
+      //
+      // `outcome` rungs make this a BRANCH-arm write rather than a row write: `count` and `product` are
+      // DERIVED by the classifier from the instructions prose, they are not fields of the task, and no amount of
+      // field-matching could have found them.
+      shopify_create_order: {
+        // The in-place `lookup` on shopify_create_order (v2055) turns an EMAIL into the Customer gid and a product
+        // NAME into the variant gid, so the declaration names the human values and the resolver does the rest.
+        customer_gid: { contact: 'primary', type: 'email' },
+        line_items: { each: { variantId: { outcome: 'product' }, quantity: { outcome: 'count' } } },
+        // A warranty replacement is not a sale. The leg's own `does` prescribes exactly this pair for the case
+        // ('for a free warranty replacement pass a 100% applied_discount and a zero shipping_line'), and a draft
+        // that bills a homeowner for a warranty part is a worse error than one that does not — a human still
+        // completes the draft, so this is the reviewable default, not a payment.
+        applied_discount: { const: { value: 100, valueType: 'PERCENTAGE', title: 'Warranty replacement' } },
+        shipping_line: { const: { title: 'Free shipping', price: '0.00' } },
+        // The draft says what it is FOR, on the draft itself, where the person completing it is looking. The
+        // Records ledger's `incitedBy` answers the same question inside Orchard; this answers it in Shopify.
+        note: { template: 'Warranty replacement — task {TaskNumber}, {AddressLine1}' },
+      },
     },
     joinKey: [
       'AddressLine1',                          // 1. the warranty SHIPPING address - stable across systems
@@ -908,6 +930,28 @@ export const CONNECTOR_RECIPES = [
         province: { cityStateZip: 'CityStateZip', part: 'province' },
         zip: { cityStateZip: 'CityStateZip', part: 'zip' },
         country: { literal: 'US' },        // VendorSuite is a US homebuilder feed; the code, not the name
+      },
+      // v2.74.2200 — how a CLASSIFIED warranty row fills a Shopify DRAFT ORDER (Core/armWrite.js). This is the
+      // declaration the per-item act reads; without it 'draft the replacements' has no target and correctly
+      // refuses rather than guessing which create a warranty row fills.
+      //
+      // `outcome` rungs make this a BRANCH-arm write rather than a row write: `count` and `product` are
+      // DERIVED by the classifier from the instructions prose, they are not fields of the task, and no amount of
+      // field-matching could have found them.
+      shopify_create_order: {
+        // The in-place `lookup` on shopify_create_order (v2055) turns an EMAIL into the Customer gid and a product
+        // NAME into the variant gid, so the declaration names the human values and the resolver does the rest.
+        customer_gid: { contact: 'primary', type: 'email' },
+        line_items: { each: { variantId: { outcome: 'product' }, quantity: { outcome: 'count' } } },
+        // A warranty replacement is not a sale. The leg's own `does` prescribes exactly this pair for the case
+        // ('for a free warranty replacement pass a 100% applied_discount and a zero shipping_line'), and a draft
+        // that bills a homeowner for a warranty part is a worse error than one that does not — a human still
+        // completes the draft, so this is the reviewable default, not a payment.
+        applied_discount: { const: { value: 100, valueType: 'PERCENTAGE', title: 'Warranty replacement' } },
+        shipping_line: { const: { title: 'Free shipping', price: '0.00' } },
+        // The draft says what it is FOR, on the draft itself, where the person completing it is looking. The
+        // Records ledger's `incitedBy` answers the same question inside Orchard; this answers it in Shopify.
+        note: { template: 'Warranty replacement — task {TaskNumber}, {AddressLine1}' },
       },
     },
     joinKey: [

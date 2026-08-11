@@ -124,6 +124,7 @@ import { emptyPriorStop } from './Core/priorScope.js';
 import { casePeek, caseActionLine, caseItemKey } from './Core/pipelineCase.js';   // v2172 — caseItemKey: a case is identified by its RECORD, never by its position in the run   // v1689 — the case legs render a peek line; the STORE stays in the SW (this is the pure formatter only)   // PP-4 (v1686) — a step whose words point at a set the last step left EMPTY does not dispatch   // PP-3 (v1686) — the CASE clause: the local review artifact, and the empty-prior stop that keeps a 0-item step from resolving a write   // PP-2 (v1681) — the write's own tally (queued + unfillable are classes, not footnotes) and its early preflight   // PM-6 (v2.74.1639) — row → write params by DECLARATION; the proposals half feeds the existing approval spine
 import { shouldDismissIncidentCase, PRESENCE_DISMISS_GRACE_MS } from './Core/vitals.js';   // v1703 — auto-dismiss a self-healed PRESENCE case from the Rail (drift kept as history)
 import { runUpsert } from './Core/upsert.js';   // PP-2 (v2.74.1661) — find/create with the three-outcome contract and an inline re-check
+import { armActParams, selectArmItems, armActTally, pickArmTarget, OUTCOME_KEY } from './Core/armWrite.js';   // v2.74.2200 — PER-ITEM ACT over a branch arm: the composition "draft the replacements" needed and did not have (gl 2026-08-11). NOT an upsert — a draft order has no identity to guard against.
 import { gateActionForLeg, gateLine } from './Core/pipelineGate.js';   // PP-4 (v2.74.1680) — the pipeline's own gate, reading the leg's declared axes   // PP (v2.74.1665) — the run object §9.2 decided to BUILD (PP-0e: the ledger is a narration substrate, not run state)
 import { evaluateDataCondition } from './Services/DataAssertion.js';   // PP-0 — the CANONICAL scope-side evaluator (needs no tab); the branch calls it rather than re-implementing one
 import { Scope, scalar, record as scopeRecord, document as scopeDocument } from './Services/Scope.js';
@@ -6114,6 +6115,32 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
   try { _orchLog(`BRANCH ▸ ${results.length} × ${br.mode} → ${tally}${capped ? ` (capped ${cap}/${rows.length})` : ''}`); } catch { /* */ }
   if (unknownWhy.length) { try { _orchLog(`BRANCH ▸ unknown reasons: ${unknownWhy.join(' | ')}`); } catch { /* */ } }
 
+  // v2.74.2200 — THE CLASSIFIED ITEMS SURVIVE THE TURN. Exactly the bounded handoff `_lastMapRun` makes for a
+  // lookup's misses (chat.js:7476), and for the same reason: chain state dies with the turn, so a follow-up ask
+  // ("draft the replacements") arrives at the interpret door with nothing to iterate. That is not a hypothetical
+  // — it is the gl 2026-08-11 finding: the branch sorted 3 rows into `replacement needed` and the very next ask
+  // routed to a single-shot create because the arm existed nowhere a later turn could reach.
+  //
+  // The OUTCOME rides ON THE ROW under `__outcome`, the same way the contacts sidecar rides under `__contacts`.
+  // That is the whole trick that lets a per-item write resolve `count`/`product` through an ordinary declaration:
+  // they are derived values, not record fields, and attaching them makes the item — not the row — the unit the
+  // declaration reads. Module-var lifetime (a panel reload clears it; re-run the branch).
+  try {
+    _lastBranchRun = {
+      convId: _currentConversationId, at: Date.now(), srcLeg,
+      items: results.map((r) => {
+        const _o = ((classifyBy && classifyBy.get) ? classifyBy.get(String(r.id)) : null) || {};
+        const _oc = _o._outcome || null;
+        return {
+          arm: r.outcome === 'arm' ? (r.arms || []).map((a) => a.label).join('+') : '',
+          outcome: _oc,
+          row: _oc ? { ...(r.item || {}), [OUTCOME_KEY]: _oc } : (r.item || null),
+        };
+      }).filter((x) => x.row),
+    };
+    try { _orchLog(`BRANCH ▸ banked ${_lastBranchRun.items.length} classified item(s) for a follow-up act — arms: ${[...new Set(_lastBranchRun.items.map((x) => x.arm || '(none)'))].join(' · ')}`); } catch { /* */ }
+  } catch { _lastBranchRun = null; }   // the branch VERDICT stands whatever the handoff does
+
   // 4) MATERIALIZE EACH ITEM AS A CASE, under a run (§5.7). This is the step that turns a rendered table into
   // something a human can come back to — and it is deliberately last, so a rendering or persistence failure can
   // never change what the branch DECIDED.
@@ -6458,11 +6485,130 @@ function _incitedByForRow(row, i, srcLeg, label) {
  * `queued` becomes a proposal for review, `refused` never runs at all. An UNDECLARED write lands in `queued`,
  * so this clause cannot widen what the catalog permits — it can only act on what was explicitly allowed.
  */
+/**
+ * v2.74.2200 — PER-ITEM ACT over a branch arm. The composition the gl of 2026-08-11 proved missing: `process
+ * these` sorted three warranty rows into `replacement needed`, and `draft the replacements` had nowhere to go.
+ *
+ * DELIBERATELY NOT `runUpsert`. A draft order has no identity to match on, so find/recheck/create is meaningless
+ * here — see Core/armWrite.js's header. This runs the leg once per item, with params resolved from the item by
+ * DECLARATION (`writeMap.<targetId>`), and it fails per row rather than per batch.
+ *
+ * THE GATE IS THE CATALOG'S, NOT THIS FUNCTION'S. `shopify_create_order` declares `reversible:true,
+ * outward:false`, so `gateActionForLeg` returns `auto` and these creates run without a click. That is the
+ * declared policy (create is auto because its undo is a human-confirmed delete, v2069) and the user chose it
+ * explicitly for this path — it is named here so the next reader meets the decision instead of inferring it from
+ * an absent confirm. A `queued` leg still becomes a proposal; a `refused` one still never runs.
+ */
+async function _runArmActClause(msg, wr, { tabId, goal = '', branchRun = null } = {}) {
+  const items = (branchRun && Array.isArray(branchRun.items)) ? branchRun.items : [];
+  const srcLeg = (branchRun && branchRun.srcLeg) || null;
+  const _arm = _str0(wr && wr.arm) || '';
+  // 1) WHICH write — BY DECLARATION SHAPE, not by matching the ask's words against target ids. The source's
+  //    `writeMap` may declare several creates; the one a per-item ACT runs is the one that READS the branch
+  //    outcome, because only a classified item can fill it (Core/armWrite.js `pickArmTarget`). Word-matching
+  //    would have to decide that "draft the replacements" means shopify_create_order and not
+  //    shopify_create_customer from two ids that share "create" and "shopify" — it cannot, and a wrong answer
+  //    there creates the wrong KIND of record.
+  const _pf = pickArmTarget(srcLeg && srcLeg.tool && srcLeg.tool.writeMap);
+  const targetId = _pf.ok ? _pf.targetId : '';
+  if (!targetId) {
+    const _known = (_pf.targets || []).map((t) => String(t).replace(/_/g, ' ')).join(', ');
+    _setMessageBody(msg, _pf.reason === 'no-declaration'
+      ? `These rows don’t declare a create I can run per sorted item${_known ? ` — they can fill **${escHtml(_known)}**, but that one is filled from a lookup's misses, not from a sort` : ' — the source doesn’t say which record they fill, and I won’t invent one'}.`
+      : `More than one per-item create is declared here (**${escHtml(_known)}**) — say which one.`, { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`ARM_ACT ▸ ${_pf.reason} — declared [${(_pf.targets || []).join(', ')}] for "${_scrubHead(goal, 40)}"`); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+  const createLeg = await _rideDrillLeg(srcLeg, targetId, (srcLeg && srcLeg.tool && srcLeg.tool.groundId) || null);
+  if (!createLeg) {
+    _setMessageBody(msg, `The declared target (**${escHtml(targetId)}**) isn’t available — connect it, or enable that recipe in Studio.`, { markdown: true });
+    _orchFinalize(msg);
+    try { _orchLog(`ARM_ACT ▸ target leg unavailable [${targetId}]`); } catch { /* */ }
+    return { ok: false, gap: true };
+  }
+  const gate = gateActionForLeg(createLeg);
+  try { _orchLog(`GATE   ▸ ${createLeg.name} → ${gate.decision}(${gate.why})`); } catch { /* */ }
+  if (gate.decision === 'refused') {
+    _setMessageBody(msg, `**${escHtml(createLeg.name)}** stays a human click here — ${escHtml(gate.why)}. I won’t run it per row.`, { markdown: true });
+    _orchFinalize(msg);
+    return { ok: false, gap: true };
+  }
+
+  // 2) WHICH items. Chosen by what the declaration can FILL, never by matching the ask against an arm label —
+  //    arm labels are authored per run by the classifier, so keying behaviour to their wording keys it to a
+  //    string the model invented (Core/armWrite.js `selectArmItems`).
+  const _declared = _pf.declared || null;   // already the per-target rung map (pickArmTarget returns writeMap[targetId])
+  const _paramDefs = legParamDefs(createLeg);
+  const { use, skipped } = selectArmItems(items, { arm: _arm, declared: _declared, paramDefs: _paramDefs });
+  try { _orchLog(`ARM_ACT ▸ start target=${targetId} gate=${gate.decision} items=${use.length}/${items.length}${_arm ? ` arm="${_arm}"` : ' arm=(by fillability)'}${skipped.length ? ` · skipped ${skipped.map((s) => s.why).join(' · ')}` : ''}`); } catch { /* */ }
+  if (!use.length) {
+    _setMessageBody(msg, items.length
+      ? `Nothing here can fill a **${escHtml(String(targetId).replace(/_/g, ' '))}** — ${escHtml(skipped.slice(0, 3).map((s) => s.why).join('; '))}.`
+      : 'I don’t have classified rows in hand — run the sort first (“process these”), then ask me to act on them.', { markdown: true });
+    _orchFinalize(msg);
+    return { ok: false, gap: true };
+  }
+
+  const run = openRun({ pipeline: `armact:${targetId}`, items: use.map((it, i) => ({ id: String(i), label: _rowLabel(it.row, srcLeg) })), cap: use.length, now: Date.now(), stages: ['write'] });
+  try { _orchLog(runStartLine(run)); } catch { /* */ }
+  const created = []; const queuedRows = []; const failed = [];
+  for (let i = 0; i < use.length; i++) {
+    if (_walkAbortFlag.requested) break;
+    const it = use[i];
+    const id = String(i);
+    const label = _rowLabel(it.row, srcLeg);
+    const { params } = armActParams(it.row, _declared, _paramDefs);
+    _setMessageBody(msg, `Drafting ${i + 1} of ${use.length}…`);
+    if (gate.decision === 'queued') { queuedRows.push({ row: it.row, label, value: '', incitedBy: _incitedByForRow(it.row, i, srcLeg, label) }); recordStage(run, id, { name: 'write', verdict: 'queued', detail: gate.why }); closeItem(run, id, 'blocked', 'queued for approval'); continue; }
+    try {
+      // §12.8.1 — the provenance rides, so the created draft can name the warranty task that caused it. This is
+      // the FIRST path that will actually exercise it: no create has ever run on either road.
+      const r = await _rideExecOnce(createLeg, params, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null, confirmed: true, incitedBy: _incitedByForRow(it.row, i, srcLeg, label) });
+      if (r && r.ok) { created.push({ label, ref: createdRecordId(r.value) || '' }); recordStage(run, id, { name: 'write', verdict: 'created' }); closeItem(run, id, 'done'); }
+      else { const why = (r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'create failed'; failed.push({ label, why }); recordStage(run, id, { name: 'write', verdict: 'failed', detail: why }); closeItem(run, id, 'failed', why); }
+    } catch (e) {
+      const why = (e && e.message) || 'create threw';
+      failed.push({ label, why }); recordStage(run, id, { name: 'write', verdict: 'failed', detail: why }); closeItem(run, id, 'failed', why);
+    }
+  }
+  let mintedN = 0;
+  if (queuedRows.length) {
+    try {
+      const built = buildWriteProposals(queuedRows, { leg: createLeg, declared: _declared, sourceName: 'record', why: gate.why, cap: queuedRows.length });
+      if (built.proposals.length) { await addProposals(_memoryId(), built.proposals); mintedN = built.proposals.length; }
+    } catch { /* the tally still reports them as queued */ }
+  }
+  const lines = [];
+  if (created.length) { lines.push('', '**created**'); for (const c of created) lines.push(`  • ${escHtml(c.label)}${c.ref ? ` — ${escHtml(c.ref)}` : ''}`); }
+  if (queuedRows.length) { lines.push('', `**queued for your approval** — ${queuedRows.length}`); for (const q of queuedRows) lines.push(`  • ${escHtml(q.label)}`); }
+  if (failed.length) { lines.push('', '**failed**'); for (const f of failed) lines.push(`  • ${escHtml(f.label)} — ${escHtml(f.why)}`); }
+  if (skipped.length) { lines.push('', `**skipped** — ${skipped.length}`); for (const s of skipped) lines.push(`  • ${escHtml(_rowLabel(s.item.row, srcLeg))} — ${escHtml(s.why)}`); }
+  _setMessageBody(msg, [armActTally({ created: created.length, queued: queuedRows.length, failed: failed.length, skipped: skipped.length, total: items.length }), ...lines].join('\n'), { markdown: true });
+  _orchFinalize(msg);
+  closeRun(run, { now: Date.now(), aborted: _walkAbortFlag.requested });
+  try { _orchLog(runEndLine(run)); } catch { /* */ }
+  try { _orchLog(`ARM_ACT ▸ ${use.length} × ${targetId} → ${created.length} created, ${queuedRows.length} queued (${mintedN} minted), ${failed.length} failed, ${skipped.length} skipped`); } catch { /* */ }
+  return { ok: true, created, queued: queuedRows, failed, skipped };
+}
+
 async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = null, goal = '', state = null, inChain = false } = {}) {
   if (!inChain) { _walkAbortFlag.requested = false; _walkPauseFlag.requested = false; }   // WFP-1 (§12.3) — a STANDALONE run is a run start (reset both latches); MID-CHAIN this erased a stop pressed during the previous clause's LLM roundtrip, after which a write created rows the user had already refused
   _ilBusy(msg, true);
   const st = state || {};
   const misses = Array.isArray(st.lastMisses) ? st.lastMisses : [];
+  // v2.74.2200 — ONE DOOR, TWO MECHANISMS, each named. `write` is the intent for "create a record per item"; the
+  // ITEMS can come from a lookup's misses (an upsert — guard against a duplicate) or from a branch's arm (an act
+  // — there is nothing to duplicate). Routing them to one intent keeps the reachability surface at ONE clause
+  // rather than adding a sibling that has to be threaded through four whitelists and both dispatch doors — the
+  // "wiring a new clause into one of N dispatchers" failure the pipeline spec §7.3 records.
+  // Misses win when both are in hand: a lookup ran more recently is the ordinary chain, and an upsert's duplicate
+  // guard is the safer of the two to prefer when the ask is ambiguous.
+  if (!misses.length) {
+    const _br = (_lastBranchRun && _lastBranchRun.convId === _currentConversationId
+      && (Date.now() - _lastBranchRun.at) < _BRANCH_RUN_TTL && _lastBranchRun.items.length) ? _lastBranchRun : null;
+    if (_br) { try { _orchLog(`DISPATCH ▸ write → _runArmActClause (${_br.items.length} classified item(s), no lookup misses in hand)`); } catch { /* */ } return await _runArmActClause(msg, wr || {}, { tabId, goal, branchRun: _br }); }
+  }
   const srcLeg = st.lastMapLeg || priorLeg || null;
   const lookup = st.lastMapLookup || null;
   try { _orchLog(`WRITE ▸ start misses=${misses.length} src=${(srcLeg && srcLeg.tool && srcLeg.tool.recipeId) || '—'}`); } catch { /* */ }
@@ -7474,6 +7620,13 @@ let _lastGroundedRead = null;   // { leg, params, at }
 // lifetime (a panel reload clears it — rerun the lookup); consuming it late is duplicate-safe because the
 // write's inline re-check re-runs this very lookup per row immediately before creating.
 let _lastMapRun = null;   // { convId, misses, srcLeg, lookup, system, matched, total, at }
+// v2.74.2200 — the BRANCH's twin of the above: the classified items, each carrying its arm and its `__outcome`.
+// `draft the replacements` reads this. Same lifetime and same duplicate posture as _lastMapRun, with one real
+// difference stated plainly: a re-run of a per-item ACT genuinely creates a SECOND draft order, because a draft
+// has no identity to match on (that is why this is not an upsert). The 30-minute window below is what keeps a
+// stale arm from being acted on an hour later; re-running the branch is cheap and re-banks it.
+let _lastBranchRun = null;   // { convId, at, srcLeg, items: [{ arm, outcome, row }] }
+const _BRANCH_RUN_TTL = 30 * 60 * 1000;
 // FC (v2.74.1552, DESIGN_conversation_focus.md) — the CONVERSATION's durable working set. `_lastGroundedRead`
 // above is the fast in-panel cache of the last read; focus is its per-conversation, persisted generalization —
 // a case is BORN with its record pinned here; grounded reads accrete entries (FC-3). Working state, not memory:

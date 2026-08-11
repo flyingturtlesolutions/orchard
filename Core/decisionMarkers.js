@@ -169,6 +169,11 @@ export const DECISION_MARKERS = [
   { key: 'dispatch', src: "DISPATCH ▸" },
   { key: 'clause-error', src: "CLAUSE_ERROR ▸" },
   { key: 'branch', src: "BRANCH ▸" },
+  // v2.74.2200 (invariant #1) — the PER-ITEM ACT over a branch arm: which target, which gate verdict, how many
+  // items of how many, and what was skipped and why. Added in the SAME edit as the marker, because a decision
+  // absent from this allow-list is structurally invisible to a `gc` download — and this one carries the only
+  // record of a write that fired N times without a click.
+  { key: 'arm-act', src: "ARM_ACT ▸" },
   { key: 'redact', src: "REDACT ▸" },
   { key: 'pipeline', src: "PIPELINE ▸" },
   { key: 'gate', src: "GATE   ▸" },
