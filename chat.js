@@ -6407,6 +6407,37 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
 }
 
 /**
+ * v2.74.2195 (§12.8.1) / v2.74.2199 — WHAT CAUSED A CREATE, built where the source row is in scope. Reconstructing
+ * it at render time is the mistake `divsrc` taught: bank the join at creation.
+ *
+ * v2199 MADE IT SHARED, and that is the point of this extraction. The pipeline gate sends a row down one of two
+ * roads — `auto` runs `runUpsert` → `_rideExecOnce` (which carried provenance since v2195) or `queued` mints a
+ * PROPOSAL for a human (which carried none). So the provenance was present on machine-cleared creates and absent
+ * on exactly the human-reviewed ones — the rows a person is most likely to open the Records card for. One
+ * builder, both roads, so they cannot bank different answers.
+ *
+ * Shaped like a RECORD — `system · kind · id · label` + an `args` bag — so a Zendesk-incited draft costs no new
+ * plumbing. A POSITIONAL key is REFUSED: `caseItemKey` marks its fallback `idx:`, and a position cannot identify
+ * a record across runs, so banking one would promise an opener that opens the wrong thing.
+ *
+ * The KIND asks the drive artifact first (v2196's `opens`) and falls back to the recipe-id guess. That makes the
+ * banked kind and the record card's fallback noun agree BY CONSTRUCTION rather than by both happening to say
+ * "task" — the card resolves `_inc.kind || recordOpenerForHost(system).noun`, so the two must not disagree.
+ */
+function _incitedByForRow(row, i, srcLeg, label) {
+  try {
+    const sys = String((srcLeg && (srcLeg.host || (srcLeg.tool && srcLeg.tool.host))) || '').trim();
+    const rid = String(caseItemKey(row, i) || '');
+    if (!sys || !rid || rid.startsWith('idx:')) return null;
+    const _rcp = String((srcLeg && srcLeg.tool && (srcLeg.tool.recipeId || srcLeg.tool.id)) || '');
+    const kind = (recordOpenerForHost(sys) || {}).noun
+      || (/task/i.test(_rcp) ? 'task' : /ticket/i.test(_rcp) ? 'ticket' : 'record');
+    const div = String((row && (row.__division ?? row.division ?? row.Division)) || '').trim();
+    return { system: sys, kind, id: rid, label: String(label || ''), ...(div ? { args: { division: div } } : {}) };
+  } catch { return null; }   // provenance is an affordance; a case that cannot carry it must still create
+}
+
+/**
  * PP-2/PP-4 (v2.74.1681) — the PER-ITEM WRITE. The arc's last step: create the missing records.
  *
  * Spec: docs/DESIGN_peritem_pipeline.md §3 (UPSERT) · §4 (the gate) · §5.7 (cases) · §10.1 (adopt, don't undo).
@@ -6539,7 +6570,10 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
     }
 
     if (gate.decision === 'queued') {
-      queued.push({ row, label, value: m.value });
+      // v2.74.2199 (§12.8.1) — the provenance rides the QUEUED row too. Same builder as the auto road above: the
+      // gate decides which road a row takes, and that decision must not also decide whether the created record
+      // can name what caused it.
+      queued.push({ row, label, value: m.value, incitedBy: _incitedByForRow(row, i, srcLeg, label) });
       recordStage(run, id, { name: 'write', verdict: 'queued', detail: gate.why });
       closeItem(run, id, 'blocked', 'queued for approval');
       continue;
@@ -6581,23 +6615,9 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
         // v2.74.2013 — the pipeline gate already returned auto for this leg; the ride handler's confirmed:true
         // belt is a SEPARATE fail-close that this path never cleared (live 01:45:52Z: GATE ▸ auto → INVOKE ▸
         // blocked write-needs-confirm → 1 blocked). confirmed here means "the gate cleared it", not "skip HITL".
-        // v2.74.2195 (§12.8.1) — WHAT CAUSED THIS CREATE. Built here because this is where the source row is in
-        // scope; reconstructing it at render time is the mistake `divsrc` taught (bank the join at creation).
-        // Shaped like a RECORD — system/kind/id/label + an `args` bag — so a Zendesk-incited draft costs no new
-        // plumbing. A POSITIONAL key is refused: `caseItemKey` marks its fallback `idx:`, and a position cannot
-        // identify a record across runs, so banking one would promise an opener that opens the wrong thing.
-        const _incitedBy = (() => {
-          try {
-            const sys = String((srcLeg && (srcLeg.host || (srcLeg.tool && srcLeg.tool.host))) || '').trim();
-            const rid = String(caseItemKey(row, i) || '');
-            if (!sys || !rid || rid.startsWith('idx:')) return null;
-            const _rcp = String((srcLeg && srcLeg.tool && (srcLeg.tool.recipeId || srcLeg.tool.id)) || '');
-            const kind = /task/i.test(_rcp) ? 'task' : /ticket/i.test(_rcp) ? 'ticket' : 'record';
-            const div = String(row.__division ?? row.division ?? row.Division ?? '').trim();
-            return { system: sys, kind, id: rid, label, ...(div ? { args: { division: div } } : {}) };
-          } catch { return null; }
-        })();
-        const r = await _rideExecOnce(createLeg, body, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null, confirmed: true, incitedBy: _incitedBy });
+        // v2.74.2195 (§12.8.1) — WHAT CAUSED THIS CREATE, from `_incitedByForRow` (v2199 — ONE builder, shared
+        // with the queued/approval path, which was banking nothing at all).
+        const r = await _rideExecOnce(createLeg, body, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null, confirmed: true, incitedBy: _incitedByForRow(row, i, srcLeg, label) });
         if (!r || !r.ok) throw new Error((r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'create failed');   // v2.74.2016 — surface the reason, not just the code
         return r.value ?? {};
       },
@@ -10352,7 +10372,11 @@ async function _approveProposal(id) {
   const plan = planExec(p.leg, p.params, {});
   let res = null;
   if (!plan || !plan.ok || !plan.channel) res = { success: false, error: plan && plan.reason ? plan.reason : 'no executor' };
-  else { try { res = await _orchReq(plan.channel, { ...plan.payload, confirmed: true }); } catch (e) { res = { success: false, error: (e && e.message) || 'failed' }; } }   // approval = the CX-6 confirm
+  // v2.74.2199 (§12.8.1) — hop 2 of the queued road: the proposal's banked provenance reaches the invoke payload,
+  // where connector.js's `recordCreate` already reads `payload.incitedBy` (hop 3 needs no change — it is the same
+  // seam the auto path uses). Without this line a human-approved create landed in the Records book with no
+  // inciting reference and no back-arrow, while the identical create cleared automatically had both.
+  else { try { res = await _orchReq(plan.channel, { ...plan.payload, confirmed: true, ...(p.incitedBy ? { incitedBy: p.incitedBy } : {}) }); } catch (e) { res = { success: false, error: (e && e.message) || 'failed' }; } }   // approval = the CX-6 confirm
   const ok = !!(res && res.success !== false);
   await decideProposal(inst, id, { status: ok ? 'executed' : 'failed', reason: ok ? '' : ((res && res.error) || 'failed') });
   await appendLedger(inst, ledgerEntry('execution', { action: p.name, targets: p.targets, proposalId: id, ok, error: ok ? '' : ((res && res.error) || 'failed'), urls: p.urls }));

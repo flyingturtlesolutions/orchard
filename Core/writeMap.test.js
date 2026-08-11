@@ -402,3 +402,48 @@ describe('writeMap — GEO / place resolver (v2062)', () => {
     assert.equal(writeBatchSummary({ proposals: [1], system: 'Shopify' }).includes('address'), false);
   });
 });
+
+// v2.74.2199 (DESIGN_audit.md §12.8.1) — PROVENANCE MUST SURVIVE THE HUMAN. The pipeline gate sends a row down
+// one of two roads: `auto` (runUpsert → _rideExecOnce, which has carried `incitedBy` since v2195) or `queued` (a
+// proposal a person approves, which carried none). Provenance was therefore present on machine-cleared creates
+// and absent on exactly the human-reviewed ones — the rows someone is most likely to open the Records card for.
+describe('writeMap — buildWriteProposals carries incitedBy onto the proposal (§12.8.1)', () => {
+  const INC = { system: 'vendorsuite.drhorton.com', kind: 'task', id: '4903279', label: '#4903279 · 1565 Fairlie Way', args: { division: 'Columbus' } };
+
+  it('rides onto the proposal WHOLE, so the approval path can forward it to the same create seam', () => {
+    const { proposals } = buildWriteProposals([{ row, label: '#01 1008 Harb Drive', value: '1008 Harb Drive', incitedBy: INC }], { leg: createLeg, declared });
+    assert.deepEqual(proposals[0].incitedBy, INC);
+  });
+
+  it('CARRIED, never computed — a row with no reference produces a proposal with no field at all', () => {
+    // §12.8's "never inferred": a guessed provenance is worse than an absent one, because everything downstream
+    // trusts it. This module knows rows and params; it does not know source systems or record ids.
+    const { proposals } = buildWriteProposals([{ row, label: '#01 1008 Harb Drive', value: '1008 Harb Drive' }], { leg: createLeg, declared });
+    assert.equal('incitedBy' in proposals[0], false, 'absent stays absent — no empty object, no placeholder');
+  });
+
+  it('a non-object reference is refused rather than banked as junk', () => {
+    for (const bad of ['4903279', 42, true, ['a'], null]) {
+      const { proposals } = buildWriteProposals([{ row, label: 'x', value: 'y', incitedBy: bad }], { leg: createLeg, declared });
+      assert.equal('incitedBy' in proposals[0], false, `${JSON.stringify(bad)} must not ride`);
+    }
+  });
+
+  it('per-ROW, not per-batch — each proposal names the record that incited IT', () => {
+    const a = { ...INC, id: '4903279' };
+    const b = { ...INC, id: '4888221' };
+    const { proposals } = buildWriteProposals([
+      { row, label: 'first', value: '1', incitedBy: a },
+      { row, label: 'second', value: '2', incitedBy: b },
+    ], { leg: createLeg, declared });
+    assert.equal(proposals[0].incitedBy.id, '4903279');
+    assert.equal(proposals[1].incitedBy.id, '4888221');
+  });
+
+  it('an UNPROPOSABLE row banks nothing — a create that never happens has no provenance to carry', () => {
+    const { proposals, unproposable } = buildWriteProposals(
+      [{ row: { AddressLine1: 'x' }, label: 'thin', value: 'v', incitedBy: INC }], { leg: createLeg, declared });
+    assert.equal(proposals.length, 0);
+    assert.equal(unproposable.length, 1);
+  });
+});

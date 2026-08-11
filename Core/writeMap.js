@@ -272,6 +272,14 @@ export function buildWriteProposals(missRows, {
       params: send,
       safety: leg.safety || 'confirm',
       why: _str(why) || `no match found for ${label}`,
+      // v2.74.2199 (DESIGN_audit.md §12.8.1) — PROVENANCE SURVIVES THE HUMAN. Carried, never computed: this
+      // module knows rows and params, not source systems or record ids, and a guessed provenance is worse than
+      // an absent one because everything downstream trusts it (§12.8's "never inferred" rule). The caller builds
+      // it where the source leg is in scope and attaches it to the entry; here it just rides onto the proposal
+      // so `_approveProposal` can forward it to the same `recordCreate` seam the auto path already reaches.
+      // `!Array.isArray` because `typeof [] === 'object'` — the same guard `_capIncitedBy` applies at the audit
+      // seam. Refusing it here too keeps the STORED proposal clean rather than relying on a downstream drop.
+      ...(entry && entry.incitedBy && typeof entry.incitedBy === 'object' && !Array.isArray(entry.incitedBy) ? { incitedBy: entry.incitedBy } : {}),
     };
     // The duplicate guard. Without a readLeg the CAS in _approveProposal is skipped entirely, so an approval
     // that ages could create a record that now exists — see requireStalenessGuard.
