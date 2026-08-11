@@ -64,6 +64,20 @@ const ENTRY_FIELD_MAP = new Set([
   // seeded path irrelevant, and an unknown recipe resolves to `selection` — so a DROP would weaken a sentence
   // rather than falsify one. The seal caught its absence here on the first run, which is the ratchet working.
   'coverage',          // coverageOf (Core/synthEntity.js) — partition-vs-selection; catalog-read by id, never a leg field, fail-safe when absent
+  // v2.74.2203 — the REVERSAL pair, and this seal is what forced the choice between threading and catalog-reading.
+  //   undoLeg — WHICH leg undoes this one. `reversible: true` has asserted that an undo exists since v1681 without
+  //             naming it, so every consumer had to know the pair by heart; PP-0d (DESIGN_peritem_pipeline.md §6)
+  //             asked for exactly this ("reversible becomes a leg REFERENCE, not a boolean") and the Records
+  //             card's delete is the first surface that has to ASK.
+  //   gidType — the entity a created id belongs to, so a caller can rebuild the gid the delete wants without
+  //             knowing the vendor's naming.
+  // CATALOG-READ BY ID, deliberately, on `coverage`'s precedent and for its reason: `_recordUndoLeg` (chat.js)
+  // resolves both against CONNECTOR_RECIPES, exactly as `_recordOpenUrl` beside it already resolves `itemUrl`.
+  // Reading from the catalog makes the seeded path irrelevant, so there is no three-hop drop to catch — and a
+  // DROP here would remove a button rather than fire a wrong delete, which is the fail-safe direction for a
+  // destructive act. Threading them to the leg would put an irreversible operation's address on the surface this
+  // seal exists because things fall off.
+  'undoLeg', 'gidType',
 ]);
 
 const ENTRIES = CONNECTOR_RECIPES.filter((e) => e && e.id && e.appHost);

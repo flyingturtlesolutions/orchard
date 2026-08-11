@@ -58,6 +58,41 @@ export async function appendCreateEntry(fields, { cap = AUDIT_CAP } = {}) {
   });
 }
 
+/**
+ * v2.74.2203 — remove ONE banked create. TESTING AFFORDANCE, and the constraint is written here because this is
+ * the function that would have to be deleted to enforce it: a real creates-audit ledger is APPEND-ONLY, and a
+ * production Records surface must not offer this at all (user direction 2026-08-11: "for testing only, live
+ * version of records will be permanent"). It exists so a build loop can clear the rows it just made.
+ *
+ * Identity is `at` + `id` together, never `id` alone: the same record can legitimately be created twice (a draft
+ * order has no identity to dedupe on — the whole reason the per-item act is not an upsert), and removing "the row
+ * with this id" would then delete an arbitrary one of them.
+ *
+ * `total` decrements with it so the truncation notice ("showing the last 500 of 812") keeps describing the book
+ * that exists rather than a history this row has been taken out of. Floored at the retained count, which is the
+ * only value that cannot lie.
+ * @returns {Promise<{items,total,notice,removed:boolean}>}
+ */
+export async function removeCreate({ at = 0, id = '' } = {}) {
+  return _chained(async () => {
+    const rec = await _read();
+    const prev = (rec && Array.isArray(rec.items)) ? rec.items : [];
+    const prevTotal = (rec && Number.isFinite(rec.total)) ? rec.total : prev.length;
+    const _at = Number(at) || 0;
+    const _id = String(id || '');
+    let hit = -1;
+    for (let i = prev.length - 1; i >= 0; i--) {
+      const e = prev[i];
+      if (e && Number(e.at) === _at && String(e.id || '') === _id) { hit = i; break; }
+    }
+    if (hit < 0) return { items: prev, total: prevTotal, notice: truncationNotice(prev.length, prevTotal), removed: false };
+    const items = prev.slice(0, hit).concat(prev.slice(hit + 1));
+    const total = Math.max(items.length, prevTotal - 1);
+    await chrome.storage.local.set({ [KEY]: { items, total, updatedAt: Date.now() } });
+    return { items, total, notice: truncationNotice(items.length, total), removed: true };
+  });
+}
+
 /** Forget the whole creates book (local reset). */
 export async function clearCreates() {
   return _chained(async () => { await chrome.storage.local.remove(KEY); });

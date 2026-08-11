@@ -101,7 +101,7 @@ import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) �
 import { evaluatePinBank, refinePinBankAfterStore } from './Core/workflowPinBank.js';   // v2.74.2038 — pin-bank cause probes (refuse taxonomy; no remediation)
 import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun, explainPartialWhy, normalizeHistoryTrace, formatTraceLines } from './Core/runHistory.js';   // CD-6; v2027 items; v2029 partial why; v2030 banked trace
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
-import { loadCreates } from './Services/Storage/AuditCreateStore.js';   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
+import { loadCreates, removeCreate } from './Services/Storage/AuditCreateStore.js';   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
@@ -6453,9 +6453,26 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
  */
 function _incitedByForRow(row, i, srcLeg, label) {
   try {
-    const sys = String((srcLeg && (srcLeg.host || (srcLeg.tool && srcLeg.tool.host))) || '').trim();
+    // v2.74.2203 — THE HOST RESOLUTION ORDER THE REST OF THE CODEBASE USES. Live (gl 07:45): three drafts were
+    // created and NONE carried a back-arrow. Cause: this read `srcLeg.host || srcLeg.tool.host` and a projected
+    // leg carries NEITHER — `recipeToLeg` puts the site on `tool.appHost` (and `tool.origin` when a ground
+    // supplied one). So `system` came out empty, `_capIncitedBy` correctly dropped a reference it could not open,
+    // and §12.8.1 produced nothing on the one run that finally had creates to attach it to.
+    //
+    // `_provenance` (Core/conversationFocus.js:95) already had the answer — `tool.origin || tool.appHost ||
+    // tool.host` — and it is now used verbatim rather than restated in a different order. Two fields I invented
+    // from memory, one field that exists: the third time this session that reading the established accessor
+    // would have been faster than writing a new one.
+    const _t = (srcLeg && srcLeg.tool) || {};
+    const sys = String(srcLeg && srcLeg.host ? srcLeg.host : (_t.origin || _t.appHost || _t.host || ''))
+      .replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
     const rid = String(caseItemKey(row, i) || '');
-    if (!sys || !rid || rid.startsWith('idx:')) return null;
+    if (!sys || !rid || rid.startsWith('idx:')) {
+      // SAY WHY IT WAS DROPPED. A refusal with no line is indistinguishable from a feature that was never built —
+      // which is exactly how three creates shipped with no provenance and nothing in the trace said so.
+      try { _orchLog(`AUDIT ▸ incitedBy dropped — system=${sys ? `"${sys}"` : '(none)'} id=${rid ? `"${rid}"` : '(none)'}${rid.startsWith('idx:') ? ' (positional key refused)' : ''}`); } catch { /* */ }
+      return null;
+    }
     const _rcp = String((srcLeg && srcLeg.tool && (srcLeg.tool.recipeId || srcLeg.tool.id)) || '');
     const kind = (recordOpenerForHost(sys) || {}).noun
       || (/task/i.test(_rcp) ? 'task' : /ticket/i.test(_rcp) ? 'ticket' : 'record');
@@ -12423,7 +12440,11 @@ function _railRecordCard(e, fmtTime) {
   // two different objects on two different systems: the eye opens the created record, the source button opens
   // the inciting one. Collapsing them into one eye is what produced the v2149 trap.
   const _inc = _incitedOpener(e);
-  if (_url || _inc.how !== 'none') {
+  // v2.74.2203 — the UNDO, and it is a TESTING affordance by explicit direction ("for testing only, live version
+  // of records will be permanent"). Offered only where the catalog declares a reversal for what was created, so
+  // a record whose create cannot be undone shows no button rather than one that fails on click.
+  const _undo = _recordUndoLeg(e);
+  if (_url || _inc.how !== 'none' || _undo) {
     const acts = document.createElement('div'); acts.className = 'rail-record-acts';
     const _host = String(e.system || 'the site').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
     if (_url) {
@@ -12447,6 +12468,12 @@ function _railRecordCard(e, fmtTime) {
         if (_inc.how === 'drive') void _driveToSourceTask(_inc.label || _inc.id, _inc.id, _inc.system, btn, { title: _inc.label || '' });
         else void _openRecordLink(_inc.url, btn);
       }, { title: `Show ${_what} on ${_inc.system}` }));
+    }
+    if (_undo) {
+      acts.appendChild(_mkIconBtn('trash', `Delete this ${e.kind || 'record'} on ${_host}`, async (btn, ev) => {
+        try { ev.stopPropagation(); } catch { /* */ }   // the card body opens the drill — the button must not
+        void _undoRecordCreate(e, _undo, btn, card);
+      }, { title: `Delete ${e.label || e.id || 'this record'} on ${_host} — permanent, and removes this row` }));
     }
     card.appendChild(acts);
   }
@@ -12899,6 +12926,74 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
     if (btn) btn.title = `Couldn’t open ${ref}`;
     return { ok: false, arrived: false, reason: (e && e.message) || String(e) };
   } finally { _clearRunning(); }   // v2.74.2192 — one exit point for the running state: button, row class and caption all clear together
+}
+
+/**
+ * v2.74.2203 — DOES THE CATALOG DECLARE A REVERSAL for what this row created? Returns the delete leg's recipe
+ * entry, or null. A lookup, not a decision: `undoLeg` is catalog data (Core/connectorRecipes.js), and a record
+ * whose create declares no undo shows NO button rather than one that discovers its own impossibility on click.
+ *
+ * TESTING AFFORDANCE (user direction 2026-08-11): "add delete button on record cards, for testing only, live
+ * version of records will be permanent". The ledger is append-only in principle; this exists so a build loop can
+ * take back the drafts it just made, and it is the button a production Records surface would drop first.
+ */
+function _recordUndoLeg(e) {
+  try {
+    const rec = (CONNECTOR_RECIPES || []).find((r) => r && r.id === (e && e.recipeId));
+    const undoId = rec && rec.undoLeg;
+    if (!undoId || !e || !e.id) return null;
+    const undo = (CONNECTOR_RECIPES || []).find((r) => r && r.id === undoId);
+    return (undo && undo.write) ? undo : null;
+  } catch { return null; }
+}
+
+/**
+ * v2.74.2203 — run the declared reversal, then remove the row IF the vendor confirms it went.
+ *
+ * ORDER IS THE WHOLE DESIGN. The row leaves only after the delete succeeds — a local removal first would produce
+ * exactly the lie this repo keeps catching (the workflow-card note at v1804: "the row leaves only if the store
+ * CONFIRMS"), and here the stakes are higher: the ledger would stop showing a draft that still exists in a real
+ * store, which is a create nobody can find again.
+ *
+ * THE ID IS THE INTERNAL ONE, and that matters. `createdRecordId` banks the numeric tail of the gid the CREATE's
+ * own response returned, so `gid://shopify/DraftOrder/<id>` is exact — not the human `#D1023` number the v2069
+ * note warns about pre-minting. The delete leg's `lookup` passes a `gid://` through untouched, so no search runs
+ * and there is nothing to mis-rank on a destructive call.
+ */
+async function _undoRecordCreate(e, undoRec, btn, card) {
+  const host = String(e.system || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  const what = `${e.kind || 'record'} ${e.label || e.id}`;
+  // §5 — a destructive, IRREVERSIBLE act confirms, and the sentence names the thing and the system it lives on.
+  if (!confirm(`Delete ${what} on ${host}?\n\nThis is permanent — the ${undoRec.destructive ? 'delete cannot be undone' : 'record is removed'}, and this row leaves the Records list.`)) return;
+  const was = btn ? btn.title : '';
+  if (btn) { btn.disabled = true; btn.title = `Deleting ${e.id}…`; }
+  try {
+    const _g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${host}/` });
+    const gid = (_g && _g.groundId) || '';
+    if (!gid) throw new Error(`no ground for ${host}`);
+    const { recipes } = await _cachedHostRecipes(host);
+    const leg = harvestedRecipeLegs(recipes || [], { host, mode: 'act', groundId: gid }).find((l) => l && l.tool && l.tool.recipeId === undoRec.id);
+    if (!leg) throw new Error(`${undoRec.id} is not armed on ${host}`);
+    // The one required param, from the leg's own declaration — never a hardcoded name.
+    const _p = (legParamDefs(leg).find((p) => p && p.required) || {}).name || 'id';
+    const _idIsGid = /^gid:\/\//i.test(String(e.id));
+    const params = { [_p]: _idIsGid ? String(e.id) : `gid://shopify/${undoRec.gidType || 'DraftOrder'}/${e.id}` };
+    const r = await _rideExecOnce(leg, params, { groundId: gid, confirmed: true });   // confirmed = the human clicked through the prompt above
+    if (!r || !r.ok) throw new Error((r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'delete failed');
+    const _rm = await removeCreate({ at: e.at, id: e.id });
+    try { _orchLog(`AUDIT ▸ undo ${undoRec.id} ${e.id} on ${host} → deleted${_rm && _rm.removed ? ' · row removed' : ' · ROW KEPT (store miss)'}`); } catch { /* */ }
+    try { card.remove(); } catch { /* the re-render below is the belt */ }
+    void _renderActiveRailTab({ force: true });
+    try { toast(`Deleted ${what}.`, 'ok'); } catch { /* */ }
+  } catch (err) {
+    // The row STAYS on any failure, and says why — a record that still exists must still be listed.
+    const why = (err && err.message) || 'delete failed';
+    try { _orchLog(`AUDIT ▸ undo ${undoRec.id} ${e.id} on ${host} → FAILED — ${why}`); } catch { /* */ }
+    if (btn) { btn.disabled = false; btn.title = `Couldn’t delete — ${why}`; }
+    try { toast(`Couldn’t delete ${what} — ${why}`, 'err'); } catch { /* */ }
+    return;
+  }
+  if (btn) { btn.disabled = false; btn.title = was; }
 }
 
 // AU-2 — resolve a stored row to its absolute page. The catalog lookup is HERE (the panel has CONNECTOR_RECIPES)

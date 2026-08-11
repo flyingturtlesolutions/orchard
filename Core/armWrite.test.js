@@ -248,3 +248,37 @@ describe('armWrite — the contact rung needs the STRUCTURED list, not the flatt
     assert.equal(params.customer_gid, 'jimmy@example.com', 'the HOMEOWNER, not the builder’s CSR who happens to be first');
   });
 });
+
+// v2.74.2203 — asserted against the REAL catalog, not a fixture copy. A declaration is data, and a fixture that
+// drifts from it tests nothing: the point of these two is that the shipped warranty rows fill the shipped leg.
+describe('armWrite — the shipped warranty declaration fills the shipped create leg', () => {
+  it('every required param of shopify_create_order resolves from a classified warranty row', async () => {
+    const { CONNECTOR_RECIPES } = await import('./connectorRecipes.js');
+    const wm = CONNECTOR_RECIPES.find((r) => r.id === 'vs_warranty_tasks').writeMap.shopify_create_order;
+    const defs = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_create_order').params;
+    const { params, missing } = armActParams(row(OUT), wm, defs);
+    assert.deepEqual(missing, [], 'a warranty row must be able to fill a draft order end to end');
+    assert.equal(params.customer_gid, 'jimmy@example.com', 'the human value; the lookup seam resolves it to a gid');
+    assert.deepEqual(params.line_items, [{ variantId: OUT.product, quantity: 6 }]);
+  });
+
+  it('a warranty draft is ALWAYS tagged, with all four (user direction 2026-08-11)', async () => {
+    const { CONNECTOR_RECIPES } = await import('./connectorRecipes.js');
+    const wm = CONNECTOR_RECIPES.find((r) => r.id === 'vs_warranty_tasks').writeMap.shopify_create_order;
+    const defs = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_create_order').params;
+    const { params } = armActParams(row(OUT), wm, defs);
+    assert.deepEqual(params.tags, ['replacement', 'support', 'foc', 'warranty']);
+    // Nobody is billed for a warranty part, and the tags say so alongside the discount that enforces it.
+    assert.equal(params.applied_discount.value, 100);
+    assert.equal(params.shipping_line.price, '0.00');
+  });
+
+  it('BOTH warranty legs declare it — the list and the detail, or a drilled row silently loses the target', async () => {
+    const { CONNECTOR_RECIPES } = await import('./connectorRecipes.js');
+    for (const id of ['vs_warranty_tasks', 'vs_warranty_task']) {
+      const wm = CONNECTOR_RECIPES.find((r) => r.id === id).writeMap;
+      assert.ok(wm && wm.shopify_create_order, `${id} declares the draft-order write`);
+      assert.deepEqual(wm.shopify_create_order.tags.const, ['replacement', 'support', 'foc', 'warranty']);
+    }
+  });
+});

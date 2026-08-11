@@ -695,6 +695,12 @@ export const CONNECTOR_RECIPES = [
   // a distinct admin object until it is completed, which is the same distinction the user's "the order needs to be
   // completed by a human" ruling turns on.
   { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, gql: false, persistedOp: 'DraftOrderCreate', itemUrl: '/store/{handle}/draft_orders/{id}',
+    // v2.74.2203 — WHICH LEG UNDOES THIS ONE. `reversible: true` has been an assertion with no address since
+    // v1681: it says an undo exists and names nothing, so every consumer had to know the pair by heart. PP-0d
+    // (DESIGN_peritem_pipeline.md §6) called for exactly this — 'reversible becomes a leg REFERENCE, not a
+    // boolean' — and the Records card is the first surface that needs to ASK. `gidType` is the entity the
+    // created id belongs to, so a caller can rebuild the gid the delete wants without knowing Shopify's naming.
+    undoLeg: 'shopify_delete_order', gidType: 'DraftOrder',
     does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; reversible via the delete-draft action (shopify_delete_order, human-confirmed) if it should not stand; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
     // v2.74.2067 RC-1/RC-2 — LOOKUP resolution (Core/lookupRun.js): users type a customer EMAIL and a product
     // NAME, never gids. IN-PLACE: an email in `customer_gid` resolves via shopify_customer_by_email; a name/sku in
@@ -867,6 +873,12 @@ export const CONNECTOR_RECIPES = [
         // that bills a homeowner for a warranty part is a worse error than one that does not — a human still
         // completes the draft, so this is the reviewable default, not a payment.
         applied_discount: { const: { value: 100, valueType: 'PERCENTAGE', title: 'Warranty replacement' } },
+        // v2.74.2203 (user direction) — a warranty draft is ALWAYS tagged, and always with the same four. Tags
+        // are how these are found again in Shopify's own UI by someone who has never heard of Orchard: what it
+        // is (replacement), why it exists (warranty, support), and that nobody is being billed (foc). They ride
+        // the DECLARATION, not the leg, because they are a fact about warranty orders — the same reason the
+        // switch-identity rule moved out of the create leg at v2086.
+        tags: { const: ['replacement', 'support', 'foc', 'warranty'] },
         shipping_line: { const: { title: 'Free shipping', price: '0.00' } },
         // The draft says what it is FOR, on the draft itself, where the person completing it is looking. The
         // Records ledger's `incitedBy` answers the same question inside Orchard; this answers it in Shopify.
@@ -948,6 +960,12 @@ export const CONNECTOR_RECIPES = [
         // that bills a homeowner for a warranty part is a worse error than one that does not — a human still
         // completes the draft, so this is the reviewable default, not a payment.
         applied_discount: { const: { value: 100, valueType: 'PERCENTAGE', title: 'Warranty replacement' } },
+        // v2.74.2203 (user direction) — a warranty draft is ALWAYS tagged, and always with the same four. Tags
+        // are how these are found again in Shopify's own UI by someone who has never heard of Orchard: what it
+        // is (replacement), why it exists (warranty, support), and that nobody is being billed (foc). They ride
+        // the DECLARATION, not the leg, because they are a fact about warranty orders — the same reason the
+        // switch-identity rule moved out of the create leg at v2086.
+        tags: { const: ['replacement', 'support', 'foc', 'warranty'] },
         shipping_line: { const: { title: 'Free shipping', price: '0.00' } },
         // The draft says what it is FOR, on the draft itself, where the person completing it is looking. The
         // Records ledger's `incitedBy` answers the same question inside Orchard; this answers it in Shopify.
