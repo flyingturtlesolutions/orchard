@@ -348,10 +348,17 @@ export function pollPlan(rows, { catalog = [], now = 0, lastPollAt = {}, gapMs =
  * @param o.seenBy      {rowKey: seen-state} for observeFields
  * @returns {Array<{key, at, kind:'update'|'gone', fields?, seenNext?, why?}>}
  */
-export function reconcileCollection(rows, observedRows, { leg = null, now = 0, seenBy = {} } = {}) {
+export function reconcileCollection(rows, observedRows, { leg = null, now = 0, seenBy = {}, stats = null } = {}) {
   const list = (Array.isArray(rows) ? rows : []).filter(_isObj);
   const got = (Array.isArray(observedRows) ? observedRows : []).filter(_isObj);
   const l = _isObj(leg) ? leg : {};
+  // v2.74.2214 — COUNTS FOR THE CALLER'S AUDIT LINE, because "0 handed off" alone cannot distinguish the two
+  // ways this loop does nothing: a banked row ABSENT from the vendor reply (a silent `continue` — correct for a
+  // `selection` collection, but invisible) vs. PRESENT with a probe condition that did not hold. Live 2026-08-11:
+  // #D29741 sat COMPLETED in Shopify through two green polls and the tally could not say which of those it was.
+  // Counts only — never an observed value — per the body-blind audit rule.
+  const st = _isObj(stats) ? stats : null;
+  if (st) { st.matched = 0; st.whenMet = 0; }
   const decl = _isObj(l.observe) ? l.observe : null;
   const idKey = _str(l.rowId) || 'id';
   const seen = _isObj(seenBy) ? seenBy : {};
@@ -372,6 +379,11 @@ export function reconcileCollection(rows, observedRows, { leg = null, now = 0, s
       // Absence. ONLY a partition may read it as non-existence — see the rule above.
       if (_str(l.coverage) === 'partition') out.push({ key, at: _num(now), kind: 'gone', why: '404' });
       continue;
+    }
+    if (st) {
+      st.matched++;
+      const _w = _isObj(l.handOffProbe) && _isObj(l.handOffProbe.when) ? l.handOffProbe.when : null;
+      if (_w && String(extractValue(hit, _str(_w.field))) === String(_w.is)) st.whenMet++;
     }
     // THE HAND-OFF IS CHECKED FIRST, and it is checked BEFORE the field observers because it changes which
     // collection answers for this record from now on. A draft that became an order stops being the draft list's

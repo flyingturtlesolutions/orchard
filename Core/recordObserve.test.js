@@ -223,6 +223,22 @@ describe('recordObserve — §12.3 reconcileCollection', () => {
     assert.deepEqual(reconcileCollection(null, null, {}), []);
     assert.deepEqual(reconcileCollection([row()], [null, 'x', 7], { leg: sel, now: T0 }), []);
   });
+
+  it('v2.74.2214 — `stats` names which kind of NOTHING happened: absent-from-reply vs present-but-condition-unmet', () => {
+    // Live 2026-08-11: #D29741 sat COMPLETED in Shopify through two green polls and `0 handed off` could not say
+    // whether the row was missing from our reply or present with a status the probe declaration did not expect.
+    const probing = { ...sel, handOffProbe: { when: { field: 'status', is: 'COMPLETED' }, via: 'detail' } };
+    const absent = {};
+    reconcileCollection([row()], [{ id: 'other', status: 'COMPLETED' }], { leg: probing, now: T0, stats: absent });
+    assert.deepEqual(absent, { matched: 0, whenMet: 0 }, 'the banked row is not in the vendor reply');
+    const unmet = {};
+    reconcileCollection([row()], [{ id: '29685', status: 'OPEN' }], { leg: probing, now: T0, stats: unmet });
+    assert.deepEqual(unmet, { matched: 1, whenMet: 0 }, 'present, but the probe condition does not hold');
+    const met = {};
+    const acts = reconcileCollection([row()], [{ id: '29685', status: 'COMPLETED' }], { leg: probing, now: T0, stats: met });
+    assert.deepEqual(met, { matched: 1, whenMet: 1 });
+    assert.equal(acts[0].kind, 'probe', 'and when-met is the probe actually raised');
+  });
 });
 
 // v2.74.2212 — THE POLL WAS REFUSED BEFORE THE NETWORK, every tick, in silence. `shopify_draft_orders` carries

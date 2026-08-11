@@ -337,7 +337,13 @@ async function _recordWatchSweep({ force = false } = {}) {
       polled++;
       if (!reply || !reply.ok) { failed++; continue; }   // a signed-out or 404 collection says nothing about its members
       const observedRows = rowsAt(reply.value, leg.rows);   // v2208 — ONE walker, shared with the pure half: the local copy took edges[0] and reconciled a single row
-      const acts = reconcileCollection(rows, observedRows, { leg, now: Date.now(), seenBy });
+      const _st = {};
+      const acts = reconcileCollection(rows, observedRows, { leg, now: Date.now(), seenBy, stats: _st });
+      // v2.74.2214 — NAME WHICH KIND OF NOTHING HAPPENED. Two polls read this collection green while #D29741 sat
+      // COMPLETED in Shopify, and `0 handed off · 0 unreadable` could not say whether the banked row was ABSENT
+      // from the vendor's reply (our poll's query:''/no-saved-view differs from the HAR-proven page request) or
+      // PRESENT with a status the probe declaration did not expect. Counts only, body-blind.
+      try { Logger.info('audit', `AUDIT ▸ watch reconcile [${leg.id}] vendor=${observedRows.length} banked=${rows.length} matched=${_st.matched} when-met=${_st.whenMet} → ${acts.length} act(s)`); } catch { /* */ }
       for (const a of acts) {
         const [atStr, ...idParts] = String(a.key).split('|');
         const ref = { at: Number(atStr) || 0, id: idParts.join('|') };
