@@ -75,13 +75,13 @@ import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdi
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
-import { DRIVE_ARTIFACTS } from './Core/driveArtifacts.js';   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
+import { DRIVE_ARTIFACTS, originMatchesAppHost } from './Core/driveArtifacts.js';   // v2195 — originMatchesAppHost: does a drive artifact cover this host?   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { parseDashboardAsk, friendlyVitalsLine, clockWord } from './Core/vitalsDashboard.js';   // VT-2d (v2.74.1583) — the context dashboard door; v1590 — the human-words layer for incident cases
-import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer, recordOpenUrl } from './Core/audit.js';   // AU-2 (v2.74.2147) — recordOpenUrl resolves a banked row to its page on the owning system (the eye button)
+import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer, recordOpenUrl, incitedOpener } from './Core/audit.js';   // v2195 §12.8.1 — incitedOpener decides link|drive|none for the record that CAUSED this one   // AU-2 (v2.74.2147) — recordOpenUrl resolves a banked row to its page on the owning system (the eye button)
 import { buildWarrantyExtractSystem, readWarrantyItem, tallyOutcomes, WARRANTY_ARMS } from './Core/warrantySwitch.js';   // v2.74.2106 — the warranty branch EXTRACTS typed fields; code derives the arm (no label for the model to invent)   // AU-3 (DESIGN_audit.md §11) — the "what have I created?" read surface (local ledger, one-shot answer)
 import { friendlyError as _errWord, actionPhrase as _actionPhrase, recordNounWord as _recordNounWord } from './Core/chatVoice.js';   // v2.74.1591 — ONE chat voice: slugs/codes → phrases, catalog verbs → sentences, leg names → nouns
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
@@ -6569,7 +6569,23 @@ async function _runWriteClause(msg, wr, { tabId, priorValue = null, priorLeg = n
         // v2.74.2013 — the pipeline gate already returned auto for this leg; the ride handler's confirmed:true
         // belt is a SEPARATE fail-close that this path never cleared (live 01:45:52Z: GATE ▸ auto → INVOKE ▸
         // blocked write-needs-confirm → 1 blocked). confirmed here means "the gate cleared it", not "skip HITL".
-        const r = await _rideExecOnce(createLeg, body, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null, confirmed: true });
+        // v2.74.2195 (§12.8.1) — WHAT CAUSED THIS CREATE. Built here because this is where the source row is in
+        // scope; reconstructing it at render time is the mistake `divsrc` taught (bank the join at creation).
+        // Shaped like a RECORD — system/kind/id/label + an `args` bag — so a Zendesk-incited draft costs no new
+        // plumbing. A POSITIONAL key is refused: `caseItemKey` marks its fallback `idx:`, and a position cannot
+        // identify a record across runs, so banking one would promise an opener that opens the wrong thing.
+        const _incitedBy = (() => {
+          try {
+            const sys = String((srcLeg && (srcLeg.host || (srcLeg.tool && srcLeg.tool.host))) || '').trim();
+            const rid = String(caseItemKey(row, i) || '');
+            if (!sys || !rid || rid.startsWith('idx:')) return null;
+            const _rcp = String((srcLeg && srcLeg.tool && (srcLeg.tool.recipeId || srcLeg.tool.id)) || '');
+            const kind = /task/i.test(_rcp) ? 'task' : /ticket/i.test(_rcp) ? 'ticket' : 'record';
+            const div = String(row.__division ?? row.division ?? row.Division ?? '').trim();
+            return { system: sys, kind, id: rid, label, ...(div ? { args: { division: div } } : {}) };
+          } catch { return null; }
+        })();
+        const r = await _rideExecOnce(createLeg, body, { tabId, groundId: (createLeg.tool && createLeg.tool.groundId) || null, confirmed: true, incitedBy: _incitedBy });
         if (!r || !r.ok) throw new Error((r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'create failed');   // v2.74.2016 — surface the reason, not just the code
         return r.value ?? {};
       },
@@ -12125,13 +12141,32 @@ function _railRecordCard(e, fmtTime) {
   // stopPropagation is load-bearing — the button sits inside a role=button card, so without it one click fires
   // both and the drill overlay opens behind the tab switch.
   const _url = _recordOpenUrl(e);
-  if (_url) {
+  // v2.74.2195 (§12.8.1) — THE SYMMETRIC AFFORDANCE. AU-2 lets you view what Orchard CREATED; provenance means
+  // you must also be able to view what CAUSED it. Two buttons, deliberately distinguishable, because they are
+  // two different objects on two different systems: the eye opens the created record, the source button opens
+  // the inciting one. Collapsing them into one eye is what produced the v2149 trap.
+  const _inc = _incitedOpener(e);
+  if (_url || _inc.how !== 'none') {
     const acts = document.createElement('div'); acts.className = 'rail-record-acts';
     const _host = String(e.system || 'the site').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
-    acts.appendChild(_mkIconBtn('eye', `View this ${e.kind || 'record'} on ${_host}`, (btn, ev) => {
-      try { ev.stopPropagation(); } catch { /* */ }
-      void _openRecordLink(_url, btn);
-    }, { title: `Open ${e.label || e.id || 'this record'} on ${_host}` }));
+    if (_url) {
+      acts.appendChild(_mkIconBtn('eye', `View this ${e.kind || 'record'} on ${_host}`, (btn, ev) => {
+        try { ev.stopPropagation(); } catch { /* */ }
+        void _openRecordLink(_url, btn);
+      }, { title: `Open ${e.label || e.id || 'this record'} on ${_host}` }));
+    }
+    if (_inc.how !== 'none') {
+      const _what = `${_inc.kind || 'record'} ${_inc.label || _inc.id}`.trim();
+      acts.appendChild(_mkIconBtn('back', `Show the ${_inc.kind || 'record'} that caused this, on ${_inc.system}`, (btn, ev) => {
+        try { ev.stopPropagation(); } catch { /* */ }
+        // THE DRIVE IS CANONICAL — this reuses `_driveToSourceTask` exactly as the case card does (user
+        // direction). No second mechanism: same walk, same postcondition, same honest failure reporting.
+        // `find` is the row TEXT the walk clicks (the label, e.g. a street address) and `ref` is the id it
+        // searches with — the same split the case card passes.
+        if (_inc.how === 'drive') void _driveToSourceTask(_inc.label || _inc.id, _inc.id, _inc.system, btn, { title: _inc.label || '' });
+        else void _openRecordLink(_inc.url, btn);
+      }, { title: `Show ${_what} on ${_inc.system}` }));
+    }
     card.appendChild(acts);
   }
   const open = () => _openRecordDrill(e, fmtTime);
@@ -12529,6 +12564,26 @@ function _recordOpenUrl(e) {
     const rec = (CONNECTOR_RECIPES || []).find((r) => r && r.id === (e && e.recipeId));
     return recordOpenUrl(e, (rec && rec.itemUrl) || '', fillEndpoint);
   } catch { return ''; }
+}
+
+/**
+ * v2.74.2195 (§12.8.1) — how to open the record that INCITED this one. The panel-side adapter: it supplies the
+ * two catalog facts `incitedOpener` deliberately does not know, and the pure function decides.
+ *
+ *   template  — the inciting SYSTEM's own itemUrl, found by host across CONNECTOR_RECIPES. Not by recipeId: the
+ *               inciting record was read by some other leg, and the audit row banks the system, not that leg.
+ *   canDrive  — does a built-in DRIVE artifact exist for that host? That is what generalises this: VendorSuite
+ *               gets the walk because DRIVE_ARTIFACTS covers it, not because it is named here. A second
+ *               walk-only source becomes true the moment its artifact ships, with no edit to this function.
+ */
+function _incitedOpener(e) {
+  try {
+    const sys = String((e && e.incitedBy && e.incitedBy.system) || '');
+    if (!sys) return { how: 'none' };
+    const rec = (CONNECTOR_RECIPES || []).find((r) => r && originMatchesAppHost(sys, r.appHost) && r.itemUrl);
+    const canDrive = (host) => (DRIVE_ARTIFACTS || []).some((d) => d && originMatchesAppHost(host, d.appHost));
+    return incitedOpener(e, { template: (rec && rec.itemUrl) || '', canDrive, fill: fillEndpoint });
+  } catch { return { how: 'none' }; }
 }
 
 /**
@@ -14683,7 +14738,11 @@ async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
 const _rideRowCache = makeRideCache();
 const _RIDE_CACHE_MS = 120000;   // the find scan's window: long enough to make a repeat free, short enough that a division's list has not turned over
 
-async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = false, maxAgeMs = 0, confirmed = false } = {}) {
+async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = false, maxAgeMs = 0, confirmed = false, incitedBy = null } = {}) {
+  // v2.74.2195 (§12.8.1) — `incitedBy` rides the WRITE so the audit ledger can bank what caused the create. It is
+  // opaque here: this function forwards it and Core/audit's `_capIncitedBy` is the single normalizer. Both
+  // dispatch paths carry it — SESSION_REPLAY and the planned channel — because a field threaded down one of two
+  // branches is the Invariant-#3 drop, and only the branch nobody tests loses it.
   // Reads only. A write must never be served from cache and must never fill it — and it INVALIDATES instead (below).
   // `confirmed` (v2.74.2013) — the ride handlers fail-close every write without confirmed:true. Callers that have
   // already cleared their OWN gate (pipeline gate auto, or an explicit HITL) must pass it; omitting it is how the
@@ -14699,11 +14758,11 @@ async function _rideExecOnce(leg, p, { tabId = null, groundId = null, quiet = fa
     if (leg.tool.replay === 'headers') {
       const _gqlRead = leg.tool.write !== true && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object' && isReadOnlyGql(String(leg.tool.body.query || ''));
       const _rb = _gqlRead ? _filledConnectorWrite(leg, p) : null;
-      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, readOnly: leg.mode === 'ask', apiHost: leg.tool.apiHost || null, csrfHeader: leg.tool.csrfHeader || null, ...(confirmed ? { confirmed: true } : {}), ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
+      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, readOnly: leg.mode === 'ask', apiHost: leg.tool.apiHost || null, csrfHeader: leg.tool.csrfHeader || null, ...(confirmed ? { confirmed: true } : {}), ...(incitedBy ? { incitedBy } : {}), ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
     } else {
       const plan = planExec(leg, p, { tabId, groundId });
       if (plan && plan.ok && plan.channel) {
-        const payload = { ...plan.payload, ...(quiet ? { quiet: true } : {}), ...(confirmed ? { confirmed: true } : {}) };
+        const payload = { ...plan.payload, ...(quiet ? { quiet: true } : {}), ...(confirmed ? { confirmed: true } : {}), ...(incitedBy ? { incitedBy } : {}) };
         r = await _orchReq(plan.channel, payload);
       }
     }

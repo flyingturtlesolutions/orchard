@@ -133,8 +133,39 @@ export function customerLabelFrom(params) {
  * @returns {{at:number, system:string, verb:string, kind:string, id:string, label:string, who:string,
  *           itemUrl?:string, recipeId?:string, groundId?:string}}
  */
+/**
+ * v2.74.2195 (§12.8.1) — the INCITING record: what CAUSED this create. PURE, capped, and deliberately shaped
+ * like a record rather than like VendorSuite.
+ *
+ * An inciting object IS a record, so it reuses this entry's own vocabulary — `system · kind · id · label`. The
+ * first draft of this field carried `division`, which is a VendorSuite noun: a draft order incited by a Zendesk
+ * ticket has no division, and a field that only fits one source is a field that has to be widened the first time
+ * a second source appears. Anything an OPENER needs beyond the identity goes in `args`, exactly as `urlArgs`
+ * already carries the fill ingredients for `itemUrl` — same capping helper, same reason.
+ *
+ * `system` + `id` are REQUIRED and the whole thing is dropped without them: a provenance that cannot be opened is
+ * the "valid-looking but wrong" shape §12.8.1 exists to prevent (a card offering to show you something it cannot
+ * reach). `kind` stays a capped free string and is NEVER dispatched on — AUDIT_KINDS is the domain of what
+ * Orchard CREATES and feeds classifyCreate; a warranty task is not one, and widening it to fit a display label
+ * would blur what that classifier is allowed to return. The load-bearing field is `system`: the surface asks
+ * "how do I open a record on this system?", not "is this VendorSuite?".
+ */
+function _capIncitedBy(raw) {
+  const o = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : null;
+  if (!o) return null;
+  const system = _str(o.system).replace(/^https?:\/\//i, '').replace(/\/.*$/, '').slice(0, 80);
+  const id = _str(o.id).slice(0, 80);
+  if (!system || !id) return null;
+  const out = { system, id };
+  const kind = _str(o.kind).slice(0, 24); if (kind) out.kind = kind;
+  const label = _str(o.label).slice(0, 80); if (label) out.label = label;
+  const args = _capUrlArgs(o.args); if (args) out.args = args;
+  return out;
+}
+
 export function auditEntry(f = {}) {
   const at = Number.isFinite(f.at) && f.at > 0 ? f.at : 0;
+  const incitedBy = _capIncitedBy(f.incitedBy);
   return {
     at,
     system: _str(f.system || f.origin).slice(0, 80),
@@ -147,6 +178,7 @@ export function auditEntry(f = {}) {
     ...(f.recipeId ? { recipeId: _str(f.recipeId).slice(0, 60) } : {}),   // join key to the catalog (+ the leg's itemUrl template at render)
     ...(f.groundId ? { groundId: _str(f.groundId).slice(0, 60) } : {}),
     ...(_capUrlArgs(f.urlArgs) ? { urlArgs: _capUrlArgs(f.urlArgs) } : {}),   // AU-2 — the fill ingredients ({handle}…) to resolve itemUrl at render
+    ...(incitedBy ? { incitedBy } : {}),                                      // §12.8.1 — the record that CAUSED this one
   };
 }
 
@@ -211,6 +243,51 @@ export function recordOpenUrl(entry, template = '', fill = null) {
   const path = typeof fill === 'function' ? fill(tpl, args) : tpl;
   if (/\{[a-zA-Z_][\w-]*\}/.test(path)) return '';                      // an UNFILLED placeholder is a dead link — say nothing rather than open a 404
   return `https://${host}${path.startsWith('/') ? '' : '/'}${path}`;
+}
+
+/**
+ * v2.74.2195 (§12.8.1) — HOW do I open the record that incited this one? PURE decision, no DOM, no drive.
+ *
+ * The generalisation this field exists for: the surface must not ask "is this VendorSuite?". It asks what the
+ * INCITING SYSTEM affords, and the answer follows the same rule `recordOpenUrl` already enforces for the created
+ * record —
+ *   · a per-record URL (its itemUrl template carries `{id}`)  → 'link'   — Zendesk, Shopify
+ *   · no per-record URL, but a drive can walk to it           → 'drive'  — VendorSuite (§12.8.1)
+ *   · neither                                                 → 'none'   — no button; the v2149 rule that no
+ *                                                                          link beats a wrong one
+ * `canDrive` is injected (the catalogs live outside this module and this file stays pure) — the caller passes a
+ * predicate over the inciting system. That is what keeps a second walk-only source from needing a code change
+ * here: it becomes true for another host and this function is untouched.
+ *
+ * OPTIONS OBJECT, not positionals: `fill` is REQUIRED for a link and is easy to forget — the first draft omitted
+ * it and every Zendesk row silently fell through to 'drive', because `recordOpenUrl` returns the template
+ * UNFILLED without a substituter and its own placeholder guard then rejects it. Named arguments make the missing
+ * one visible at the call site instead of turning into a wrong verdict.
+ *
+ * @param {object} entry                          an audit row
+ * @param {object}  o
+ * @param {string}  o.template                    the inciting source's itemUrl template, if the caller resolved one
+ * @param {(system:string)=>boolean} o.canDrive   can a drive walk to a record on this system?
+ * @param {(tpl:string,args:object)=>string} o.fill  the substituter (chat.js injects `fillEndpoint`)
+ * @returns {{how:'link'|'drive'|'none', system:string, id:string, label:string, url:string, args:object}}
+ */
+export function incitedOpener(entry, { template = '', canDrive = null, fill = null } = {}) {
+  const inc = (entry && typeof entry === 'object' && entry.incitedBy && typeof entry.incitedBy === 'object')
+    ? entry.incitedBy : null;
+  const none = { how: 'none', system: '', id: '', label: '', url: '', args: {} };
+  if (!inc) return none;
+  const system = _str(inc.system); const id = _str(inc.id);
+  if (!system || !id) return none;                                   // _capIncitedBy already guarantees both; belt
+  const base = { system, id, label: _str(inc.label), args: (inc.args && typeof inc.args === 'object') ? inc.args : {} };
+  // A LINK only when the template identifies the RECORD — the same `{id}` test recordOpenUrl applies, and for the
+  // same reason: a section route fills cleanly and opens the wrong page while claiming to open the right one.
+  const tpl = _str(template);
+  if (/\{id\}/.test(tpl)) {
+    const url = recordOpenUrl({ system, id, itemUrl: tpl, urlArgs: base.args }, tpl, fill);
+    if (url) return { ...base, how: 'link', url };
+  }
+  if (typeof canDrive === 'function' && canDrive(system)) return { ...base, how: 'drive', url: '' };
+  return none;
 }
 
 /**

@@ -10,7 +10,7 @@ import {
   classifyCreate, createRecordFrom, auditSucceeded, customerLabelFrom,
   auditEntry, appendCreate, truncationNotice, describeCreate,
   parseCreatesAsk, createsScopeWindow, filterCreatesByScope, renderCreatesAnswer,
-  recordOpenUrl,
+  recordOpenUrl, incitedOpener,
 } from './audit.js';
 import { fillEndpoint } from './connectorRecipes.js';   // AU-2 — the real substituter, injected exactly as chat.js injects it
 
@@ -256,5 +256,83 @@ describe('AU-2 recordOpenUrl', () => {
   it('a banked ABSOLUTE url is still honoured — it already identifies the record', () => {
     const task = auditEntry({ at: 1, system: 'vendorsuite.drhorton.com', kind: 'record', id: '4899327', who: 'gate', itemUrl: 'https://vendorsuite.drhorton.com/task/4899327' });
     assert.equal(recordOpenUrl(task, '/#warranty', fillEndpoint), 'https://vendorsuite.drhorton.com/task/4899327');
+  });
+});
+
+// ── §12.8.1 — the INCITING record (v2.74.2195) ────────────────────────────────────────────────────────────────
+// The field is shaped like a RECORD, not like VendorSuite. Its first draft carried `division`, a VendorSuite
+// noun; a draft order incited by a Zendesk ticket has none. Anything source-specific lives in `args`.
+describe('auditEntry — incitedBy is a capped RECORD reference, not a source-specific bag', () => {
+  it('keeps system/kind/id/label and puts source-specific extras in args', () => {
+    const e = auditEntry({
+      system: 'admin.shopify.com', kind: 'draft', id: '29685', who: 'human',
+      incitedBy: { system: 'vendorsuite.drhorton.com', kind: 'task', id: '4903279', label: '1565 Fairlie Way', args: { division: 'Columbus' } },
+    });
+    assert.deepEqual(e.incitedBy, {
+      system: 'vendorsuite.drhorton.com', id: '4903279', kind: 'task',
+      label: '1565 Fairlie Way', args: { division: 'Columbus' },
+    });
+  });
+
+  it('a source with NO extras carries none — a Zendesk ticket needs only its id', () => {
+    const e = auditEntry({ system: 'admin.shopify.com', kind: 'draft', id: '1', incitedBy: { system: 'deako.zendesk.com', kind: 'ticket', id: '12345' } });
+    assert.deepEqual(e.incitedBy, { system: 'deako.zendesk.com', id: '12345', kind: 'ticket' });
+    assert.equal('args' in e.incitedBy, false, 'no empty bag — absent means absent');
+  });
+
+  // A provenance that cannot be OPENED is the "valid-looking but wrong" shape §12.8.1 exists to prevent: a card
+  // offering to show you something it has no way to reach.
+  it('DROPS the whole reference without both system and id', () => {
+    assert.equal('incitedBy' in auditEntry({ id: '1', incitedBy: { system: 'vendorsuite.drhorton.com' } }), false);
+    assert.equal('incitedBy' in auditEntry({ id: '1', incitedBy: { id: '4903279' } }), false);
+    assert.equal('incitedBy' in auditEntry({ id: '1', incitedBy: null }), false);
+    assert.equal('incitedBy' in auditEntry({ id: '1' }), false);
+  });
+
+  it('normalizes the system to a bare host and caps the strings', () => {
+    const e = auditEntry({ id: '1', incitedBy: { system: 'https://vendorsuite.drhorton.com/#warranty', id: 'x'.repeat(200), label: 'y'.repeat(200) } });
+    assert.equal(e.incitedBy.system, 'vendorsuite.drhorton.com');
+    assert.equal(e.incitedBy.id.length, 80);
+    assert.equal(e.incitedBy.label.length, 80);
+  });
+
+  it('args are string-valued and capped, like urlArgs — no nested objects ride in', () => {
+    const e = auditEntry({ id: '1', incitedBy: { system: 's.com', id: '1', args: { division: 'Columbus', nested: { a: 1 }, n: 7 } } });
+    assert.deepEqual(e.incitedBy.args, { division: 'Columbus', n: '7' });
+  });
+});
+
+// The surface asks what the inciting SYSTEM affords — never "is this VendorSuite?". A second walk-only source
+// makes `canDrive` true for another host and this function is untouched.
+describe('incitedOpener — link | drive | none, decided by the SYSTEM (§12.8.1)', () => {
+  const vsd = { incitedBy: { system: 'vendorsuite.drhorton.com', id: '4903279', label: '1565 Fairlie Way', args: { division: 'Columbus' } } };
+  const zd = { incitedBy: { system: 'deako.zendesk.com', id: '12345', label: 'Broken switch' } };
+
+  it('a per-record URL wins — the link needs no drive', () => {
+    const r = incitedOpener(zd, { template: '/agent/tickets/{id}', canDrive: () => true, fill: fillEndpoint });
+    assert.equal(r.how, 'link');
+    assert.equal(r.url, 'https://deako.zendesk.com/agent/tickets/12345');
+  });
+
+  it('a SECTION route is not a record link — it falls through to the drive (the v2149 trap)', () => {
+    const r = incitedOpener(vsd, { template: '/#warranty', canDrive: (s) => s === 'vendorsuite.drhorton.com', fill: fillEndpoint });
+    assert.equal(r.how, 'drive', '/#warranty fills cleanly and opens the wrong page — it must never be a link');
+    assert.equal(r.url, '');
+    assert.equal(r.args.division, 'Columbus', 'the opener carries what the drive needs');
+  });
+
+  it('no template and no drive → none; a button that cannot deliver is worse than no button', () => {
+    assert.equal(incitedOpener(vsd, { canDrive: () => false, fill: fillEndpoint }).how, 'none');
+    assert.equal(incitedOpener(vsd, { template: '/#warranty', fill: fillEndpoint }).how, 'none');
+  });
+
+  it('no incitedBy at all → none, and never throws on a legacy row', () => {
+    assert.equal(incitedOpener({ system: 'admin.shopify.com', id: '1' }, { template: '/x/{id}', canDrive: () => true, fill: fillEndpoint }).how, 'none');
+    assert.equal(incitedOpener(null).how, 'none');
+    assert.equal(incitedOpener({ incitedBy: 'nonsense' }, {}).how, 'none');
+  });
+
+  it('carries the label so the button can name what it opens', () => {
+    assert.equal(incitedOpener(vsd, { canDrive: (s) => s.includes('vendorsuite') }).label, '1565 Fairlie Way');
   });
 });

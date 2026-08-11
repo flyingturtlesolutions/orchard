@@ -1394,7 +1394,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             try { void reportLegOutcome({ ..._evtBase, ok: true, urlArgs: _urlArgs || null }); } catch { /* LEG-1 — the funnel banks lastUrlArgs off successful rides */ }
             // AU-1 (DESIGN_audit.md §11) — bank the create into the audit ledger (fail-safe; auditSucceeded is
             // belt-and-suspenders here — reply.value already passed the :1263-1280 nested-userErrors screen).
-            if (isWrite) { try { void recordCreate({ value: reply.value, origin, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null, urlArgs: _urlArgs || null }); } catch { /* */ } }
+            if (isWrite) { try { void recordCreate({ value: reply.value, origin, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null, urlArgs: _urlArgs || null, incitedBy: (payload && payload.incitedBy) || null }); } catch { /* */ } }
             sendResponse({ ...reply, origin, urlArgs: _urlArgs });
           } else {
             let _heal = null;
@@ -1849,7 +1849,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // AU-1 (DESIGN_audit.md §11) — bank the create. auditSucceeded is LOAD-BEARING here: this branch has NO
           // nested-userErrors screen (:1802 checks only top-level r.body.errors), so a 200-with-userErrors reaches
           // it as ok:true — recordCreate's guard refuses to bank that phantom row (§10.1).
-          if (isWrite) { try { void recordCreate({ value: r.body, origin: apiHost, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null }); } catch { /* */ } }
+          if (isWrite) { try { void recordCreate({ value: r.body, origin: apiHost, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null, incitedBy: (payload && payload.incitedBy) || null }); } catch { /* */ } }
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
       })();
