@@ -75,7 +75,7 @@ import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdi
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
-import { DRIVE_ARTIFACTS, originMatchesAppHost, recordOpenerForHost } from './Core/driveArtifacts.js';   // v2196 — recordOpenerForHost: WHICH artifact opens a record here, and what this system calls it (task/ticket/call)   // v2195 — originMatchesAppHost: does a drive artifact cover this host?   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
+import { DRIVE_ARTIFACTS, originMatchesAppHost, recordOpenerForHost, arrivalContract } from './Core/driveArtifacts.js';   // v2198 — arrivalContract: an artifact that declares a postcondition IS the arrival witness; the landing URL is only the fallback   // v2196 — recordOpenerForHost: WHICH artifact opens a record here, and what this system calls it (task/ticket/call)   // v2195 — originMatchesAppHost: does a drive artifact cover this host?   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
@@ -12628,13 +12628,30 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
     if (_siteCrashed && typeof r.tabId === 'number') {
       try { await chrome.tabs.reload(r.tabId); _lastCrashReloadAt = Date.now(); } catch { /* the message below still tells the user to retry */ }
     }
-    _orchLog(`AUDIT ▸ show task ${ref} on ${site} div="${_div || '(current)'}" divsrc=${_banked ? 'banked' : (_ctxDiv ? 'context' : 'none')} tab=${r.reused ? 'reused' : 'new'} drive=${_drive === 'vsd_review_warranty_task' ? 'composite' : 'row-only'} FIND="${String(find).slice(0, 48)}" → ${ok ? 'engine ok' : `stopped — ${_siteCrashed ? 'SITE PAGE BLANK (its own script threw — division data not loaded yet; retry on a warm tab) — ' : ''}${_reason}`} end="${_end || '(unknown)'}"`);
+    _orchLog(`AUDIT ▸ show task ${ref} on ${site} div="${_div || '(current)'}" divsrc=${_banked ? 'banked' : (_ctxDiv ? 'context' : 'none')} tab=${r.reused ? 'reused' : 'new'} drive=${_drive === 'vsd_review_warranty_task' ? 'composite' : 'row-only'} FIND="${String(find).slice(0, 48)}" → ${ok ? 'engine ok' : `stopped — ${_siteCrashed ? 'SITE PAGE BLANK (its own script threw — division data not loaded yet; retry on a warm tab) — ' : ''}${_reason}`} end="${_end || '(unknown)'}" arrived=${_arrived ? 'y' : 'n'} by=${_contract.declared ? 'postcondition' : 'url'}`);
     // The BUTTON must not claim it either. A tab still sitting on the bare section did not reach the task,
     // whatever the engine returned — so the tooltip says so rather than quietly reverting to its resting text.
     // v2.74.2190 — remember what we drove to, so a second click on the same eye can say "already open" instead
     // of re-running the walk. Recorded only on a run the engine reported OK; a failed walk leaves no belief.
     if (ok) _lastDrive = { ref: String(ref), tabId: r.tabId, at: Date.now(), told: false };
-    const _arrived = ok && !!_end && !/^\/?(?:#warranty)?\/?$/i.test(_end);
+    // v2.74.2198 — ARRIVAL IS THE ARTIFACT'S OWN CONTRACT WHEN IT DECLARES ONE. Live: a `show task` the user
+    // watched succeed replied "couldn't reach task 4903279 — a step failed". `ok` was true (the reason was the
+    // fallback string, so the engine reported none) and `_end` was `/#warranty` — because VendorSuite renders
+    // the task detail INTO the page without changing its hash. The URL never moves on success here, so the
+    // v2164 witness could only ever have said "did not arrive".
+    //
+    // That witness was right when it was written and its premise expired at v2171: F3 shipped
+    // `postconditions: []` — which is the whole of "engine-success does not mean arrived" — and v2171 filled it
+    // with `article#warrantyTaskDetails`, probed after a 5s stabilisation, failing the fragment when absent.
+    // Keeping the URL veto after that means refusing to use the rung this arc spent twenty versions building.
+    // The URL stays in the LOG as an independent witness (it costs nothing and it is how the trivial-postcondition
+    // risk in the catalog's own note would surface); it just no longer overrules the contract.
+    const _contract = arrivalContract(_drive);
+    const _sec = String(_contract.sectionPath || '').replace(/^\/+/, '');
+    const _arrived = ok && (_contract.declared
+      // No declared postcondition → fall back to the URL, compared against the artifact's OWN section rather
+      // than a hardcoded one: an artifact still sitting on its section page did not reach a record.
+      || (!!_end && String(_end).replace(/^\/+/, '').replace(/\/+$/, '') !== _sec.replace(/\/+$/, '')));
     // v2.74.2182 — the TOOLTIP says the same thing the log does. "The page is where it stopped" invites the
     // reader to look for our mistake; when the site's own script has blanked the page, the honest instruction is
     // to try again once its data has loaded.

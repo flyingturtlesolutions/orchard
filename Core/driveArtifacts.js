@@ -457,6 +457,33 @@ export function recordOpenerForHost(host, catalog = DRIVE_ARTIFACTS) {
   return best ? { driveId: String(best.id || ''), noun: String(best.opens).toLowerCase() } : null;
 }
 
+/**
+ * v2.74.2198 — HOW DO WE KNOW THIS WALK ARRIVED? PURE. Returns `{ declared, sectionPath }`.
+ *
+ * `declared` is true when the artifact carries a postcondition — DIRECTLY (a tier-1 fragment) or through a
+ * fragment it composes (a tier-2 strategy REFERENCES its fragments, so the composite inherits the contract
+ * without copying it). When it is true, the engine's verdict already means "the destination is on screen":
+ * ExecutionEngine probes the postcondition after the run and fails the fragment when it does not hold.
+ *
+ * WHY THIS FUNCTION EXISTS, and it is a correction. v2164 ruled that engine-success is not arrival and made the
+ * landing URL the witness instead — correctly, at the time: F3 shipped `postconditions: []`, so `ok` genuinely
+ * meant "the clicks did not throw". v2171 filled that array. The URL witness then outlived its premise and
+ * started vetoing a walk that HAD arrived — live, a successful `show task` reported "couldn't reach task
+ * 4903279 — a step failed", because VendorSuite renders the task detail into the page without changing its
+ * hash, so `end` stays `/#warranty` on success.
+ *
+ * `sectionPath` rides back so the URL fallback — which still applies to any artifact that declares nothing —
+ * compares against the artifact's OWN section instead of a hardcoded `#warranty`.
+ */
+export function arrivalContract(driveId, catalog = DRIVE_ARTIFACTS) {
+  const list = Array.isArray(catalog) ? catalog : [];
+  const e = list.find((x) => x && x.id === String(driveId || ''));
+  if (!e) return { declared: false, sectionPath: '' };
+  const has = (x) => Array.isArray(x && (x.postcondition || x.postconditions)) && (x.postcondition || x.postconditions).length > 0;
+  const declared = has(e) || (Array.isArray(e.compose) && e.compose.some((cid) => has(list.find((x) => x && x.id === cid))));
+  return { declared, sectionPath: String(e.sectionPath || '') };
+}
+
 // ── Record → OfferedLeg (hop 3: the palette projection) ───────────────────────────────────────────────────
 
 /**

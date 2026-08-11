@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   DRIVE_ARTIFACTS, driveFromCatalogEntry, seedFromCatalog, mergeArtifacts,
-  seededDriveLegs, buildDriveFragment, buildDriveStrategy, recordOpenerForHost,
+  seededDriveLegs, buildDriveFragment, buildDriveStrategy, recordOpenerForHost, arrivalContract,
 } from './driveArtifacts.js';
 
 const VS_ORIGIN = 'vendorsuite.drhorton.com';
@@ -497,5 +497,50 @@ describe('opens — the domain noun of the record an artifact walks to', () => {
 
   it('resolves over per-Ground RECORDS too (they carry `origin`, not `appHost`)', () => {
     assert.deepEqual(recordOpenerForHost(VS_ORIGIN, seed()), { driveId: 'vsd_review_warranty_task', noun: 'task' });
+  });
+});
+
+// v2.74.2198 — WHAT COUNTS AS ARRIVAL. Live: a `show task` the user watched succeed replied "couldn't reach
+// task 4903279 — a step failed", because VendorSuite renders the task detail without changing its hash, so the
+// v2164 landing-URL witness could only ever say "did not arrive". Its premise (F3 shipped `postconditions: []`)
+// expired at v2171.
+describe('arrivalContract — the artifact says what arriving looks like', () => {
+  it('the tier-1 row fragment declares it DIRECTLY', () => {
+    const c = arrivalContract('vsd_open_task_row');
+    assert.equal(c.declared, true);
+    assert.equal(c.sectionPath, '/#warranty', 'the section rides back so no caller hardcodes it');
+  });
+
+  it('the tier-2 composite INHERITS it through the fragment it composes — it declares none of its own', () => {
+    assert.equal(DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_review_warranty_task').postcondition, undefined);
+    assert.equal(arrivalContract('vsd_review_warranty_task').declared, true, 'a strategy REFERENCES its fragments; the contract comes with them');
+  });
+
+  it('an artifact whose steps only change what the page SHOWS declares nothing — the URL is all it has', () => {
+    assert.equal(arrivalContract('vsd_select_division').declared, false);
+    assert.equal(arrivalContract('vsd_open_status_tab').declared, false);
+  });
+
+  it('an unknown id declares nothing and names no section — never a claimed arrival', () => {
+    assert.deepEqual(arrivalContract('nope'), { declared: false, sectionPath: '' });
+    assert.deepEqual(arrivalContract(''), { declared: false, sectionPath: '' });
+  });
+
+  it('an EMPTY postcondition array is not a declaration — that is exactly the v2164 state', () => {
+    const cat = [{ id: 'x', appHost: 'h.example.com', sectionPath: '/#x', postcondition: [] }];
+    assert.equal(arrivalContract('x', cat).declared, false);
+  });
+
+  it('a composite whose composed fragment declares nothing inherits nothing', () => {
+    const cat = [
+      { id: 'f', appHost: 'h.example.com', tier: 1 },
+      { id: 's', appHost: 'h.example.com', tier: 2, compose: ['f'], sectionPath: '/#s' },
+    ];
+    assert.equal(arrivalContract('s', cat).declared, false);
+  });
+
+  it('reads a per-Ground record too, where the field is `postconditions` after the fragment build', () => {
+    const cat = [{ id: 'r', appHost: 'h.example.com', postconditions: [{ type: 'selector_present', selector: 'article#x' }] }];
+    assert.equal(arrivalContract('r', cat).declared, true);
   });
 });
