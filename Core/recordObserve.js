@@ -384,7 +384,13 @@ export function reconcileCollection(rows, observedRows, { leg = null, now = 0, s
     // The collection may only be able to say SOMETHING happened (Shopify's draft list carries `status` and not
     // `order`). Then it asks for one targeted read rather than guessing — §12.5's second branch.
     const pr = probeDue(row, hit, l.handOffProbe);
-    if (pr) out.push({ key, at: _num(now), kind: 'probe', via: pr.via, id: want });
+    if (pr) {
+      // The status change IS the probe's trigger, so it is not ALSO separate news — reporting both would put
+      // 'Became an order' and 'Changed — status COMPLETED' in one timeline saying the same thing twice. A failed
+      // probe loses nothing: the condition is state-triggered, so the next sweep raises it again.
+      out.push({ key, at: _num(now), kind: 'probe', via: pr.via, id: want });
+      continue;
+    }
     if (!decl) continue;
     const obs = observeFields(hit, decl, seen[key] || null);
     if (!hasNews(obs)) continue;

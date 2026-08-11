@@ -306,13 +306,22 @@ async function _recordWatchSweep({ force = false } = {}) {
     const { items } = await loadCreates();
     const rows = Array.isArray(items) ? items : [];
     if (!rows.length) return;
-    const book = (await StorageManager.get(WATCH_KEY)) || {};
+    // v2.74.2213 — `chrome.storage.local` DIRECTLY, like every other book in this file (INC_KEY, TALLY_KEY,
+    // KA_KEY). v2207 used `StorageManager.get(WATCH_KEY)`, and `#get` is a PRIVATE static — there is no public
+    // one — so this line threw a TypeError on every sweep, the fail-safe catch swallowed it, and NEITHER the
+    // collection poll NOR the per-record tier has executed since. I reached for a helper instead of copying the
+    // neighbour three functions up.
+    let book = {};
+    try { book = (await chrome.storage.local.get(WATCH_KEY))?.[WATCH_KEY] || {}; } catch { book = {}; }
     const lastPollAt = _isPlain(book.lastPollAt) ? book.lastPollAt : {};
     const seenBy = _isPlain(book.seenBy) ? book.seenBy : {};
     // `force` = a human is looking (verify-at-view). Passing an empty lastPollAt makes every collection due;
     // the window exists to bound BACKGROUND cost, and a person asking is not background cost.
     const plan = pollPlan(rows, { catalog: CONNECTOR_RECIPES, now: Date.now(), lastPollAt: force ? {} : lastPollAt });
-    if (!plan.length) return;
+    // v2.74.2213 — NO EARLY RETURN ON AN EMPTY COLLECTION PLAN. It skipped the PER-RECORD tier below, so a record
+    // that had HANDED OFF was never watched again: nothing collection-shaped covers `order` (the unfulfilled
+    // queue cannot host that watch — v2209), so its plan is empty by design and the shipping watch died there.
+    // Caught by the sweep's own execution test, which is the first thing to ever run this path.
     let polled = 0; let updated = 0; let gone = 0; let handed = 0; let probed = 0; let failed = 0;
     for (const step of plan) {
       const leg = (CONNECTOR_RECIPES || []).find((r) => r && r.id === step.recipeId);
@@ -387,13 +396,18 @@ async function _recordWatchSweep({ force = false } = {}) {
       } catch { /* one row's failure must not stop the rest */ }
     }
 
-    try { await StorageManager.set(WATCH_KEY, { lastPollAt, lastProbeAt, seenBy }); } catch { /* */ }
+    try { await chrome.storage.local.set({ [WATCH_KEY]: { lastPollAt, lastProbeAt, seenBy } }); } catch { /* */ }
     // BODY-BLIND like every other audit line: counts and leg ids, never a value that was observed.
     try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) + ${probed} record read(s) over ${rows.length} row(s) → ${updated} updated · ${handed} handed off · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
     // v2.74.2212 — THE CALLER GETS THE TALLY, because a surface that says 're-checked' on a sweep where every read
     // was refused is the dishonest-indicator class this ledger keeps correcting (`→ driven`, `arrived`, '5 of 6').
     return { polled, probed, updated, handed, gone, failed };
-  } catch { /* fail-safe — the watch must never break the tick */ }
+  } catch (e) {
+    // FAIL-SAFE MEANS 'DO NOT BREAK THE TICK', NOT 'SAY NOTHING'. A bare catch here hid a TypeError for six
+    // versions — the sweep threw on its third line and every surface reported a healthy no-op. The tick still
+    // survives; it just no longer does so in silence.
+    try { Logger.info('audit', `AUDIT ▸ watch sweep FAILED — ${(e && e.message) || e}`); } catch { /* */ }
+  }
   return null;
 }
 
