@@ -395,3 +395,58 @@ describe('pushFocus — a map\'s own output must not evict the source it came fr
     assert.ok(f.some((e) => e.label === 'CASE'));
   });
 });
+
+// v2.74.2196 — the DETERMINERLESS form. A button labelled "Show task" teaches that exact phrase; before this it
+// fell past the referent stage to the section-opener, which navigated to /#warranty and named a task page it
+// never reached (reported twice, v2157/v2158). A label is an affordance AND a vocabulary.
+describe('referentialAsk — the bare-noun form a button label teaches', () => {
+  it('claims `show task` / `open ticket` — the phrase the card’s control puts in front of the user', () => {
+    assert.deepEqual(referentialAsk('show task'), { verb: 'show', noun: 'task', deictic: 'bare-noun' });
+    assert.deepEqual(referentialAsk('open ticket'), { verb: 'open', noun: 'ticket', deictic: 'bare-noun' });
+    assert.deepEqual(referentialAsk('show me record'), { verb: 'show', noun: 'record', deictic: 'bare-noun' });
+    assert.equal(referentialAsk('view call').deictic, 'bare-noun', 'a telephony record is named by its own noun');
+  });
+
+  it('leaves the three older forms untouched — the new branch is LAST and cannot shadow them', () => {
+    assert.equal(referentialAsk('show this ticket').deictic, 'demonstrative');
+    assert.equal(referentialAsk('open the task').deictic, 'definite');
+    assert.equal(referentialAsk('show me').deictic, 'bare');
+    assert.equal(referentialAsk('show it').deictic, 'bare');
+  });
+
+  it('a SECTION word is not a record — "show warranty" still belongs to the section-opener', () => {
+    assert.equal(referentialAsk('show warranty'), null);
+    assert.equal(referentialAsk('show dashboard'), null);
+    assert.equal(referentialAsk('open settings'), null);
+  });
+
+  it('`case` and `one` are excluded on purpose — "show case" is about OUR object, not the record it came from', () => {
+    assert.equal(referentialAsk('show case'), null);
+    assert.equal(referentialAsk('show one'), null);
+    assert.equal(referentialAsk('show my cases'), null);
+  });
+
+  it('two words never take this branch — the bare form is one noun or nothing', () => {
+    assert.equal(referentialAsk('show warranty task'), null, 'without a determiner this is not a reference');
+    assert.equal(referentialAsk('show zendesk ticket'), null);
+  });
+
+  it('a record NUMBER still belongs to the record intercepts, not the referent stage', () => {
+    assert.equal(referentialAsk('show task 4888221'), null);
+  });
+
+  it('binds against a case’s pinned record, exactly as the determiner form does', () => {
+    const bare = bindReferent('show task', [CASE_ENTRY]);
+    const definite = bindReferent('show the task', [CASE_ENTRY]);
+    assert.equal(bare.entry.label, CASE_ENTRY.label);
+    assert.equal(bare.entry.label, definite.entry.label, 'the button’s phrase and the typed phrase reach one record');
+  });
+
+  it('binds NOTHING with an empty focus — a panel holding no record falls through unchanged', () => {
+    assert.equal(bindReferent('show task', []), null);
+  });
+
+  it('a noun the entry’s own vocabulary does not carry binds nothing — no generic rescue', () => {
+    assert.equal(bindReferent('show call', [CASE_ENTRY]), null, '`call` is not in the generic set, so it needs real evidence');
+  });
+});

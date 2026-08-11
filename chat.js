@@ -75,7 +75,7 @@ import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdi
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
-import { DRIVE_ARTIFACTS, originMatchesAppHost } from './Core/driveArtifacts.js';   // v2195 — originMatchesAppHost: does a drive artifact cover this host?   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
+import { DRIVE_ARTIFACTS, originMatchesAppHost, recordOpenerForHost } from './Core/driveArtifacts.js';   // v2196 — recordOpenerForHost: WHICH artifact opens a record here, and what this system calls it (task/ticket/call)   // v2195 — originMatchesAppHost: does a drive artifact cover this host?   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
@@ -6367,7 +6367,19 @@ async function _runBranchClause(msg, br, { tabId, priorValue = null, priorLeg = 
                 outcome: _outc, people: _people, decision: _dec,
                 draft: _ce ? { to: _ce.to, subject: _ce.subject, body: _ce.body } : null,
               })),
-              focus: null,
+              // v2.74.2196 — THE CASE IS BORN HOLDING ITS RECORD, which is what FC-0 built this slot for and what
+              // this spawn site has been passing `null` for since. Without it a case's focus is empty, so
+              // `bindReferent` has nothing to bind and "show the task" falls past the referent stage to the
+              // section-opener — the phrase half of the ruling, and it cannot be fixed at the phrase.
+              // `focusRecordEntry` derives the noun from the leg ("Warranty tasks by status" → "warranty tasks"),
+              // carries provenance.host (which is what `_openFocusEntry` resolves the drive artifact from), and
+              // returns null when there is nothing to hold — in which case the case spawns exactly as before.
+              focus: (() => {
+                try {
+                  const fe = focusRecordEntry({ label: _rowLabel(r.item, srcLeg), fields: _row, leg: srcLeg, pinned: true, at: Date.now() });
+                  return fe ? [fe] : null;
+                } catch { return null; }   // a case that cannot carry its record must still open
+              })(),
             });
           }
           const { created, skipped, existingCount } = await _createSubTasks(app, _items, { brief: false });
@@ -7772,6 +7784,38 @@ async function _openFocusEntry(entry, originalText) {
   // indicator). _openRecordOnSite converts it to the assistant reply on whichever path acts; unconsumed (total
   // miss) → removed (thinking messages are transient, never persisted).
   const mW = appendMessage({ role: 'thinking', body: `Opening ${String(entry.label || `ticket ${find}`).slice(0, 60)}${div ? ` (${div})` : ''} on ${host || 'the site'}…` });
+  // v2.74.2196 — WHEN THE HOST HAS A DRIVE ARTIFACT, THE PHRASE IS KEYED TO IT. User ruling: "for vendorsuite
+  // the rail card case button works, the text equivalent should not be interpreted, it should be keyed to the
+  // drive artifact."
+  //
+  // Before this, the two doors to the same destination ran different machinery: the BUTTON called
+  // `_driveToSourceTask` (the built-in composite, twenty versions of live diagnosis behind it — division wait →
+  // nav click → search → group expand → row click, with a real postcondition), while the PHRASE fell to
+  // `_openRecordOnSite`, which LLM-matches an ask against the ground's capabilities and replays whatever it
+  // picks. Same intent, same record, two mechanisms, one of them non-deterministic — so the button could work
+  // and the phrase it teaches could fail, which is exactly what was reported.
+  //
+  // `recordOpenerForHost` is the gate, not a host test: a system with no record-opening artifact still falls
+  // through to the proven ask path below, unchanged. The drive itself is untouched per standing direction —
+  // same call, same arguments the button passes, same honest failure.
+  const _opener = host ? recordOpenerForHost(host) : null;
+  if (_opener) {
+    // The two values the artifact wants, split the way the button splits them: SEARCH is the number that makes
+    // the row exist, FIND is the row TEXT a human reads. `_rowLabel` composes them as "#4888221 · 7356 AXEL
+    // CREEK ST", so the address is everything after the separator — with the number as the fallback for a label
+    // that carries no address.
+    const _addr = (String(entry.label || '').split('·')[1] || '').trim();
+    try { _orchLog(`FOCUS ▸ drive-keyed — ${host} opens a ${_opener.noun} via ${_opener.driveId}; the phrase runs the same artifact as the card button`); } catch { /* */ }
+    const _d = await _driveToSourceTask(_addr || find, find, host, null, { title: entry.label || '' });
+    mW.classList.remove('thinking'); mW.classList.add('assistant');
+    _setMessageBody(mW, _d && _d.arrived
+      ? (_d.already
+        ? `${entry.label || `${_opener.noun} ${find}`} is already open on ${host} — focused the tab. Ask again to re-walk it.`
+        : `Opened ${entry.label || `${_opener.noun} ${find}`} on ${host}.`)
+      : `I opened ${host} but couldn’t reach ${_opener.noun} ${find} — ${(_d && _d.reason) || 'the walk stopped'}. The tab is where it stopped.`);
+    _orchFinalize(mW);
+    return true;   // the drive is this host's answer, right or wrong — falling through to a second mechanism would hide which one spoke
+  }
   if (await _openRecordOnSite(synth, find, siteWord, { statusMsg: mW })) return true;
   const prov = entry.provenance || {};
   if (host && prov.itemUrl) {
@@ -12156,8 +12200,12 @@ function _railRecordCard(e, fmtTime) {
       }, { title: `Open ${e.label || e.id || 'this record'} on ${_host}` }));
     }
     if (_inc.how !== 'none') {
-      const _what = `${_inc.kind || 'record'} ${_inc.label || _inc.id}`.trim();
-      acts.appendChild(_mkIconBtn('back', `Show the ${_inc.kind || 'record'} that caused this, on ${_inc.system}`, (btn, ev) => {
+      // v2.74.2196 — ONE noun resolution across both surfaces. The banked `kind` wins (it was written when the
+      // source row was in scope and is true of THAT record); the artifact's declared noun is the fallback for a
+      // row banked before §12.8.1, so an old create still says "task" rather than the generic word.
+      const _kind = _inc.kind || (recordOpenerForHost(_inc.system) || {}).noun || 'record';
+      const _what = `${_kind} ${_inc.label || _inc.id}`.trim();
+      acts.appendChild(_mkIconBtn('back', `Show the ${_kind} that caused this, on ${_inc.system}`, (btn, ev) => {
         try { ev.stopPropagation(); } catch { /* */ }
         // THE DRIVE IS CANONICAL — this reuses `_driveToSourceTask` exactly as the case card does (user
         // direction). No second mechanism: same walk, same postcondition, same honest failure reporting.
@@ -12202,7 +12250,15 @@ function _attachCaseActs(el, conv) {
   const acts = document.createElement('div');
   acts.className = 'rail-record-acts';    // reuse the Records card's row verbatim — one action vocabulary
   const site = 'vendorsuite.drhorton.com';
-  acts.appendChild(_mkIconBtn('eye', `Show task ${ref} on ${site}`, (btn, ev) => {
+  // v2.74.2196 — THE BUTTON NAMES THE INCITING RECORD, and the system says what to call it. User ruling: "the
+  // labeling is entirely too domain specific … it's to view the inciting record. For vendorsuite it is a task,
+  // but for zendesk it's a ticket and for aircall a phone call." So the noun is resolved from the artifact that
+  // actually reaches the record (Core/driveArtifacts.js `opens`), never written here. A second walk-only system
+  // becomes correctly labelled the moment its artifact ships, with no edit at this line.
+  // `'record'` is the honest fallback, not a default noun: it means "we could not ask", and it is the same word
+  // the Records card already falls back to for an inciting reference with no banked kind.
+  const noun = (recordOpenerForHost(site) || {}).noun || 'record';
+  acts.appendChild(_mkIconBtn('eye', `Show ${noun} ${ref} on ${site}`, (btn, ev) => {
     try { ev.stopPropagation(); } catch { /* */ }   // the rail row itself opens the case — the button must not
     // v2.74.2151 — hand the drill the LABEL, not the bare ref. `drill.matchOn:'address'` is a free-text ADDRESS
     // filter (chat.js:14070 "the drill's free-text filter slot (e.g. address)"), and v2150 passed the TaskId —
@@ -12218,7 +12274,7 @@ function _attachCaseActs(el, conv) {
     // an equality, not a heuristic. It stays a CLICK-time read: v2150's mistake was gating the button's RENDER on
     // a sidecar join, which gave it four ways to silently not appear. Here a miss costs a fallback, not a button.
     void _driveToSourceTask(addr || ref, ref, site, btn, { title });
-  }, { title: `Show task ${ref} — drives your ${site} tab` }));
+  }, { title: `Show ${noun} ${ref} — drives your ${site} tab` }));
   el.appendChild(acts);
 }
 
@@ -12306,6 +12362,15 @@ let _lastCrashReloadAt = 0;
 let _lastDrive = { ref: '', tabId: null, at: 0, told: false };
 const _DRIVE_SKIP_WINDOW_MS = 120000;   // beyond this, re-walk rather than trust a stale belief
 
+/**
+ * v2.74.2196 — RETURNS ITS OUTCOME. Unchanged behaviour; the button path ignores the value exactly as before.
+ * The reason it now has one: the composer phrase routes here too (`_openFocusEntry`), and a chat reply cannot be
+ * a tooltip. Every exit answers the same three questions the log line already answers —
+ *   `{ ok, arrived, reason, already?, siteCrashed?, end? }`
+ * — so the text path can say what happened instead of inferring it from silence. `arrived` is deliberately
+ * separate from `ok`: v2164 established that engine-success is not arrival, and a sentence that conflates them
+ * is the dishonest-success shape this whole arc has been unlearning.
+ */
 async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
   const was = btn ? btn.title : '';
   // v2.74.2192 — MARK THE ROW EXPLICITLY, from JS. v2190 styled the running state with `:has(button[data-busy])`
@@ -12345,7 +12410,7 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
         try { await chrome.tabs.update(_lastDrive.tabId, { active: true }); } catch { /* focus is a courtesy */ }
         try { _orchLog(`AUDIT ▸ show task ${ref} on ${site} → already open (drove here ${Math.round((Date.now() - _lastDrive.at) / 1000)}s ago) — focused the tab; click again to re-open`); } catch { /* */ }
         if (btn) btn.title = `${ref} is already open — click again to re-open it`;
-        return;
+        return { ok: true, arrived: true, already: true, reason: '' };
       }
     }
     // 1. Open the warranty section on the ground's own tab (reuse-then-navigate — the same SHOW_SOURCES the
@@ -12393,7 +12458,7 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
     if (!r || r.success === false || typeof r.tabId !== 'number') {
       _orchLog(`AUDIT ▸ show task ${ref} → could not open ${site}`);
       if (btn) btn.title = `Couldn’t open ${site}`;
-      return;
+      return { ok: false, arrived: false, reason: `couldn’t open ${site}` };
     }
     // 2. Walk it with the BUILT-IN artifact. `vsd_review_warranty_task` (tier 2) composes exactly the four steps
     //    the user named — select division → open status tab → open the task row — and its fragments click by
@@ -12434,7 +12499,7 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
     if (!_gid) {
       _orchLog(`AUDIT ▸ show task ${ref} on ${site} → stopped — no ground for ${site} (the drive is ground-scoped)`);
       if (btn) btn.title = `Couldn’t resolve ${site} — open the site once, then retry`;
-      return;
+      return { ok: false, arrived: false, reason: `I don’t have a ground for ${site} yet — open the site once, then ask again` };
     }
     // v2.74.2164 — A BLANK DIVISION MUST NOT RUN THE COMPOSITE, and the catalog said so before this arc began.
     // `vsd_select_division`'s own comment: "the RISK this leaves is a blank {{DIVISION}}: its label-click skips
@@ -12551,9 +12616,11 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
         : _siteCrashed ? `${site} went blank — its page errored before its division data loaded. Try again in a few seconds.`
           : `Opened ${site} but couldn’t reach ${ref} — the page is where it stopped`;
     }
+    return { ok, arrived: _arrived, siteCrashed: _siteCrashed, end: _end, reason: _arrived ? '' : (_siteCrashed ? `${site} went blank — its own page errored before its division data loaded; try again in a few seconds` : _reason) };
   } catch (e) {
     _orchLog(`AUDIT ▸ show task ${ref} FAILED — ${(e && e.message) || e}`);
     if (btn) btn.title = `Couldn’t open ${ref}`;
+    return { ok: false, arrived: false, reason: (e && e.message) || String(e) };
   } finally { _clearRunning(); }   // v2.74.2192 — one exit point for the running state: button, row class and caption all clear together
 }
 

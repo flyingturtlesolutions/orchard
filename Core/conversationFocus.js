@@ -241,6 +241,21 @@ export function pushFocus(list, entry, cap = FOCUS_CAP) {
 // ── The referential gate: lexical SHAPE only — binding requires entry evidence. ──
 const _VERB = '(?:show|open|view|display|pull\\s+up|bring\\s+up)';
 
+// v2.74.2196 — the DETERMINERLESS form: `show task`, `open ticket`. It exists because a BUTTON teaches it — the
+// case card's control reads "Show task", the user types exactly that, and until now `referentialAsk` required
+// `this`/`that`/`the`, so the phrase fell past the referent stage to `_showSection`, which navigated to the
+// warranty SECTION and named a task page it never reached (v2157/v2158, reported twice). A label is an
+// affordance AND a vocabulary; the phrase it teaches has to land where the button lands.
+//
+// DELIBERATELY NARROWER THAN `GENERIC_RECORD`, on two words:
+//   `case` — "show case" is about OUR object (the queue row), not the record it came from. Binding it would
+//            send a case-management phrase down a ~15s site walk.
+//   `one`  — too weak to carry a whole ask on its own; it needs a determiner to mean anything.
+// `call` is here and NOT in GENERIC_RECORD on purpose: it names a record on a telephony system, and leaving it
+// out of the generic set means "show call" only binds where an entry's own vocabulary says `call` — which is
+// exactly the specific-evidence rule below, not a new one.
+const BARE_RECORD = new Set(['task', 'ticket', 'record', 'claim', 'item', 'request', 'entry', 'call']);
+
 /** Is this ask a REFERENCE to something at hand? Returns { verb, noun, deictic } or null. An explicit ≥3-digit
  *  run is never a reference (the record-number intercepts own it). PURE. */
 export function referentialAsk(text) {
@@ -252,6 +267,14 @@ export function referentialAsk(text) {
   if (m) { const n = _cleanNoun(m[1]); if (n !== undefined && n !== null) return { verb: t.match(/^\w+/)[0].toLowerCase(), noun: n, deictic: 'definite' }; return null; }
   m = t.match(new RegExp(`^${_VERB}(?:\\s+me)?(?:\\s+it)?\\s*$`, 'i'));
   if (m) return { verb: t.match(/^\w+/)[0].toLowerCase(), noun: null, deictic: 'bare' };
+  // The determinerless form, LAST so it can never shadow the three above. One word only, and that word must be
+  // in BARE_RECORD — so "show warranty" (a section), "show my cases" (our queue) and "show dashboard" (a venue,
+  // already rejected by _cleanNoun) all fall through to normal routing exactly as before.
+  m = t.match(new RegExp(`^${_VERB}\\s+(?:me\\s+)?([\\w][\\w'-]*)\\s*$`, 'i'));
+  if (m) {
+    const n = _cleanNoun(m[1]);
+    if (n && BARE_RECORD.has(n)) return { verb: t.match(/^\w+/)[0].toLowerCase(), noun: n, deictic: 'bare-noun' };
+  }
   return null;
 }
 

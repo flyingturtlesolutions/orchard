@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   DRIVE_ARTIFACTS, driveFromCatalogEntry, seedFromCatalog, mergeArtifacts,
-  seededDriveLegs, buildDriveFragment, buildDriveStrategy,
+  seededDriveLegs, buildDriveFragment, buildDriveStrategy, recordOpenerForHost,
 } from './driveArtifacts.js';
 
 const VS_ORIGIN = 'vendorsuite.drhorton.com';
@@ -439,5 +439,63 @@ describe('buildDriveStrategy — tier-2 record + composed fragments → Strategy
 
   it('null on empty composition', () => {
     assert.equal(buildDriveStrategy(rec(), [], deps()), null);
+  });
+});
+
+// v2.74.2196 — `opens`: the artifact names the record it reaches, and two surfaces read that instead of
+// hardcoding a noun. User ruling: "Show task" is too domain-specific — vendorsuite has tasks, zendesk tickets,
+// aircall calls, and the button is for viewing whichever record the case is tied to.
+describe('opens — the domain noun of the record an artifact walks to', () => {
+  it('the VendorSuite composite declares its noun', () => {
+    const s1 = DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_review_warranty_task');
+    assert.equal(s1.opens, 'task');
+  });
+
+  it('an artifact that only changes what the page SHOWS declares nothing — it opens no record', () => {
+    for (const id of ['vsd_select_division', 'vsd_open_status_tab']) {
+      assert.equal(DRIVE_ARTIFACTS.find((e) => e.id === id).opens, undefined, `${id} must not claim to open a record`);
+    }
+  });
+
+  it('hop 1 — the noun survives catalog → per-Ground record, lowercased and capped', () => {
+    const rec = driveFromCatalogEntry({ id: 'x', appHost: 'h.example.com', tier: 2, opens: 'Phone Call' }, { groundId: 'g1', origin: 'h.example.com' });
+    assert.equal(rec.opens, 'phone call');
+    assert.equal(driveFromCatalogEntry({ id: 'y', appHost: 'h.example.com' }, { groundId: 'g1', origin: 'h.example.com' }).opens, undefined);
+  });
+
+  it('hop 2 — a catalog re-seed REFRESHES the noun (it is mechanical, not user state)', () => {
+    const before = [{ ...driveFromCatalogEntry({ id: 'x', appHost: 'h.example.com', opens: 'task' }, { groundId: 'g1', origin: 'h.example.com' }), name: 'my name' }];
+    const after = driveFromCatalogEntry({ id: 'x', appHost: 'h.example.com', opens: 'ticket' }, { groundId: 'g1', origin: 'h.example.com' });
+    const merged = mergeArtifacts(before, [after]);
+    assert.equal(merged[0].opens, 'ticket', 'the catalog owns the noun');
+    assert.equal(merged[0].name, 'my name', 'and user state still survives beside it');
+  });
+
+  it('hop 3 — the noun rides the palette leg', () => {
+    const leg = seededDriveLegs(seed(), { host: VS_ORIGIN, groundId: 'g1' }).find((l) => l.tool.driveId === 'vsd_review_warranty_task');
+    assert.equal(leg.tool.opens, 'task');
+  });
+
+  it('recordOpenerForHost answers the host, not the noun — the surfaces never write one', () => {
+    assert.deepEqual(recordOpenerForHost(VS_ORIGIN), { driveId: 'vsd_review_warranty_task', noun: 'task' });
+    assert.deepEqual(recordOpenerForHost(`https://${VS_ORIGIN}/#warranty`), { driveId: 'vsd_review_warranty_task', noun: 'task' });
+  });
+
+  it('a host with no record-opening artifact returns null — the caller falls back, it does not invent a noun', () => {
+    assert.equal(recordOpenerForHost('deako.zendesk.com'), null);
+    assert.equal(recordOpenerForHost(''), null);
+    assert.equal(recordOpenerForHost(VS_ORIGIN, [DRIVE_ARTIFACTS.find((e) => e.id === 'vsd_select_division')]), null);
+  });
+
+  it('a TIER-2 composite outranks a tier-1 fragment on the same host — the composite is the whole walk', () => {
+    const cat = [
+      { id: 'f_row', appHost: 'h.example.com', tier: 1, opens: 'row' },
+      { id: 's_open', appHost: 'h.example.com', tier: 2, opens: 'ticket' },
+    ];
+    assert.deepEqual(recordOpenerForHost('h.example.com', cat), { driveId: 's_open', noun: 'ticket' });
+  });
+
+  it('resolves over per-Ground RECORDS too (they carry `origin`, not `appHost`)', () => {
+    assert.deepEqual(recordOpenerForHost(VS_ORIGIN, seed()), { driveId: 'vsd_review_warranty_task', noun: 'task' });
   });
 });

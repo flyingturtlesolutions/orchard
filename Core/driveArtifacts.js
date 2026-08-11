@@ -35,6 +35,13 @@ function _host(origin) { return String(origin || '').replace(/^https?:\/\//i, ''
 //   steps (tier 1)            — [{action, selector (best-known GUESS), proto:{role, accessibleName}?, value?}]
 //                               proto is the recovery identity; an empty {{PARAM}} label SKIPS its click.
 //   compose (tier 2)          — ordered tier-1 ids; params derive as the union of the composed entries'.
+//   opens                     — v2.74.2196: the DOMAIN NOUN of the record this artifact walks to ('task' ·
+//                               'ticket' · 'call'). Declared HERE because this is the thing that knows: the
+//                               artifact is what reaches the record, so it is what can name it. Two surfaces
+//                               read it and neither hardcodes a noun — the case card's button label, and the
+//                               composer phrase that must key to this artifact rather than be interpreted.
+//                               An artifact that only changes what the page SHOWS (pick a division, open a
+//                               status tab) declares nothing: it does not open a record.
 //   postcondition (tier 1)    — [{type, …}] page-family conditions (Services/ConditionVocabulary.js) that must
 //                               hold AFTER the steps run, or the fragment FAILS. `{{PARAM}}` is substituted
 //                               before the probe. This is what makes `ok` mean ARRIVED rather than "the clicks
@@ -309,6 +316,9 @@ export const DRIVE_ARTIFACTS = Object.freeze([
     postcondition: [{ type: 'selector_present', selector: 'article#warrantyTaskDetails' }] },
   // S1 — composite: the visual-review flow (the drive twin of the vs_warranty_tasks ride drill).
   { ...VSD, id: 'vsd_review_warranty_task', tier: 2, compose: ['vsd_select_division', 'vsd_open_status_tab', 'vsd_open_task_row'],
+    // v2.74.2196 — VendorSuite calls it a TASK. Zendesk would say 'ticket' and Aircall 'call', and neither of
+    // those needs an edit at either surface: the label and the phrase both resolve through `recordOpenerForHost`.
+    opens: 'task',
     name: 'Review a warranty task on the page',
     does: 'OPEN the live VendorSuite site and visually walk to one warranty task — pick the division, open the status tab, open the task row. Use this to SHOW/REVIEW a task on screen (so you can eyeball or act on it); use the warranty-task data reads to ANSWER questions.' },
 ]);
@@ -338,6 +348,10 @@ export function driveFromCatalogEntry(entry, { groundId = '', origin = '', catal
     reviewState: 'accepted',
   };
   if (e.sectionPath) rec.sectionPath = String(e.sectionPath);
+  // v2.74.2196 — hop 1 of three, the ride Invariant-#3 discipline applied to the drive catalog. Hop 2 is
+  // `mergeArtifacts` (`{ ...r }` carries it automatically); hop 3 is `seededDriveLegs`. Not a user field: the
+  // noun is what the SYSTEM calls the record, so a re-seed refreshes it like any other mechanical field.
+  if (e.opens) rec.opens = String(e.opens).toLowerCase().slice(0, 24);
   if (e.catalogVersion != null) rec.catalogVersion = Number(e.catalogVersion);
   if (Array.isArray(e.compose)) rec.compose = e.compose.slice();
   // v2.74.2171 — hop 1 of the postcondition's three (the ride Invariant-#3 shape, applied here): the record must
@@ -411,6 +425,38 @@ export function mergeArtifacts(existing, incoming) {
   return out;
 }
 
+/**
+ * v2.74.2196 — WHICH artifact opens a record on this host, and what that system CALLS the record.
+ * PURE — reads the catalog (or a Ground's records), no storage, no DOM, so a surface can call it at render.
+ *
+ * The ruling this exists to satisfy: "Show task" is too domain-specific. The button, and the phrase it teaches,
+ * are for viewing *whichever* record the case is tied to — a VendorSuite task, a Zendesk ticket, an Aircall
+ * call. So neither surface may name a noun; both ask the artifact that reaches the record what to call it.
+ *
+ * A TIER-2 composite wins over a tier-1 fragment: the composite is the whole walk (division → search → row),
+ * and it is what both surfaces invoke. Ties go to document order, which is authoring order.
+ *
+ * @param host      the system the record lives on ('vendorsuite.drhorton.com')
+ * @param catalog   DRIVE_ARTIFACTS, or a Ground's merged records (same `opens`/`appHost`/`origin` shape)
+ * @returns {{driveId:string, noun:string}|null}   null when no artifact on this host opens a record
+ */
+export function recordOpenerForHost(host, catalog = DRIVE_ARTIFACTS) {
+  // Cut any path/hash/query, not just the scheme: callers hold a bare host today, but a URL landing here would
+  // otherwise return null SILENTLY — a wrong verdict, which is the failure shape `incitedOpener` was already
+  // bitten by. `_capIncitedBy` normalises the same way.
+  const h = _host(host).replace(/[/#?].*$/, '');
+  if (!h) return null;
+  let best = null;
+  for (const e of (Array.isArray(catalog) ? catalog : [])) {
+    if (!e || !e.opens) continue;
+    // A catalog entry carries `appHost`; a per-Ground record carries `origin`. Accept either so a caller can
+    // pass whichever collection it is holding — the same shape tolerance `seedFromCatalog` relies on.
+    if (!originMatchesAppHost(h, e.appHost || e.origin)) continue;
+    if (!best || (Number(e.tier) === 2 && Number(best.tier) !== 2)) best = e;
+  }
+  return best ? { driveId: String(best.id || ''), noun: String(best.opens).toLowerCase() } : null;
+}
+
 // ── Record → OfferedLeg (hop 3: the palette projection) ───────────────────────────────────────────────────
 
 /**
@@ -444,6 +490,7 @@ export function seededDriveLegs(records, { host = '', groundId = '', seenKeys = 
         impl: 'drive', driveId: r.id,
         origin: r.origin || host, groundId: String(groundId || ''),
         sectionPath: r.sectionPath || '/', tier: r.tier || 1,
+        ...(r.opens ? { opens: String(r.opens) } : {}),   // v2.74.2196 — hop 3: the noun rides the palette leg too, so a model-selected drive can name what it opens
         hydrated: !!r.capabilityId,
       },
     });
