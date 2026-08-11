@@ -256,6 +256,18 @@ const _VERB = '(?:show|open|view|display|pull\\s+up|bring\\s+up)';
 // exactly the specific-evidence rule below, not a new one.
 const BARE_RECORD = new Set(['task', 'ticket', 'record', 'claim', 'item', 'request', 'entry', 'call']);
 
+/**
+ * v2.74.2197 — does this word mean "the record at hand" rather than naming a PARTICULAR kind of thing? PURE.
+ * Exported so a caller deciding whether a referential ask is about the record it is holding reads THIS
+ * vocabulary instead of keeping a second copy — two lists of the same words is how they drift.
+ * "support requests" is not one: it names a specific artifact, and a case must not drive to its source task
+ * because the phrase happened to start with "show the".
+ */
+export function isGenericRecordNoun(word) {
+  const w = _str(word).toLowerCase().trim();
+  return !!w && (GENERIC_RECORD.has(w) || BARE_RECORD.has(w));
+}
+
 /** Is this ask a REFERENCE to something at hand? Returns { verb, noun, deictic } or null. An explicit ≥3-digit
  *  run is never a reference (the record-number intercepts own it). PURE. */
 export function referentialAsk(text) {

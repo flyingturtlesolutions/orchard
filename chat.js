@@ -44,7 +44,7 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { canBulkApprove, getPath, pendingSummary, targetUrls, renderProposalCards } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links; FL-10f (v1385) — the grouped review render
-import { focusRecordEntry, focusListEntry, focusFromSeedRecord, pushFocus, bindReferent, recordFind, recordDivision, nounFromLeg, stripRecordRef } from './Core/conversationFocus.js';   // v2.74.2001 — stripRecordRef: a probe naming THE RECORD ("details for 1Z…") is a RELATED follow-up, not a new ask
+import { focusRecordEntry, focusListEntry, focusFromSeedRecord, pushFocus, bindReferent, referentialAsk, isGenericRecordNoun, recordFind, recordDivision, nounFromLeg, stripRecordRef } from './Core/conversationFocus.js';   // v2197 — referentialAsk + isGenericRecordNoun: the case-drive claim reads the SHAPE and the vocabulary, never a second copy of either   // v2.74.2001 — stripRecordRef: a probe naming THE RECORD ("details for 1Z…") is a RELATED follow-up, not a new ask
 import { selectPrior, describePick } from './Core/priorSelect.js';   // PS-1 (v2.74.1982) — WHICH prior the ask named; the noun in the sentence selects the rows, not recency   // FC (v2.74.1552, DESIGN_conversation_focus.md) — the conversation's working set of grounded entity handles + the pure referent binder
 import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
 import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown, queueStateLines } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown; v1375 — the queue-state breakdown
@@ -12236,6 +12236,47 @@ function _railRecordCard(e, fmtTime) {
  * all `send`, which emails a homeowner — share a confirm/gate seam that is not designed yet, and the money rule
  * (human-click, never auto) says that seam gets designed before it gets built, not during a render pass.
  */
+// v2.74.2197 — the case's SOURCE SYSTEM, from the conversation alone. A case spawned since v2196 carries it in
+// its focus entry's provenance; one spawned before does not. The fallback is EXPLICIT and it is the same host
+// this button has used since v2150 — because a button that vanishes for older cases is the v2152 defect
+// ("four ways to silently not appear"), and it is worse than naming the only walk-only system we ship.
+const CASE_SOURCE_FALLBACK_HOST = 'vendorsuite.drhorton.com';
+function _caseSourceHost(conv) {
+  try {
+    for (const e of (Array.isArray(conv && conv.focus) ? conv.focus : [])) {
+      const h = e && e.kind === 'record' && e.provenance && e.provenance.host;
+      if (h && recordOpenerForHost(h)) return String(h);
+    }
+  } catch { /* a malformed focus entry must not cost the button */ }
+  return CASE_SOURCE_FALLBACK_HOST;
+}
+
+/**
+ * v2.74.2197 — WHAT A CASE DRIVES TO, resolved from the conversation and nothing else. ONE function, BOTH doors:
+ * the rail card's button and the typed phrase now compute identical arguments and make the identical call.
+ *
+ * This exists because v2196 shipped them as two computations that were only meant to agree. The button reads the
+ * TITLE (unconditionally — v2152's rule, learned when gating it on a sidecar join made it disappear); the phrase
+ * went through the referent binder, which needs a focus entry AND a `recordFind` number. Live, `show task`
+ * answered "Couldn't search Shopify orders — needs query": the binder had nothing to bind, the referent stage
+ * fell through, and the router picked a Shopify leg. Same class as v2152, one surface over — a control that
+ * works and a phrase that means the same thing must not have different preconditions.
+ *
+ * @returns {{ref:string, find:string, site:string, noun:string, driveId:string, title:string}|null}
+ */
+function _caseDriveTarget(conv) {
+  const title = String((conv && conv.title) || '').trim();
+  if (!title) return null;
+  const site = _caseSourceHost(conv);
+  const opener = recordOpenerForHost(site);
+  if (!opener) return null;
+  // The same split the drive wants: SEARCH is the number that makes the row exist, FIND is the row TEXT a human
+  // reads. The case title is "#4888221 · 7356 AXEL CREEK ST" by construction (`_rowLabel`).
+  const ref = (title.match(/#\s*([\w-]+)/) || [])[1] || title;
+  const find = (title.split('·')[1] || '').trim() || ref;
+  return { ref, find, site, noun: opener.noun, driveId: opener.driveId, title };
+}
+
 function _attachCaseActs(el, conv) {
   // v2.74.2152 — RENDER FROM THE CONVERSATION, nothing else. v2150 gated this on a sidecar join + a banked
   // `record.ref`, which gave the button four ways to silently not appear (no ref on older cases, a label-join
@@ -12244,37 +12285,23 @@ function _attachCaseActs(el, conv) {
   // the address ("#4888221 · 7356 AXEL CREEK ST"), which is exactly the free-text value the drill matches on, so
   // the sidecar was never needed for THIS button. Every case row gets it, unconditionally.
   if (!el || !conv) return;
-  const title = String(conv.title || '').trim();
-  if (!title) return;
-  const ref = (title.match(/#\s*([\w-]+)/) || [])[1] || title;   // the leading #id, for the label + log
+  // v2.74.2197 — RESOLVED ONCE, SHARED WITH THE PHRASE. Every argument below now comes from `_caseDriveTarget`,
+  // which the `show <noun>` intercept calls too — so the two doors cannot drift apart again. Previous versions:
+  //   v2151 — hand the drill the LABEL, not the bare ref (`drill.matchOn:'address'` is a free-text ADDRESS
+  //           filter, and passing the TaskId searched for "4899327" among addresses and matched nothing).
+  //   v2154 — FIND is the ROW TEXT the built-in artifact clicks (`vsd_open_task_row`: "a street address as
+  //           displayed, or a task/claim number"), so it is everything after the title's separator.
+  //   v2156 — the TITLE rides along as the join key to the banked case (same string by construction, so the
+  //           lookup is an equality); a CLICK-time read, never a render-time gate.
+  //   v2196 — the NOUN comes from the artifact that reaches the record, never written here.
+  const tgt = _caseDriveTarget(conv);
+  if (!tgt) return;
   const acts = document.createElement('div');
   acts.className = 'rail-record-acts';    // reuse the Records card's row verbatim — one action vocabulary
-  const site = 'vendorsuite.drhorton.com';
-  // v2.74.2196 — THE BUTTON NAMES THE INCITING RECORD, and the system says what to call it. User ruling: "the
-  // labeling is entirely too domain specific … it's to view the inciting record. For vendorsuite it is a task,
-  // but for zendesk it's a ticket and for aircall a phone call." So the noun is resolved from the artifact that
-  // actually reaches the record (Core/driveArtifacts.js `opens`), never written here. A second walk-only system
-  // becomes correctly labelled the moment its artifact ships, with no edit at this line.
-  // `'record'` is the honest fallback, not a default noun: it means "we could not ask", and it is the same word
-  // the Records card already falls back to for an inciting reference with no banked kind.
-  const noun = (recordOpenerForHost(site) || {}).noun || 'record';
-  acts.appendChild(_mkIconBtn('eye', `Show ${noun} ${ref} on ${site}`, (btn, ev) => {
+  acts.appendChild(_mkIconBtn('eye', `Show ${tgt.noun} ${tgt.ref} on ${tgt.site}`, (btn, ev) => {
     try { ev.stopPropagation(); } catch { /* */ }   // the rail row itself opens the case — the button must not
-    // v2.74.2151 — hand the drill the LABEL, not the bare ref. `drill.matchOn:'address'` is a free-text ADDRESS
-    // filter (chat.js:14070 "the drill's free-text filter slot (e.g. address)"), and v2150 passed the TaskId —
-    // so it searched for "4899327" among addresses, matched nothing, and left the user on `/#warranty`. That is
-    // the live report. `_rowLabel` composes id + address ("#4899327 — 7048 Eclipse Trail"), so the label is the
-    // richest match value the case already holds.
-    // v2.74.2154 — FIND is the ROW TEXT the built-in artifact clicks: `vsd_open_task_row` documents it as "a
-    // street address as displayed, or a task/claim number". The case title is "#4888221 · 7356 AXEL CREEK ST",
-    // so the address is everything after the separator; fall back to the id when a title carries no address.
-    const addr = (title.split('·')[1] || '').trim();
-    // v2.74.2156 — the TITLE rides along as the join key to the banked case. The pipeline case's `label` and this
-    // rail case's `title` are the same string by construction (both `_rowLabel(r.item, srcLeg)`), so the lookup is
-    // an equality, not a heuristic. It stays a CLICK-time read: v2150's mistake was gating the button's RENDER on
-    // a sidecar join, which gave it four ways to silently not appear. Here a miss costs a fallback, not a button.
-    void _driveToSourceTask(addr || ref, ref, site, btn, { title });
-  }, { title: `Show ${noun} ${ref} — drives your ${site} tab` }));
+    void _driveToSourceTask(tgt.find, tgt.ref, tgt.site, btn, { title: tgt.title });
+  }, { title: `Show ${tgt.noun} ${tgt.ref} — drives your ${tgt.site} tab. Typing “show ${tgt.noun}” does the same thing.` }));
   el.appendChild(acts);
 }
 
@@ -17894,6 +17921,50 @@ async function sendChatMessage(textOverride = null) {
           _setMessageBody(mC, _text, { markdown: true });
           _orchFinalize(mC);
           try { _orchLog(`CONTACT ▸ role=${_cr.role} record=#${_cr.ticket} → UNRESOLVED (leg=${_m.leg ? 'y' : 'n'} invoked=${_m.invoked || 0} blocked=${_m.blocked || 0} rows=${_m.rows || 0} hits=${_m.hits || 0} div=${_m.div || '(none)'} scope=division-local)`); } catch { /* */ }
+          return;
+        }
+      }
+      // v2.74.2197 — THE PHRASE IS THE BUTTON. User, after `show task` answered "Couldn't search Shopify orders
+      // — needs query": "I said show task and the eye button on case card should RUN THE SAME DRIVE ARTIFACT."
+      //
+      // WHY v2196 DID NOT DO THIS. It routed the phrase through the referent binder, which needs a focus entry
+      // AND a `recordFind` number off that entry. A case spawned before v2196 has neither, so the binder bound
+      // nothing, this whole stage fell through, and the router picked a Shopify leg. The BUTTON needs neither —
+      // it reads the conversation's title, unconditionally, which is exactly the rule v2152 learned when gating
+      // it on a sidecar join made it disappear. I gave the phrase a longer chain than the control it mirrors.
+      //
+      // So it claims from `_caseDriveTarget(conv)` — the same resolver the button calls, on the same conv the
+      // rail renders from. One local storage read, taken only AFTER the ask matches the referential shape, so
+      // this is not a decide-by-probing intercept (invariant #4) and the turn already claimed at entry.
+      //
+      // THE LINE BELOW IS THE POINT OF THIS PASS: it says which of the four preconditions failed. Three versions
+      // of this feature have now been debugged by inference because nothing recorded why a claim did not happen.
+      const _refAsk = referentialAsk(text);
+      if (_refAsk && _currentConversationId) {
+        let _conv = null;
+        try { _conv = await ConversationStore.load(_currentConversationId); } catch { _conv = null; }
+        // A CASE is a conversation with a parent desk — the rail's own test for rendering the button (row.role
+        // === 'subtask'). Not a title pattern, not a kind string.
+        const _tgt = (_conv && _conv.parentId) ? _caseDriveTarget(_conv) : null;
+        // A noun that names a PARTICULAR artifact must not be swallowed: "show the support requests" is its own
+        // ask, and a case must not drive to its source task because the phrase began with "show the".
+        const _nounOk = !_refAsk.noun || isGenericRecordNoun(_refAsk.noun) || !!(_tgt && _refAsk.noun === _tgt.noun);
+        const _claim = !!(_tgt && _nounOk);
+        try { _orchLog(`FOCUS ▸ case-drive "${_scrubHead(text, 32)}" → case=${_conv && _conv.parentId ? 'y' : 'n'} ref=${(_tgt && _tgt.ref) || '(none)'} host=${(_tgt && _tgt.site) || '(none)'} opens=${(_tgt && _tgt.noun) || '(none)'} asked=${_refAsk.noun || '(bare)'} nounOk=${_nounOk ? 'y' : 'n'} → ${_claim ? `drive ${(_tgt && _tgt.driveId) || ''}` : 'fell through'}`); } catch { /* */ }
+        if (_claim) {
+          const mD = appendMessage({ role: 'thinking', body: `Opening ${_tgt.noun} ${_tgt.ref} on ${_tgt.site}…` });
+          let _d = null;
+          _turnLock();
+          try { _d = await _driveToSourceTask(_tgt.find, _tgt.ref, _tgt.site, null, { title: _tgt.title }); } finally { _turnUnlock(); }
+          mD.classList.remove('thinking'); mD.classList.add('assistant');
+          // `arrived` is deliberately not `ok` — v2164 established engine-success is not arrival, and the button
+          // already refuses to claim it in its tooltip. The sentence here holds to the same standard.
+          _setMessageBody(mD, _d && _d.arrived
+            ? (_d.already
+              ? `${_tgt.noun} ${_tgt.ref} is already open on ${_tgt.site} — focused the tab. Ask again to re-walk it.`
+              : `Opened ${_tgt.noun} ${_tgt.ref} on ${_tgt.site}.`)
+            : `I opened ${_tgt.site} but couldn’t reach ${_tgt.noun} ${_tgt.ref} — ${(_d && _d.reason) || 'the walk stopped'}. The tab is where it stopped.`);
+          _orchFinalize(mD);
           return;
         }
       }

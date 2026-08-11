@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   FOCUS_CAP, pruneFields, nounFromLeg, focusRecordEntry, focusListEntry, pushFocus, stripRecordRef,
-  referentialAsk, bindReferent, recordFind, recordDivision, focusFromSeedRecord,
+  referentialAsk, bindReferent, isGenericRecordNoun, recordFind, recordDivision, focusFromSeedRecord,
 } from './conversationFocus.js';
 
 const LEG = { name: 'Warranty tasks by status', tool: { groundId: 'gnd_vs', origin: 'vendorsuite.drhorton.com', recipeId: 'vs_warranty_tasks', itemUrl: null, drill: { via: 'vs_warranty_task', from: 'TaskId', param: 'taskId' } } };
@@ -448,5 +448,42 @@ describe('referentialAsk — the bare-noun form a button label teaches', () => {
 
   it('a noun the entry’s own vocabulary does not carry binds nothing — no generic rescue', () => {
     assert.equal(bindReferent('show call', [CASE_ENTRY]), null, '`call` is not in the generic set, so it needs real evidence');
+  });
+});
+
+// v2.74.2197 — the vocabulary a caller consults instead of keeping a second copy. Live: `show task` in a case
+// answered "Couldn't search Shopify orders — needs query" because the binder needed a focus entry the case did
+// not have; the fix claims from the conversation's title, and THIS is the guard that stops it swallowing an ask
+// that merely starts with "show the".
+describe('isGenericRecordNoun — "the record at hand" vs a named artifact', () => {
+  it('the words that mean the record at hand', () => {
+    for (const w of ['task', 'ticket', 'record', 'claim', 'item', 'request', 'entry', 'call', 'case', 'one']) {
+      assert.equal(isGenericRecordNoun(w), true, `${w} is generic`);
+    }
+    assert.equal(isGenericRecordNoun('TASK'), true, 'case-insensitive');
+    assert.equal(isGenericRecordNoun(' ticket '), true, 'trimmed');
+  });
+
+  it('a NAMED artifact is not — "show the support requests" must keep its own ask', () => {
+    for (const w of ['support requests', 'draft order', 'invoice', 'homeowners', 'instructions', 'dashboard']) {
+      assert.equal(isGenericRecordNoun(w), false, `${w} names a particular thing`);
+    }
+  });
+
+  it('empty is not generic — a bare ask carries no noun and must be judged on its own', () => {
+    assert.equal(isGenericRecordNoun(''), false);
+    assert.equal(isGenericRecordNoun(null), false);
+    assert.equal(isGenericRecordNoun(undefined), false);
+  });
+
+  it('the guard composes with referentialAsk exactly as the claim site uses it', () => {
+    // `show the support requests` parses as a reference but its noun is NOT generic → the case-drive declines.
+    const named = referentialAsk('show the support requests');
+    assert.equal(named.noun, 'support requests');
+    assert.equal(isGenericRecordNoun(named.noun), false, 'so the drive must fall through to the real intercept');
+    // `show task` parses AND is generic → the case-drive claims.
+    assert.equal(isGenericRecordNoun(referentialAsk('show task').noun), true);
+    // A bare `show` has no noun at all; the claim site treats that as "the record at hand" on its own.
+    assert.equal(referentialAsk('show').noun, null);
   });
 });
