@@ -646,9 +646,19 @@ not-sync / body-blind-marker posture as fields rather than a key.*
 > this browser) and the `webNavigation` trigger (free, catches them looking at it). Both are cheap and neither is
 > load-bearing now that the poll exists: they would make a change VISIBLE SOONER, not visible at all.
 >
-> **Also not built:** §12.5's `readTransition` adapter (still LIVE-UNVERIFIED per §10.3 — a real order must be
-> created first) and §12.9's `observe` extractor. `applyUpdate` accepts the fields §12.9 would produce; nothing
-> produces them yet.
+> **v2.74.2208 — §12.5 IS BUILT, as a DECLARATION rather than the per-platform function this section assumed.**
+> `handOff: { at: 'order.id', toKind: 'order' }` on the draft list; the poll reads that path and moves the
+> record's pointer only if a value is actually there. That satisfies §10.3 without a live completed order: it
+> names a path, it does not guess a shape, and an absent field leaves the record exactly as it was. Data beats a
+> function here — a second platform costs a line, and the declaration cannot drift from the read it sits on.
+>
+> With it, the SHIPPING WATCH is reachable: `shopify_orders_queue` declares `watches:['order']` plus a `set` of
+> parcels (keyed by tracking number) and a `member` observer for their delivery — so a split shipment reports each
+> box, and §12.2's motivating case (the tracking number that lands on the ORDER days after the DRAFT) completes
+> on ONE row. Every path was already returned by that leg's existing query: no new request, no new field.
+>
+> **Still not built:** the tee hint and the `webNavigation` trigger (2 of 5 — both free, both would make a change
+> visible SOONER rather than visible at all).
 
 ### 12.0 The principle everything else follows from
 

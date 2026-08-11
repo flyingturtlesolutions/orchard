@@ -11,18 +11,34 @@ const _str = (v) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
 const _isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const _num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
-/** Walk `a[].b.c` — the array hop `extractValue` already understands, plus an explicit rows-path reader. PURE. */
-function _rowsAt(value, path) {
+/**
+ * Walk a rows path to EVERY match — `data.draftOrders.edges[].node`, `fulfillments`, `returns.edges[].node`. PURE.
+ *
+ * v2.74.2208 — MAPS OVER ARRAYS rather than taking the first element, which the first version did (borrowing
+ * `extractValue`'s array hop, where taking [0] is right because it is resolving ONE scalar). Here it was a bug
+ * with no symptom in the tests: `data.draftOrders.edges[].node` walked to the edges array, took edges[0], and
+ * returned exactly ONE row — so a poll over fifty drafts would have reconciled the newest and silently ignored
+ * the other forty-nine. Every test passed because they all declared flat paths.
+ *
+ * A GraphQL `edges[].node` list unwraps to its nodes at the end, so a caller may declare either form.
+ */
+export function rowsAt(value, path) {
   if (!path) return [];
-  let cur = value;
+  let cur = [value];
   for (const seg of _str(path).split('.').filter(Boolean)) {
     const bare = seg.replace(/\[\]$/, '');
-    if (Array.isArray(cur)) cur = cur[0];
-    if (!_isObj(cur)) return [];
-    cur = cur[bare];
+    const next = [];
+    for (const c of cur) {
+      if (!_isObj(c) && !Array.isArray(c)) continue;
+      const v = Array.isArray(c) ? undefined : c[bare];
+      if (Array.isArray(v)) next.push(...v);
+      else if (v != null) next.push(v);
+    }
+    cur = next;
   }
-  return Array.isArray(cur) ? cur.filter((r) => r != null) : (_isObj(cur) ? [cur] : []);
+  return cur.filter((r) => r != null).map((r) => (_isObj(r) && _isObj(r.node) ? r.node : r));
 }
+const _rowsAt = rowsAt;
 
 /**
  * §12.9 — READ THE DECLARED OBSERVERS off one vendor object. PURE.
@@ -122,6 +138,36 @@ export function observeFields(obj, decl, seen = null) {
     }
   }
   return out;
+}
+
+/**
+ * §12.5 (v2.74.2208) — THE TRANSITION ADAPTER, as a DECLARATION rather than a per-platform function.
+ *
+ * The spec asked for `readTransition(replyOrRecord, {kind,id}) -> null | {toKind,toId,at}`, isolating one
+ * unknown behind one function per platform. A declaration is strictly better and does the same job: it is
+ * catalog DATA, so a second platform costs a line rather than a function, and it cannot drift from the read it
+ * belongs to because it sits on that read.
+ *
+ *     handOff: { at: 'order.id', toKind: 'order' }     // on shopify_draft_orders
+ *
+ * AND IT DOES NOT VIOLATE §10.3'S "never code a reply shape blind". Nothing here guesses: it names a path and
+ * acts ONLY if a value is actually there. If Shopify's DraftOrderList does not return `order`, this resolves to
+ * null and the record simply stays a draft — no event, no false hand-off. The unknown fails toward NOTHING,
+ * which is the same posture §12.5 wanted from its re-read, one step cheaper.
+ *
+ * A hand-off must be OBSERVED, never inferred from a status string — which is exactly why this reads an ID and
+ * not `status === 'COMPLETED'`. A completed status says something happened; an id says what it became.
+ */
+export function readTransition(obj, decl) {
+  const o = _isObj(obj) ? obj : null;
+  const d = _isObj(decl) ? decl : null;
+  if (!o || !d) return null;
+  const raw = extractValue(o, _str(d.at));
+  if (raw == null || raw === '') return null;
+  const toId = _str(raw).split('/').pop();                     // gid://shopify/Order/1234 → 1234, matching what a create banks
+  const toKind = _str(d.toKind);
+  if (!toId || !toKind) return null;
+  return { toKind, toId };
 }
 
 /** Is there anything to report? PURE — so a caller can skip a write rather than append an empty event. */
@@ -225,6 +271,14 @@ export function reconcileCollection(rows, observedRows, { leg = null, now = 0, s
       // Absence. ONLY a partition may read it as non-existence — see the rule above.
       if (_str(l.coverage) === 'partition') out.push({ key, at: _num(now), kind: 'gone', why: '404' });
       continue;
+    }
+    // THE HAND-OFF IS CHECKED FIRST, and it is checked BEFORE the field observers because it changes which
+    // collection answers for this record from now on. A draft that became an order stops being the draft list's
+    // business; reporting a status change on it first would be describing a record at its old address.
+    const ho = readTransition(hit, l.handOff);
+    if (ho && (ho.toKind !== (_str(row.currentKind) || _str(row.kind)) || ho.toId !== want)) {
+      out.push({ key, at: _num(now), kind: 'transition', toKind: ho.toKind, toId: ho.toId });
+      continue;                                                 // the pointer moves; the new collection reads it next tick
     }
     if (!decl) continue;
     const obs = observeFields(hit, decl, seen[key] || null);

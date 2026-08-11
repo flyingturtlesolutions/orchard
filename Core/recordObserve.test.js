@@ -7,7 +7,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { observeFields, hasNews, newsToFields, pollPlan, reconcileCollection, POLL_GAP_MS } from './recordObserve.js';
+import { observeFields, hasNews, newsToFields, pollPlan, reconcileCollection, readTransition, rowsAt, POLL_GAP_MS } from './recordObserve.js';
 import { auditEntry } from './audit.js';
 import { applyGone } from './recordLife.js';
 

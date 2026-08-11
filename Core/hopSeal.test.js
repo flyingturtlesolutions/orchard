@@ -93,6 +93,10 @@ const ENTRY_FIELD_MAP = new Set([
   // The poll reads the catalog by id (the `coverage` precedent), so there is no seeded path to drop them, and a
   // drop stops a watch rather than firing a wrong write.
   'watches', 'observe', 'rows', 'rowId', 'pollGapMs',
+  // §12.5 (v2.74.2208) — `handOff` is the transition adapter as DATA: {at, toKind}, read by the poll to move a
+  // record's pointer when the vendor names what it became. Catalog-read like its four neighbours above, and for
+  // the same fail-safe reason — dropping it stops a hand-off being noticed, it cannot cause a wrong one.
+  'handOff',
 ]);
 
 const ENTRIES = CONNECTOR_RECIPES.filter((e) => e && e.id && e.appHost);

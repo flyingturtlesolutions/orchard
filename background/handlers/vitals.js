@@ -28,8 +28,8 @@ import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   //
 // the pure planner/reconciler, and the state-machine functions it applies. No new alarm, no second clock owner.
 import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';
 import { loadCreates, updateCreate } from '../../Services/Storage/AuditCreateStore.js';
-import { pollPlan, reconcileCollection } from '../../Core/recordObserve.js';
-import { applyGone, applyUpdate, warmWindowMs } from '../../Core/recordLife.js';
+import { pollPlan, reconcileCollection, rowsAt } from '../../Core/recordObserve.js';
+import { applyGone, applyUpdate, applyTransition, warmWindowMs } from '../../Core/recordLife.js';
 
 const TICK_ALARM = 'vitals:tick';
 const CONFIRM_PREFIX = 'vitals:confirm:';
@@ -313,7 +313,7 @@ async function _recordWatchSweep({ force = false } = {}) {
     // the window exists to bound BACKGROUND cost, and a person asking is not background cost.
     const plan = pollPlan(rows, { catalog: CONNECTOR_RECIPES, now: Date.now(), lastPollAt: force ? {} : lastPollAt });
     if (!plan.length) return;
-    let polled = 0; let updated = 0; let gone = 0; let failed = 0;
+    let polled = 0; let updated = 0; let gone = 0; let handed = 0; let failed = 0;
     for (const step of plan) {
       const leg = (CONNECTOR_RECIPES || []).find((r) => r && r.id === step.recipeId);
       if (!leg) continue;
@@ -327,13 +327,19 @@ async function _recordWatchSweep({ force = false } = {}) {
       } catch { reply = null; }
       polled++;
       if (!reply || !reply.ok) { failed++; continue; }   // a signed-out or 404 collection says nothing about its members
-      const observedRows = _rowsFromReply(reply.value, leg.rows);
+      const observedRows = rowsAt(reply.value, leg.rows);   // v2208 — ONE walker, shared with the pure half: the local copy took edges[0] and reconciled a single row
       const acts = reconcileCollection(rows, observedRows, { leg, now: Date.now(), seenBy });
       for (const a of acts) {
         const [atStr, ...idParts] = String(a.key).split('|');
         const ref = { at: Number(atStr) || 0, id: idParts.join('|') };
         try {
           if (a.kind === 'gone') { const r = await updateCreate(ref, (row) => applyGone(row, { why: a.why || '404', at: a.at })); if (r.changed) gone++; }
+          // §12.5/§12.0 — the HAND-OFF: the same row changes kind, the timeline records both ends, and the warm
+          // window RESTARTS because the thing worth seeing (a tracking number) usually arrives AFTER it.
+          else if (a.kind === 'transition') {
+            const r = await updateCreate(ref, (row) => applyTransition(row, { toKind: a.toKind, toId: a.toId, at: a.at, windowMs: warmWindowMs(leg) }));
+            if (r.changed) handed++;
+          }
           else {
             const r = await updateCreate(ref, (row) => applyUpdate(row, { fields: a.fields, at: a.at, windowMs: warmWindowMs(leg) }));
             if (r.changed) { updated++; seenBy[a.key] = a.seenNext; }
@@ -344,28 +350,12 @@ async function _recordWatchSweep({ force = false } = {}) {
     }
     try { await StorageManager.set(WATCH_KEY, { lastPollAt, seenBy }); } catch { /* */ }
     // BODY-BLIND like every other audit line: counts and leg ids, never a value that was observed.
-    try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) over ${rows.length} row(s) → ${updated} updated · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
+    try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) over ${rows.length} row(s) → ${updated} updated · ${handed} handed off · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
   } catch { /* fail-safe — the watch must never break the tick */ }
 }
 
 const _isPlain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/** Pull the vendor rows out of a reply by the leg's declared `rows` path. Tolerant: a shape change yields [], and
- *  reconcile then reads that as "said nothing" rather than "everything is gone" (the coverage rule protects it). */
-function _rowsFromReply(value, path) {
-  try {
-    let cur = value;
-    for (const seg of String(path || '').split('.').filter(Boolean)) {
-      const bare = seg.replace(/\[\]$/, '');
-      if (Array.isArray(cur)) cur = cur[0];
-      if (!cur || typeof cur !== 'object') return [];
-      cur = cur[bare];
-    }
-    if (!Array.isArray(cur)) return cur && typeof cur === 'object' ? [cur] : [];
-    // A GraphQL edges[] list unwraps to its nodes; anything else is already the row.
-    return cur.map((x) => (x && typeof x === 'object' && x.node && typeof x.node === 'object' ? x.node : x)).filter(Boolean);
-  } catch { return []; }
-}
 
 // ── SGV-0 (DESIGN_session_governor.md v1.14 §11.1) — the planner runs INERT: every tick snapshots, plans, and
 // LOGS (`SGV ▸` heartbeat + plan lines) — nothing executes. The soak's plans are graded against real traffic

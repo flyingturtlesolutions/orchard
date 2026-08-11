@@ -618,6 +618,23 @@ export const CONNECTOR_RECIPES = [
     displayId: ['name'], joinKey: ['customer.email'],
     drill: { via: 'shopify_order', param: 'order', from: 'name', matchOn: 'order', label: ['name', 'id', 'displayFulfillmentStatus', 'displayFinancialStatus'] },
     does: 'THE fulfillment queue: open orders not yet (fully) fulfilled, newest first — number, date, payment/fulfillment status, total, customer email, line items, tracking. Give an order number to drill straight into that one; say "on the site" to open it on the admin orders page. Fans out: "open each in a case"',
+    // AU-6 (v2.74.2208, §12.9) — THE SHIPPING WATCH. Where a record ARRIVES after a draft hands off, and the
+    // reason the whole lifecycle exists: the tracking number appears on the ORDER, days after the DRAFT was
+    // created (§12.2's motivating case). Everything below is already in _GQL_ORDERS — no new request, no new
+    // field; this only names which of the fields it ALREADY returns count as news.
+    //
+    // TWO KINDS OVER THE SAME ROWS, deliberately. A single `field` observer reads the FIRST fulfillment, which
+    // is wrong the moment an order ships in two boxes. `set` reports each parcel as it appears (keyed by its
+    // tracking number — one parcel, one number) and `member` reports that parcel later being delivered. That is
+    // §12.9.2's composition doing its job rather than a special case for split shipments.
+    watches: ['order'], rowId: 'id', rows: 'data.orders.edges[].node',
+    observe: {
+      shipStatus: { of: 'field', at: 'displayFulfillmentStatus' },
+      parcels: { of: 'set', rows: 'fulfillments', id: 'trackingInfo.number',
+        keep: { carrier: 'trackingInfo.company', eta: 'estimatedDeliveryAt' } },
+      progress: { of: 'member', rows: 'fulfillments', id: 'trackingInfo.number',
+        track: { status: 'displayStatus', deliveredAt: 'deliveredAt' } },
+    },
     endpoint: '/api/shopify/{handle}?operation=Orders&type=query',
     body: { operationName: 'Orders', query: _GQL_ORDERS, variables: { q: 'status:open fulfillment_status:unfulfilled', n: 10 } },
     params: [
@@ -778,6 +795,12 @@ export const CONNECTOR_RECIPES = [
     // three innocent explanations (completed into an order, past `first: 50`, a filter moved), so absence here
     // must never be read as deletion. reconcileCollection enforces that; the marker is how it knows.
     watches: ['draft'], rowId: 'id', rows: 'data.draftOrders.edges[].node',
+    // §12.5 (v2.74.2208) — WHAT THIS DRAFT BECAME. The transition adapter, as DATA: name the path, and act only
+    // if a value is actually there. If the pinned DraftOrderList document does not return `order`, this resolves
+    // to nothing and the record simply stays a draft — no guess, no false hand-off, which is how it satisfies
+    // §10.3's rule against coding a reply shape blind. Reading the ID and not `status === COMPLETED` is the
+    // point: a status says something happened, an id says WHAT IT BECAME, and only the second is a hand-off.
+    handOff: { at: 'order.id', toKind: 'order' },
     observe: {
       status: { of: 'field', at: 'status' },          // OPEN → INVOICE_SENT → COMPLETED — the hand-off's own tell
       total: { of: 'field', at: 'totalPrice' },
