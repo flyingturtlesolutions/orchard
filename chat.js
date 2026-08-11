@@ -73,7 +73,7 @@ import { isCapabilityMetaAsk } from './Core/targetResolve.js';   // v2.74.1761 �
 import { stepReceiptLine, mayDeclareFilter, buildStepReceipt, renderStepReceipt } from './Core/stepReceipt.js';
 import { renderSpan, createRunLedger, renderNoEffect, renderRunReceipt, runVerdict } from './Core/runLedger.js';   // OB-1 (v2.74.1831) — paired EXIT lines + the turn-level no-effect backstop   // v2.74.1828 receipt (STEP ▸); v1829 — mayDeclareFilter is a COST GATE for the branch consult, never a decider
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, primaryObject, primaryList, rowsFromValue, roleFlags, summarizeItem, itemFields, mapMatchLabel, parseRowLabel } from './Core/connectorRender.js';   // PM-2 (v1625) — summarizeItem + itemFields: the map join's source-row identity   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';
 import { DRIVE_ARTIFACTS, originMatchesAppHost, recordOpenerForHost, arrivalContract } from './Core/driveArtifacts.js';   // v2198 — arrivalContract: an artifact that declares a postcondition IS the arrival witness; the landing URL is only the fallback   // v2196 — recordOpenerForHost: WHICH artifact opens a record here, and what this system calls it (task/ticket/call)   // v2195 — originMatchesAppHost: does a drive artifact cover this host?   // v2.74.1796 — declared drive names feed the reachability guard (_declaredLegNames)   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
@@ -12498,8 +12498,17 @@ function _railRecordCard(e, fmtTime) {
         //   MISS … of 200 case(s)`, live), where a record-card provenance was never going to be. The banked value
         //   is the authoritative one for exactly the reason v2156 gave: it was true when the row was read.
         if (_inc.how === 'drive') {
-          const _addr = (String(_inc.label || '').split('·')[1] || '').trim();
-          void _driveToSourceTask(_addr || _inc.label || _inc.id, _inc.id, _inc.system, btn,
+          // v2.74.2211 — THE SEARCH TERM IS THE HUMAN NUMBER, and it comes out of the LABEL. v2210 still passed
+          // `_inc.id` here, which is `caseItemKey`'s value — the INTERNAL TaskId (10912257 for a task whose
+          // ticket number is 4888221). The site's search box matches the ticket number, so it found nothing and
+          // the walk had no row to click. `caseItemKey` is not wrong: identity must be stable and the internal
+          // id is. They are two different jobs and the label is where the looking-up number lives.
+          //
+          // `parseRowLabel` is SHARED with `_caseDriveTarget` (Core/connectorRender.js, beside the function that
+          // composes the label) — the fourth time a second surface reached this destination without the first
+          // one's corrections, and the first time the parse itself stopped being copied.
+          const _p = parseRowLabel(_inc.label || '');
+          void _driveToSourceTask(_p.find || _inc.id, _p.ref || _inc.id, _inc.system, btn,
             { title: _inc.label || '', division: String((_inc.args && _inc.args.division) || '') });
         }
         else void _openRecordLink(_inc.url, btn);
@@ -12575,8 +12584,11 @@ function _caseDriveTarget(conv) {
   if (!opener) return null;
   // The same split the drive wants: SEARCH is the number that makes the row exist, FIND is the row TEXT a human
   // reads. The case title is "#4888221 · 7356 AXEL CREEK ST" by construction (`_rowLabel`).
-  const ref = (title.match(/#\s*([\w-]+)/) || [])[1] || title;
-  const find = (title.split('·')[1] || '').trim() || ref;
+  // v2.74.2211 — ONE parser, shared with the record card's back-arrow (Core/connectorRender.js, deliberately
+  // beside `summarizeItem`, which composes the string it reads back). This was the copy that was right; the copy
+  // that was not is what sent an internal id to a search box expecting a ticket number.
+  const { ref: _pref, find } = parseRowLabel(title);
+  const ref = _pref || title;
   return { ref, find, site, noun: opener.noun, driveId: opener.driveId, title };
 }
 

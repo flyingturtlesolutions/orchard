@@ -206,6 +206,30 @@ function _suffixId(o) {
   return null;
 }
 
+/**
+ * v2.74.2211 — THE INVERSE OF A ROW LABEL: read "#4888221 · 7356 AXEL CREEK ST" back into the two values a
+ * page-walk needs. PURE. Lives here because `summarizeItem` COMPOSES that string, and a parser that drifts from
+ * its composer is the bug this function exists to stop having twice.
+ *
+ *   ref  — the leading `#id`. This is the HUMAN number (`displayId: ['TicketId','TaskNumber']` on a warranty
+ *          leg), which is what a site's search box matches. It is deliberately NOT the record's identity:
+ *          `caseItemKey` picks `TaskId`, the INTERNAL id, and is right to — identity must be stable, and the
+ *          internal id is. Live 2026-08-11: the record card sent that internal id (10912257) as the search term
+ *          for a task whose ticket number is 4888221, so the search box matched nothing and the walk had no row
+ *          to click. Two different jobs, two different numbers; this returns the one for LOOKING.
+ *   find — the row text a human sees, which is what CLICK_BY_LABEL matches: everything after the separator
+ *          (v2154 — "a street address as displayed"). Falls back to `ref` when the label carries no second part.
+ *
+ * @returns {{ref:string, find:string}}  both '' for an unusable label — the caller decides what to do about it
+ */
+export function parseRowLabel(label) {
+  const s = (typeof label === 'string' ? label : '').trim();
+  if (!s) return { ref: '', find: '' };
+  const ref = (s.match(/#\s*([\w-]+)/) || [])[1] || '';
+  const tail = (s.split('·')[1] || '').trim();
+  return { ref, find: tail || ref || s };
+}
+
 /** Pull one item's salient fields. PURE. `full` → a longer title + a separate body when there's a distinct name +
  *  content. `displayId` (CX-9k, v2.74.1617) — recipe-declared HUMAN id key(s), preference-ordered: tried EXACTLY and
  *  FIRST, because the generic scans below can land on the wrong number (a VS warranty row's first `…Number` field is

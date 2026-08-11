@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, itemFields, recordDetails, toWorkItem, toWorkItems, normalizeDisplay, mapMatchLabel } from './connectorRender.js';
+import { primaryList, primaryObject, rowsFromValue, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, createdRecordLabel, itemFields, recordDetails, toWorkItem, toWorkItems, normalizeDisplay, mapMatchLabel , parseRowLabel } from './connectorRender.js';
 import { renderMarkdown } from '../markdown.js';   // v1949 — assert the RENDERED HTML, not eyeball the panel
 
 describe('primaryList — find the data array', () => {
@@ -698,5 +698,42 @@ describe('mapMatchLabel — a map row carries declared highlights, not the join 
   it('junk in, safe out', () => {
     assert.equal(mapMatchLabel(null, DISPLAY), 'match');
     assert.equal(mapMatchLabel({}, DISPLAY), 'match');
+  });
+});
+
+// v2.74.2211 — the inverse of a row label, and the live defect it closes. A warranty row carries THREE numbers:
+// TaskId (internal, 10912257), TicketId (the human ticket, 4888221) and TaskNumber. `caseItemKey` picks the
+// internal one — correctly, because identity must be stable — and the record card was sending THAT to a site
+// search box that matches the ticket number, so it found nothing and the walk had no row to click.
+describe('parseRowLabel — read a row label back into {ref, find}', () => {
+  it('takes the HUMAN number and the row text a person sees', () => {
+    assert.deepEqual(parseRowLabel('#4888221 · 7356 AXEL CREEK ST'), { ref: '4888221', find: '7356 AXEL CREEK ST' });
+  });
+
+  it('is the exact inverse of what summarizeItem composes for a warranty row', () => {
+    // The composer's own declaration is `displayId: ['TicketId','TaskNumber']`, so the id in the label is the
+    // TICKET number — never the internal TaskId the record is keyed by.
+    const row = { TaskId: 10912257, TicketId: 4888221, TaskNumber: '4888221-05-01', AddressLine1: '7356 AXEL CREEK ST' };
+    const it = summarizeItem(row, { displayId: ['TicketId', 'TaskNumber'] });
+    const label = `#${it.id} · ${row.AddressLine1}`;
+    assert.equal(parseRowLabel(label).ref, '4888221');
+    assert.notEqual(parseRowLabel(label).ref, '10912257', 'the internal id must never become a search term');
+  });
+
+  it('falls back to the ref when a label carries no second part', () => {
+    assert.deepEqual(parseRowLabel('#4888221'), { ref: '4888221', find: '4888221' });
+  });
+
+  it('a label with no #id yields no ref, and the caller decides — never a wrong guess', () => {
+    assert.deepEqual(parseRowLabel('7356 AXEL CREEK ST'), { ref: '', find: '7356 AXEL CREEK ST' });
+  });
+
+  it('tolerates a hyphenated id, a space after the sigil, and extra separators', () => {
+    assert.equal(parseRowLabel('# 4888221-05 · x · y').ref, '4888221-05');
+    assert.equal(parseRowLabel('# 4888221-05 · x · y').find, 'x');
+  });
+
+  it('junk in, empty out', () => {
+    for (const j of [null, undefined, '', '   ', 42, {}]) assert.deepEqual(parseRowLabel(j), { ref: '', find: '' });
   });
 });
