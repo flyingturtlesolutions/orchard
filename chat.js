@@ -12485,7 +12485,23 @@ function _railRecordCard(e, fmtTime) {
         // direction). No second mechanism: same walk, same postcondition, same honest failure reporting.
         // `find` is the row TEXT the walk clicks (the label, e.g. a street address) and `ref` is the id it
         // searches with — the same split the case card passes.
-        if (_inc.how === 'drive') void _driveToSourceTask(_inc.label || _inc.id, _inc.id, _inc.system, btn, { title: _inc.label || '' });
+        // v2.74.2210 — PASS WHAT THE PROVENANCE ALREADY KNOWS. Two defects the live 16:56 trace exposed, and both
+        // are lessons the CASE card learned that this button never inherited — the two-doors-one-drift pattern
+        // v2197 fixed for the case-vs-phrase pair, third instance.
+        //
+        //   FIND was the whole label. `_rowLabel` composes "#4895718 · las vegas", and the walk clicks a ROW by
+        //   its visible text — which is the ADDRESS. v2154 settled this for the case card ("a street address as
+        //   displayed"); the record card was still handing the walk a string no row carries.
+        //
+        //   DIVISION was thrown away. `_incitedByForRow` banks it in `args.division` at creation, when the source
+        //   row is in scope — and the drive then went looking for it in the CASE store (`case division lookup
+        //   MISS … of 200 case(s)`, live), where a record-card provenance was never going to be. The banked value
+        //   is the authoritative one for exactly the reason v2156 gave: it was true when the row was read.
+        if (_inc.how === 'drive') {
+          const _addr = (String(_inc.label || '').split('·')[1] || '').trim();
+          void _driveToSourceTask(_addr || _inc.label || _inc.id, _inc.id, _inc.system, btn,
+            { title: _inc.label || '', division: String((_inc.args && _inc.args.division) || '') });
+        }
         else void _openRecordLink(_inc.url, btn);
       }, { title: `Show ${_what} on ${_inc.system}` }));
     }
@@ -12685,7 +12701,7 @@ const _DRIVE_SKIP_WINDOW_MS = 120000;   // beyond this, re-walk rather than trus
  * separate from `ok`: v2164 established that engine-success is not arrival, and a sentence that conflates them
  * is the dishonest-success shape this whole arc has been unlearning.
  */
-async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
+async function _driveToSourceTask(find, ref, site, btn, { title = '', division = '' } = {}) {
   const was = btn ? btn.title : '';
   // v2.74.2192 — MARK THE ROW EXPLICITLY, from JS. v2190 styled the running state with `:has(button[data-busy])`
   // and assumed the row carries `.rail-item`; live, nothing showed. Rather than guess which of those two
@@ -12791,7 +12807,11 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
     // this version and for a lookup that misses.
     // v2.74.2172 — `ref` is the task id parsed off the case title, and it is now the case's own itemId, so the
     // lookup can join on identity instead of on display text.
-    const _banked = await _bankedCaseDivision(title, ref);
+    // v2.74.2210 — A DIVISION THE CALLER ALREADY HOLDS OUTRANKS A LOOKUP. The record card banks it in the
+    // provenance at creation (§12.8.1's `args`); asking the CASE store for it is both slower and wrong, since a
+    // record-card provenance has no case. Skipping the lookup when we have the answer also stops the honest-but
+    // -useless `case division lookup MISS … of 200 case(s)` line the live trace filled with.
+    const _banked = division || await _bankedCaseDivision(title, ref);
     const _ctxDiv = (() => { try { return _contextDivision() || ''; } catch { return ''; } })();
     const _div = _banked || _ctxDiv;
     // v2.74.2158 — RESOLVE THE GROUND. `groundId: null` was a placeholder that could never work: the handler's
@@ -12915,12 +12935,6 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
     if (_siteCrashed && typeof r.tabId === 'number') {
       try { await chrome.tabs.reload(r.tabId); _lastCrashReloadAt = Date.now(); } catch { /* the message below still tells the user to retry */ }
     }
-    _orchLog(`AUDIT ▸ show task ${ref} on ${site} div="${_div || '(current)'}" divsrc=${_banked ? 'banked' : (_ctxDiv ? 'context' : 'none')} tab=${r.reused ? 'reused' : 'new'} drive=${_drive === 'vsd_review_warranty_task' ? 'composite' : 'row-only'} FIND="${String(find).slice(0, 48)}" → ${ok ? 'engine ok' : `stopped — ${_siteCrashed ? 'SITE PAGE BLANK (its own script threw — division data not loaded yet; retry on a warm tab) — ' : ''}${_reason}`} end="${_end || '(unknown)'}" arrived=${_arrived ? 'y' : 'n'} by=${_contract.declared ? 'postcondition' : 'url'}`);
-    // The BUTTON must not claim it either. A tab still sitting on the bare section did not reach the task,
-    // whatever the engine returned — so the tooltip says so rather than quietly reverting to its resting text.
-    // v2.74.2190 — remember what we drove to, so a second click on the same eye can say "already open" instead
-    // of re-running the walk. Recorded only on a run the engine reported OK; a failed walk leaves no belief.
-    if (ok) _lastDrive = { ref: String(ref), tabId: r.tabId, at: Date.now(), told: false };
     // v2.74.2198 — ARRIVAL IS THE ARTIFACT'S OWN CONTRACT WHEN IT DECLARES ONE. Live: a `show task` the user
     // watched succeed replied "couldn't reach task 4903279 — a step failed". `ok` was true (the reason was the
     // fallback string, so the engine reported none) and `_end` was `/#warranty` — because VendorSuite renders
@@ -12939,6 +12953,15 @@ async function _driveToSourceTask(find, ref, site, btn, { title = '' } = {}) {
       // No declared postcondition → fall back to the URL, compared against the artifact's OWN section rather
       // than a hardcoded one: an artifact still sitting on its section page did not reach a record.
       || (!!_end && String(_end).replace(/^\/+/, '').replace(/\/+$/, '') !== _sec.replace(/\/+$/, '')));
+    // v2.74.2210 — THE LINE THAT REPORTS THE VERDICT NOW SITS AFTER THE VERDICT. It was 18 lines ABOVE the two
+    // `const`s it reads, which is a temporal-dead-zone throw on EVERY completed drive: live 16:56:07 and 16:56:20,
+    // `AUDIT ▸ show task … FAILED — Cannot access '_arrived' before initialization`. The walk itself had already
+    // run — SHOW_SOURCES and INVOKE_DRIVE_ARTIFACT are both above this — so the tab moved and the reply then said
+    // it had failed, which is the v2198 defect's own shape wearing a different hat.
+    _orchLog(`AUDIT ▸ show task ${ref} on ${site} div="${_div || '(current)'}" divsrc=${division ? 'provenance' : (_banked ? 'banked' : (_ctxDiv ? 'context' : 'none'))} tab=${r.reused ? 'reused' : 'new'} drive=${_drive === 'vsd_review_warranty_task' ? 'composite' : 'row-only'} FIND="${String(find).slice(0, 48)}" → ${ok ? 'engine ok' : `stopped — ${_siteCrashed ? 'SITE PAGE BLANK (its own script threw — division data not loaded yet; retry on a warm tab) — ' : ''}${_reason}`} end="${_end || '(unknown)'}" arrived=${_arrived ? 'y' : 'n'} by=${_contract.declared ? 'postcondition' : 'url'}`);
+    // v2.74.2190 — remember what we drove to, so a second click on the same eye can say "already open" instead
+    // of re-running the walk. Recorded only on a run the engine reported OK; a failed walk leaves no belief.
+    if (ok) _lastDrive = { ref: String(ref), tabId: r.tabId, at: Date.now(), told: false };
     // v2.74.2182 — the TOOLTIP says the same thing the log does. "The page is where it stopped" invites the
     // reader to look for our mistake; when the site's own script has blanked the page, the honest instruction is
     // to try again once its data has loaded.
