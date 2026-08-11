@@ -13178,6 +13178,21 @@ function _openRecordDrill(e, fmtTime) {
   if (_as) {
     const s = document.createElement('div'); s.className = 'rail-record-drill-note'; s.textContent = `State: ${_as}`;
     body.appendChild(s);
+    // AU-6 (v2.74.2207, §12.3) — VERIFY-AT-VIEW, the tier that fires because a HUMAN is looking. It ignores the
+    // poll window on purpose: the window bounds BACKGROUND cost, and a person opening a record has asked a
+    // question the cadence cannot answer. §12.3 marks this trigger "fires when cold: yes".
+    //
+    // It runs the SAME sweep the tick runs rather than a private read path — one reconciliation, one set of
+    // rules about what absence means. Fire-and-forget: the overlay renders NOW from banked state and the row
+    // refreshes underneath it, because a spinner in front of a record's history would be the wrong trade.
+    if (nextWatch(e, Date.now()) !== 'gone') {
+      void (async () => {
+        try {
+          const r = await _orchReq('RECORD_VERIFY_NOW', {});
+          if (r && r.success !== false) { try { s.textContent = `State: ${_as} · re-checked just now`; } catch { /* */ } void _renderActiveRailTab({ force: true }); }
+        } catch { /* the banked state is still on screen and still honest */ }
+      })();
+    }
   }
 }
 

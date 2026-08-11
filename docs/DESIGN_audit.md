@@ -628,18 +628,23 @@ not-sync / body-blind-marker posture as fields rather than a key.*
 > the hand-off (`draft → order #1234`) and the as-of line · **the §12.1a AU-2 defect is closed** — the eye resolves
 > from `currentKind`, so a completed draft can no longer build a draft URL carrying an order id.
 >
-> **Triggers (§12.3): ONE of five.** `verify-at-view` is wired only in its cheapest form (the card reads the
-> banked state); a delete WE perform records `gone`. **Not built:** the tee hint, the `webNavigation` trigger, the
-> targeted per-record re-read, and the collection poll on `vitals:tick` (§12.4) — which is the one that catches a
-> change made ELSEWHERE, and therefore the one that makes the watch mean anything against another machine.
-> Until it lands, Orchard learns of a vendor-side change only when it did the change itself.
+> **Triggers (§12.3), v2.74.2207: THREE of five.** The COLLECTION POLL is built — on `vitals:tick`, no new alarm
+> (§12.4's explicit instruction), planning by `pollPlan` and reconciling by `reconcileCollection`, covering warm
+> AND cold rows because a collection read is O(1) in records. VERIFY-AT-VIEW is built — opening a record's drill
+> sends `RECORD_VERIFY_NOW`, which runs the SAME sweep with the window bypassed, because the window bounds
+> background cost and a person looking is not background cost. A delete WE perform records `gone`.
 >
-> **v2.74.2206 added:** the drill overlay RENDERS the timeline (§12.1a) — it had promised that in words since
-> AU-8 while rendering nothing — and the reversal offer is now DERIVED from §13.2's four conditions rather than
-> from 'a delete leg exists', with `outwardAt` stamped at the write seam (§13.3) and the suppression sentence
-> rendered in the drill (§13.5). One deviation, deliberate: §13.2 makes freshness a conjunct of the offer, which
-> would hide the control on every cold row while §12.3's verify-at-view read is unbuilt — so a cold row returns
-> `stale`, still offers, and states what it does not know. When that read lands, `stale` becomes a re-read.
+> **§12.9 observed fields is built**: all three observer kinds (`field` / `set` / `member`), declared paths only,
+> additions-only for sets, `id` required. `shopify_draft_orders` declares `watches:[draft]` + `observe:{status,
+> total}`, so a draft completed elsewhere now surfaces as an `update` on the next poll.
+>
+> **The VERB GENERALIZATION (§10.3) is built**: `AUDIT_VERBS` is `create|update|delete`, `classifyVerb` reads the
+> vendor's own operation key first and defaults to `create` on no evidence. An act on a record we ALREADY hold
+> becomes an EVENT on that row — never a second row, which is what keeps §12.0 intact.
+>
+> **Still not built (2 of 5 triggers):** the tee hint (`harvestTee` — free, body-blind, catches a change made in
+> this browser) and the `webNavigation` trigger (free, catches them looking at it). Both are cheap and neither is
+> load-bearing now that the poll exists: they would make a change VISIBLE SOONER, not visible at all.
 >
 > **Also not built:** §12.5's `readTransition` adapter (still LIVE-UNVERIFIED per §10.3 — a real order must be
 > created first) and §12.9's `observe` extractor. `applyUpdate` accepts the fields §12.9 would produce; nothing

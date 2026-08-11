@@ -10,7 +10,7 @@ import {
   classifyCreate, createRecordFrom, auditSucceeded, customerLabelFrom,
   auditEntry, appendCreate, truncationNotice, describeCreate,
   parseCreatesAsk, createsScopeWindow, filterCreatesByScope, renderCreatesAnswer,
-  recordOpenUrl, incitedOpener,
+  recordOpenUrl, incitedOpener, classifyVerb,
 } from './audit.js';
 import { fillEndpoint } from './connectorRecipes.js';   // AU-2 — the real substituter, injected exactly as chat.js injects it
 
@@ -68,7 +68,7 @@ describe('classifyCreate — kind from op key, else recipeId, else record', () =
   it('REST reply → kind from recipeId (create_ticket → ticket)', () => {
     assert.deepEqual(classifyCreate(TICKET_REST, 'create_ticket'), { verb: 'create', kind: 'ticket' });
   });
-  it('unknown → kind record, never thrown; verb always create in v1', () => {
+  it('unknown → kind record, never thrown; verb defaults to create (AU-6 kept the safe default)', () => {
     const c = classifyCreate({ foo: 1 }, 'mystery_leg');
     assert.equal(c.verb, 'create');
     assert.equal(c.kind, 'record');
@@ -346,5 +346,40 @@ describe('incitedOpener — link | drive | none, decided by the SYSTEM (§12.8.1
 
   it('carries the label so the button can name what it opens', () => {
     assert.equal(incitedOpener(vsd, { canDrive: (s) => s.includes('vendorsuite') }).label, '1565 Fairlie Way');
+  });
+});
+
+// AU-6 (v2.74.2207) — the VERB generalization §10.3 named. `create` unless the evidence says otherwise: an
+// unrecognised write is far more likely a create shape we have not met than a destructive act we failed to spot,
+// and mislabelling a create as a delete would put a terminal word on a live record.
+describe('classifyVerb — which act was this (AU-6)', () => {
+  const gql = (op) => ({ data: { [op]: { userErrors: [] } } });
+
+  it('reads the vendor naming its OWN act, from the reply’s operation key', () => {
+    assert.equal(classifyVerb(gql('draftOrderDelete'), 'x'), 'delete');
+    assert.equal(classifyVerb(gql('customerUpdate'), 'x'), 'update');
+    assert.equal(classifyVerb(gql('draftOrderCreate'), 'x'), 'create');
+  });
+
+  it('falls back to the recipe id when the reply does not say', () => {
+    assert.equal(classifyVerb({}, 'shopify_delete_order'), 'delete');
+    assert.equal(classifyVerb({}, 'shopify_update_customer'), 'update');
+    assert.equal(classifyVerb({}, 'shopify_create_order'), 'create');
+  });
+
+  it('the REPLY outranks the id — the vendor knows what it did', () => {
+    assert.equal(classifyVerb(gql('draftOrderDelete'), 'shopify_create_order'), 'delete');
+  });
+
+  it('DEFAULTS TO CREATE on no evidence — the safe direction', () => {
+    assert.equal(classifyVerb(null, ''), 'create');
+    assert.equal(classifyVerb({ data: {} }, 'something_new'), 'create');
+  });
+
+  it('classifyCreate carries the verb through, and the whitelist accepts all three', () => {
+    assert.equal(classifyCreate(gql('draftOrderDelete'), 'x').verb, 'delete');
+    assert.equal(auditEntry({ verb: 'delete', kind: 'draft' }).verb, 'delete');
+    assert.equal(auditEntry({ verb: 'update', kind: 'draft' }).verb, 'update');
+    assert.equal(auditEntry({ verb: 'wormhole', kind: 'draft' }).verb, 'create', 'an unknown verb still falls to create');
   });
 });

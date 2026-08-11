@@ -83,6 +83,16 @@ const ENTRY_FIELD_MAP = new Set([
   // resulting `warmUntil` on the row. Never a leg field — the leg is the thing being INVOKED, and this describes
   // how long what it produced is worth re-reading, which is a property of the record, not of the call.
   'warm',
+  // AU-6 (v2.74.2207, §12.9/§12.4) — the WATCH quartet on a collection READ leg, all four catalog-read by the
+  // poll (`pollPlan` / `reconcileCollection`, Core/recordObserve.js) and none of them a leg field:
+  //   watches — which record KINDS this collection's rows answer for; it is what makes a leg a poll candidate
+  //   observe — what counts as NEWS on one of those rows (declared paths only — a poll cannot invent an event)
+  //   rows    — where the vendor rows live in the reply
+  //   rowId   — the member identity within them
+  // They describe how a record is WATCHED, which is a property of the record's life, not of invoking the read.
+  // The poll reads the catalog by id (the `coverage` precedent), so there is no seeded path to drop them, and a
+  // drop stops a watch rather than firing a wrong write.
+  'watches', 'observe', 'rows', 'rowId', 'pollGapMs',
 ]);
 
 const ENTRIES = CONNECTOR_RECIPES.filter((e) => e && e.id && e.appHost);

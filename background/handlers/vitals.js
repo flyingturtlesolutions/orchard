@@ -24,6 +24,12 @@ import { primaryHost } from '../../Core/groundDedup.js';   // v2.74.2052 — the
 import { invokeRideRecipe } from '../../Core/rideStep.js';   // DESIGN_cadence.md §12 (v1715) — share the RUNNER: one resolve→plan→invoke for the canary AND the workflow step
 import { planSessionGovernorTick } from '../../Core/sessionGovernor.js';   // SGV-0 — the governor's PURE planner (inert soak; BUILD_ARC rung 4)
 import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   // SGV-0 — due-soon demand source for the snapshot
+// AU-6 (v2.74.2207, §12.4) — the COLLECTION poll rides this tick: the catalog it reads, the ledger it reconciles,
+// the pure planner/reconciler, and the state-machine functions it applies. No new alarm, no second clock owner.
+import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';
+import { loadCreates, updateCreate } from '../../Services/Storage/AuditCreateStore.js';
+import { pollPlan, reconcileCollection } from '../../Core/recordObserve.js';
+import { applyGone, applyUpdate, warmWindowMs } from '../../Core/recordLife.js';
 
 const TICK_ALARM = 'vitals:tick';
 const CONFIRM_PREFIX = 'vitals:confirm:';
@@ -31,6 +37,7 @@ const LAST_DAILY_KEY = 'vitals:lastDaily';
 const SETTINGS_KEY = 'settings:vitals';
 const INC_KEY = 'vitals:incidents';
 const TALLY_KEY = 'vitals:tally';
+const WATCH_KEY = 'audit:watch';      // AU-6 §12.4 — { lastPollAt: {recipeId: ms}, seenBy: {rowKey: observe-seen-state} }
 const KA_KEY = 'vitals:ka';           // KA-0/1 — { [origin]: { on, samples[], est, lastPingAt, lastPingOkAt, strikes, futile } }
 
 let _ctx = null;
@@ -274,7 +281,90 @@ async function _tick() {
     try { await chrome.storage.local.set({ [LAST_DAILY_KEY]: Date.now() }); } catch { /* */ }   // stamp at START (double-run guard across SW restarts)
     await _dailySweep(s);
   }
+  await _recordWatchSweep();   // AU-6 §12.4 — the COLLECTION poll: one read per collection, reconciled against every row
   await _sgvInertTick();   // SGV-0 — the governor's INERT soak: plan + log, never execute (BUILD_ARC rung 4)
+}
+
+/**
+ * AU-6 (v2.74.2207, DESIGN_audit.md §12.3/§12.4) — THE COLLECTION POLL. The trigger that catches a change made
+ * somewhere other than this browser, and therefore the one that makes the watch mean anything at all.
+ *
+ * NO NEW ALARM, per §12.4: "`vitals:tick` is explicitly one alarm — the window is the cadence, the tick is just
+ * the scanner", and it already absorbed `conn:heartbeat`. A second alarm would regress that consolidation, and
+ * under MV3 alarms are the only durable timer.
+ *
+ * THE UNIT IS THE COLLECTION, never the record — `shopify_draft_orders` answers for N drafts in ONE request, and
+ * per-record polling is O(N) requests on a live user session, untenable near the 500-row cap. Which is also why
+ * COLD rows are reconciled here: the read costs the same either way, so excluding them would save nothing and
+ * blind us precisely where it hurts (a draft that sat long enough to go cold, then completed on someone else's
+ * machine — §12.3's corrected rule).
+ *
+ * EVERYTHING FAIL-SAFE. This runs after presence and keep-alive; a throw anywhere must not cost the tick.
+ */
+async function _recordWatchSweep({ force = false } = {}) {
+  try {
+    const { items } = await loadCreates();
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) return;
+    const book = (await StorageManager.get(WATCH_KEY)) || {};
+    const lastPollAt = _isPlain(book.lastPollAt) ? book.lastPollAt : {};
+    const seenBy = _isPlain(book.seenBy) ? book.seenBy : {};
+    // `force` = a human is looking (verify-at-view). Passing an empty lastPollAt makes every collection due;
+    // the window exists to bound BACKGROUND cost, and a person asking is not background cost.
+    const plan = pollPlan(rows, { catalog: CONNECTOR_RECIPES, now: Date.now(), lastPollAt: force ? {} : lastPollAt });
+    if (!plan.length) return;
+    let polled = 0; let updated = 0; let gone = 0; let failed = 0;
+    for (const step of plan) {
+      const leg = (CONNECTOR_RECIPES || []).find((r) => r && r.id === step.recipeId);
+      if (!leg) continue;
+      // The ground that owns this host — the same resolution the canary makes, and the same shared runner.
+      let groundId = '';
+      try { groundId = (await _ctx.invokeSgHandler('ENSURE_GROUND_FOR_URL', { url: `https://${step.host}/` }))?.groundId || ''; } catch { groundId = ''; }
+      if (!groundId) continue;
+      let reply = null;
+      try {
+        reply = await invokeRideRecipe({ id: leg.id, ...leg }, groundId, { invoke: (payload) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...payload, headless: true }) });
+      } catch { reply = null; }
+      polled++;
+      if (!reply || !reply.ok) { failed++; continue; }   // a signed-out or 404 collection says nothing about its members
+      const observedRows = _rowsFromReply(reply.value, leg.rows);
+      const acts = reconcileCollection(rows, observedRows, { leg, now: Date.now(), seenBy });
+      for (const a of acts) {
+        const [atStr, ...idParts] = String(a.key).split('|');
+        const ref = { at: Number(atStr) || 0, id: idParts.join('|') };
+        try {
+          if (a.kind === 'gone') { const r = await updateCreate(ref, (row) => applyGone(row, { why: a.why || '404', at: a.at })); if (r.changed) gone++; }
+          else {
+            const r = await updateCreate(ref, (row) => applyUpdate(row, { fields: a.fields, at: a.at, windowMs: warmWindowMs(leg) }));
+            if (r.changed) { updated++; seenBy[a.key] = a.seenNext; }
+          }
+        } catch { /* one row's failure must not stop the rest */ }
+      }
+      lastPollAt[leg.id] = Date.now();
+    }
+    try { await StorageManager.set(WATCH_KEY, { lastPollAt, seenBy }); } catch { /* */ }
+    // BODY-BLIND like every other audit line: counts and leg ids, never a value that was observed.
+    try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) over ${rows.length} row(s) → ${updated} updated · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
+  } catch { /* fail-safe — the watch must never break the tick */ }
+}
+
+const _isPlain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** Pull the vendor rows out of a reply by the leg's declared `rows` path. Tolerant: a shape change yields [], and
+ *  reconcile then reads that as "said nothing" rather than "everything is gone" (the coverage rule protects it). */
+function _rowsFromReply(value, path) {
+  try {
+    let cur = value;
+    for (const seg of String(path || '').split('.').filter(Boolean)) {
+      const bare = seg.replace(/\[\]$/, '');
+      if (Array.isArray(cur)) cur = cur[0];
+      if (!cur || typeof cur !== 'object') return [];
+      cur = cur[bare];
+    }
+    if (!Array.isArray(cur)) return cur && typeof cur === 'object' ? [cur] : [];
+    // A GraphQL edges[] list unwraps to its nodes; anything else is already the row.
+    return cur.map((x) => (x && typeof x === 'object' && x.node && typeof x.node === 'object' ? x.node : x)).filter(Boolean);
+  } catch { return []; }
 }
 
 // ── SGV-0 (DESIGN_session_governor.md v1.14 §11.1) — the planner runs INERT: every tick snapshots, plans, and
@@ -529,6 +619,21 @@ async function _confirmFire(groundId) {
 // ── VT-2 — the handlers the Admin desk renders from ────────────────────────────────────────────────────────────────
 export function createVitalsHandlers() {
   return {
+    /**
+     * AU-6 (v2.74.2207, §12.3) — VERIFY-AT-VIEW: "whatever is true right now", 1 read, ON DEMAND. The tier that
+     * fires when a HUMAN is looking, which is why it ignores the poll window — a person opening a record has
+     * asked a question the cadence cannot answer, and §12.3 marks this trigger "fires when cold: yes".
+     *
+     * It runs the SAME sweep as the tick rather than a private read path: one reconciliation, one set of rules
+     * about what absence means. `force` only bypasses the window.
+     */
+    RECORD_VERIFY_NOW: (_payload, _sender, sendResponse) => {
+      (async () => {
+        try { await _recordWatchSweep({ force: true }); sendResponse({ success: true }); }
+        catch (e) { sendResponse({ success: false, error: (e && e.message) || 'verify failed' }); }
+      })();
+      return true;
+    },
     // The full vitals picture: the presence registry + incidents + a per-ground shape rollup (counts + names only).
     VITALS_STATUS: (_payload, _sender, sendResponse) => {
       (async () => {

@@ -1,0 +1,235 @@
+// Core/recordObserve.js — AU-6 §12.9 (observed fields) + §12.3/§12.4 (the collection poll's pure half).
+// PURE — no chrome, no DOM, no LLM, no clock. The SW supplies `now` and performs the reads.
+//
+// TWO JOBS, one file, because they are two halves of one sentence: §12.9 says WHAT to watch on a record, and
+// §12.3/§12.4 say WHEN to go look and what an answer means. Splitting them would put the "absence is not
+// deletion" rule a file away from the extractor whose output it judges.
+
+import { extractValue } from './peritemMap.js';
+
+const _str = (v) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
+const _isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const _num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+/** Walk `a[].b.c` — the array hop `extractValue` already understands, plus an explicit rows-path reader. PURE. */
+function _rowsAt(value, path) {
+  if (!path) return [];
+  let cur = value;
+  for (const seg of _str(path).split('.').filter(Boolean)) {
+    const bare = seg.replace(/\[\]$/, '');
+    if (Array.isArray(cur)) cur = cur[0];
+    if (!_isObj(cur)) return [];
+    cur = cur[bare];
+  }
+  return Array.isArray(cur) ? cur.filter((r) => r != null) : (_isObj(cur) ? [cur] : []);
+}
+
+/**
+ * §12.9 — READ THE DECLARED OBSERVERS off one vendor object. PURE.
+ *
+ * Three kinds, and they compose rather than multiply (§12.9.2):
+ *   A `field`  — a scalar on the record            → {fields:{name:value}}
+ *   B `set`    — a collection whose MEMBERS are the news (a Zendesk reply)  → {added:[…]}
+ *   C `member` — a collection whose members have their own state           → {changed:[…]}
+ * C is B composed with A, which is why there is no third mechanism: a new member arrives by the `set` rule and
+ * its later state moves by this one.
+ *
+ * DECLARED PATHS ONLY, and an absent path yields NO KEY — never `undefined`, never a guess (§12.7). The whole
+ * point of a declaration here is that a poll cannot invent news: if nobody said to watch it, a change in it is
+ * not an event.
+ *
+ * ADDITIONS ONLY for `set`, by default and deliberately (§12.9.2): "a member that vanishes is far more often
+ * pagination (`first: 10`) or a filter change than a deletion. Concluding 'removed' from a truncated read
+ * manufactures false events" — the same silent-truncation failure §5.6 exists to prevent.
+ *
+ * @param obj    the vendor object for ONE record (a row from a collection read, or a detail read's body)
+ * @param decl   the leg's `observe` declaration: {name: {of:'field'|'set'|'member', …}}
+ * @param seen   what we already know: {fields:{}, sets:{name:[ids]}, members:{name:{id:{k:v}}}}
+ * @returns {{fields:object, added:object, changed:object, seenNext:object}}  empty objects when nothing is news
+ */
+export function observeFields(obj, decl, seen = null) {
+  const o = _isObj(obj) ? obj : null;
+  const d = _isObj(decl) ? decl : null;
+  const prev = _isObj(seen) ? seen : {};
+  const prevFields = _isObj(prev.fields) ? prev.fields : {};
+  const prevSets = _isObj(prev.sets) ? prev.sets : {};
+  const prevMembers = _isObj(prev.members) ? prev.members : {};
+  const out = { fields: {}, added: {}, changed: {}, seenNext: { fields: { ...prevFields }, sets: { ...prevSets }, members: { ...prevMembers } } };
+  if (!o || !d) return out;
+
+  for (const [name, spec] of Object.entries(d)) {
+    if (!_isObj(spec)) continue;
+    const of = _str(spec.of) || 'field';
+
+    if (of === 'field') {
+      const v = extractValue(o, _str(spec.at));
+      if (v == null || v === '') continue;                       // absent path → no key at all
+      if (String(prevFields[name]) === String(v)) continue;      // unchanged → not news (absent→present IS news)
+      out.fields[name] = v;
+      out.seenNext.fields[name] = v;
+      continue;
+    }
+
+    const rows = _rowsAt(o, _str(spec.rows));
+    const idKey = _str(spec.id);
+    if (!rows.length || !idKey) continue;                        // `id` is REQUIRED — without member identity every poll looks like change
+
+    if (of === 'set') {
+      const known = new Set((Array.isArray(prevSets[name]) ? prevSets[name] : []).map(String));
+      const keep = _isObj(spec.keep) ? spec.keep : {};
+      const added = [];
+      const nextIds = new Set(known);
+      for (const r of rows) {
+        const id = _str(extractValue(r, idKey) ?? r[idKey]);
+        if (!id || known.has(id)) continue;
+        const rec = { id };
+        for (const [k, path] of Object.entries(keep)) {
+          const v = extractValue(r, _str(path));
+          if (v != null && v !== '') rec[k] = v;
+        }
+        added.push(rec);
+        nextIds.add(id);
+      }
+      // The seen-set grows even when nothing was added, so a first sighting does not replay as news next poll.
+      out.seenNext.sets[name] = [...nextIds].slice(-200);
+      if (added.length) out.added[name] = added;
+      continue;
+    }
+
+    if (of === 'member') {
+      const track = _isObj(spec.track) ? spec.track : {};
+      const known = _isObj(prevMembers[name]) ? prevMembers[name] : {};
+      const next = { ...known };
+      const changed = [];
+      for (const r of rows) {
+        const id = _str(extractValue(r, idKey) ?? r[idKey]);
+        if (!id) continue;
+        const cur = {};
+        for (const [k, path] of Object.entries(track)) {
+          const v = extractValue(r, _str(path));
+          if (v != null && v !== '') cur[k] = v;
+        }
+        if (!Object.keys(cur).length) continue;
+        const was = _isObj(known[id]) ? known[id] : null;
+        next[id] = { ...(was || {}), ...cur };
+        if (!was) continue;                                      // a NEW member is the `set` rule's news, not this one's
+        const moved = {};
+        for (const [k, v] of Object.entries(cur)) if (String(was[k]) !== String(v)) moved[k] = v;
+        if (Object.keys(moved).length) changed.push({ id, ...moved });
+      }
+      out.seenNext.members[name] = next;
+      if (changed.length) out.changed[name] = changed;
+    }
+  }
+  return out;
+}
+
+/** Is there anything to report? PURE — so a caller can skip a write rather than append an empty event. */
+export function hasNews(obs) {
+  const o = _isObj(obs) ? obs : {};
+  return !!(Object.keys(o.fields || {}).length || Object.keys(o.added || {}).length || Object.keys(o.changed || {}).length);
+}
+
+/**
+ * Flatten an observation into the `{name: scalar}` shape `applyUpdate` compares and stores. PURE.
+ * A `set`/`member` result becomes a COUNT-and-latest summary rather than a nested blob, because the timeline
+ * entry is a sentence a person reads — the members themselves are on the vendor's page, one eye-click away.
+ */
+export function newsToFields(obs) {
+  const o = _isObj(obs) ? obs : {};
+  const out = { ...(o.fields || {}) };
+  for (const [name, list] of Object.entries(o.added || {})) {
+    if (Array.isArray(list) && list.length) out[name] = `+${list.length} new (${list.map((x) => _str(x.id)).slice(0, 3).join(', ')})`;
+  }
+  for (const [name, list] of Object.entries(o.changed || {})) {
+    if (Array.isArray(list) && list.length) out[name] = list.map((x) => `${_str(x.id)}→${Object.entries(x).filter(([k]) => k !== 'id').map(([, v]) => _str(v)).join('/')}`).slice(0, 3).join(' · ');
+  }
+  return out;
+}
+
+// ── §12.3/§12.4 — the COLLECTION poll ──────────────────────────────────────────────────────────────────────
+
+/** Default gap between polls of one collection when its recipe declares no `pulse` cadence. */
+export const POLL_GAP_MS = 6 * 60 * 60 * 1000;   // 4× a day at most — a ceiling, never a guarantee (§12.6)
+
+/**
+ * §12.4 — WHICH COLLECTIONS ARE WORTH READING RIGHT NOW. PURE.
+ *
+ * THE UNIT OF POLLING IS THE COLLECTION, never the record: `shopify_draft_orders` answers for N drafts in ONE
+ * request, and per-record polling is O(N) requests on a live user session, untenable near the 500 cap.
+ *
+ * A collection is a candidate when it declares BOTH `observe` (something to watch) and `watches` (which record
+ * kinds its rows answer for). Cold rows are INCLUDED in the coverage count — §12.3's corrected rule: a
+ * collection read is O(1) in records, so excluding cold rows saves zero and buys a blind spot exactly where it
+ * hurts (a draft that sat long enough to go cold and was then completed on someone else's machine).
+ *
+ * @returns {Array<{recipeId, host, rowIds:string[], why}>}  one entry per collection worth reading
+ */
+export function pollPlan(rows, { catalog = [], now = 0, lastPollAt = {}, gapMs = POLL_GAP_MS } = {}) {
+  const list = (Array.isArray(rows) ? rows : []).filter(_isObj);
+  const legs = (Array.isArray(catalog) ? catalog : []).filter((r) => _isObj(r) && _isObj(r.observe) && Array.isArray(r.watches) && r.watches.length);
+  const seenAt = _isObj(lastPollAt) ? lastPollAt : {};
+  const out = [];
+  for (const leg of legs) {
+    const host = _str(leg.appHost);
+    const kinds = new Set(leg.watches.map((k) => _str(k)));
+    const live = list.filter((r) => _str(r.system) === host && _str(r.watch) !== 'gone'
+      && (kinds.has(_str(r.currentKind) || _str(r.kind))));
+    if (!live.length) continue;                                             // nothing to reconcile → no request
+    const gap = _num(leg.pollGapMs) || _num(gapMs) || POLL_GAP_MS;
+    const last = _num(seenAt[_str(leg.id)]);
+    if (last && (_num(now) - last) < gap) continue;                         // inside its window — the tick is the scanner, the window is the cadence
+    out.push({ recipeId: _str(leg.id), host, rowIds: live.map((r) => _str(r.currentId) || _str(r.id)), why: last ? 'window elapsed' : 'never polled' });
+  }
+  return out;
+}
+
+/**
+ * §12.3 — WHAT A COLLECTION'S ANSWER MEANS FOR EACH ROW. PURE; returns INSTRUCTIONS, not mutations, so the
+ * caller applies them through Core/recordLife's own functions and this file never owns the state machine.
+ *
+ * THE RULE THAT MATTERS MOST — **ABSENCE IS NOT DELETION, unless the collection is a PARTITION.**
+ * `shopify_draft_orders` declares `coverage: 'selection'` (connectorRecipes.js), and a draft missing from it has
+ * at least three innocent explanations: it was COMPLETED into an order, it fell past `first: 50`, or a filter
+ * moved. Concluding `gone` from any of those would mark a live record dead and remove its eye — a confidently
+ * wrong terminal state, from silence. Only a declared PARTITION ("these rows are ALL of them") makes absence an
+ * observation, and even then only for rows the read's own scope covers.
+ *
+ * @param rows          the banked rows this collection answers for
+ * @param observedRows  the vendor rows it returned
+ * @param o.leg         the collection recipe ({observe, coverage, id})
+ * @param o.seenBy      {rowKey: seen-state} for observeFields
+ * @returns {Array<{key, at, kind:'update'|'gone', fields?, seenNext?, why?}>}
+ */
+export function reconcileCollection(rows, observedRows, { leg = null, now = 0, seenBy = {} } = {}) {
+  const list = (Array.isArray(rows) ? rows : []).filter(_isObj);
+  const got = (Array.isArray(observedRows) ? observedRows : []).filter(_isObj);
+  const l = _isObj(leg) ? leg : {};
+  const decl = _isObj(l.observe) ? l.observe : null;
+  const idKey = _str(l.rowId) || 'id';
+  const seen = _isObj(seenBy) ? seenBy : {};
+  const byId = new Map();
+  for (const r of got) {
+    const raw = _str(extractValue(r, idKey) ?? r[idKey]);
+    if (!raw) continue;
+    byId.set(raw, r);
+    const tail = raw.split('/').pop();                                      // gid://shopify/DraftOrder/29685 → 29685
+    if (tail && tail !== raw) byId.set(tail, r);
+  }
+  const out = [];
+  for (const row of list) {
+    const key = `${_num(row.at)}|${_str(row.id)}`;
+    const want = _str(row.currentId) || _str(row.id);
+    const hit = byId.get(want) || null;
+    if (!hit) {
+      // Absence. ONLY a partition may read it as non-existence — see the rule above.
+      if (_str(l.coverage) === 'partition') out.push({ key, at: _num(now), kind: 'gone', why: '404' });
+      continue;
+    }
+    if (!decl) continue;
+    const obs = observeFields(hit, decl, seen[key] || null);
+    if (!hasNews(obs)) continue;
+    out.push({ key, at: _num(now), kind: 'update', fields: newsToFields(obs), seenNext: obs.seenNext });
+  }
+  return out;
+}

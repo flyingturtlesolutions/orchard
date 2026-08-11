@@ -769,6 +769,19 @@ export const CONNECTOR_RECIPES = [
     // (first, not draftOrdersFirst) was right; dropped the undeclared last/before/after (the HAR omits them, so the
     // pinned doc does not declare them — sending them risks a "Variable not defined" error). query carries the search phrase.
     endpoint: '/api/operations/{op_sha}/DraftOrderList/shopify/{handle}?operationName=DraftOrderList&variables=%7B%22first%22%3A50%2C%22sortKey%22%3Anull%2C%22reverse%22%3Anull%2C%22query%22%3A%22{query}%22%2C%22savedViewId%22%3Anull%7D',
+    // AU-6 (v2.74.2207, §12.9/§12.4) — THIS COLLECTION IS THE WATCH for draft records. `watches` names the record
+    // KINDS its rows answer for, which is what makes it a poll candidate at all; `observe` names what counts as
+    // news on one of those rows. Declared paths ONLY — a poll cannot invent an event, so a field nobody declared
+    // is not news however much it moves.
+    //
+    // `coverage: 'selection'` above is LOAD-BEARING for this, not decoration: a draft missing from this read has
+    // three innocent explanations (completed into an order, past `first: 50`, a filter moved), so absence here
+    // must never be read as deletion. reconcileCollection enforces that; the marker is how it knows.
+    watches: ['draft'], rowId: 'id', rows: 'data.draftOrders.edges[].node',
+    observe: {
+      status: { of: 'field', at: 'status' },          // OPEN → INVOICE_SENT → COMPLETED — the hand-off's own tell
+      total: { of: 'field', at: 'totalPrice' },
+    },
     params: [{ name: 'query', type: 'string', required: false, hint: 'Shopify draft search syntax (status:open) or a draft number like #D1023, or blank for the most recent drafts' }] },
   // v2.74.2069 — DELETE a Shopify DRAFT order (persisted op DeleteDraftOrder, already banked live). The
   // DESTRUCTIVE-write template (delete_ticket's safety axes: write:true, reversible:false, destructive:true) on the

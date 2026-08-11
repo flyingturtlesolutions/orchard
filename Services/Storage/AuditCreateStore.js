@@ -94,6 +94,28 @@ export async function removeCreate({ at = 0, id = '' } = {}) {
 }
 
 /**
+ * AU-6 (v2.74.2207, §12.0) — DO WE ALREADY HOLD THIS RECORD? Matched on `system` + the vendor id, checking the
+ * POINTER as well as the create id, so a draft that became an order is still found when the order is acted on.
+ *
+ * The write seam calls this before banking an `update`/`delete`: an act on a record we already have is an EVENT
+ * on that row, and a second row would double-count an artifact that exists once. Returns the row (for its
+ * immutable `at`+`id` key) or null.
+ */
+export async function findCreate({ system = '', id = '' } = {}) {
+  const rec = await _read();
+  const items = (rec && Array.isArray(rec.items)) ? rec.items : [];
+  const sys = String(system || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  const want = String(id || '');
+  if (!sys || !want) return null;
+  for (let i = items.length - 1; i >= 0; i--) {          // newest first — a re-created id belongs to the latest act
+    const e = items[i];
+    if (!e || String(e.system || '') !== sys) continue;
+    if (String(e.id || '') === want || String(e.currentId || '') === want) return e;
+  }
+  return null;
+}
+
+/**
  * AU-6 (v2.74.2204, §12.1a) — apply a LIFECYCLE change to one banked row, in place. The row is found by its
  * IMMUTABLE identity (`at` + the create `id`) — never by `currentId`, which is the thing that moves.
  *

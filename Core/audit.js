@@ -14,7 +14,16 @@ import { createdRecordId, createdRecordLabel } from './connectorRender.js';
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
 
-export const AUDIT_VERBS = Object.freeze(['create']);                 // v1; update/delete arrive at AU-6
+// AU-6 (v2.74.2207) — the VERB GENERALIZATION §10.3 named ("Extractors — CREATE-only in v1; the
+// write-generalization is AU-6"). A row is one of Orchard's ACTS (§12.0), so an update or a delete WE perform is
+// an act and may head a row.
+//
+// THE RULE THAT KEEPS §12.0 INTACT, and it is the whole content of this generalization: an act on a record we
+// ALREADY have a row for is an EVENT on that row, never a second row. Updating a draft we created did not create
+// a second thing — the AU-3 answer ("you've created 12 records") must not become 24 because half were edited.
+// A row is only headed by `update`/`delete` when the record it touches was never ours to begin with, which is a
+// genuinely different act: we changed someone else's record, and that is worth its own line.
+export const AUDIT_VERBS = Object.freeze(['create', 'update', 'delete']);
 export const AUDIT_KINDS = Object.freeze(['customer', 'order', 'draft', 'ticket', 'user', 'record']);  // unknown → 'record'
 export const AUDIT_WHO = Object.freeze(['human', 'gate']);            // clearedBy: a person clicked vs pipelineGate auto
 export const AUDIT_CAP = 500;   // GLOBAL book — creates are human-gated + rare, so a generous cap with a VISIBLE
@@ -56,7 +65,29 @@ export function classifyCreate(replyValue, recipeId, _method) {
   for (const ok of _opKeys(replyValue)) { kind = _kindFromOpKey(ok); if (kind) break; }
   if (!kind) kind = _kindFromRecipeId(recipeId);
   if (!AUDIT_KINDS.includes(kind)) kind = 'record';
-  return { verb: 'create', kind };
+  return { verb: classifyVerb(replyValue, recipeId), kind };
+}
+
+/**
+ * AU-6 (v2.74.2207) — WHICH ACT WAS THIS? PURE. `create` unless the evidence says otherwise, because an
+ * unrecognised write is far more likely a create shape we have not met than a destructive act we failed to spot,
+ * and mislabelling a create as a delete would put a terminal word on a live record.
+ *
+ * Evidence, strongest first: the reply's own OPERATION KEY (`draftOrderDelete`, `customerUpdate` — the vendor
+ * naming its own act), then the recipe id. Both are read, not guessed: an id containing `delete` is a delete
+ * whatever else it says, and `edit`/`update` is an update.
+ */
+export function classifyVerb(replyValue, recipeId) {
+  const opKeys = _opKeys(replyValue);
+  for (const ok of opKeys) {
+    const k = String(ok).toLowerCase();
+    if (/delete|destroy|remove/.test(k)) return 'delete';
+    if (/update|edit|modify|patch/.test(k)) return 'update';
+  }
+  const rid = String(recipeId || '').toLowerCase();
+  if (/delete|destroy|remove/.test(rid)) return 'delete';
+  if (/update|edit|modify|patch/.test(rid)) return 'update';
+  return 'create';
 }
 
 // A human label for a REST-created record that carries no `.data` envelope ({ticket:{id,subject}} / {user:{name}}).
