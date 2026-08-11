@@ -7921,6 +7921,29 @@ function _sidecarFields(value, alsoLeg, spec = null) {
       }).filter(Boolean).join('; ');
       if (roll) out[`${prefix}sAll`] = roll.slice(0, 300);
     }
+    // v2.74.2201 — KEEP THE STRUCTURED LIST, not just the flattened scalars. Live (gl 07:32): the branch enriched
+    // 3/3 rows "via vs_warranty_task +1 sidecar(s)" and then `ARM_ACT ▸ items=0/3 · skipped can't fill
+    // customer_gid` three times — the contacts had been READ and then thrown away on the way onto the row.
+    //
+    // Everything above this line projects the sidecar into SCALARS (`ContactEmail`, `ContactRoles`,
+    // `ContactsAll`), which is right for rendering and useless for selection: `readContacts` and the ladder's
+    // contact rungs both resolve against `__contacts`, and a flattened first-contact-wins string cannot answer
+    // "the PRIMARY homeowner's email" at all. peritemMap.js:258 says so in as many words — "the row's preserved
+    // contact LIST (`__contacts`, kept by the enrich pass)" — and this enrich pass was not keeping it.
+    //
+    // FOURTH INSTANCE OF ONE CAUSE. The v2117 note 150 lines below already records that `drill.also` "is executed
+    // by exactly ONE path, the map-enrich pass", and that every other door left records with no `__contacts`.
+    // That was fixed for the single-record drill by fetching on demand; the branch's sidecar door runs the leg
+    // and drops the shape instead, which looks like success from every log line in between.
+    //
+    // CONTACT-SHAPED BY THE MODULE'S OWN PREDICATE, never by a leg name: `roleFlags` (Core/contactRoles.js) is
+    // what decides a row carries contact roles, and it is already called four lines up for the scalar rollup.
+    // A name test ("is this the contacts leg?") would be the domain-specific shortcut this session keeps
+    // correcting — a second contacts-shaped sidecar on another system gets this for free.
+    if (Array.isArray(list) && list.length) {
+      const _people = list.slice(0, 12).filter((r) => r && typeof r === 'object' && roleFlags(r).length);
+      if (_people.length) out.__contacts = _people;
+    }
   } catch { /* an unreadable sidecar adds nothing */ }
   return out;
 }

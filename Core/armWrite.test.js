@@ -209,3 +209,42 @@ describe('armWrite — declarationReadsOutcome / pickArmTarget', () => {
     for (const junk of [null, undefined, {}, 'x', []]) assert.equal(pickArmTarget(junk).ok, false);
   });
 });
+
+// v2.74.2201 — THE LIVE FAILURE, pinned as a contract. gl 07:32: the branch reported `enriched 3/3 row(s) via
+// vs_warranty_task +1 sidecar(s)` and the act then reported `items=0/3 · skipped can't fill customer_gid` three
+// times. The contacts had been READ and thrown away: the sidecar merge projected them into scalars
+// (ContactEmail, ContactRoles, ContactsAll) and dropped the structured list every selector resolves against.
+//
+// `_sidecarFields` lives in chat.js, which is OUTSIDE the test glob, so these assert the CONTRACT it has to
+// satisfy rather than the function itself — what a row must carry for a per-item act to fill a contact rung.
+describe('armWrite — the contact rung needs the STRUCTURED list, not the flattened scalars', () => {
+  const flattenedOnly = {
+    TaskNumber: '4913764-01-01', AddressLine1: '2184 Monk Drive',
+    // Exactly what the sidecar merge produced before v2201 — readable, renderable, and unselectable.
+    ContactEmail: 'jimmy@example.com', ContactRoles: 'Primary, Buyer',
+    ContactsAll: 'Jimmy Ivey (Primary, Buyer) jimmy@example.com 555-0100',
+    [OUTCOME_KEY]: OUT,
+  };
+
+  it('reproduces the live miss: flattened scalars alone cannot fill customer_gid', () => {
+    const { params, missing } = armActParams(flattenedOnly, DECL, DEFS);
+    assert.deepEqual(missing, ['customer_gid'], 'this is the `items=0/3` line from the trace');
+    assert.deepEqual(params.line_items, [{ variantId: OUT.product, quantity: 6 }],
+      'and it localises the fault: __outcome DID reach the row, so the bank was never the problem');
+  });
+
+  it('with __contacts present the same row fills completely — one key is the whole difference', () => {
+    const { params, missing } = armActParams({ ...flattenedOnly, __contacts: CONTACTS }, DECL, DEFS);
+    assert.deepEqual(missing, []);
+    assert.equal(params.customer_gid, 'jimmy@example.com');
+  });
+
+  it('a contact rung picks the declared ROLE, which is why a first-wins scalar cannot stand in for it', () => {
+    const staffFirst = [
+      { FirstName: 'Kat', LastName: 'Owens', Email: 'kat@builder.example', IsDrHorton: true, AssignmentType: 'CSR' },
+      ...CONTACTS,
+    ];
+    const { params } = armActParams({ ...flattenedOnly, __contacts: staffFirst }, DECL, DEFS);
+    assert.equal(params.customer_gid, 'jimmy@example.com', 'the HOMEOWNER, not the builder’s CSR who happens to be first');
+  });
+});
