@@ -78,6 +78,11 @@ const ENTRY_FIELD_MAP = new Set([
   // destructive act. Threading them to the leg would put an irreversible operation's address on the surface this
   // seal exists because things fall off.
   'undoLeg', 'gidType',
+  // AU-6 (v2.74.2204, §12.4) — the WARM WINDOW, catalog-read at the ONE seam that knows which recipe wrote a
+  // record: `recordCreate` (background/handlers/audit.js) resolves it through `warmWindowMs` and banks the
+  // resulting `warmUntil` on the row. Never a leg field — the leg is the thing being INVOKED, and this describes
+  // how long what it produced is worth re-reading, which is a property of the record, not of the call.
+  'warm',
 ]);
 
 const ENTRIES = CONNECTOR_RECIPES.filter((e) => e && e.id && e.appHost);

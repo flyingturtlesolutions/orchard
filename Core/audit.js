@@ -179,6 +179,17 @@ export function auditEntry(f = {}) {
     ...(f.groundId ? { groundId: _str(f.groundId).slice(0, 60) } : {}),
     ...(_capUrlArgs(f.urlArgs) ? { urlArgs: _capUrlArgs(f.urlArgs) } : {}),   // AU-2 — the fill ingredients ({handle}…) to resolve itemUrl at render
     ...(incitedBy ? { incitedBy } : {}),                                      // §12.8.1 — the record that CAUSED this one
+    // AU-6 (v2.74.2204, §12.1) — the LIFECYCLE fields. A create is born WARM with a one-entry timeline; the
+    // pointer fields stay absent until a hand-off is observed, which is what keeps `handOff()` a fact about the
+    // row rather than a comparison that has to special-case "same as the create".
+    //
+    // `kind`/`id` above are now explicitly IMMUTABLE — what Orchard created, forever. Everything that moves
+    // moves in `currentKind`/`currentId` and `events`. Collapsing the two would make a completed draft report as
+    // "you created an order", which is false, and would corrupt the AU-3 count (§12.0).
+    watch: 'warm',
+    ...(Number.isFinite(f.warmUntil) && f.warmUntil > 0 ? { warmUntil: f.warmUntil } : {}),
+    lastSeenAt: at,
+    events: [{ at, type: 'create', kind: AUDIT_KINDS.includes(f.kind) ? f.kind : 'record', id: _str(f.id).slice(0, 80), label: _str(f.label).slice(0, 80) }],
   };
 }
 

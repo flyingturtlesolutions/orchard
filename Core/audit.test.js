@@ -90,8 +90,20 @@ describe('customerLabelFrom — minimal human label from the INPUT (§10.5)', ()
 describe('auditEntry — whitelist normalizer, clock passed in', () => {
   it('drops unknown fields, keeps the whitelist, defaults verb/kind/who', () => {
     const e = auditEntry({ at: 1000, system: 'admin.shopify.com', kind: 'draft', id: '29685', label: '#D29685', who: 'human', recipeId: 'shopify_create_order', junk: 'x' });
-    assert.deepEqual(e, { at: 1000, system: 'admin.shopify.com', verb: 'create', kind: 'draft', id: '29685', label: '#D29685', who: 'human', recipeId: 'shopify_create_order' });
+    // AU-6 (v2.74.2204, §12.1) — the shape grew three LIFECYCLE fields, and this deepEqual is why the change is
+    // reviewed rather than absorbed: a create is born WARM, having been confirmed at its own timestamp, with a
+    // one-entry timeline. `currentKind`/`currentId` are deliberately ABSENT until a hand-off is observed — that
+    // absence is what lets `handOff()` be a fact about the row instead of a comparison that special-cases
+    // "same as the create".
+    assert.deepEqual(e, {
+      at: 1000, system: 'admin.shopify.com', verb: 'create', kind: 'draft', id: '29685', label: '#D29685',
+      who: 'human', recipeId: 'shopify_create_order',
+      watch: 'warm', lastSeenAt: 1000,
+      events: [{ at: 1000, type: 'create', kind: 'draft', id: '29685', label: '#D29685' }],
+    });
     assert.equal('junk' in e, false);
+    assert.equal('currentKind' in e, false, 'the pointer stays absent until something is observed');
+    assert.equal('warmUntil' in e, false, 'the window is set by the writer that knows the leg’s cadence, not here');
   });
   it('unknown kind → record, unknown who → gate, no at → 0', () => {
     const e = auditEntry({ kind: 'wormhole', who: 'martian' });

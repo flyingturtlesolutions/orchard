@@ -101,7 +101,8 @@ import { workflowTier } from './Core/workflowTier.js';   // CD-1a (v2.74.1693) �
 import { evaluatePinBank, refinePinBankAfterStore } from './Core/workflowPinBank.js';   // v2.74.2038 — pin-bank cause probes (refuse taxonomy; no remediation)
 import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun, explainPartialWhy, normalizeHistoryTrace, formatTraceLines } from './Core/runHistory.js';   // CD-6; v2027 items; v2029 partial why; v2030 banked trace
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
-import { loadCreates, removeCreate } from './Services/Storage/AuditCreateStore.js';   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
+import { loadCreates, removeCreate, updateCreate } from './Services/Storage/AuditCreateStore.js';
+import { nextWatch, applyGone, applyTransition, currentRef, handOff, asOfLine, warmWindowMs } from './Core/recordLife.js';   // AU-6 (v2204, DESIGN_audit.md §12) — the record LIFECYCLE: one row per ACT, kind/id immutable, currentKind/currentId follow the artifact, one append-only timeline   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
@@ -12415,17 +12416,31 @@ function _railRecordCard(e, fmtTime) {
   card.setAttribute('tabindex', '0');
   card.title = 'Open this record';
   const top = document.createElement('div'); top.className = 'rail-record-top';
-  const kind = document.createElement('span'); kind.className = 'rail-record-kind'; kind.textContent = e.kind || 'record';
-  const label = document.createElement('span'); label.className = 'rail-record-label'; label.textContent = e.label || e.id || '';
+  const kind = document.createElement('span'); kind.className = 'rail-record-kind';
+  // AU-6 (v2.74.2204, §12.1a) — THE CARD RENDERS THE TRANSITION, not one of its two halves. "draft → order" is
+  // also the warranty question answered at a glance: did the replacement actually go out. `kind` alone would
+  // hide the completion; `currentKind` alone would claim we created an order, which we did not.
+  const _ho = handOff(e);
+  kind.textContent = _ho ? `${_ho.fromKind} → ${_ho.toKind}` : (e.kind || 'record');
+  const label = document.createElement('span'); label.className = 'rail-record-label';
+  label.textContent = _ho ? `${e.label || e.id || ''} → #${_ho.toId}` : (e.label || e.id || '');
   top.append(kind, label); card.appendChild(top);
   const meta = document.createElement('div'); meta.className = 'rail-record-meta';
-  meta.textContent = [e.system, fmtTime(e.at), e.who === 'human' ? 'you' : 'auto'].filter(Boolean).join(' · ');
+  // §12.6 — STALENESS IS RENDERED, NEVER IMPLIED. Under session-ride the poll runs only while a live session
+  // exists, so a cadence is a CEILING ("at most every N"), and a card that omits this implies a completeness it
+  // does not have. Same visible-total honesty §4 forces on `truncationNotice`.
+  const _life = asOfLine(e, e.lastSeenAt ? fmtTime(e.lastSeenAt) : '', Date.now());
+  meta.textContent = [e.system, fmtTime(e.at), e.who === 'human' ? 'you' : 'auto', _life].filter(Boolean).join(' · ');
   card.appendChild(meta);
+  if (nextWatch(e, Date.now()) === 'gone') card.classList.add('is-gone');   // a record that no longer exists must not read as live
   // HOVER-PEEK — a detail line that slides open on hover/focus (same curve + intent as ＋ View, §6.1).
   const peek = document.createElement('div'); peek.className = 'rail-record-peek';
   const pbits = [];
   if (e.id) pbits.push(`id ${e.id}`);
+  if (_ho) pbits.push(`became ${_ho.toKind} ${_ho.toId}`);
   if (e.recipeId) pbits.push(`via ${e.recipeId}`);
+  const _evN = (Array.isArray(e.events) ? e.events : []).length;
+  if (_evN > 1) pbits.push(`${_evN} events`);
   pbits.push('click to open →');
   peek.textContent = pbits.join(' · ');
   card.appendChild(peek);
@@ -12980,8 +12995,15 @@ async function _undoRecordCreate(e, undoRec, btn, card) {
     const params = { [_p]: _idIsGid ? String(e.id) : `gid://shopify/${undoRec.gidType || 'DraftOrder'}/${e.id}` };
     const r = await _rideExecOnce(leg, params, { groundId: gid, confirmed: true });   // confirmed = the human clicked through the prompt above
     if (!r || !r.ok) throw new Error((r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'delete failed');
+    // AU-6 (v2.74.2204, §12.2) — A DELETE WE PERFORMED IS AN OBSERVATION OF NON-EXISTENCE, and it is one of
+    // exactly two ways a row may reach `gone`. Recorded BEFORE the row is removed, deliberately: on this build
+    // the removal wins (the delete button is a testing affordance and its job is to clear the row), but the
+    // `gone` write is what a PRODUCTION Records surface keeps — there the artifact is deleted and the audit row
+    // survives, carrying a terminal `gone` event, because an append-only ledger must record the ending too.
+    // Ordering it this way means removing the removal is the whole diff.
+    try { await updateCreate({ at: e.at, id: e.id }, (row) => applyGone(row, { why: 'deleted', at: Date.now() })); } catch { /* the removal below still lands */ }
     const _rm = await removeCreate({ at: e.at, id: e.id });
-    try { _orchLog(`AUDIT ▸ undo ${undoRec.id} ${e.id} on ${host} → deleted${_rm && _rm.removed ? ' · row removed' : ' · ROW KEPT (store miss)'}`); } catch { /* */ }
+    try { _orchLog(`AUDIT ▸ undo ${undoRec.id} ${e.id} on ${host} → deleted · watch=gone${_rm && _rm.removed ? ' · row removed' : ' · ROW KEPT (store miss)'}`); } catch { /* */ }
     try { card.remove(); } catch { /* the re-render below is the belt */ }
     void _renderActiveRailTab({ force: true });
     try { toast(`Deleted ${what}.`, 'ok'); } catch { /* */ }
@@ -13000,6 +13022,20 @@ async function _undoRecordCreate(e, undoRec, btn, card) {
 // and the decision is in the pure `recordOpenUrl`, so the rule stays unit-testable and this stays a lookup.
 function _recordOpenUrl(e) {
   try {
+    // AU-6 (v2.74.2204, §12.1a) — FOLLOW THE ARTIFACT, NOT THE ACT. This resolved `itemUrl` from the CREATE's
+    // recipe, which is correct until a hand-off and silently wrong after one: `shopify_create_order` yields
+    // `/store/{handle}/draft_orders/{id}`, so a completed draft would build a DRAFT url carrying an ORDER id.
+    // Not a visible 404 — potentially a different record, which is the worst failure shape available and the
+    // exact reason §12.1a says this "lands WITH AU-6 or the eye silently misleads".
+    //
+    // The pointer is `currentKind`; the recipe is found by the KIND it opens, not by the leg that wrote it.
+    const _cur = currentRef(e);
+    if (_cur.kind && _cur.id && _cur.id !== String((e && e.id) || '')) {
+      const _byKind = (CONNECTOR_RECIPES || []).find((r) => r && r.appHost === (e && e.system)
+        && /\{id\}/.test(String(r.itemUrl || '')) && new RegExp(`/${_cur.kind}s?/`, 'i').test(String(r.itemUrl || '')));
+      if (_byKind && _byKind.itemUrl) return recordOpenUrl({ ...e, id: _cur.id }, _byKind.itemUrl, fillEndpoint);
+      return '';   // handed off somewhere we cannot address — no link beats a wrong one (the v2149 rule)
+    }
     const rec = (CONNECTOR_RECIPES || []).find((r) => r && r.id === (e && e.recipeId));
     return recordOpenUrl(e, (rec && rec.itemUrl) || '', fillEndpoint);
   } catch { return ''; }

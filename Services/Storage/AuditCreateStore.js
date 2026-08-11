@@ -93,6 +93,36 @@ export async function removeCreate({ at = 0, id = '' } = {}) {
   });
 }
 
+/**
+ * AU-6 (v2.74.2204, §12.1a) — apply a LIFECYCLE change to one banked row, in place. The row is found by its
+ * IMMUTABLE identity (`at` + the create `id`) — never by `currentId`, which is the thing that moves.
+ *
+ * `mutate` is a PURE row→row function from Core/recordLife.js (`applyTransition`, `applyGone`, `applyUpdate`,
+ * `reWarm`). Keeping the decisions there and only the persistence here is what lets §12.7's whole test list run
+ * without chrome: this function contributes no rule of its own, and returning `changed:false` when the mutator
+ * returns the same object means a re-read that CONFIRMS state writes nothing at all.
+ * @returns {Promise<{items,total,notice,changed:boolean,row:object|null}>}
+ */
+export async function updateCreate({ at = 0, id = '' } = {}, mutate) {
+  return _chained(async () => {
+    const rec = await _read();
+    const prev = (rec && Array.isArray(rec.items)) ? rec.items : [];
+    const total = (rec && Number.isFinite(rec.total)) ? rec.total : prev.length;
+    const _at = Number(at) || 0;
+    const _id = String(id || '');
+    const i = prev.findIndex((e) => e && Number(e.at) === _at && String(e.id || '') === _id);
+    if (i < 0 || typeof mutate !== 'function') {
+      return { items: prev, total, notice: truncationNotice(prev.length, total), changed: false, row: null };
+    }
+    let next = prev[i];
+    try { next = mutate(prev[i]) || prev[i]; } catch { next = prev[i]; }   // a throwing mutator must never corrupt the book
+    if (next === prev[i]) return { items: prev, total, notice: truncationNotice(prev.length, total), changed: false, row: prev[i] };
+    const items = prev.slice(); items[i] = next;
+    await chrome.storage.local.set({ [KEY]: { items, total, updatedAt: Date.now() } });
+    return { items, total, notice: truncationNotice(items.length, total), changed: true, row: next };
+  });
+}
+
 /** Forget the whole creates book (local reset). */
 export async function clearCreates() {
   return _chained(async () => { await chrome.storage.local.remove(KEY); });

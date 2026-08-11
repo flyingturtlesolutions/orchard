@@ -11,6 +11,8 @@
 import { Logger } from '../../Core/Logger.js';
 import { auditSucceeded, classifyCreate, createRecordFrom, customerLabelFrom } from '../../Core/audit.js';
 import { appendCreateEntry } from '../../Services/Storage/AuditCreateStore.js';
+import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';   // AU-6 (v2204) — the leg's declared `warm` window
+import { warmWindowMs } from '../../Core/recordLife.js';                 // AU-6 — parse it; the decision stays pure
 
 /**
  * Bank one create event to the audit ledger — IF it was a real, vendor-accepted create.
@@ -45,6 +47,12 @@ export async function recordCreate(evt) {
       // v2.74.2195 (§12.8.1) — the record that CAUSED this one. Forwarded RAW; Core/audit's `_capIncitedBy` is the
       // single normalizer, so this seam never has to know the shape. Dropped there without system+id.
       ...(e.incitedBy && typeof e.incitedBy === 'object' ? { incitedBy: e.incitedBy } : {}),
+      // AU-6 (v2.74.2204, §12.4) — THE WARM WINDOW COMES FROM THE LEG, and it is resolved HERE because this is
+      // the only seam that knows which recipe wrote the record. `warm: '60d'` is catalog data; `warmWindowMs`
+      // parses it and falls back rather than throwing, so a malformed catalog string costs a default window and
+      // never the create. A leg that declares nothing gets DEFAULT_WARM_MS — warm decays either way, which is
+      // the point: a record nobody has looked at in weeks must stop costing per-record reads.
+      warmUntil: Date.now() + warmWindowMs((CONNECTOR_RECIPES || []).find((r) => r && r.id === e.recipeId)),
     };
     await appendCreateEntry(fields);
     // AUDIT ▸ — BODY-BLIND (§5/§7-7): system · verb · kind · who only, NEVER the id/label. Registered metric:true

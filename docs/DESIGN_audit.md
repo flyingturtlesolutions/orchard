@@ -614,6 +614,30 @@ not-sync / body-blind-marker posture as fields rather than a key.*
 
 *(v2.74.2148. Rulings 2026-08-10, recorded inline. Stages 0–2 are BUILT; this section specs 3–8.)*
 
+> **BUILD STATE, v2.74.2204** — the SUBSTRATE landed; the TRIGGERS mostly have not.
+>
+> **Built + unit-gated** (`Core/recordLife.js`, 33 tests, §12.7's list in its order): the three-state machine
+> (§12.2) with `gone` terminal and absorbing and no `settled` · the one append-only timeline with the `create`
+> entry never evicted (§12.1a) · `applyTransition` — same row, `kind`/`id` immutable, `currentKind`/`currentId`
+> advancing, warm restarted, and a re-read that confirms appending nothing · `applyUpdate` appending only on a
+> real change · `applyGone`, idempotent · `warmWindowMs` reading `warm: '60d'` as recipe data (§12.4), resolved
+> at the write seam and banked as `warmUntil` · `asOfLine` (§12.6) · `mayRead`, where `cold` suppresses per-record
+> reads and NOT collection reconciliation (§12.3, the corrected rule).
+>
+> **Built, in the surfaces**: `auditEntry` births a row warm with its one-entry timeline · the record card renders
+> the hand-off (`draft → order #1234`) and the as-of line · **the §12.1a AU-2 defect is closed** — the eye resolves
+> from `currentKind`, so a completed draft can no longer build a draft URL carrying an order id.
+>
+> **Triggers (§12.3): ONE of five.** `verify-at-view` is wired only in its cheapest form (the card reads the
+> banked state); a delete WE perform records `gone`. **Not built:** the tee hint, the `webNavigation` trigger, the
+> targeted per-record re-read, and the collection poll on `vitals:tick` (§12.4) — which is the one that catches a
+> change made ELSEWHERE, and therefore the one that makes the watch mean anything against another machine.
+> Until it lands, Orchard learns of a vendor-side change only when it did the change itself.
+>
+> **Also not built:** §12.5's `readTransition` adapter (still LIVE-UNVERIFIED per §10.3 — a real order must be
+> created first) and §12.9's `observe` extractor. `applyUpdate` accepts the fields §12.9 would produce; nothing
+> produces them yet.
+
 ### 12.0 The principle everything else follows from
 
 **A ledger row is one of ORCHARD'S ACTS. `kind` and `id` are the CURRENT STATE of the artifact that act

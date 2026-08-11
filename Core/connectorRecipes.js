@@ -701,6 +701,11 @@ export const CONNECTOR_RECIPES = [
     // boolean' — and the Records card is the first surface that needs to ASK. `gidType` is the entity the
     // created id belongs to, so a caller can rebuild the gid the delete wants without knowing Shopify's naming.
     undoLeg: 'shopify_delete_order', gidType: 'DraftOrder',
+    // AU-6 (v2.74.2204, §12.4) — the WARM WINDOW is recipe DATA, not code: how long a record of this kind is
+    // worth spending per-record reads on. 60d because a warranty draft's meaningful life runs to the merchant's
+    // return policy — the thing worth seeing (a tracking number) lands on the ORDER, days after the draft. Not
+    // derivable and different per store, so it is declared, visible and editable rather than inferred.
+    warm: '60d',
     does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; reversible via the delete-draft action (shopify_delete_order, human-confirmed) if it should not stand; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
     // v2.74.2067 RC-1/RC-2 — LOOKUP resolution (Core/lookupRun.js): users type a customer EMAIL and a product
     // NAME, never gids. IN-PLACE: an email in `customer_gid` resolves via shopify_customer_by_email; a name/sku in
