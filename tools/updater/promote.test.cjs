@@ -35,6 +35,9 @@ ok(C.parseManifest('{"version":"1.2.3"}').ok, 'parseManifest: good');
 ok(!C.parseManifest('{bad json').ok, 'parseManifest: refuses invalid JSON');
 ok(!C.parseManifest('{"name":"x"}').ok, 'parseManifest: refuses missing version');
 ok(!C.parseManifest('{"version":1}').ok, 'parseManifest: refuses non-string version');
+ok(C.parseManifest('{"version":"2.74.2224"}').ok, 'parseManifest: accepts a normal 3-part version');
+ok(!C.parseManifest('{"version":"9\\n2026 evil"}').ok, 'parseManifest: rejects a non-dotted-numeric version (log-injection defense)');
+ok(!C.parseManifest('{"version":"1.2.3-dev"}').ok, 'parseManifest: rejects a non-numeric version suffix');
 
 // collectRefs on the REAL shipped manifest shape (read the actual repo manifest)
 const realManifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'manifest.json'), 'utf8'));

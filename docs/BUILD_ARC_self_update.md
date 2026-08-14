@@ -288,10 +288,10 @@ names. A convergence bought that way is the opposite of the safety the feature i
 | 1 | SU-0 branches + ignores + control | git/repo | ~1 hr | **DONE** 2026-08-14 — `.gitignore` stamps + `.orchard-dev`; `fleet` (payload, at main tip) and `fleet-control` (orphan, `control.json`=`{hold:false}`) branches pushed to origin |
 | 2 | SU-1a `promote.cjs` gate | tools/updater | ~1–2 days | **BUILT + TESTED** 2026-08-14 — `tools/updater/promote{,Checks}.cjs`; `node tools/updater/promote.test.cjs` = 40/40 (unit + fixture-repo integration: dirty-checkout-ignored, failing-gate, dangling-ref, version-not-bumped, node --check, no-op, hold/release off the payload) |
 | 3 | SU-1b updater (node CLI) + installers | tools/updater | ~2–3 days | **BUILT + TESTED** 2026-08-14 — `updater.cjs` (one node recipe, not twin shell — ruling 22) + `install-updater.{ps1,sh}` launchers; `updater.test.cjs` = 21/21 (apply, no-op, hold, unparseable→hold, dirty-refuse, torn-apply recovery, stale-lock steal, brick-refuse, fetch-fail, stamp-every-exit). OS registration + credential = live-owed · **→ M2** |
-| 4 | SU-2 extension signal | extension | ~2 days | not started |
+| 4 | SU-2 extension signal | extension | ~2 days | **BUILT** 2026-08-14 — `Core/updateSignal.js` (pure) + test 21/21, 3 `UPDATE ▸` markers in `decisionMarkers.js` (test 5/5); SW glue `background/handlers/updatePoll.js` (poll + boot diary + heartbeat relay) + `background.js` wire + `chat.js` merged dual-source arming — undef-clean, full suite 4942. Core verified; the dot/beacons/SW-poll are **live-owed** |
 | 5 | SU-3 beacons in `glf` | extension/observability | ~half day | not started — **→ M3** |
 | 6 | SU-4 + SU-5 live drills (incl. Mac) | live fleet | ~1 day + wall-clock | not started — acceptance · **→ M4** |
-| 7 | security pass | — | ~half day | not started |
+| 7 | security pass | — | ~half day | **DONE (clean)** 2026-08-14 — multi-lens red-team (injection · trust · the 6 named attacks + integrity/DoS): **0 confirmed holes**; 13 guards tested + held (run-from-copy, control-data-only, no-shell git, untracked-_ block, torn-heal, dirty-refuse, same-origin signal, no-XSS); all 8 findings refuted as the accepted push-to-fleet=code-exec model or the deferred §7 signed-tag item. Folded 2 defense-in-depth hardenings (version-format validation, log-line sanitize) |
 
 Rough total ~7–10 working days, of which rung 0 (platform truth) and rung 3 (scheduler/credential) are the
 only ones that can be blocked by something outside this repo. Sizes are the author's estimate at spec time and

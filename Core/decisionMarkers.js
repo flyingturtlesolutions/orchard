@@ -203,6 +203,13 @@ export const DECISION_MARKERS = [
   // AU-1 (DESIGN_audit.md §11) — the creates-audit hook's body-blind marker: one line per durable create banked
   // (system · verb · kind · who — never the id/label). metric:true so the fleet count sees "creates banked" (§5/§7-7).
   { key: 'audit', src: "AUDIT ▸", metric: true, metricPattern: 'AUDIT ▸' },
+  // SU-2 (DESIGN_self_update.md §3.3/§3.5) — the fleet self-update signal. THREE separate entries so the metric
+  // side can express the ready-vs-applied SKEW (§4.6's operational read); update-updater's metricPattern narrows
+  // to the ALARMING states so the daily ok-heartbeat doesn't swamp the metric. Added WITH the background.js/chat.js
+  // emitters (invariant #1) — a marker absent here is invisible to a decisions download AND the fleet dashboard.
+  { key: 'update-ready', src: "UPDATE ▸ ready", metric: true },
+  { key: 'update-applied', src: "UPDATE ▸ applied", metric: true },
+  { key: 'update-updater', src: "UPDATE ▸ updater", metric: true, metricPattern: ['UPDATE ▸ updater state=error', 'UPDATE ▸ updater state=refused', 'UPDATE ▸ updater state=held'] },
 ];
 
 /** The decisions-view filter, derived (studio.js consumes this). */

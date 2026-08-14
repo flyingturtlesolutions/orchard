@@ -32,6 +32,10 @@ function parseManifest(text) {
   }
   if (!manifest || typeof manifest !== 'object') return { ok: false, error: 'manifest.json is not an object' };
   if (typeof manifest.version !== 'string' || !manifest.version) return { ok: false, error: 'manifest.json lacks a string "version"' };
+  // Chrome versions are 1-4 dot-separated integers. Enforcing the format keeps a malformed/hostile version out of
+  // the version compare + skew read (parseInt-based cmp would silently truncate it) AND off the UPDATE ▸ log lines
+  // as an injection vector (security pass, defense-in-depth).
+  if (!/^\d+(\.\d+){0,3}$/.test(manifest.version)) return { ok: false, error: `manifest.json version is not dotted-numeric: ${JSON.stringify(manifest.version).slice(0, 48)}` };
   return { ok: true, manifest };
 }
 

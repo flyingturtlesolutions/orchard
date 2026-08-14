@@ -381,12 +381,17 @@ before applying, so a raw push that skipped the gate is refused host-side.
   dirty-refusal, torn-apply recovery, stale-lock steal vs live-lock yield, brick-tree refusal, fetch-failure,
   stamp-on-every-exit. Live-owed (real machine): schtasks/LaunchAgent cadence across sleep/wake, the
   DPAPI/Keychain credential non-interactive to the task.
-- **SU-2** — extension half: SW alarm poll (`no-store`, fetch-reject→`{ok:false}`), `update:signal` +
-  persisted `update:seenReady` to `chrome.storage.local`, panel-side merged `OR(devArm, updateArm)` visibility
-  (touching `chat.js` + `devBridge.js` so neither clobbers the other), semver newer-only arm, boot diary
-  (`update:lastRunVersion`, `lag=unknown` fallback), the three `UPDATE ▸` shapes into `Core/decisionMarkers.js`.
-  Pure logic in `Core/updateSignal.js` (poll `{ok,version,at}` + loaded version + persisted seen-set →
-  arm/log/noop) tested in the npm gate; the `background/handlers/` glue stays thin (outside the test glob).
+- **SU-2 (BUILT 2026-08-14, core verified · glue live-owed)** — extension half. Pure logic in
+  `Core/updateSignal.js` (evaluateReady / evaluateBoot / the line formatters / updaterLine / shouldRelay) —
+  npm gate, 21 tests; the three `UPDATE ▸` shapes into `Core/decisionMarkers.js` (5 tests, metric patterns
+  literal). SW glue `background/handlers/updatePoll.js`: alarm poll (`no-store`, fetch-reject→`{ok:false}`),
+  publishes `update:signal` + persisted `update:seenReady`, boot diary (`update:lastRunVersion`,
+  `lag=unknown` fallback), throttled heartbeat relay; wired in `background.js` as a self-registering alarm
+  owner (`initUpdatePoll`). Panel `chat.js` `_wireDevReload` refactored to merged `OR(devArm, updateArm)`
+  visibility (single-owner `_applyReloadBtn`, semver newer-only arm, bridge-independent reload click) so the
+  fleet source and the dev-bridge source can't clobber each other. `background/handlers/` glue stays outside
+  the test glob (undef-clean; full suite 4942). LIVE-OWED: the SW poll firing on the alarm, the dot arming
+  outside dev mode without breaking the dev-bridge cycle, and the beacons landing in `glf`.
 - **SU-3** — beacons proven in `glf`: `ready`, `applied` (each landing path), `updater` heartbeat + each
   `state` value (ok / refused:dirty / refused:invalid / held / error), verified per-install against the
   enrollment roster (catches a never-opted-in install masquerading as unenrolled).
@@ -504,6 +509,27 @@ devBridge.js, CloudLogShipper.js, .gitattributes) and reproduced the one refuted
   `text=auto` skips CRLF-committed blobs) and the repo has zero CRLF blobs. The surviving sliver — "dirty" is
   undefined — is handled by defining the guard as `git status --porcelain --untracked-files=no` (so the
   stamps and stray files don't count) plus the untracked-root-`_` scan (§3.2.7).
+
+### Rung 7 — security red-team of the whole SU surface, 2026-08-14 (CLEAN)
+
+A multi-lens red-team (command-injection · trust-boundary · a concrete attempt of the six named attacks +
+integrity/DoS) over the updater, promote, installers, and the extension signal returned **zero confirmed
+holes**. 13 guards were attacked and held: run-from-copy (a hostile fleet tree rewriting `tools/updater/*`
+is inert — the scheduler runs the state-dir copy, and its require graph never resolves back into the reset
+clone); `control.json` is data-only (only `parsed.hold` is read + boolean-coerced — a `{"hold":"; rm -rf ~"}`
+payload reaches no arg or shell); every updater git call is `execFileSync` (no shell, no metacharacter/arg
+injection); the untracked-root-`_` scan blocks the stamp on BOTH the apply and up-to-date paths (incl.
+space/non-ASCII via `-z`); a torn reset self-heals via the journal; a human-dirtied tree is `refused:dirty`;
+the extension signal is same-origin (no page/other-extension influence) and reaches the panel via
+`btn.title` (a DOM property, not `innerHTML` — no XSS even from a script-payload version). All 8 raised
+findings were refuted as either the explicitly-accepted "push-to-fleet is fleet code execution" trust model
+(ruling 5 — an attacker already needs fleet-branch WRITE), the accepted compromised-box exposure (§7), or the
+one genuine defense-in-depth residual — host-side signature/provenance verification of the fleet ref — which
+is already named in §7 "Push protection (minor)" and deferred to SU-6, with a git-host branch-protection
+ruleset as the primary control. Two cheap hardenings the pass recommended were folded in immediately:
+`parseManifest` now enforces a dotted-numeric version format (keeps a malformed/hostile version out of the
+compare + skew read and off the log lines), and the `UPDATE ▸` line formatters strip non-vocabulary chars
+from the version/head/state/guid fields (log-line-injection defense-in-depth).
 
 ### Third review — Rung 3 implementation (`updater.cjs` + launchers), 2026-08-14
 

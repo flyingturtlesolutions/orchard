@@ -49,6 +49,7 @@ import { createConnectionsHandlers, registerConnTransitionListener, readConnRegi
 import { createPipelineHandlers } from './background/handlers/pipeline.js';   // PP (v2.74.1665, DESIGN_peritem_pipeline.md §5.7/§9.3) — the per-item CASE sidecar (vitals-pattern store; the Conversation record cannot hold case state)
 import { initVitals, onConnTransition, createVitalsHandlers } from './background/handlers/vitals.js';   // VT-0..4 (v2.74.1569-1572, DESIGN_vitals.md) — the outcome funnel + scheduler + daily visit + incident store
 import { initCadence, createCadenceHandlers } from './background/handlers/cadence.js';   // CD-1 (v2.74.1692, DESIGN_cadence.md §2/§5) — the one clock owner for time-triggered workflows (scanner + headless fire + run history)
+import { initUpdatePoll } from './background/handlers/updatePoll.js';   // SU-2 (DESIGN_self_update.md §3.3) — the fleet self-update SIGNAL: SW detects disk-newer, publishes update:signal, boot diary, heartbeat relay
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
@@ -456,6 +457,12 @@ initCadence({
   startPulse: __startPulse,
   stopPulse: __stopPulse,
 });
+
+// SU-2 (DESIGN_self_update.md §3.3) — the fleet self-update signal owner: a durable 5-min poll of
+// update/ready.json (published to update:signal for the panel to arm the reload dot), the §3.4 boot diary, and
+// the throttled updater heartbeat relay. Like the other alarm owners above, the listener re-registers on every
+// SW boot; inert on any install the host updater doesn't manage (no ready.json → the poll no-ops).
+initUpdatePoll();
 
 
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
