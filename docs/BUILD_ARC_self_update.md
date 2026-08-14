@@ -102,22 +102,23 @@ pointed at an ungated `fleet` is exactly the fleet-wide-brick path §4.1 exists 
   refused; `hold`/`release` move `fleet-control` and NOTHING else; a worktree left behind on failure is a
   bug (assert cleanup).
 
-## Rung 3 — SU-1b: the updater (both wrappers) + installer — the external-risk rung
+## Rung 3 — SU-1b: the updater (node CLI) + installers — the external-risk rung
 
-**What:** `tools/updater/update.ps1` + `install-updater.ps1` (Windows) and `update.sh` + `install-updater.sh`
-(macOS) — **twin wrappers, ONE recipe** (spec §3.2): lock (PID+age steal) → torn-apply journal recovery →
-fetch `fleet` + `fleet-control` → read control (unparseable → hold) → validate (no-`_`, manifest parses,
-brick-tier references exist) → apply (journal → `reset --hard` → untracked-root-`_` scan) → stamp
-`ready.json` last → `finally` stamps `updater-state.json` (with `state`/`lastError`/`hold`) and releases the
-lock. The installer **copies the script into the state dir and registers the task/agent against the COPY**
-(spec §2, ruling 15 — the updater must not be able to rewrite itself), sets up the read-only credential
-(Windows logged-on-only task, NOT S4U; macOS absolute-git path + one interactive Keychain seed), stamps the
-per-clone machine GUID, turns `cloudLogs` on, and pins the clone refspec so `origin/fleet` + `origin/fleet-control`
-resolve.
+**What:** `tools/updater/updater.cjs` — **ONE node recipe** (spec §3.2, ruling 22 — not twin shell wrappers;
+node joins git as a prerequisite, buying a single tested recipe with no cross-shell drift): lock (PID+age
+steal) → torn-apply journal recovery → fetch `fleet` + `fleet-control` → read control (unparseable → hold) →
+validate (no-`_`, manifest parses, brick-tier references exist) → apply (journal → `reset --hard` →
+untracked-root-`_` scan) → stamp `ready.json` last → `finally` stamps `updater-state.json` (with
+`state`/`lastError`/`hold`) and releases the lock. It reuses `promoteChecks.cjs`, so promote and the updater
+share one pure core. The thin launchers `install-updater.ps1` / `.sh` **copy the script into the state dir and
+register the Scheduled Task / LaunchAgent against the COPY** (spec §2, ruling 15 — the updater must not be
+able to rewrite itself), set up the read-only credential (Windows logged-on-only task, NOT S4U; macOS
+absolute node+git path + one interactive Keychain seed), stamp the per-clone machine GUID, and pin the clone
+refspec so `origin/fleet` + `origin/fleet-control` resolve.
 
-**Honest sizing:** large (~2–3 days). Two lanes double the surface, and this is the rung whose risk lives
-outside the repo — schtasks/launchd cadence, DPAPI/Keychain non-interactive access, git-under-scheduler PATH.
-The fixture logic is portable; the platform integration is what bites.
+**Honest sizing:** medium (~1–2 days — the node-CLI decision halved it vs the twin-wrapper estimate). The
+recipe is a single tested file; the risk that lives outside the repo is now confined to the launchers —
+schtasks/launchd cadence, DPAPI/Keychain non-interactive access, git+node-under-scheduler PATH.
 
 **Why after the gate, not before:** the updater's FIXTURE drills need only a bare fixture repo (no gate), so
 they don't depend on rung 2 — but the first REAL enrollment does. Ordering the gate first means the external-
@@ -286,7 +287,7 @@ names. A convergence bought that way is the opposite of the safety the feature i
 | 0 | SPIKE: two platform truths | hands-on, 2 machines | ~half day | not started — **stop condition · → M1 · owed by the human** |
 | 1 | SU-0 branches + ignores + control | git/repo | ~1 hr | **DONE** 2026-08-14 — `.gitignore` stamps + `.orchard-dev`; `fleet` (payload, at main tip) and `fleet-control` (orphan, `control.json`=`{hold:false}`) branches pushed to origin |
 | 2 | SU-1a `promote.cjs` gate | tools/updater | ~1–2 days | **BUILT + TESTED** 2026-08-14 — `tools/updater/promote{,Checks}.cjs`; `node tools/updater/promote.test.cjs` = 40/40 (unit + fixture-repo integration: dirty-checkout-ignored, failing-gate, dangling-ref, version-not-bumped, node --check, no-op, hold/release off the payload) |
-| 3 | SU-1b updater (both wrappers) + installer | tools/updater | ~2–3 days | not started — external-risk rung · **→ M2** |
+| 3 | SU-1b updater (node CLI) + installers | tools/updater | ~2–3 days | **BUILT + TESTED** 2026-08-14 — `updater.cjs` (one node recipe, not twin shell — ruling 22) + `install-updater.{ps1,sh}` launchers; `updater.test.cjs` = 21/21 (apply, no-op, hold, unparseable→hold, dirty-refuse, torn-apply recovery, stale-lock steal, brick-refuse, fetch-fail, stamp-every-exit). OS registration + credential = live-owed · **→ M2** |
 | 4 | SU-2 extension signal | extension | ~2 days | not started |
 | 5 | SU-3 beacons in `glf` | extension/observability | ~half day | not started — **→ M3** |
 | 6 | SU-4 + SU-5 live drills (incl. Mac) | live fleet | ~1 day + wall-clock | not started — acceptance · **→ M4** |

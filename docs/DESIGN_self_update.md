@@ -35,18 +35,21 @@ this generalizes from dev-only to dual-source).
 
 ## 2. Shape — three parties across the existing trust boundaries
 
-- **Host half — the updater** (installed COPY, not the clone): a 10-minute scheduler firing a small script —
-  Windows: Scheduled Task + `update.ps1`; macOS: LaunchAgent + `update.sh` (ruling 12 — twin wrappers, ONE
-  recipe: same steps, same ordering, same refusals; a step added to one must land in the other). Owns code
-  ACQUISITION only: fetch → control → validate → apply → stamp. **The script the scheduler runs lives in the
-  per-OS-account STATE DIR, not in `tools/updater/` inside the clone** (ruling 15 / §4 ruling 8) — because
-  the updater hard-resets that clone, and a script that resets its own source lets a bad push rewrite the
-  updater and run arbitrary host-shell as the logged-in user on the next tick. `tools/updater/` in the repo
-  is the SOURCE the installer copies out; updater upgrades happen only by re-running the installer, a human
-  act. Git is the only prerequisite on both platforms, installed as part of machine setup (ruling 9). The
-  extension never holds git; the updater never touches Chrome. Everything Chrome-side is platform-identical
-  by construction — unpacked serving, profile-scoped storage, the `_`-prefix load refusal are Chrome rules,
-  not OS rules.
+- **Host half — the updater** (installed COPY, not the clone): a 10-minute scheduler firing **one node CLI,
+  `updater.cjs`** (ruling 22, superseding the twin-wrapper ruling 12) — Windows: Scheduled Task; macOS:
+  LaunchAgent; each just runs `node <state-dir>/updater.cjs`. ONE tested recipe, no cross-shell drift, no
+  per-OS JSON parser; the launchers stay per-OS only because scheduling + the credential store are genuinely
+  platform-specific, the logic is not. It reuses `promoteChecks.cjs`, so promote and the updater share one
+  pure core. Owns code ACQUISITION only: fetch → control → validate → apply → stamp. **The script the
+  scheduler runs lives in the per-OS-account STATE DIR, not in `tools/updater/` inside the clone** (ruling 15
+  / §4 ruling 8) — because the updater hard-resets that clone, and a script that resets its own source lets a
+  bad push rewrite the updater and run arbitrary host-shell as the logged-in user on the next tick.
+  `tools/updater/` in the repo is the SOURCE the installer copies out; updater upgrades happen only by
+  re-running the installer, a human act. Prerequisites on both platforms: **git and node**, both one-time
+  installs (the "no node on fleet" assumption was relaxed 2026-08-14 — node buys the single tested recipe;
+  ruling 22). The extension never holds git; the updater never touches Chrome. Everything Chrome-side is
+  platform-identical by construction — unpacked serving, profile-scoped storage, the `_`-prefix load refusal
+  are Chrome rules, not OS rules.
 - **Extension half — the signal** (SW poll + the header reload button): owns UPDATE VISIBILITY and
   OBSERVABILITY, never timing. The **service worker DETECTS** disk-newer-than-loaded and publishes the fact
   to `chrome.storage.local`; the **panel ARMS** the reload button's dot from that published state (§3.3 —
@@ -322,12 +325,12 @@ platform store: Windows via git-credential-manager (DPAPI-bound), macOS via `git
 - **Windows:** register the task to run **only when the user is logged on** (NOT S4U / "run whether logged
   on or not" + `/NP`) — S4U has no DPAPI master key, so the credential fetch fails every tick even while the
   user is logged in.
-- **macOS:** pin an ABSOLUTE `git` path (launchd's minimal PATH may resolve no git, and the CLT shim breaks
-  after major-OS upgrades — "invalid active developer path"); do one INTERACTIVE fetch at enrollment to seed
-  the Keychain ACL ("Always Allow"), and README the re-prompt after CLT updates.
-- **JSON without node:** neither wrapper has node; parse `control.json`/`manifest.json` with the per-OS tool —
-  Windows `ConvertFrom-Json`, macOS `plutil -convert json`/`python3 -c 'json.load…'` (CLT-provided). A
-  malformed-manifest drill runs against BOTH wrappers so the lanes can't diverge.
+- **macOS:** pin ABSOLUTE `git` and `node` paths (launchd's minimal PATH may resolve neither, and the CLT git
+  shim breaks after major-OS upgrades — "invalid active developer path"); do one INTERACTIVE fetch at
+  enrollment to seed the Keychain ACL ("Always Allow"), and README the re-prompt after CLT updates.
+- **JSON parsing** is no longer a per-OS gotcha (ruling 22): the updater is node, so `control.json` /
+  `manifest.json` parse with `JSON.parse` on both platforms — the old `ConvertFrom-Json` vs `plutil`/`python3`
+  split, and the twin-wrapper drift drill it required, are gone.
 
 **Offboarding:** revoke the deploy token, unregister the task/LaunchAgent, delete the clone — AND revoke the
 install's CloudWatch shipping credential, which lives in the Chrome profile (`Services/Cloud/…`), not in the
@@ -365,17 +368,19 @@ before applying, so a raw push that skipped the gate is refused host-side.
 - **SU-0** — `fleet-control` branch created holding `update/control.json` (`{ "hold": false }`); `.gitignore`
   on `main`: `/update/ready.json`, `/update/updater-state.json`, `/update/apply-in-progress`, `/.orchard-dev`;
   create the `fleet` branch; this doc. No behavior.
-- **SU-1** — host half, BOTH lanes: `tools/updater/update.ps1` + `install-updater.ps1` and `update.sh` +
-  `install-updater.sh`. The installer **copies the script to the state dir and registers the task against the
-  COPY** (ruling 15), sets up the read-only credential (Windows logged-on-only task; macOS absolute-git +
-  interactive-seed Keychain), stamps the machine GUID, turns on `cloudLogs`, and pins the clone refspec.
-  Plus `promote.cjs` (worktree gate + `hold`/`release` subcommands + version-movement + manifest-ref walk)
-  and `README.md` (per-platform install steps incl. git). Headless-testable against a bare fixture repo +
-  throwaway clone, EACH wrapper: task-path-not-under-clone, brick-tree refusal (incl. dangling manifest ref
-  and untracked-`_`), hold via `fleet-control`, unparseable-control-→-hold, dirty-refusal, torn-apply journal
-  recovery, stale-lock steal, stamp-on-every-exit, stamp-catch-up after hand-pull, malformed-manifest parse.
-  `promote.cjs`: candidate = origin/main (dirty local checkout ignored), refuse on version-non-movement,
-  refuse on missing manifest reference.
+- **SU-1a (BUILT + TESTED 2026-08-14)** — the dev-side gate: `tools/updater/promote{,Checks}.cjs` (worktree
+  gate + `hold`/`release` + version-movement + manifest-ref walk). `promote.test.cjs` = 40 (unit + fixture:
+  candidate = origin/main with the dirty local checkout ignored, failing-gate, dangling-ref, version-non-
+  movement, node --check, no-op, hold/release off the payload).
+- **SU-1b (BUILT + TESTED 2026-08-14)** — the fleet-side updater as ONE node CLI (ruling 22, not twin shell
+  wrappers): `tools/updater/updater.cjs` (lock steal → torn-apply journal recovery → fetch → control →
+  validate → apply → stamp, reusing `promoteChecks.cjs`), thin launchers `install-updater.ps1` / `.sh` (copy
+  to state dir + register task/agent against the COPY per ruling 15; Windows logged-on-only, NOT S4U; macOS
+  absolute node+git + interactive-seed Keychain; machine GUID; clone refspec), and `README.md`.
+  `updater.test.cjs` = 21 fixture drills: apply+stamp, no-op-when-current, hold, unparseable-control-→-hold,
+  dirty-refusal, torn-apply recovery, stale-lock steal vs live-lock yield, brick-tree refusal, fetch-failure,
+  stamp-on-every-exit. Live-owed (real machine): schtasks/LaunchAgent cadence across sleep/wake, the
+  DPAPI/Keychain credential non-interactive to the task.
 - **SU-2** — extension half: SW alarm poll (`no-store`, fetch-reject→`{ok:false}`), `update:signal` +
   persisted `update:seenReady` to `chrome.storage.local`, panel-side merged `OR(devArm, updateArm)` visibility
   (touching `chat.js` + `devBridge.js` so neither clobbers the other), semver newer-only arm, boot diary
@@ -430,8 +435,16 @@ OWED before trusting the fleet:
 10. Keystore cannot eliminate the local bootstrap secret; v1 = scoped read-only token, platform-store
     protected, per-machine revocable; token-vending deferred (§7).
 11. N+1 profiles → N+1 extension-minted ids sharing one updater (§7).
-12. Windows + macOS: twin wrappers around one recipe; DPAPI / login-Keychain; enrollment per OS account
-    (§2, §7, SU-1).
+12. Windows + macOS: ~~twin wrappers around one recipe~~ **superseded by ruling 22** — one node CLI, per-OS
+    launchers only; DPAPI / login-Keychain; enrollment per OS account (§2, §7, SU-1).
+
+*Third review (Rung 3 implementation):*
+22. **The updater is one node CLI, not two shell wrappers** (2026-08-14, user ruling "no node isn't a hard
+    requirement"). node joins git as a fleet prerequisite; in return the tick recipe is a single
+    `updater.cjs` — unit-tested like `promote.cjs`, sharing `promoteChecks.cjs`, with zero cross-shell drift
+    and no per-OS JSON parser. The launchers (`install-updater.ps1` / `.sh`) stay per-OS because scheduling +
+    the credential store are platform-specific; the logic is not. Reverses ruling 12's twin-wrapper shape and
+    retires the §7 "JSON without node" gotcha (§2, §7, §9 SU-1b).
 
 *Second review (confirmed-finding fixes):*
 13. **promote tests the artifact, not the checkout** — candidate = `origin/main`, materialized in a temp
@@ -491,3 +504,21 @@ devBridge.js, CloudLogShipper.js, .gitattributes) and reproduced the one refuted
   `text=auto` skips CRLF-committed blobs) and the repo has zero CRLF blobs. The surviving sliver — "dirty" is
   undefined — is handled by defining the guard as `git status --porcelain --untracked-files=no` (so the
   stamps and stray files don't count) plus the untracked-root-`_` scan (§3.2.7).
+
+### Third review — Rung 3 implementation (`updater.cjs` + launchers), 2026-08-14
+
+A third adversarial review (over the BUILT node updater) confirmed 11 findings, all folded into the code
+(documented as `F1`–`F10` in the `updater.cjs` header, each with a fixture drill in `updater.test.cjs` — 32
+passing). Two were latent-critical: a failed `git reset --hard` (Defender/indexer lock) cleared the recovery
+journal anyway, defeating the very self-heal ruling 18 built (now: journal stays on a failed reset); and on
+default Windows PowerShell 5.1, `Set-Content -Encoding utf8` wrote `config.json` with a BOM that node's
+`JSON.parse` rejects, silently resolving `CLONE` to the wrong dir and killing the feature (now: installer
+writes BOM-free + updater reads BOM-tolerant + fails loud on a non-work-tree `CLONE`). The majors: control
+now fails safe to hold on ANY non-`{hold:…}` read (missing blob / wrong key), not only malformed JSON; the
+per-clone machine GUID is stamped INTO `updater-state.json` (was a dead sidecar file); the macOS absolute git
+path is pinned into `config.json` (launchd's minimal PATH); and the up-to-date fast-path now runs the
+untracked-`_` scan (with `-z`, so space/non-ASCII names aren't missed) before stamping. Minors: refuse a
+clone that is AHEAD of fleet (unpushed commits) rather than orphaning it, and the installers check out a
+dedicated `fleet` branch so `reset --hard` never repoints local `main`. Four findings were refuted
+(cloudLogs-wording, missing-control-blob-as-happy-path, lock TOCTOU, dev-marker-via-torn-apply) — see the
+review transcript.
