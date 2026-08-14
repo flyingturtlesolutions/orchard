@@ -1849,7 +1849,11 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // AU-1 (DESIGN_audit.md §11) — bank the create. auditSucceeded is LOAD-BEARING here: this branch has NO
           // nested-userErrors screen (:1802 checks only top-level r.body.errors), so a 200-with-userErrors reaches
           // it as ok:true — recordCreate's guard refuses to bank that phantom row (§10.1).
-          if (isWrite) { try { void recordCreate({ value: r.body, origin: apiHost, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null, incitedBy: (payload && payload.incitedBy) || null }); } catch { /* */ } }
+          // v2.74.2222 — `urlArgs` pass-through: unlike INVOKE_SESSION there is no tab-derived `{handle}` here to
+          // bank (this branch replays a captured request), so a header-replay row can fill only templates that
+          // need nothing beyond `{id}` (Zendesk's `/agent/tickets/{id}` — fine). A caller that DID resolve args
+          // may thread them on the payload and they now survive to the ledger instead of being dropped.
+          if (isWrite) { try { void recordCreate({ value: r.body, origin: apiHost, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null, urlArgs: (payload && payload.urlArgs) || null, incitedBy: (payload && payload.incitedBy) || null }); } catch { /* */ } }
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
       })();

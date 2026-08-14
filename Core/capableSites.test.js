@@ -164,6 +164,24 @@ describe('DK-6 — seedDeskCatalog (a preconfigured desk’s sites → pre-picke
     assert.deepEqual(picks, []);
     assert.deepEqual(unresolved, ['Zendesk']);
   });
+  it('v2.74.2219 — Warranty’s concrete Zendesk + Aircall pre-pick on an empty catalog (new install, no Grounds)', () => {
+    const sites = [
+      { host: 'vendorsuite.drhorton.com', label: 'VendorSuite' },
+      { host: 'deako.zendesk.com', label: 'Zendesk' },
+      { host: 'workspace.aircall.io', label: 'Aircall' },
+      { host: 'admin.shopify.com', label: 'Shopify' },
+      { host: 'app.hubspot.com', label: 'HubSpot' },
+    ];
+    const { picks, unresolved } = seedDeskCatalog([], sites);
+    assert.deepEqual(unresolved, [], 'no type-your-address hint on a clean install');
+    assert.deepEqual(picks.map(([, p]) => p.origin), [
+      'https://vendorsuite.drhorton.com',
+      'https://deako.zendesk.com',
+      'https://workspace.aircall.io',
+      'https://admin.shopify.com',
+      'https://app.hubspot.com',
+    ]);
+  });
   it('junk-safe: empty catalog + empty sites', () => {
     assert.deepEqual(seedDeskCatalog(null, null), { catalog: [], picks: [], unresolved: [] });
     const r = seedDeskCatalog([], [{ host: 'app.hubspot.com', label: 'HubSpot' }]);

@@ -11,6 +11,7 @@
 // both seams can call, is what stops a row from being born false.
 
 import { createdRecordId, createdRecordLabel } from './connectorRender.js';
+import { applyGone, applyActEvent } from './recordLife.js';
 
 const _str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()));
 
@@ -107,6 +108,24 @@ function _restLabel(v) {
 export function createRecordFrom(value) {
   const gid = createdRecordId(value);                                 // GraphQL {data:…} shape
   if (gid != null) return { id: String(gid), label: createdRecordLabel(value) || String(gid) };
+  // v2.74.2222 (§10.3's deferred `deletedId` branch, now live-capturable) — a DELETE names its casualty as a
+  // SCALAR (`data.draftOrderDelete.deletedId`), which the entity walk above cannot see: createdRecordId takes
+  // `v.id` on an OBJECT or a key literally named `id`, so every GraphQL delete extracted nothing, auditSucceeded
+  // refused it, and recordCreate's whole verb!=='create' arm was unreachable for deletes — a ride-leg delete
+  // outside the Records-undo flow recorded NOTHING on the row it destroyed. gid → tail here, for the reason
+  // §10.3 gave when it deferred this: a raw gid would not group with the create's stored tail.
+  const _data = (value && typeof value === 'object' && value.data && typeof value.data === 'object') ? value.data : null;
+  if (_data) {
+    for (const op of Object.values(_data)) {
+      if (!op || typeof op !== 'object' || Array.isArray(op)) continue;
+      for (const [k, v] of Object.entries(op)) {
+        if (!/^deleted/i.test(k) || (typeof v !== 'string' && typeof v !== 'number')) continue;
+        let id = String(v);
+        if (/^gid:\/\//i.test(id)) id = id.split('/').pop();
+        if (id) return { id, label: id };
+      }
+    }
+  }
   const o = (value && typeof value === 'object' && !Array.isArray(value)) ? value : null;   // REST {entity:{…}}
   if (o) {
     for (const [k, v] of Object.entries(o)) {
@@ -197,14 +216,27 @@ function _capIncitedBy(raw) {
 export function auditEntry(f = {}) {
   const at = Number.isFinite(f.at) && f.at > 0 ? f.at : 0;
   const incitedBy = _capIncitedBy(f.incitedBy);
+  // v2.74.2222 — THE BIRTH EVENT IS TYPED BY THE VERB, and so is the watch. This function used to hardcode
+  // `watch:'warm'` + a `create`-typed first event, which was right for every row until the AU-6 verb
+  // generalization let an `update`/`delete` head a row (an act on a record that was never ours, §12.0): an
+  // update-headed row then opened its own timeline with "Created as a draft …" — a lie about its own first
+  // event — and a delete-headed row was born WARM, so the sweep polled a record we had just destroyed.
+  const _verb = AUDIT_VERBS.includes(f.verb) ? f.verb : 'create';
+  const _kind = AUDIT_KINDS.includes(f.kind) ? f.kind : 'record';
+  const _id = _str(f.id).slice(0, 80);
+  const _label = _str(f.label).slice(0, 80);
+  const _who = AUDIT_WHO.includes(f.who) ? f.who : 'gate';
+  const _birth = _verb === 'delete' ? { at, type: 'gone', why: 'deleted' }
+    : _verb === 'update' ? { at, type: 'update', fields: { update: _who === 'human' ? 'by you' : 'auto' } }
+      : { at, type: 'create', kind: _kind, id: _id, label: _label };
   return {
     at,
     system: _str(f.system || f.origin).slice(0, 80),
-    verb: AUDIT_VERBS.includes(f.verb) ? f.verb : 'create',
-    kind: AUDIT_KINDS.includes(f.kind) ? f.kind : 'record',
-    id: _str(f.id).slice(0, 80),
-    label: _str(f.label).slice(0, 80),
-    who: AUDIT_WHO.includes(f.who) ? f.who : 'gate',
+    verb: _verb,
+    kind: _kind,
+    id: _id,
+    label: _label,
+    who: _who,
     ...(f.itemUrl ? { itemUrl: _str(f.itemUrl).slice(0, 400) } : {}),     // AU-2 — a pre-filled durable link, if the caller had one
     ...(f.recipeId ? { recipeId: _str(f.recipeId).slice(0, 60) } : {}),   // join key to the catalog (+ the leg's itemUrl template at render)
     ...(f.groundId ? { groundId: _str(f.groundId).slice(0, 60) } : {}),
@@ -217,16 +249,35 @@ export function auditEntry(f = {}) {
     // `kind`/`id` above are now explicitly IMMUTABLE — what Orchard created, forever. Everything that moves
     // moves in `currentKind`/`currentId` and `events`. Collapsing the two would make a completed draft report as
     // "you created an order", which is false, and would corrupt the AU-3 count (§12.0).
-    watch: 'warm',
+    //
+    // v2.74.2222 — a DELETE-headed row is born GONE (its act destroyed the record; there is nothing to watch),
+    // and per §12.1 a gone row carries no warmUntil.
+    watch: _verb === 'delete' ? 'gone' : 'warm',
     // §13.3 (v2.74.2206) — WHEN SOMETHING LEFT THE BOUNDARY, and absent when nothing has. It is a field of the
     // RECORD rather than a property read off the delete leg, because the declared axes describe the ACT and not
     // the record's history: a ticket is internally deletable and may still have emailed the homeowner. The
     // reversal offer reads this, so a create by an `outward: true` leg is un-undoable from birth.
     ...(Number.isFinite(f.outwardAt) && f.outwardAt > 0 ? { outwardAt: f.outwardAt } : {}),
-    ...(Number.isFinite(f.warmUntil) && f.warmUntil > 0 ? { warmUntil: f.warmUntil } : {}),
+    ...(_verb !== 'delete' && Number.isFinite(f.warmUntil) && f.warmUntil > 0 ? { warmUntil: f.warmUntil } : {}),
     lastSeenAt: at,
-    events: [{ at, type: 'create', kind: AUDIT_KINDS.includes(f.kind) ? f.kind : 'record', id: _str(f.id).slice(0, 80), label: _str(f.label).slice(0, 80) }],
+    events: [_birth],
   };
+}
+
+/**
+ * v2.74.2222 (M3) — WHICH MUTATOR does an act on an ALREADY-BANKED row apply? PURE, and in Core so the unit gate
+ * reaches the routing that used to live inline in background/handlers/audit.js (outside every gate — the v2213
+ * lesson). The seam's whole known-row branch is now: `bankAct(fields, (known) => chooseAuditMutator(verb, …))`.
+ *
+ * Returns NULL for a create — a create never lands on an existing row (the same record created twice is two
+ * acts, two rows; the whole reason removeCreate keys on at+id). `delete` → the §12.2 gone observation (a delete
+ * we performed and the vendor confirmed). `update` → an ACT event on the timeline (applyActEvent — never
+ * applyUpdate, whose `observed` bag belongs to the §12.9 vendor-observed values, not to acts we performed).
+ */
+export function chooseAuditMutator(verb, { who = 'gate', at = 0, windowMs = 0 } = {}) {
+  if (verb === 'delete') return (row) => applyGone(row, { why: 'deleted', at });
+  if (verb === 'update') return (row) => applyActEvent(row, { verb, who, at, ...(windowMs > 0 ? { windowMs } : {}) });
+  return null;
 }
 
 // A small, string-valued snapshot of the endpoint args ({handle}, …) so the surface can fill the leg's itemUrl at

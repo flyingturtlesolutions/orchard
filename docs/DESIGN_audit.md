@@ -511,8 +511,10 @@ the user reported the pull-only ask read as "nothing visible on rail" (the surfa
 (the hook), the two connector.js wire points, the `AUDIT ▸` marker (capture LIVE-PROVEN 22:33Z), the chat.js "what
 have I created?" intercept, and the **Records tab** (`_renderRailRecords` — a persistent card per create, drillable).
 `npm test` green (4407); live eyeball owed (bus tests v2.74.2079/2080/2081). AU-2 folded into render (below).
-Remaining: AU-4 (export), AU-5 (gated undo), AU-6 (update/delete writes-expansion), AU-7 (cross-system), plus a
-live SW→panel push so the Records tab updates without re-opening, and the drill-to-record link (AU-2-at-render).
+**Build state is tracked in ONE place now — §12's BUILD STATE block** (this list went stale while that one was
+kept: the drill link, the timeline renderer, and the AU-6 verb generalization all shipped under §12). Still
+genuinely remaining: AU-4 (export), AU-7 (cross-system correlation), the live SW→panel push, and AU-5's
+production HITL undo (the shipped delete button is the testing affordance; the §13 derivation is built).
 
 §7 is the full AU-0..8 ladder; this section is the **buildable v1 only** (creates → durable link → read), each rung
 independently landable, `npm test`-green, and bump-per-rung. It names the exact new files, the function signatures,
@@ -670,6 +672,25 @@ not-sync / body-blind-marker posture as fields rather than a key.*
 >
 > **Still not built:** the tee hint and the `webNavigation` trigger (2 of 5 — both free, both would make a change
 > visible SOONER rather than visible at all).
+>
+> **v2.74.2222 — the AU-arc review pass (bugs/modularity/maintenance), all findings landed.** (1) The DELETE
+> branch is real: `createRecordFrom` reads the scalar `deletedId` (gid→tail), so `auditSucceeded` accepts a
+> vendor-confirmed delete and an act on a known row can reach `gone` through the seam — before this, every
+> GraphQL delete failed the guard and the seam's delete arm was unreachable (the undo flow was the only route to
+> `gone`). (2) `auditEntry` types the BIRTH by the verb: update-headed rows open with an `update` event (never a
+> false "Created"), delete-headed rows are born `gone` with no `warmUntil`. (3) The known-row routing is pure and
+> gated (`chooseAuditMutator`, Core/audit.js) and the find+write is ONE chained store turn (`bankAct`) — the old
+> find-then-update pair could double-row under concurrency. (4) An act we perform is an `applyActEvent`, never an
+> `applyUpdate` with a synthetic key — the §12.9 `observed` bag belongs to vendor-observed values. (5) A
+> vendor-side deletion is now observable: a probe declared `exact: true` (the gid-addressed draft detail) whose
+> OK reply resolves to nothing is the §12.2 "object returned 404" observation; search-shaped probes still fail
+> toward silence. (6) Verify-at-view is SCOPED: the drill passes its row's `at|id` key and the forced sweep reads
+> that row only — §12.3's "1 read, on demand", where the unscoped force was O(book) per card open. (7) The
+> watch's `seenBy` advances whenever an act is processed (not only on `changed`) so the two seen-memories cannot
+> wedge into a permanent re-emit, and row-keyed watch state is PRUNED for departed rows on whole-book sweeps.
+> (8) The handed-off eye resolves its destination leg by `reads`+`appHost` (the same rule as `destinationWarmMs`),
+> not by regexing the URL path; the undo's gid type comes from the create recipe's `gidType` declaration, never a
+> hardcoded default.
 
 ### 12.0 The principle everything else follows from
 
@@ -1140,3 +1161,134 @@ refund or cancel on Shopify"*. The eye keeps working in every case, so there is 
   nothing, so the control is gated on a verify-at-view read (§12.3), never on the cached row.
 - **Human-click only, never auto** — money = human-click (§6, PP-4). The gate *requires* the click; the card only
   *offers*.
+
+
+---
+
+## 14. Consequence watch — decision → resolved surface → outcome (AU-6 generalized)
+
+*(Ruling 2026-08-11. Volume of draft field-edits stays under ~30/mo and is a thin signal; human decisions on
+ambiguous warranty instructions are denser. The user direction: cause clarity is not only a label at decision
+time — apply the same monitor abstraction used for Shopify drafts/orders to the **resolved surface** (email /
+ticket), and watch not only what was decided but what followed.)*
+
+### 14.0 Recap of the idea (then the grounded form)
+
+**The idea, in one breath.** When Orchard cannot finish a warranty row, a human decides (email / call / leave
+unresolved) and a cause is named (`no-count`, `other-trade`, …). That decision is a *hypothesis about what the
+world needs*. The rich teaching signal is not the hypothesis alone, nor edits to a Shopify draft we made — it is
+**what happens on the artifact that carries the decision out**: the Zendesk ticket that asked support to call,
+the public reply that left, whether the homeowner answered, whether the ticket closed. Same watch machinery as
+AU-6 (§12.3 / §12.9); different subject: the **consequence record**, not the draft.
+
+**Why this beats draft-edit learning at low volume.** A draft qty fix is a local extraction slip. A contact
+decision + ticket trajectory is a *policy episode*: cause → channel → outward artifact → replies → resolution.
+A handful of those episodes teach; a handful of qty edits do not.
+
+### 14.1 The chain (one episode)
+
+```
+warranty task (VendorSuite)
+    │  classify → arm + cause          (← CONTACT_ASKS — hypothesis)
+    ▼
+desk CASE (ambiguous / contact)
+    │  human decides channel            (email | call | unresolved)
+    │  primary act fires
+    ▼
+consequence RECORD (Zendesk ticket)     ← AU-1 create banks it; §12.8.1 incitedBy → task
+    │  outwardAt stamped when public    (§13 — something left the boundary)
+    ▼
+CONSEQUENCE WATCH (§12.9 observe)       ← NEW: same sweep, different leg
+    │  replies added · status moved · solved/closed
+    ▼
+episode complete: hypothesis → outcome  ← teaching surface (case + record timeline)
+```
+
+Shopify draft→order hand-off is the same shape with different nouns: create → pointer follows → observe on the
+**current** kind. Here: decide → create/link ticket → observe on **ticket**, not on the warranty row and not on
+a draft we are not using as curriculum.
+
+### 14.2 Cause is a hypothesis; the watch grades it
+
+| layer | what it is | already exists? |
+|---|---|---|
+| **Cause (declared)** | Why the machine stopped — `CONTACT_ASKS` keys (`no-count`, …). Machine-named at classify; rides the ticket body and tags. | **Yes** — `Core/warrantyContact.js`, `warrantySwitch.js` |
+| **Channel (decided)** | How a human chose to act — email / call / unresolved. | **Yes** — `contactChannel.js`, `contactReview.js` |
+| **Consequence (observed)** | What the world did after — ticket replies, status→solved, reopen. | **Partial** — ticket create banks; **observe on ticket not declared** |
+| **Episode (derived)** | `{cause, channel, consequence*}` — the teaching unit. | **No** — assemble at read time from case + record events |
+
+**Do not invent a second "cause" vocabulary from the watch.** The watch does not rename `no-count` into
+something smarter. It answers a different question: *given this cause and channel, what happened next?* A
+homeowner reply that supplies a quantity is evidence the `no-count` hypothesis was right to ask; a ticket that
+rots open for 14 days with no reply is evidence the channel or ask failed — still under the same cause key.
+
+### 14.3 Abstraction — one monitor, many hosts (not "a Shopify watcher")
+
+AU-6's monitor is already host-agnostic:
+
+- `watches` / `reads` / `observe` live on **legs** (`connectorRecipes.js`)
+- the `vitals:tick` watch sweep (background/handlers/vitals.js, on `pollPlan`/`reconcileCollection`,
+  Core/recordObserve.js) plans collections + per-record probes from those declarations
+- `incitedBy` ties create → source task; hand-off moves `currentKind`
+
+**Consequence watch adds no new engine.** It adds declarations + one linking rule:
+
+1. **When a contact primary succeeds** (ticket created, or public comment sent), bank an audit create (AU-1) with
+   `incitedBy` → the warranty task (already the intent of §12.8.1 on this path) and `outwardAt` if the act was
+   public/outward.
+2. **Declare `observe` on the ticket refresh leg** — not on `create_ticket`. Per §12.9.4, observe lives on the
+   read that refreshes the kind. Concrete candidates (already in catalog):
+   - `ticket_comments` as a per-record read (`reads: 'ticket'`) with  
+     `observe: { replies: { of:'set', rows:'…', id:'id', keep:{ author, at, public } }, status: { of:'field', at:'status' } }`  
+     (exact paths from the live ticket/comment shapes — HAR or one live probe before land; do not invent).
+3. **Warm window** on that leg tracks "how long a contact ask is worth watching" — declare `warm: '14d'` (or
+   similar) as recipe data, same as order `60d`. Cold → stop; forced verify-at-view still re-reads (§12.3 / v2217).
+4. **Case card / record card** render the episode: cause + channel already on the case; consequence lines from
+   the ticket record's `events[]` (same drill timeline as draft→order).
+
+Shopify remains one host among others. Draft lifecycle (hand-off, tracking) stays §12 as built. Draft *field*
+corrections as curriculum stay **deferred** at <30 volume (2026-08-11 ruling).
+
+### 14.4 What is in / out
+
+**In (v1 — landable on existing spine):**
+
+- Ticket (or other consequence create) always carries `incitedBy` + cause in tags/body (already partly true).
+- `observe` on the ticket read leg for: new comments (set), status field (field). Metadata-first on comment
+  bodies (§12.9.5 — knowing a reply happened; prose stays off the LLM path unless explicitly `keep`'d).
+- Record timeline lines: *"Aug 12 · 1 new reply (public)"*, *"Aug 14 · status solved"*.
+- Case surface: one line that the consequence record exists and its newest material event (reference control
+  already opens the source task; eye on the ticket record opens the ticket).
+
+**Out (v1):**
+
+- Auto-rewriting `CONTACT_ASKS` or classify rules from outcomes.
+- Watching Gmail/Outlook directly — Zendesk is the team's contact surface today; the ticket *is* the email
+  consequence for this desk.
+- Predicates in recipes (`status == solved`) — render decides; observe stays raw (§12.9.3).
+- Treating "leave unresolved" as a watch subject — no consequence record; the case close *is* the outcome.
+
+### 14.5 Volume honesty
+
+At sparse contact volume the episode is still worth banking: each one is dense (cause × channel × trajectory).
+The **digest** that improves the agent is a later rung — same bar as draft-edit learning: wait until the same
+`(cause, outcome-shape)` repeats enough to write a `LESSON[…]` by hand. Until then the product value is
+**visibility for the human on the next similar case** ("last time we emailed no-count, they replied in 2 days /
+never"), not autonomous tuning.
+
+### 14.6 Build ladder (smallest safe first)
+
+| rung | what | gate |
+|---|---|---|
+| **CW-0** | Prove contact→ticket create banks AU-1 with `incitedBy` + cause tag; if not, fix the seam (no new watch) | live create + `AUDIT ▸` + record card back-arrow to task |
+| **CW-1** | Declare `reads`/`observe`/`warm` on the ticket refresh leg; paths from one live reply shape | unit: observeFields fixtures; live: one forced verify shows a reply or status line |
+| **CW-2** | Case / contact card shows newest consequence event (reference, not a second primary) | eyeball + decisions download |
+| **CW-3** | Episode digest (optional) — meta-only counts by cause×channel×terminal status for Forge/journal | only after CW-1 has real events |
+
+### 14.7 Non-goals restated
+
+- Not a second lifecycle next to AU-6 — **the same lifecycle**, pointed at the consequence kind.
+- Not "watch Shopify to learn cause" — cause is classified from the warranty note; Shopify is the replace arm.
+- Not draft field monitoring as curriculum at current volume — lifecycle only there.
+
+**One-line law:** *Decide on the case; watch the artifact the decision created; teach from the episode, not from the label alone.*

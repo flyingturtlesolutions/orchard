@@ -117,7 +117,9 @@ describe('the shipping watch — declared on the SHIPPED catalog', () => {
     const one = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_draft_order');
     assert.equal(one.reads, 'draft');
     assert.deepEqual(one.handOff, { at: 'order.id', label: 'order.name', toKind: 'order' });
-    assert.deepEqual(one.probe, { param: 'draft_gid', gid: 'DraftOrder' });
+    // v2.74.2222 — `exact: true`: gid-addressed, so an OK reply with no row is the vendor stating non-existence
+    // (the §12.2 gone observation); a search-shaped probe must never declare it.
+    assert.deepEqual(one.probe, { param: 'draft_gid', gid: 'DraftOrder', exact: true });
     // The transport the HAR attests: a document-in-body POST under an operation NAME the BFF routes on.
     assert.match(one.endpoint, /\?operation=DraftOrderDetails_0&type=query$/);
     assert.equal(one.body.operationName, 'DraftOrderDetails_0');

@@ -10,7 +10,7 @@ import {
   classifyCreate, createRecordFrom, auditSucceeded, customerLabelFrom,
   auditEntry, appendCreate, truncationNotice, describeCreate,
   parseCreatesAsk, createsScopeWindow, filterCreatesByScope, renderCreatesAnswer,
-  recordOpenUrl, incitedOpener, classifyVerb,
+  recordOpenUrl, incitedOpener, classifyVerb, chooseAuditMutator,
 } from './audit.js';
 import { fillEndpoint } from './connectorRecipes.js';   // AU-2 — the real substituter, injected exactly as chat.js injects it
 
@@ -381,5 +381,70 @@ describe('classifyVerb — which act was this (AU-6)', () => {
     assert.equal(auditEntry({ verb: 'delete', kind: 'draft' }).verb, 'delete');
     assert.equal(auditEntry({ verb: 'update', kind: 'draft' }).verb, 'update');
     assert.equal(auditEntry({ verb: 'wormhole', kind: 'draft' }).verb, 'create', 'an unknown verb still falls to create');
+  });
+});
+
+// ── v2.74.2222 — the delete branch (the §10.3 deferral, closed): a GraphQL delete names its casualty as a
+// SCALAR (`deletedId`), which the entity walk cannot see — so every delete failed auditSucceeded and the seam's
+// whole verb!=='create' arm was unreachable for deletes. ──────────────────────────────────────────────────────
+describe('createRecordFrom + auditSucceeded — the DELETE reply (deletedId, v2222)', () => {
+  const DELETE_OK = { data: { draftOrderDelete: { deletedId: 'gid://shopify/DraftOrder/29685', userErrors: [] } } };
+  const DELETE_REJECTED = { data: { draftOrderDelete: { deletedId: null, userErrors: [{ message: 'Draft order is completed' }] } } };
+  it('a deletedId SCALAR extracts, gid → tail — grouping with the create’s banked id', () => {
+    assert.deepEqual(createRecordFrom(DELETE_OK), { id: '29685', label: '29685' });
+  });
+  it('auditSucceeded accepts a vendor-confirmed delete and still refuses a rejected one', () => {
+    assert.equal(auditSucceeded(DELETE_OK), true);
+    assert.equal(auditSucceeded(DELETE_REJECTED), false);
+  });
+  it('the delete reply classifies whole: verb delete, kind draft', () => {
+    assert.deepEqual(classifyCreate(DELETE_OK, 'shopify_delete_order'), { verb: 'delete', kind: 'draft' });
+  });
+  it('an entity-returning reply is untouched by the scalar branch (create still wins first)', () => {
+    assert.deepEqual(createRecordFrom(DRAFT_OK), { id: '29685', label: '#D29685' });
+  });
+});
+
+// ── v2.74.2222 — the BIRTH EVENT is typed by the verb. Hardcoded `create`+warm was right until the AU-6 verb
+// generalization let update/delete head a row: an update-headed row then opened its own timeline with a false
+// "Created…", and a delete-headed row was born WARM — the sweep polling a record we had just destroyed. ───────
+describe('auditEntry — the birth is typed by the verb (v2222)', () => {
+  it('a create is born warm with a create event (unchanged)', () => {
+    const e = auditEntry({ at: 5, verb: 'create', kind: 'draft', id: '1', label: '#D1', warmUntil: 99 });
+    assert.equal(e.watch, 'warm');
+    assert.equal(e.warmUntil, 99);
+    assert.deepEqual(e.events.map((x) => x.type), ['create']);
+  });
+  it('an update-headed row (a record that was never ours) opens with an update event, never a false "Created"', () => {
+    const e = auditEntry({ at: 5, verb: 'update', kind: 'draft', id: '1', who: 'human' });
+    assert.equal(e.watch, 'warm');
+    assert.deepEqual(e.events.map((x) => x.type), ['update']);
+    assert.deepEqual(e.events[0].fields, { update: 'by you' });
+  });
+  it('a delete-headed row is born GONE — nothing to watch — and carries no warmUntil (§12.1)', () => {
+    const e = auditEntry({ at: 5, verb: 'delete', kind: 'draft', id: '1', warmUntil: 99 });
+    assert.equal(e.watch, 'gone');
+    assert.equal('warmUntil' in e, false);
+    assert.deepEqual(e.events.map((x) => x.type), ['gone']);
+    assert.equal(e.events[0].why, 'deleted');
+  });
+});
+
+// ── v2.74.2222 (M3) — the known-row routing, lifted out of the ungated seam. ─────────────────────────────────
+describe('chooseAuditMutator — which mutator does an act apply to a KNOWN row', () => {
+  const known = () => auditEntry({ at: 1, verb: 'create', kind: 'draft', id: '29685', label: '#D29685', warmUntil: 10 });
+  it('create → null: a create never lands on an existing row (two creates are two acts, two rows)', () => {
+    assert.equal(chooseAuditMutator('create', { at: 2 }), null);
+  });
+  it('delete → the §12.2 gone observation on the same row', () => {
+    const r = chooseAuditMutator('delete', { at: 2 })(known());
+    assert.equal(r.watch, 'gone');
+    assert.deepEqual(r.events.map((x) => x.type), ['create', 'gone']);
+  });
+  it('update → an ACT event that re-warms and leaves the §12.9 observed bag alone', () => {
+    const r = chooseAuditMutator('update', { who: 'human', at: 2, windowMs: 1000 })(known());
+    assert.deepEqual(r.events.map((x) => x.type), ['create', 'update']);
+    assert.equal(r.observed, undefined, 'an act is not an observation');
+    assert.equal(r.warmUntil, 1002, 're-warms from the act');
   });
 });

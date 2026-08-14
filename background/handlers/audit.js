@@ -9,10 +9,10 @@
 // would bank a phantom "created" row for a vendor-REFUSED create. recordCreate refuses to bank one.
 
 import { Logger } from '../../Core/Logger.js';
-import { auditSucceeded, classifyCreate, createRecordFrom, customerLabelFrom } from '../../Core/audit.js';
-import { appendCreateEntry, findCreate, updateCreate } from '../../Services/Storage/AuditCreateStore.js';
+import { auditSucceeded, classifyCreate, createRecordFrom, customerLabelFrom, chooseAuditMutator } from '../../Core/audit.js';
+import { bankAct } from '../../Services/Storage/AuditCreateStore.js';
 import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';   // AU-6 (v2204) — the leg's declared `warm` window
-import { warmWindowMs, applyGone, applyUpdate } from '../../Core/recordLife.js';   // AU-6 — the window parser + the state machine an act on a KNOWN record applies
+import { warmWindowMs } from '../../Core/recordLife.js';
 
 /**
  * Bank one create event to the audit ledger — IF it was a real, vendor-accepted create.
@@ -64,19 +64,15 @@ export async function recordCreate(evt) {
     // draft we created did not create a second thing, and a second row would corrupt the AU-3 answer the same way
     // a hand-off would ('you've created 12 records' becoming 24 because half were edited). A row is headed by
     // `update`/`delete` only when the record it touched was never ours — which is a genuinely different act.
-    if (verb !== 'create') {
-      const known = await findCreate({ system: fields.system, id: fields.id });
-      if (known) {
-        await updateCreate({ at: known.at, id: known.id }, (r) => (verb === 'delete'
-          ? applyGone(r, { why: 'deleted', at: fields.at })
-          : applyUpdate(r, { fields: { [`${verb} by ${who}`]: new Date(fields.at).toISOString().slice(11, 16) }, at: fields.at, windowMs: warmWindowMs(_recipe) })));
-        try { Logger.info('audit', `AUDIT ▸ ${fields.system || '?'} ${verb} ${kind} by ${who} → event on the existing row`); } catch { /* */ }
-        return;
-      }
-    }
-    await appendCreateEntry(fields);
+    //
+    // v2.74.2222 — the routing is PURE and elsewhere now: `chooseAuditMutator` (Core/audit.js, unit-gated) picks
+    // the mutator an act applies to a known row (delete → gone, update → an act event, create → never mutates),
+    // and `bankAct` (the store, unit-gated) does the find and the write in ONE chained turn — the old
+    // findCreate-then-updateCreate pair here was two chain entries with a race window between them. This seam is
+    // wiring again, which is all `background/handlers/*.js` (outside the unit gate) is allowed to be.
+    const _banked = await bankAct(fields, () => chooseAuditMutator(verb, { who, at: fields.at, windowMs: warmWindowMs(_recipe) }));
     // AUDIT ▸ — BODY-BLIND (§5/§7-7): system · verb · kind · who only, NEVER the id/label. Registered metric:true
     // in Core/decisionMarkers.js so both the decisions view and the CloudWatch count pick it up (Invariant #1).
-    try { Logger.info('audit', `AUDIT ▸ ${fields.system || '?'} ${verb} ${kind} by ${who}`); } catch { /* */ }
+    try { Logger.info('audit', `AUDIT ▸ ${fields.system || '?'} ${verb} ${kind} by ${who}${_banked && _banked.action === 'event' ? ' → event on the existing row' : ''}`); } catch { /* */ }
   } catch { /* fail-safe — never break the observed write */ }
 }

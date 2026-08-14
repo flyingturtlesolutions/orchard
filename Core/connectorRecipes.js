@@ -826,7 +826,12 @@ export const CONNECTOR_RECIPES = [
     // already makes); `handOff` names where the answer lives, with the order's NAME so a person reads
     // 'DEAKO#72044' and the order re-read has the key it searches by.
     reads: 'draft', rows: 'data.draftOrder',
-    probe: { param: 'draft_gid', gid: 'DraftOrder' },
+    // v2.74.2222 — `exact: true`: this probe addresses ONE record by its own gid, so an OK reply whose row
+    // resolved to nothing (`data.draftOrder: null`, HTTP 200) is the VENDOR stating non-existence — the one
+    // reply shape §12.2 accepts as a `gone` observation (the sweep's _probeOne reads this flag). A search-shaped
+    // probe (shopify_order's `name:` query) must NEVER declare it: an empty search is the v2214 query-mismatch
+    // class, not a deletion.
+    probe: { param: 'draft_gid', gid: 'DraftOrder', exact: true },
     handOff: { at: 'order.id', label: 'order.name', toKind: 'order' },
     // v2.74.2215 — `observe` is what makes this leg a PER-RECORD WATCH candidate at all: probePlan requires
     // `reads` AND `observe` (recordObserve.js), and without this block the leg was reachable ONLY as the

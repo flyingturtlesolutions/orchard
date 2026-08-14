@@ -119,12 +119,15 @@ describe('appCatalog — DK-1 (DESIGN_desks.md §4): a new site is an Inbox PRES
 });
 
 describe('appCatalog — DK-6: preconfigured desks (the flat gallery — sites built in, no type level)', () => {
-  it('the Warranty desk (id warranty-manager, identity kept) ships its 4 sites in order', () => {
+  it('the Warranty desk (id warranty-manager, identity kept) ships its 5 sites in order (concrete Zendesk + Aircall)', () => {
     const w = builtinApp('warranty-manager');
     assert.equal(w.name, 'Warranty');   // v1508 — the kind badge carries 'desk'; the name drops the descriptor
-    assert.deepEqual(w.sites.map((s) => s.host), ['vendorsuite.drhorton.com', 'zendesk.com', 'admin.shopify.com', 'app.hubspot.com']);
-    assert.deepEqual(w.sites.map((s) => s.label), ['VendorSuite', 'Zendesk', 'Shopify', 'HubSpot']);
-    assert.ok(/HubSpot/.test(w.seed) && /ONE case/.test(w.seed), 'the seed spans the homeowner’s whole record + correlation');
+    // v2.74.2219 — deako.zendesk.com (not bare zendesk.com) + Aircall so a new install pre-picks every fundamental site
+    assert.deepEqual(w.sites.map((s) => s.host), [
+      'vendorsuite.drhorton.com', 'deako.zendesk.com', 'workspace.aircall.io', 'admin.shopify.com', 'app.hubspot.com',
+    ]);
+    assert.deepEqual(w.sites.map((s) => s.label), ['VendorSuite', 'Zendesk', 'Aircall', 'Shopify', 'HubSpot']);
+    assert.ok(/HubSpot/.test(w.seed) && /Aircall/.test(w.seed) && /ONE case/.test(w.seed), 'the seed spans the homeowner’s whole record + correlation');
   });
   it('preconfiguredDesks = presets WITH sites (Support + Warranty + Call, v2.74.1509); site-less presets stay resolvable', () => {
     assert.deepEqual(preconfiguredDesks().map((d) => d.id).sort(), ['call-manager', 'support', 'warranty-manager']);

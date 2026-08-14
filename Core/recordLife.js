@@ -161,6 +161,27 @@ export function applyUpdate(row, { fields = null, at = 0, windowMs = DEFAULT_WAR
 }
 
 /**
+ * v2.74.2222 — AN ACT WE PERFORMED on this record (an update through a ride leg): one timeline event, and
+ * NOTHING in `observed`. The seam used to fake this through applyUpdate with a synthetic field key
+ * (`"update by human": "14:23"`), which wrote display prose into the §12.9 observed-values bag — the namespace
+ * the vendor-observed extractors own — and made every act at a new minute read as "news". An act is not an
+ * observation: it always appends (each act IS an event), it re-warms (we just touched the record), and the
+ * observed bag stays what §12.9 says it is.
+ */
+export function applyActEvent(row, { verb = 'update', who = 'gate', at = 0, windowMs = DEFAULT_WARM_MS } = {}) {
+  const r = _isObj(row) ? row : {};
+  if (_str(r.watch) === 'gone') return r;                                   // gone is absorbing, as everywhere
+  const t = _num(at);
+  return {
+    ...r,
+    events: appendEvent(r.events, { at: t, type: 'update', fields: { [_str(verb) || 'update']: who === 'human' ? 'by you' : 'auto' } }),
+    watch: 'warm',
+    warmUntil: t + Math.max(0, _num(windowMs) || DEFAULT_WARM_MS),
+    lastSeenAt: t,
+  };
+}
+
+/**
  * GONE — terminal, and ONLY from an observation (§12.2): the object returned 404, or a delete we performed
  * succeeded. Never a forecast, never inferred from a status string. Idempotent: a second observation of the same
  * non-existence is not a second event.

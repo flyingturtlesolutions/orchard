@@ -41,7 +41,20 @@ const FLEET_DAYS = 2;                  // the archive is a ~48h ring; older dirs
 // third line carries `· N event(s) · exported <ts>`, which changes on every export; the digest counts lines
 // rather than hashing content, so that never moved the gate — but excluding them makes "0 signal" mean what it
 // says. Everything else counts, including line shapes nobody listed here.
-const HEARTBEAT = /^\s*#|SyncEngine|CloudClient|VITALS \S* (tick|presence|csrf|prewarm)|SGV \S* tick|presence-gate/i;
+//
+// v2.74.2221 — `PANEL ▸ silent 60s`. The gate shipped at .2146 and did almost nothing: measured over its whole
+// life, 195 SKIP vs 703 RUN, and 588 of those RUNs cited `fleet` ALONE — every one of which the grader then
+// closed with "no new decision-worthy signal". Cause: this line is a CLOCK, not an event. It lands once a
+// minute whether or not anything happened (299 of the 759 signal lines across the last 6 hour-files), so a
+// digest that COUNTS lines differs on every 5-minute firing by construction — no quiet period could ever have
+// produced a SKIP. That is a different failure from "shape nobody listed": an unlisted bursty line costs one
+// wasted firing, an unlisted per-minute ticker costs EVERY firing, permanently.
+//
+// LESSON: the fail-open default is right for event shapes and wrong for periodic ones. Anything the SW emits on
+// a timer must be listed here at birth, or it silently pins the gate open. Bursty shapes (ORCH_LOG,
+// SNIFFED_OP_SEEN, WORKFLOW_PARKED) stay counted on purpose — they only move when something actually happened,
+// which is exactly what the gate exists to notice.
+const HEARTBEAT = /^\s*#|SyncEngine|CloudClient|VITALS \S* (tick|presence|csrf|prewarm)|SGV \S* tick|presence-gate|PANEL \S* silent/i;
 
 // ── pure ────────────────────────────────────────────────────────────────────────────────────────────────────
 /** Signal lines in one file's text = non-blank lines that are not heartbeat. Unknown shapes count as signal. */

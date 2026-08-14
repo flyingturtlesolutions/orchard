@@ -93,26 +93,66 @@ export async function removeCreate({ at = 0, id = '' } = {}) {
   });
 }
 
-/**
- * AU-6 (v2.74.2207, §12.0) — DO WE ALREADY HOLD THIS RECORD? Matched on `system` + the vendor id, checking the
- * POINTER as well as the create id, so a draft that became an order is still found when the order is acted on.
- *
- * The write seam calls this before banking an `update`/`delete`: an act on a record we already have is an EVENT
- * on that row, and a second row would double-count an artifact that exists once. Returns the row (for its
- * immutable `at`+`id` key) or null.
- */
-export async function findCreate({ system = '', id = '' } = {}) {
-  const rec = await _read();
-  const items = (rec && Array.isArray(rec.items)) ? rec.items : [];
+// DO WE ALREADY HOLD THIS RECORD? Matched on `system` + the vendor id, checking the POINTER as well as the
+// create id, so a draft that became an order is still found when the order is acted on. Newest first — a
+// re-created id belongs to the latest act. Shared by findCreate and bankAct (one matching rule, never two).
+function _findByVendor(items, { system = '', id = '' } = {}) {
   const sys = String(system || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
   const want = String(id || '');
   if (!sys || !want) return null;
-  for (let i = items.length - 1; i >= 0; i--) {          // newest first — a re-created id belongs to the latest act
+  for (let i = items.length - 1; i >= 0; i--) {
     const e = items[i];
     if (!e || String(e.system || '') !== sys) continue;
     if (String(e.id || '') === want || String(e.currentId || '') === want) return e;
   }
   return null;
+}
+
+/**
+ * AU-6 (v2.74.2207, §12.0) — the read-only lookup over _findByVendor's rule. Returns the row (for its immutable
+ * `at`+`id` key) or null. NOTE for writers: do NOT pair this with a separate updateCreate to implement
+ * act-or-append — that is two chain entries with a race window between them; use bankAct, which does the find
+ * and the write inside ONE chained turn (v2.74.2222).
+ */
+export async function findCreate({ system = '', id = '' } = {}) {
+  const rec = await _read();
+  const items = (rec && Array.isArray(rec.items)) ? rec.items : [];
+  return _findByVendor(items, { system, id });
+}
+
+/**
+ * v2.74.2222 — BANK ONE ACT, atomically: an act on a record we already hold becomes an EVENT on that row (§12.0);
+ * anything else appends a new row. The find and the write happen inside ONE `_chained` turn, closing the race the
+ * seam's old find-then-update pair left open (two concurrent acts on the same id could double-row).
+ *
+ * `chooseMutator(knownRow) → (row→row) | null` is the caller's PURE routing (Core/audit.chooseAuditMutator): it
+ * is consulted only when a row was found, and a null answer means "append anyway" (a create never mutates — the
+ * same record created twice is two acts, two rows). The mutator contract matches updateCreate's: same-object
+ * return ⇒ changed:false ⇒ nothing written; a throwing mutator never corrupts the book.
+ * @returns {Promise<{items,total,notice,action:'append'|'event',changed:boolean,row:object}>}
+ */
+export async function bankAct(fields, chooseMutator = null, { cap = AUDIT_CAP } = {}) {
+  return _chained(async () => {
+    const rec = await _read();
+    const prev = (rec && Array.isArray(rec.items)) ? rec.items : [];
+    const prevTotal = (rec && Number.isFinite(rec.total)) ? rec.total : prev.length;
+    const entry = auditEntry(fields);
+    const known = _findByVendor(prev, { system: entry.system, id: entry.id });
+    const mutate = (known && typeof chooseMutator === 'function') ? chooseMutator(known) : null;
+    if (known && typeof mutate === 'function') {
+      const i = prev.indexOf(known);
+      let next = known;
+      try { next = mutate(known) || known; } catch { next = known; }     // a throwing mutator must never corrupt the book
+      if (next === known) return { items: prev, total: prevTotal, notice: truncationNotice(prev.length, prevTotal), action: 'event', changed: false, row: known };
+      const items = prev.slice(); items[i] = next;
+      await chrome.storage.local.set({ [KEY]: { items, total: prevTotal, updatedAt: Date.now() } });
+      return { items, total: prevTotal, notice: truncationNotice(items.length, prevTotal), action: 'event', changed: true, row: next };
+    }
+    const items = appendCreate(prev, entry, { cap });
+    const total = prevTotal + 1;
+    await chrome.storage.local.set({ [KEY]: { items, total, updatedAt: entry.at || Date.now() } });
+    return { items, total, notice: truncationNotice(items.length, total), action: 'append', changed: true, row: entry };
+  });
 }
 
 /**

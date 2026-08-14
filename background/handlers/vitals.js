@@ -301,10 +301,16 @@ async function _tick() {
  *
  * EVERYTHING FAIL-SAFE. This runs after presence and keep-alive; a throw anywhere must not cost the tick.
  */
-async function _recordWatchSweep({ force = false } = {}) {
+async function _recordWatchSweep({ force = false, onlyKey = '' } = {}) {
   try {
     const { items } = await loadCreates();
-    const rows = Array.isArray(items) ? items : [];
+    // v2.74.2222 — SCOPE. verify-at-view passes the ONE row being looked at (`onlyKey` = its at|id identity), so
+    // a card open costs that row's reads — §12.3 prices the trigger at "1 read, on demand", and the unscoped
+    // force (every collection due + every row probe-due) was O(book) network calls per drill open: invisible at
+    // 3 rows, a per-open storm at the 500 cap. An empty key keeps the whole-book sweep (the background tick).
+    const _key = (r) => `${Number(r && r.at) || 0}|${String((r && r.id) || '')}`;
+    let rows = Array.isArray(items) ? items : [];
+    if (onlyKey) rows = rows.filter((r) => _key(r) === onlyKey);
     if (!rows.length) return;
     // v2.74.2213 — `chrome.storage.local` DIRECTLY, like every other book in this file (INC_KEY, TALLY_KEY,
     // KA_KEY). v2207 used `StorageManager.get(WATCH_KEY)`, and `#get` is a PRIVATE static — there is no public
@@ -369,7 +375,13 @@ async function _recordWatchSweep({ force = false } = {}) {
           }
           else {
             const r = await updateCreate(ref, (row) => applyUpdate(row, { fields: a.fields, at: a.at, windowMs: warmWindowMs(leg) }));
-            if (r.changed) { updated++; seenBy[a.key] = a.seenNext; }
+            if (r.changed) updated++;
+            // v2.74.2222 — the seen-state advances whenever the act was PROCESSED, not only when the row changed.
+            // Two memories diff here (reconcile against seenBy; applyUpdate against row.observed), and gating the
+            // seenBy write on `changed` let them wedge: if they ever disagreed (WATCH_KEY cleared, a crash between
+            // the two commits), reconcile re-emitted the same set/member "news" every poll and applyUpdate
+            // rejected it every time — seenBy never learned the ids, forever.
+            seenBy[a.key] = a.seenNext;
           }
         } catch { /* one row's failure must not stop the rest */ }
       }
@@ -380,7 +392,8 @@ async function _recordWatchSweep({ force = false } = {}) {
     // this one's cost scales with the book. It exists because a collection cannot always host the watch: an
     // order's tracking lives on the order, and the only orders collection that returns tracking is the
     // UNFULFILLED queue, which an order LEAVES at the moment it ships (v2209, from the same capture).
-    const fresh = (await loadCreates()).items || rows;
+    const _freshAll = (await loadCreates()).items || rows;
+    const fresh = onlyKey ? _freshAll.filter((r) => _key(r) === onlyKey) : _freshAll;
     const lastProbeAt = _isPlain(book.lastProbeAt) ? book.lastProbeAt : {};
     // v2.74.2217 — UNDER FORCE, COLD ROWS ARE RE-READ. `force` means a human is looking (verify-at-view), and
     // reversalOffer promised at v2206 that "when verify-at-view lands, `stale` becomes a re-read instead of a
@@ -401,16 +414,34 @@ async function _recordWatchSweep({ force = false } = {}) {
         if (!got) { failed++; continue; }
         probed++;
         lastProbeAt[step.key] = Date.now();
-        if (got.handOff) {
+        // v2.74.2222 (§12.2) — an EXACT probe that resolved to nothing IS the "object returned 404" observation:
+        // the read addressed the record by its own id (`probe.exact`, a leg declaration) and the vendor answered
+        // "no such record". Search-shaped probes (a `name:` query) never take this branch — an empty search is
+        // the v2214 query-mismatch class, and concluding gone from it would be a confidently wrong terminal
+        // state. Before this, NO live path could ever observe a vendor-side deletion (the per-record tier
+        // counted it `failed`; only a partition collection could say gone, and none is declared).
+        if (got.gone) {
+          const r = await updateCreate(ref, (row) => applyGone(row, { why: '404', at: Date.now() }));
+          if (r.changed) gone++;
+        } else if (got.handOff) {
           const r = await updateCreate(ref, (row) => applyTransition(row, { ...got.handOff, at: Date.now(), windowMs: got.windowMs }));
           if (r.changed) handed++;
         } else if (got.fields) {
           const r = await updateCreate(ref, (row) => applyUpdate(row, { fields: got.fields, at: Date.now(), windowMs: got.windowMs }));
-          if (r.changed) { updated++; seenBy[step.key] = got.seenNext; }
+          if (r.changed) updated++;
+          seenBy[step.key] = got.seenNext;   // v2222 — advance when processed, not only when changed (see the collection tier)
         }
       } catch { /* one row's failure must not stop the rest */ }
     }
 
+    // v2.74.2222 — PRUNE the row-keyed watch state for rows no longer in the book (evicted past the cap, or
+    // removed). Without this, seenBy/lastProbeAt grew one orphan per departed row forever. Only on a WHOLE-book
+    // sweep — a scoped verify sees one row and must not read every other row's state as departed.
+    if (!onlyKey) {
+      const _live = new Set(_freshAll.map(_key));
+      for (const k of Object.keys(seenBy)) if (!_live.has(k)) delete seenBy[k];
+      for (const k of Object.keys(lastProbeAt)) if (!_live.has(k)) delete lastProbeAt[k];
+    }
     try { await chrome.storage.local.set({ [WATCH_KEY]: { lastPollAt, lastProbeAt, seenBy } }); } catch { /* */ }
     // BODY-BLIND like every other audit line: counts and leg ids, never a value that was observed.
     try { Logger.info('audit', `AUDIT ▸ watch poll ${polled} collection(s) + ${probed} record read(s) over ${rows.length} row(s) → ${updated} updated · ${handed} handed off · ${gone} gone · ${failed} unreadable`); } catch { /* */ }
@@ -455,7 +486,11 @@ async function _probeOne(recipeId, { id = '', label = '' } = {}, now = 0, seen =
   } catch { reply = null; }
   if (!reply || !reply.ok) return null;
   const one = rowsAt(reply.value, leg.rows)[0];
-  if (!one) return null;
+  // v2.74.2222 (§12.2) — an OK reply whose rows resolved to nothing, on a leg whose probe addresses the record
+  // by EXACT id (`probe.exact` — the gid-addressed draft detail, where a deleted draft answers
+  // `data.draftOrder: null` with a 200): that is the vendor stating non-existence, the one shape §12.2 accepts
+  // as a gone observation. Anything else (a search probe, a non-exact read) keeps failing toward silence.
+  if (!one) return (leg.probe && leg.probe.exact === true) ? { gone: true } : null;
   const windowMs = warmWindowMs(leg);
   const ho = readTransition(one, leg.handOff);
   // v2.74.2217 — a hand-off re-warms on the DESTINATION kind's timescale. This leg's own window (the draft
@@ -733,9 +768,11 @@ export function createVitalsHandlers() {
      * It runs the SAME sweep as the tick rather than a private read path: one reconciliation, one set of rules
      * about what absence means. `force` only bypasses the window.
      */
-    RECORD_VERIFY_NOW: (_payload, _sender, sendResponse) => {
+    // v2.74.2222 — `key` (the row's at|id identity) scopes the forced sweep to the record being LOOKED at, which
+    // is the §12.3 price ("1 read, on demand"); no key = the whole-book force (a deliberate full re-check).
+    RECORD_VERIFY_NOW: (payload, _sender, sendResponse) => {
       (async () => {
-        try { const t = await _recordWatchSweep({ force: true }); sendResponse({ success: true, tally: t }); }
+        try { const t = await _recordWatchSweep({ force: true, onlyKey: String((payload && payload.key) || '') }); sendResponse({ success: true, tally: t }); }
         catch (e) { sendResponse({ success: false, error: (e && e.message) || 'verify failed' }); }
       })();
       return true;

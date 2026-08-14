@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  nextWatch, reWarm, applyTransition, applyUpdate, applyGone, appendEvent,
+  nextWatch, reWarm, applyTransition, applyUpdate, applyGone, appendEvent, applyActEvent,
   currentRef, handOff, asOfLine, mayRead, warmWindowMs, markOutward, reversalOffer, describeEvent,
   WATCH_STATES, EVENT_CAP, DEFAULT_WARM_MS,
 } from './recordLife.js';
@@ -349,5 +349,31 @@ describe('recordLife — describeEvent: the timeline the drill promises (§12.1a
     const r = applyGone(applyTransition(draft(), { toKind: 'order', toId: '1234', at: T0 + DAY }), { why: '404', at: T0 + 2 * DAY });
     const lines = r.events.map((ev) => describeEvent(ev, '')).filter(Boolean);
     assert.deepEqual(lines, ['Created as a draft — #D29685', 'Became an order (#1234), from draft', 'No longer on the site']);
+  });
+});
+
+// ── v2.74.2222 — applyActEvent: an act WE performed is an event, never an observation. The seam used to fake
+// this through applyUpdate with a synthetic field key, which wrote display prose into the §12.9 observed bag. ──
+describe('applyActEvent — an act on the record (v2222)', () => {
+  it('always appends (each act IS an event) and never touches observed', () => {
+    const r1 = applyActEvent(draft(), { verb: 'update', who: 'human', at: T0 + DAY, windowMs: 14 * DAY });
+    const r2 = applyActEvent(r1, { verb: 'update', who: 'human', at: T0 + DAY, windowMs: 14 * DAY });
+    assert.deepEqual(r2.events.map((e) => e.type), ['create', 'update', 'update'], 'two acts are two events, identical or not');
+    assert.equal(r2.observed, undefined, 'the observed bag belongs to the §12.9 extractors');
+    assert.deepEqual(r1.events[1].fields, { update: 'by you' });
+  });
+  it('re-warms — we just touched the record', () => {
+    const cold = { ...draft(), warmUntil: T0 };
+    const r = applyActEvent(cold, { at: T0 + DAY, windowMs: 14 * DAY });
+    assert.equal(nextWatch(r, T0 + DAY), 'warm');
+    assert.equal(r.lastSeenAt, T0 + DAY);
+  });
+  it('gone is absorbing, as everywhere', () => {
+    const g = applyGone(draft(), { why: 'deleted', at: T0 + DAY });
+    assert.equal(applyActEvent(g, { at: T0 + 2 * DAY }), g);
+  });
+  it('renders as a sentence a person reads', () => {
+    const r = applyActEvent(draft(), { verb: 'update', who: 'gate', at: T0 + DAY });
+    assert.equal(describeEvent(r.events[1], ''), 'Changed — update auto');
   });
 });

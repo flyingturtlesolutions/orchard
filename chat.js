@@ -6558,7 +6558,8 @@ async function _runArmActClause(msg, wr, { tabId, goal = '', branchRun = null } 
     try { _orchLog(`ARM_ACT ▸ ${_pf.reason} — declared [${(_pf.targets || []).join(', ')}] for "${_scrubHead(goal, 40)}"`); } catch { /* */ }
     return { ok: false, gap: true };
   }
-  const createLeg = await _rideDrillLeg(srcLeg, targetId, (srcLeg && srcLeg.tool && srcLeg.tool.groundId) || null);
+  const createLeg = await _rideCatalogLeg(targetId)
+    || await _rideDrillLeg(srcLeg, targetId, (srcLeg && srcLeg.tool && srcLeg.tool.groundId) || null);
   if (!createLeg) {
     _setMessageBody(msg, `The declared target (**${escHtml(targetId)}**) isn’t available — connect it, or enable that recipe in Studio.`, { markdown: true });
     _orchFinalize(msg);
@@ -13080,7 +13081,12 @@ async function _undoRecordCreate(e, undoRec, btn, card) {
     // The one required param, from the leg's own declaration — never a hardcoded name.
     const _p = (legParamDefs(leg).find((p) => p && p.required) || {}).name || 'id';
     const _idIsGid = /^gid:\/\//i.test(String(e.id));
-    const params = { [_p]: _idIsGid ? String(e.id) : `gid://shopify/${undoRec.gidType || 'DraftOrder'}/${e.id}` };
+    // v2.74.2222 — the gid TYPE is the CREATE recipe's declaration (`gidType`, banked beside `undoLeg` on
+    // shopify_create_order), never a hardcoded 'DraftOrder' default: a platform whose legs declare none takes
+    // the raw id (the Zendesk shape), and minting `gid://shopify/…` for it would hand a foreign id scheme to a
+    // destructive call. Same declaration-over-code idiom as probeParams' `p.gid`.
+    const _gidType = String((((CONNECTOR_RECIPES || []).find((r) => r && r.id === (e && e.recipeId)) || {}).gidType) || undoRec.gidType || '');
+    const params = { [_p]: (_idIsGid || !_gidType) ? String(e.id) : `gid://shopify/${_gidType}/${e.id}` };
     const r = await _rideExecOnce(leg, params, { groundId: gid, confirmed: true });   // confirmed = the human clicked through the prompt above
     if (!r || !r.ok) throw new Error((r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'delete failed');
     // AU-6 (v2.74.2204, §12.2) — A DELETE WE PERFORMED IS AN OBSERVATION OF NON-EXISTENCE, and it is one of
@@ -13117,10 +13123,14 @@ function _recordOpenUrl(e) {
     // exact reason §12.1a says this "lands WITH AU-6 or the eye silently misleads".
     //
     // The pointer is `currentKind`; the recipe is found by the KIND it opens, not by the leg that wrote it.
+    // v2.74.2222 — found by the DECLARATION (`reads` === the kind + appHost — the same resolution
+    // destinationWarmMs and probePlan already use), never by regexing the URL path: the old `/${kind}s?/` test
+    // matched `/orders/` and missed `/draft_orders/` only by the accident of the `_` separator, and a third
+    // resolver for "which leg answers for kind X on host Y" was one more that could drift from the other two.
     const _cur = currentRef(e);
     if (_cur.kind && _cur.id && _cur.id !== String((e && e.id) || '')) {
       const _byKind = (CONNECTOR_RECIPES || []).find((r) => r && r.appHost === (e && e.system)
-        && /\{id\}/.test(String(r.itemUrl || '')) && new RegExp(`/${_cur.kind}s?/`, 'i').test(String(r.itemUrl || '')));
+        && String(r.reads || '') === _cur.kind && /\{id\}/.test(String(r.itemUrl || '')));
       if (_byKind && _byKind.itemUrl) return recordOpenUrl({ ...e, id: _cur.id }, _byKind.itemUrl, fillEndpoint);
       return '';   // handed off somewhere we cannot address — no link beats a wrong one (the v2149 rule)
     }
@@ -13264,7 +13274,9 @@ function _openRecordDrill(e, fmtTime) {
     if (nextWatch(e, Date.now()) !== 'gone') {
       void (async () => {
         try {
-          const r = await _orchReq('RECORD_VERIFY_NOW', {});
+          // v2.74.2222 — SCOPED to this row (its at|id identity): §12.3 prices verify-at-view at "1 read, on
+          // demand", and the unscoped force re-read the whole book on every drill open.
+          const r = await _orchReq('RECORD_VERIFY_NOW', { key: `${Number(e.at) || 0}|${String(e.id || '')}` });
           if (!r || r.success === false) return;
           // v2.74.2212 — SAY WHAT THE CHECK ACTUALLY DID. This said "re-checked just now" whenever the message
           // round-tripped — including when every read was REFUSED before the network, which is exactly what was
@@ -15776,6 +15788,44 @@ async function _synthRunScan(msg, { leg, ask, tabId, groundId, params, dval, kin
 // CX-9b — project the drill's VIA recipe (the details read) from the same Ground, riding the parent leg's transport.
 // Honors the §18 arm guard (a disabled/rejected details read is never drilled into). Null → the caller just renders
 // the list (drill is an enhancement, never a blocker).
+//
+// v2.74.2220 — CROSS-SYSTEM create (arm-act / writeMap target). `_rideDrillLeg` is SAME-GROUND by design — it asks
+// GET_RIDE_RECIPES on the parent's ground. A warranty row's writeMap targets `shopify_create_order`, which lives
+// on the Shopify ground, so looking it up through VendorSuite always returned null → "isn't available" with
+// Shopify already connected (same class as PP-2c on the lookup→create road, which already rode the TARGET ground).
+// Resolve by catalog `appHost` (+ desk-bound origin under that class), never by the source leg's ground.
+async function _rideCatalogLeg(recipeId) {
+  const id = String(recipeId || '').trim();
+  if (!id) return null;
+  const cat = (CONNECTOR_RECIPES || []).find((r) => r && r.id === id);
+  const appHost = String((cat && cat.appHost) || '').toLowerCase();
+  if (!appHost) return null;
+  let host = appHost;
+  try {
+    for (const c of (_boundConnections() || [])) {
+      const origin = String((c && (c.origin || c.host)) || '');
+      if (origin && originMatchesAppHost(origin, appHost)) {
+        try {
+          host = new URL(/^https?:\/\//i.test(origin) ? origin : `https://${origin}`).host;
+        } catch {
+          host = String(origin).replace(/^https?:\/\//i, '').replace(/\/+$/, '') || appHost;
+        }
+        break;
+      }
+    }
+  } catch { /* fall through with catalog appHost */ }
+  let pack = { groundId: '', recipes: [] };
+  try { pack = await _cachedHostRecipes(host); } catch { return null; }
+  const gid = pack.groundId || '';
+  const rec = ((pack.recipes) || []).find((x) => x && x.id === id) || null;
+  if (!gid || !rec || !rideArmable(rec)) return null;
+  const l = recipeToLeg({ ...rec, app: rec.app || rec.origin || host }, { trusted: true });
+  if (!l || !l.tool) return null;
+  l.tool.groundId = gid;
+  // Do NOT stamp the source system's sessionHost — the create rides Shopify's own session (PP-2c).
+  return l;
+}
+
 async function _rideDrillLeg(parentLeg, viaId, groundId) {
   let gid = (parentLeg.tool && parentLeg.tool.groundId) || groundId || '';
   const origin = (parentLeg.tool && parentLeg.tool.origin) || '';
