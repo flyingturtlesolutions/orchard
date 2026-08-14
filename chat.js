@@ -12431,6 +12431,9 @@ async function _renderRailRecords(opts = {}) {
 // stays in tooltips and the drill where precision belongs. Resolved through the catalog (appHost → app), so a
 // new connector gets a name the day its recipes land; an unmatched host falls back to itself, never to blank.
 const _SYSTEM_LABELS = { shopify: 'Shopify', zendesk: 'Zendesk', vendorsuite: 'VendorSuite', aircall: 'Aircall', hubspot: 'HubSpot', ups: 'UPS' };
+// v2.74.2226 — kind display names: the chip says "Draft order", never the enum token 'draft'.
+const _KIND_LABELS = { customer: 'Customer', draft: 'Draft order', order: 'Order', ticket: 'Ticket', user: 'User', record: 'Record' };
+const _kindLabel = (k) => _KIND_LABELS[String(k || 'record')] || (String(k || 'record').charAt(0).toUpperCase() + String(k || 'record').slice(1));
 function _systemLabel(host) {
   try {
     const h = String(host || '');
@@ -12456,20 +12459,31 @@ function _railRecordCard(e, fmtTime) {
   // also the warranty question answered at a glance: did the replacement actually go out. `kind` alone would
   // hide the completion; `currentKind` alone would claim we created an order, which we did not.
   const _ho = handOff(e);
-  kind.textContent = _ho ? `${_ho.fromKind} → ${_ho.toKind}` : (e.kind || 'record');
-  const label = document.createElement('span'); label.className = 'rail-record-label';
-  // v2.74.2225 (UX review) — the hand-off shows the HUMAN number we banked (DEAKO#72046), never the internal
-  // tail dressed as one (#7742160535686 only LOOKS like a human number). toLabel is exactly why v2209 banked it.
-  label.textContent = _ho ? `${e.label || e.id || ''} → ${_ho.toLabel || `#${_ho.toId}`}` : (e.label || e.id || '');
-  top.append(kind, label); card.appendChild(top);
+  kind.textContent = _ho ? `${_kindLabel(_ho.fromKind)} → ${_kindLabel(_ho.toKind)}` : _kindLabel(e.kind);
+  // v2.74.2226 (UX) — AN INTERNAL ID IS NEVER A HEADLINE. The label line renders only when there is something
+  // HUMAN to say (a name, a #D-number, a hand-off); an id-titled row shows just its kind, and the id stays in
+  // the hover-peek and the drill where a technician can still reach it. "customer / 9614991622278" answered
+  // none of a person's questions; "Customer / Created Aug 13, 11:15 AM by you · Shopify" answers all of them.
+  const _human = !!(e.label && String(e.label) !== String(e.id));
+  top.append(kind);
+  if (_human || _ho) {
+    const label = document.createElement('span'); label.className = 'rail-record-label';
+    // v2.74.2225 — the hand-off shows the HUMAN number we banked (DEAKO#72046), never the internal tail
+    // dressed as one (#7742160535686 only LOOKS like a human number). toLabel is exactly why v2209 banked it.
+    label.textContent = _ho ? `${_human ? e.label : ''}${_human ? ' → ' : ''}${_ho.toLabel || `#${_ho.toId}`}` : e.label;
+    top.append(label);
+  }
+  card.appendChild(top);
   const meta = document.createElement('div'); meta.className = 'rail-record-meta';
   // §12.6 — STALENESS IS RENDERED, NEVER IMPLIED. Under session-ride the poll runs only while a live session
   // exists, so a cadence is a CEILING ("at most every N"), and a card that omits this implies a completeness it
   // does not have. Same visible-total honesty §4 forces on `truncationNotice`.
   // v2.74.2225 — the meta line speaks the app's NAME (Shopify), not its hostname; asOfLine now suppresses the
-  // duplicate timestamp itself (a fresh row's "as of" repeated the created-at instant in the same breath).
+  // duplicate timestamp itself. v2.74.2226 — and it reads as a SENTENCE: "Created Aug 13, 11:15 AM by you ·
+  // Shopify", because for a non-technical reader the card's job is what happened, by whom, where, and whether
+  // it still exists — in that order.
   const _life = asOfLine(e, e.lastSeenAt ? fmtTime(e.lastSeenAt) : '', Date.now());
-  meta.textContent = [_systemLabel(e.system), fmtTime(e.at), e.who === 'human' ? 'you' : 'auto', _life].filter(Boolean).join(' · ');
+  meta.textContent = [`Created ${fmtTime(e.at)} ${e.who === 'human' ? 'by you' : 'by Orchard'}`, _systemLabel(e.system), _life].filter(Boolean).join(' · ');
   card.appendChild(meta);
   if (nextWatch(e, Date.now()) === 'gone') card.classList.add('is-gone');   // a record that no longer exists must not read as live
   // HOVER-PEEK — a detail line that slides open on hover/focus (same curve + intent as ＋ View, §6.1).
@@ -13219,10 +13233,13 @@ async function _openRecordLink(url, btn) {   // NOT _openRecordOnSite — that n
 // (AU-6) will append here. Reuses openPanelOverlay + the .wf-history-* classes verbatim.
 function _openRecordDrill(e, fmtTime) {
   try { _closeRail(); } catch { /* */ }   // the rail is in the foreground; close it so the overlay isn't opened behind it (the rail-card→overlay convention, chat.js:11291)
+  // v2.74.2226 — an id is never a TITLE either: an unlabeled row titles itself by its kind, and the id moves to
+  // the meta where a technician can still reach it (the raw host stays in the field list below).
+  const _humanTitle = !!(e.label && String(e.label) !== String(e.id));
   const ov = openPanelOverlay({
     id: 'record:' + (e.id || e.at || 'x'),
-    title: e.label || e.id || 'Record',
-    titleMeta: [e.system, e.kind].filter(Boolean).join(' · '),
+    title: _humanTitle ? e.label : _kindLabel(e.kind),
+    titleMeta: [_systemLabel(e.system), _humanTitle ? _kindLabel(e.kind) : (e.id ? `id ${e.id}` : '')].filter(Boolean).join(' · '),
   });
   if (!ov || !ov.body) return;
   const body = ov.body;
@@ -13233,7 +13250,7 @@ function _openRecordDrill(e, fmtTime) {
   row.appendChild(summary);
   const detail = document.createElement('div'); detail.className = 'wf-history-detail';
   const fields = [
-    ['Kind', e.kind], ['Label', e.label || e.id], ['System', e.system],
+    ['Kind', _kindLabel(e.kind)], ['Label', e.label || e.id], ['System', e.system],
     ['Internal id', e.id], ['Recipe', e.recipeId], ['Authority', e.who === 'human' ? 'human-approved' : 'gate-cleared'],
   ].filter(([, v]) => v);
   for (const [k, v] of fields) {
@@ -20342,26 +20359,57 @@ _wireAttach();
 // reload on click. Creating the bridge here is cheap (closures only; no port,
 // no permission) and harmless for users who never enable dev mode — they get a
 // hidden button and nothing else.
+// SU-2 (DESIGN_self_update.md §3.3, review F4) — the reload button is DUAL-SOURCE: the dev-bridge dirty state
+// (dev mode only) OR a fleet update-ready signal (any install). Two independent sources feeding one button, so
+// neither may own `hidden` alone (the old single-owner toggle clobbered a second arm). Both write these module
+// vars and call _applyReloadBtn, the ONE place that computes visibility = OR(devArm, updateArm).
+let _devArm = { enabled: false, available: false, files: [] };
+let _updateArm = { ready: false, version: null };
+
+function _applyReloadBtn(btn) {
+  if (!btn) return;
+  const visible = _devArm.enabled || _updateArm.ready;
+  btn.classList.toggle('hidden', !visible);
+  btn.classList.toggle('has-change', !!_devArm.available || _updateArm.ready);
+  if (_updateArm.ready && !_devArm.available) {
+    btn.title = `Update ready — v${_updateArm.version} (click to reload)`;
+  } else {
+    const n = _devArm.files?.length || 0;
+    btn.title = _devArm.available ? `Reload extension — ${n} changed file${n === 1 ? '' : 's'} pending (dev)` : 'Reload extension';
+  }
+}
+
 function _wireDevReload() {
   const btn = $('btn-dev-reload');
   if (!btn) return;
   const bridge = _getDevBridge();
   btn.addEventListener('click', () => {
     if (confirm('Reload the extension to apply code changes? Running tasks will stop.')) {
-      bridge.reloadExtension();
+      // bridge-independent (review F4): chrome.runtime.reload() works on any install; the bridge is dev-only.
+      try { chrome.runtime.reload(); } catch { try { bridge.reloadExtension(); } catch { /* */ } }
     }
   });
+  // source 1 — the dev-bridge (dev mode only)
   void bridge.onReloadState((s) => {
-    btn.classList.toggle('hidden', !s.enabled);
-    btn.classList.toggle('has-change', !!s.available);
-    const n = s.files?.length || 0;
-    btn.title = s.available
-      ? `Reload extension — ${n} changed file${n === 1 ? '' : 's'} pending (dev)`
-      : 'Reload extension (dev)';
-    // DBR-6 — the `done` handler arms refreshReloadState() after a run, so this fires once a run completes:
-    // re-pull the branch header's ahead/behind + dirty + last-test. Self-guards to the active dev conversation.
+    _devArm = { enabled: !!s.enabled, available: !!s.available, files: s.files || [] };
+    _applyReloadBtn(btn);
+    // DBR-6 — the `done` handler arms refreshReloadState() after a run: re-pull the branch header's
+    // ahead/behind + dirty + last-test. Self-guards to the active dev conversation.
     if (_currentConversationKind === 'dev') _renderDevStatusHeader();
   });
+  // source 2 — the fleet update-ready signal the SW published to update:signal (any install)
+  const readUpdateSignal = async () => {
+    try {
+      const g = await chrome.storage.local.get('update:signal');
+      const sig = g && g['update:signal'];
+      let loaded = ''; try { loaded = chrome.runtime.getManifest().version; } catch { /* */ }
+      _updateArm = (sig && sig.readyVersion && sig.readyVersion !== loaded)
+        ? { ready: true, version: sig.readyVersion } : { ready: false, version: null };
+    } catch { _updateArm = { ready: false, version: null }; }
+    _applyReloadBtn(btn);
+  };
+  try { chrome.storage.onChanged.addListener((changes, area) => { if (area === 'local' && changes['update:signal']) void readUpdateSignal(); }); } catch { /* */ }
+  void readUpdateSignal();
 }
 
 /**

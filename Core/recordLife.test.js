@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  nextWatch, reWarm, applyTransition, applyUpdate, applyGone, appendEvent, applyActEvent,
+  nextWatch, reWarm, applyTransition, applyUpdate, applyGone, appendEvent, applyActEvent, applyLabel,
   currentRef, handOff, asOfLine, mayRead, warmWindowMs, markOutward, reversalOffer, describeEvent,
   WATCH_STATES, EVENT_CAP, DEFAULT_WARM_MS,
 } from './recordLife.js';
@@ -378,5 +378,28 @@ describe('applyActEvent — an act on the record (v2222)', () => {
   it('renders as a sentence a person reads', () => {
     const r = applyActEvent(draft(), { verb: 'update', who: 'gate', at: T0 + DAY });
     assert.equal(describeEvent(r.events[1], ''), 'Changed — update auto');
+  });
+});
+
+// ── v2.74.2226 — applyLabel: the sweep backfills a human display label onto id-titled rows, once. ────────────
+describe('applyLabel — display repair for rows that never got a human label (v2226)', () => {
+  const idRow = () => ({ ...draft(), id: '9614991622278', label: '9614991622278' });
+  it('replaces an id-as-label with the vendor name, and touches nothing else', () => {
+    const r = applyLabel(idRow(), { label: 'Vielka Wyatt' });
+    assert.equal(r.label, 'Vielka Wyatt');
+    assert.equal(r.id, '9614991622278', 'identity untouched');
+    assert.deepEqual(r.events.map((e) => e.type), ['create'], 'a repair is not an event');
+    assert.equal(r.lastSeenAt, idRow().lastSeenAt, 'not an observation — no freshness claim');
+  });
+  it('NEVER overwrites a human label (#D29741 stays #D29741)', () => {
+    assert.equal(applyLabel(draft(), { label: 'Something Else' }).label, '#D29685');
+  });
+  it('an empty label, or one equal to the id, applies nothing (same object back — the changed:false contract)', () => {
+    const r = idRow();
+    assert.equal(applyLabel(r, { label: '' }), r);
+    assert.equal(applyLabel(r, { label: '9614991622278' }), r);
+  });
+  it('fills a row whose label is absent entirely', () => {
+    assert.equal(applyLabel({ ...idRow(), label: '' }, { label: 'Vielka Wyatt' }).label, 'Vielka Wyatt');
   });
 });

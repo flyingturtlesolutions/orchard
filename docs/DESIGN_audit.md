@@ -1095,9 +1095,10 @@ says so, rather than silently observing nothing.
 - all three: an errored/partial reply emits nothing; `keep`/`track` extract only declared paths
 
 **Explicitly OUT of scope** (ruling 2026-08-10): acting on the value — writing it back onto the warranty task, or
-emailing the homeowner. VendorSuite has **no write leg** today (all seven `vs_*` legs are reads), so write-back is
-blocked until VendorSuite writes are tackled; and an email is an `outward` act which would set `outwardAt` and
-suppress the undo (§13). Detection and display land now; delivery is a later, separately-gated rung.
+emailing the homeowner. *(v2.74.2227 — the write-leg blocker is GONE: `vs_update_task_note` is the first
+VendorSuite write, HAR-authored, gated `queued` — so write-back is now a wiring decision, not a missing
+transport.)* An email remains an `outward` act which would set `outwardAt` and suppress the undo (§13).
+Detection and display landed first; delivery stays a separately-gated rung.
 
 ---
 

@@ -13,7 +13,7 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody, stripUnfilledJsonBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts, opCaptureHint, enumViolations } from '../../Core/connectorRecipes.js';   // v1935 — opCaptureHint: the executor's refusal must name the gesture that actually banks THIS op   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm   // v2.74.2063 — enumViolations: the refuse-before-wire ENUM belt (§10.5)
+import { fillEndpoint, fillBody, encodeBodyForContentType, stripUnfilledJsonBody, recipeForOrigin, isReadOnlyGql, persistedOpsForHost, csrfSniffHosts, opCaptureHint, enumViolations } from '../../Core/connectorRecipes.js';   // v1935 — opCaptureHint: the executor's refusal must name the gesture that actually banks THIS op   // LEG-2a (v2.74.1594) — the ops viewer's wanted-vs-banked checklist; v1760 — csrfSniffHosts for pre-warm   // v2.74.2063 — enumViolations: the refuse-before-wire ENUM belt (§10.5)
 import { pickRideTab, rideTabUrlPatterns, isCsrfColdFailure, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill; v1758 — rideTabUrlPatterns; v1759 — isCsrfColdFailure
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { reportLegOutcome } from './vitals.js';   // VT-0 (v2.74.1569, DESIGN_vitals.md §4) — the ONE outcome funnel per executor: presence → drift classification in order (subsumes the v1566 _healTick + the side-by-side reportAuthSignal calls)
@@ -367,7 +367,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   const fetchVia = (tabId, url, method, body, confirmed = false, contentType = '', extra = null) =>
     chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body, contentType: contentType || undefined, confirmed: confirmed === true,
       headers: (extra && extra.headers) || undefined, gqlRead: !!(extra && extra.gqlRead),
-      readOnly: !!(extra && extra.readOnly) } }, { frameId: 0 });   // CX-7 — sniffed-CSRF header + the gql-read carve-out flag (re-validated page-side); v1941 — `readOnly`: belt #2's carve-out for a DECLARED non-gql read (a JSON body cannot describe itself the way a gql document can — see the belt for what that costs)
+      readOnly: !!(extra && extra.readOnly), csrfNone: !!(extra && extra.csrfNone) } }, { frameId: 0 });   // v2227 — the declared no-token write contract rides to belt #2   // CX-7 — sniffed-CSRF header + the gql-read carve-out flag (re-validated page-side); v1941 — `readOnly`: belt #2's carve-out for a DECLARED non-gql read (a JSON body cannot describe itself the way a gql document can — see the belt for what that costs)
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
   // SUBframe as "live" while frame 0 is dead). On a frame-0 connection error, force-reinject + retry once.
   const fetchViaHealed = async (tabId, url, method, body, confirmed = false, contentType = '', extra = null) => {
@@ -1177,12 +1177,23 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             // draft stored "{note}" garbage). One strip here makes 'unfilled → dropped' true for every door.
             if (typeof payload.body === 'string') body = stripUnfilledJsonBody(payload.body);
             else body = fillBody(payload && payload.body, args);
+            // v2.74.2227 — FORM-ENCODED cookie-ride writes (VendorSuite UpdateCompleteTask, HAR 2026-08-14):
+            // a filled OBJECT body under x-www-form-urlencoded becomes the form STRING here — belt #2
+            // serializes only JSON (its else-branch `String(body)` would put "[object Object]" on the wire).
+            // Pure + unit-gated in Core; any other content type passes through untouched.
+            if (body && typeof body === 'object') body = encodeBodyForContentType(body, contentType);
           }
           // CX-7 — sniffed-CSRF transport: ride the token acquired above (the liveness probe already sniffed it);
           // a 403 = stale/missing token → clear bank, soft-wake the idle SPA, force re-mint + retry (v1759), then
           // surface honestly with the interact-once hint only if warm still failed.
           let extra = isGqlRead ? { gqlRead: true } : null;
           if (payload && payload.readOnly === true) extra = { ...(extra || {}), readOnly: true };   // v1941 — carry the leg's §9 verdict to belt #2, which cannot re-derive it from a JSON body
+          // v2.74.2227 — `csrf: 'none'`: a CURATED declaration that this site's write contract carries NO csrf
+          // token (VendorSuite: cookie + X-Requested-With only, HAR-proven — no token header, no meta tag).
+          // Belt #2's "a write without a token never runs" stays the DEFAULT; this is the declared exemption for
+          // the sites where no token exists to send, same trust class as `readOnly` (belt-1-classified, said in
+          // a field set on purpose — see the v1941 note for what that costs). confirmed:true is still required.
+          if (payload && payload.csrf === 'none') extra = { ...(extra || {}), csrfNone: true };
           const _rideHdrs = (payload && payload.requestHeaders && typeof payload.requestHeaders === 'object') ? payload.requestHeaders : null;
           if (_rideHdrs) extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ..._rideHdrs } };
           // v2.74.1905 — a persisted-op GET carries the token too: the HAR shows x-csrf-token on the admin bar's

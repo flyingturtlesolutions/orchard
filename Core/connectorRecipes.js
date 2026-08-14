@@ -75,6 +75,25 @@ export function fillBody(template, args = {}) {
   return r.drop ? null : r.value;
 }
 
+/**
+ * v2.74.2227 — encode a FILLED body object for its declared content type. PURE. Today one encoding matters:
+ * `application/x-www-form-urlencoded` (VendorSuite's warranty-note write — the first form-encoded cookie-ride
+ * write). Belt #2 serializes only JSON (`String(body)` would put "[object Object]" on the wire), so the
+ * executor calls this after fillBody and hands the belt a finished STRING. Form bodies are FLAT by contract:
+ * a nested member is skipped rather than silently stringified, and a null/undefined member drops — the same
+ * fail-toward-omission fillBody already applies. Any other content type returns the body untouched.
+ */
+export function encodeBodyForContentType(body, contentType) {
+  if (!/x-www-form-urlencoded/i.test(String(contentType || ''))) return body;
+  if (body == null || typeof body !== 'object' || Array.isArray(body)) return body;
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(body)) {
+    if (v == null || (typeof v === 'object')) continue;
+    p.append(k, String(v));
+  }
+  return p.toString();
+}
+
 /** Build a static Aircall Workspace GraphQL POST body from a HAR-captured document. PURE. */
 export function acGqlBody(operationName, variables = {}) {
   const doc = AC_GQL_DOCS[operationName];
@@ -128,6 +147,8 @@ const _GQL_CUSTOMERS = 'query Customers($q: String!, $n: Int!) { customers(first
 // whether. Deliberately NOT the admin's ~400-line DraftOrderDetails document: a smaller ask is a smaller thing
 // to be wrong about, and every field here is attested in the 2026-08-11 capture.
 const _GQL_DRAFT_ONE = 'query DraftOrderDetails_0($id: ID!) { draftOrder(id: $id) { id name status completedAt order { id name } } }';
+// v2.74.2226 — ONE customer by gid, four fields (the Records label-backfill read; see shopify_customer below).
+const _GQL_CUSTOMER_ONE = 'query Customer($id: ID!) { customer(id: $id) { id firstName lastName email } }';
 // v2.74.2223 — the CREATE as OUR OWN document (the §12.5/v2209 reads pattern, applied to the first write).
 // WHY: the persisted-op hash is a VENDOR-VERSIONED artifact — it identifies Shopify's deploy, not our recipe —
 // and it rotated between 2026-08-11 (#D29741 created through it) and 2026-08-14 (PERSISTED_OPERATION_NOT_FOUND,
@@ -180,10 +201,10 @@ const SH = Object.freeze({
 // header (v1430's cookie fallback carries them). {divisionId} = the D.R. Horton MARKET/division (Atlanta West-210 = 83,
 // Seattle-750 = 10, …); the VENDOR (e.g. DEAKO) is the session, the DIVISION is the variable. Resolve {divisionId} from
 // /api/VendorSuite/State: `access.DefaultDivision.Id` = the current division; `access.Hubs[].Divisions` = the whole list
-// the vendor can pick (the #divisionMenu). {status} ∈ new | open | fixed | closed. Reads only here — the warranty-note
-// WRITE (POST UpdateCompleteTask, form-urlencoded taskId+note) is a follow-on: it needs the form-urlencoded cookie-ride
-// write transport verified AND recipeFromCatalogEntry taught to carry write/body/bodyType (today's lossy projection drops
-// them), so it stays out of the curated surface until both land.
+// the vendor can pick (the #divisionMenu). {status} ∈ new | open | fixed | closed.
+// v2.74.2227 — the follow-on this paragraph parked has LANDED: `vs_update_task_note` below is the first
+// VendorSuite WRITE (both named blockers resolved — hop 1 has carried write/body/contentType since v1432, and
+// `encodeBodyForContentType` is the form-urlencoded transport, HAR-verified 2026-08-14).
 // CP-1 (v2.74.1506) — VendorSuite's auth spec: a JSON-LIVENESS probe (`probeAccept:'json'`), NOT an identity probe —
 // the State read is user-scoped (access/DefaultDivision) but carries no {id,email} user shape, and when the SSO
 // session expires it 403s. So: parseable JSON 2xx = signed in; anything else = signed out. NO `verifyIdentity`
@@ -470,6 +491,24 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/shopify/{handle}?operation=Customers&type=query',
     body: { operationName: 'Customers', query: _GQL_CUSTOMERS, variables: { q: 'phone:"{phone}"', n: 5 } },
     params: [{ name: 'phone', type: 'string', required: true }] },
+  // v2.74.2226 — ONE customer, by their internal id (a document of our own, the proven `type=query` route).
+  // Exists for the RECORDS ledger: a created customer's row banked a bare id whenever no input label rode the
+  // seam (every pre-v2225 row), and a card headlined by an internal id means nothing to a person. `reads` +
+  // `observe` make this the per-record watch read for kind `customer` (probePlan requires both), and the sweep
+  // now BACKFILLS the row's display label from the vendor's own name fields on the first probe (applyLabel —
+  // never overwriting a human label). `exact: true`: `customer(id:) → null` on a 200 is the vendor stating
+  // non-existence (§12.2). The `Customer` operation name is the one loud-fail unknown (RH-0a: wrong → the live
+  // http-404-empty, costing one failed probe, retried on the next gap — never a lost act).
+  { ...SH, id: 'shopify_customer', name: 'Read one Shopify customer', itemUrl: '/store/{handle}/customers/{id}',
+    displayId: ['email'], joinKey: ['email', 'phone'],
+    does: 'read ONE Shopify customer by their internal id — name, email, phone; for finding a customer use the email/phone/name searches',
+    endpoint: '/api/shopify/{handle}?operation=Customer&type=query',
+    body: { operationName: 'Customer', query: _GQL_CUSTOMER_ONE, variables: { id: '{customer_gid}' } },
+    reads: 'customer', rows: 'data.customer',
+    probe: { param: 'customer_gid', gid: 'Customer', exact: true },
+    observe: { email: { of: 'field', at: 'email' } },   // minimal — presence makes the leg a probePlan candidate; an email change is honest news
+    params: [{ name: 'customer_gid', type: 'string', required: true, gid: 'Customer',
+      hint: 'the customer\u0027s internal id or full gid — from a lookup or a Records row' }] },
   // v2.74.1563 — the NAME lookup (live: "does Mousab have a shopify profile?" — the most natural CS ask had no
   // leg; only email/phone existed, so interpret force-fit the email leg). Shopify search matches bare words
   // against names; the near-match warning applies doubly (same/similar names are common).
@@ -1183,6 +1222,42 @@ export const CONNECTOR_RECIPES = [
     does: 'a division\'s vendor announcements — title, message, dates, attachments; division by name, market number, or blank for your current one',
     endpoint: '/api/Vendor/Announcement/{divisionId}',
     params: [{ name: 'divisionId', type: 'string', required: true }] },
+  // v2.74.2227 — the FIRST VendorSuite WRITE, HAR-authored (vendorsuite.drhorton.com.har, 2026-08-14, entries
+  // 57/59 with the Task reads bracketing them). What the capture PROVES: POST form-encoded `taskId=<id>&note=<t>`
+  // returns a bare JSON `true`, and the task's `VendorExplanation` becomes the note VERBATIM — it REPLACES
+  // (write "." → ".", write "" → cleared), never appends. Transport: same-origin cookie-ride with NO csrf token
+  // of any kind — `csrf: 'none'` is the DECLARED belt-#2 exemption (curated data; the HAR shows cookie +
+  // X-Requested-With only, and the CS already sends X-Requested-With on every SESSION_FETCH). The `/false` path
+  // segment is the COMPLETE flag: `/true` (mark the task complete) is UNCAPTURED and stays unbuilt — completing
+  // is its own act with its own evidence bar (the Warranty preset baseline demands proof of completion), never a
+  // boolean rider on a note save. The reply is a bare boolean, so a 200 `false` means NOT saved — the task
+  // re-read is the truth. §12.9.6's "VendorSuite has no write leg" unblocks here, gated: reversible:false
+  // (the write OVERWRITES — restoring needs the prior text) ⇒ a human confirms every save (the EditCustomer
+  // posture), and pipelineGate keeps it off the unattended path.
+  // v2.74.2228 — `bodyType: 'form'` (the FIRST live 500 named it): the panel's session-write door pre-fills via
+  // fillWriteBody ONLY when bodyType is declared (chat.js:4380) — its fallback JSON.stringifies AND overrides
+  // the Content-Type to application/json (:4385), so the 05:38 run sent JSON text to a form-expecting action
+  // and ASP.NET answered its generic 500 with the HAR's own known-good taskId. hop 3 defaults an undeclared
+  // non-GET body to 'json' (connectorLeg.js:398), which is exactly right for every other write — a form leg
+  // must say so. The connector-side encodeBodyForContentType stays as the belt for object-body doors
+  // (headless/workflow paths that skip the panel pre-fill).
+  // v2.74.2229 — `reversible: true` (USER RULING 2026-08-14, the PP-4 pattern verbatim): the user asked for
+  // AUTOMATIC consequence write-backs (order confirmed / tracking / delivered → a line on the inciting task),
+  // which requires gateActionForLeg 'auto'. The assertion is honest because the WRITE-BACK CALLER always
+  // append-preserves the prior text (Core/consequenceNote.appendNote — the sweep reads VendorExplanation first),
+  // making the act reversible-by-rewrite; and per PP-4's own note this loosens ONLY the pipeline/unattended
+  // gate — the interactive chat path keeps its HITL confirm (hintToSafety floors at confirm; both executor
+  // belts still demand an authority). An interactive "save a note" ask still shows the confirm bar.
+  { ...VS, id: 'vs_update_task_note', name: 'Save a VendorSuite task note', method: 'POST', write: true,
+    reversible: true, outward: false, csrf: 'none', bodyType: 'form',
+    contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
+    does: 'save the vendor note (VendorExplanation) on ONE warranty task — REPLACES the current note text entirely (read the task first if you need to keep any of it); does NOT complete or close the task. A human confirms every save',
+    endpoint: '/api/Vendor/Warranty/UpdateCompleteTask/false',
+    body: { taskId: '{task_id}', note: '{note}' },
+    params: [
+      { name: 'task_id', type: 'string', required: true, hint: 'the task\u0027s internal TaskId (the id a task read returns — NOT the human TaskNumber)' },
+      { name: 'note', type: 'string', required: true, hint: 'the full replacement note text — the existing VendorExplanation is OVERWRITTEN, not appended to' },
+    ] },
 
   // ── HubSpot (HS-1) — the HAR-PROVEN same-origin cookie-ride GET reads. All READ-ONLY (GET). {portalId} fills from
   // the ride tab (urlParam); {id} is the record id from a lookup/URL. The v3 batch/read + graphql search POSTs are a

@@ -115,6 +115,9 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   // absent one, and this one answers a question a person genuinely asks. `accept` the list leg — "what happened
   // to this draft" through the search read is a defensible resolve, the same tolerance the warranty drill has.
   { ask: 'what happened to draft order #D29685', expect: { legId: 'shopify_draft_order' }, accept: ['shopify_draft_orders'], mintedAt: 'v2.74.2209' },
+  // v2.74.2226 — the Records label-backfill read. A person reaches it as "who is customer <internal id>" (a
+  // Records-card id in hand); the searches stay the resolve for email/phone/name asks, so they are accepted.
+  { ask: 'who is shopify customer 9614991622278', expect: { legId: 'shopify_customer' }, accept: ['shopify_customer_search', 'shopify_customer_by_email'], mintedAt: 'v2.74.2226' },
   { ask: 'delete draft order #D1023', expect: { legId: 'shopify_delete_order' }, mustBeGated: true, mintedAt: 'v2.74.2069' },
   // ── VendorSuite (trace-verbatim where live asks exist) ────────────────────────────────────────────────────
   { ask: 'show my vendorsuite state', expect: { legId: 'vs_state' } },
@@ -132,7 +135,10 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'what are my permissions in vendorsuite?', expect: { legId: 'vs_state' }, mintedAt: 'v2.74.1860' },       // live ✓
   { ask: 'list the new warranty tasks in Atlanta West', expect: { legId: 'vs_warranty_tasks' }, mintedAt: 'v2.74.1860' },        // live ✓ division-by-NAME + non-default status
   { ask: "show me every division's open warranty tasks", expect: { legId: 'vs_warranty_tasks' }, mintedAt: 'v2.74.1860' },       // live ✓ each-mode over 121 divisions
-  { ask: "what's the status of the warranty task at 409 Citron Street", expect: { legId: 'vs_warranty_tasks' }, mintedAt: 'v2.74.1860' },   // live ✓ the ADDRESS DRILL end-to-end (list+address → vs_warranty_task)
+  { ask: "what's the status of the warranty task at 409 Citron Street", expect: { legId: 'vs_warranty_tasks' }, mintedAt: 'v2.74.1860' },
+  // v2.74.2227 — the first VendorSuite WRITE (the §12.9.6 write-back road's first leg): save/replace the vendor
+  // note on one task. HITL-confirmed every run (reversible:false).
+  { ask: 'save a note on warranty task 10920483: homeowner confirmed the fix', expect: { legId: 'vs_update_task_note' }, mintedAt: 'v2.74.2227' },   // live ✓ the ADDRESS DRILL end-to-end (list+address → vs_warranty_task)
   // THE PARAM-KIND NEGATIVES (v1860): a number a person can SEE is a TicketId; this leg takes the internal
   // TaskId, and the site answers a bare http-500. Three live 500s minted these. The list+address door is the
   // only correct resolve for a user-named identifier.

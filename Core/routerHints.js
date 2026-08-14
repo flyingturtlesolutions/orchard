@@ -72,6 +72,9 @@ export const ROUTER_HINTS = Object.freeze({
   hubspot_teams: 'the teams in your HubSpot portal (name, members, child teams) — "what teams are there?", "who is on <team>?"',
   hubspot_contact: 'ONE HubSpot contact by its INTERNAL record id — there is NO by-email lookup here; an email search is not built',
 
+  // v2.74.2227 — the first VendorSuite WRITE: the hint must carry the REPLACE semantics the clipped does loses.
+  vs_update_task_note: 'SAVE/REPLACE the vendor note (VendorExplanation) on ONE task — human-confirmed write; OVERWRITES the note; never completes the task',
+
   // ── Aircall ────────────────────────────────────────────────────────────────────────────────────────────────
   aw_team_availability: "EVERY teammate's live availability company-wide (\"who is available?\") — not your own status",
   aw_my_availability: 'YOUR OWN availability right now ("am I available?", "am I on do-not-disturb?") — reads only, never sets',

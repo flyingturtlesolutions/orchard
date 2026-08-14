@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, drillTargetRedirect, fillEndpoint, fillBody, stripUnfilledJsonBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, drillTargetRedirect, fillEndpoint, fillBody, encodeBodyForContentType, stripUnfilledJsonBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, canonicalAppForHost, toShopifyGid, acGqlBody, acGqlEndpoint, persistedOpsForHost, opCaptureHint, askNamesOtherSystem, signInLandingPath, csrfSniffHosts} from './connectorRecipes.js';
 import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 import { gateActionForLeg } from './pipelineGate.js';   // v2.74.2069 — the destructive delete must REFUSE unattended
 
@@ -1112,5 +1112,34 @@ describe('shopify delete-draft (v2.74.2069) — destructive write + its draft-or
     assert.ok(!ops.includes('DeleteDraftOrder'), 'a document mutation demands no capture');
     assert.ok(ops.includes('DraftOrderList'));
     assert.match(opCaptureHint('DraftOrderList'), /draft/i);
+  });
+});
+
+// ── v2.74.2227 — the FIRST VendorSuite WRITE (vs_update_task_note) + the form-urlencoded transport ────────────
+describe('connectorRecipes — vs_update_task_note: the HAR-authored warranty-note write (v2227)', () => {
+  const legOf = (id) => recipeLegs().find((l) => l && l.tool && l.tool.recipeId === id);
+  it('projects as a gated ACT leg on the cookie-ride write path with the declared no-token contract', () => {
+    const leg = legOf('vs_update_task_note');
+    assert.ok(leg, 'the write leg projects');
+    assert.equal(leg.mode, 'act');
+    assert.equal(leg.tool.method, 'POST');
+    assert.equal(leg.tool.reversible, true, 'v2229 USER RULING — the write-back caller always append-preserves the prior text (consequenceNote.appendNote), making the act reversible-by-rewrite; unattended runs need gate auto');
+    assert.equal(leg.tool.outward, false);
+    assert.equal(leg.tool.csrf, 'none', 'HAR-proven: cookie + X-Requested-With, no token of any kind');
+    assert.equal(leg.tool.bodyType, 'form', 'v2228 — routes the panel door to fillWriteBody; the undeclared default (json) JSON-stringified the body AND overrode the Content-Type (the live 500)');
+    assert.match(String(leg.tool.contentType), /x-www-form-urlencoded/);
+    assert.equal(leg.tool.endpoint, '/api/Vendor/Warranty/UpdateCompleteTask/false', 'the /false path segment: never complete via this leg');
+    assert.equal(gateActionForLeg(leg).decision, 'auto', 'v2229 ruling — internal + reversible + declared ⇒ the sweep may write back unattended (gateCleared authority); the interactive HITL is untouched');
+  });
+  it('fillBody + encodeBodyForContentType reproduce the HAR wire string byte-for-byte', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'vs_update_task_note');
+    const filled = fillBody(rec.body, { task_id: '10920483', note: '.' });
+    assert.equal(encodeBodyForContentType(filled, rec.contentType), 'taskId=10920483&note=.', 'the capture, entry #57');
+  });
+  it('encodeBodyForContentType: json passes through untouched; form bodies are flat; null members drop', () => {
+    const o = { a: 1 };
+    assert.equal(encodeBodyForContentType(o, 'application/json'), o, 'not form → untouched');
+    assert.equal(encodeBodyForContentType('already=a-string', 'application/x-www-form-urlencoded'), 'already=a-string');
+    assert.equal(encodeBodyForContentType({ a: 'x y', b: null, nested: { z: 1 } }, 'application/x-www-form-urlencoded; charset=UTF-8'), 'a=x+y', 'null drops, nested is skipped (form bodies are flat), space → +');
   });
 });

@@ -182,6 +182,23 @@ export function applyActEvent(row, { verb = 'update', who = 'gate', at = 0, wind
 }
 
 /**
+ * v2.74.2226 — BACKFILL a human display label onto a row that never got one. A card headlined by an internal id
+ * means nothing to a person; every pre-v2225 customer row banked exactly that (the args/params seam defect), and
+ * a future create whose input carries no name lands the same way. The sweep's per-record probe already holds the
+ * vendor's own name fields — this applies them, ONCE, and never over a label a human already recognises:
+ * a label that differs from the id is HUMAN and immutable here (the create's own truth, e.g. "#D29741").
+ * No event, no re-warm, no lastSeenAt — this is a display repair, not an observation of change.
+ */
+export function applyLabel(row, { label = '' } = {}) {
+  const r = _isObj(row) ? row : {};
+  const l = _str(label).trim().slice(0, 80);
+  if (!l || l === _str(r.id)) return r;                                     // nothing human to apply
+  const cur = _str(r.label);
+  if (cur && cur !== _str(r.id)) return r;                                  // a human label exists — never overwrite
+  return { ...r, label: l };
+}
+
+/**
  * GONE — terminal, and ONLY from an observation (§12.2): the object returned 404, or a delete we performed
  * succeeded. Never a forecast, never inferred from a status string. Idempotent: a second observation of the same
  * non-existence is not a second event.

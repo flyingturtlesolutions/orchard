@@ -6387,7 +6387,13 @@ var MESSAGE_HANDLERS = {
             const metaTok = document.querySelector('meta[name="csrf-token"]');
             const csrf = metaTok && metaTok.getAttribute('content');
             if (csrf) headers['X-CSRF-Token'] = csrf;
-            else if (!gqlReadOk) { sendResponse({ success: false, error: 'no-csrf', hint: 'open the app signed in so it can authorize the write' }); return; }
+            // v2.74.2227 — `csrfNone`: the CURATED declaration that this site's write contract has NO csrf token
+            // (VendorSuite: same-origin cookie + X-Requested-With only — HAR-proven, no token header anywhere, no
+            // meta tag on the page). "A write without a token never runs" stays the DEFAULT for every undeclared
+            // leg; this exemption is belt-1-classified data in a field set on purpose — the same trust class and
+            // the same honesty note as `readOnly` (v1941). `confirmed:true` is STILL required above: the human
+            // gate is untouched, only the token demand is waived where no token exists to demand.
+            else if (!gqlReadOk && !(payload && payload.csrfNone === true)) { sendResponse({ success: false, error: 'no-csrf', hint: 'open the app signed in so it can authorize the write' }); return; }
           }
           if (payload && payload.body != null) {
             const ct = String(payload.contentType || 'application/json');

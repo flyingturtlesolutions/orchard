@@ -19,9 +19,11 @@ import { classifyLegOutcome, pickCanary, dueForDaily, upsertIncident, resolveInc
 import { buildAdminDashboardSpec, buildDeskDashboardSpec, buildFrontDashboardSpec, ageWord } from '../../Core/vitalsDashboard.js';
 import { tickOk, tickRouteMiss } from '../../Core/routeHeal.js';
 import { heartbeatTargets } from '../../Core/connectionPresence.js';
-import { armable, partitionRecipesByOrigin } from '../../Core/rideRecipe.js';   // v2.74.2052 — the OWN-ORIGIN read door (the vs_state-as-shopify-canary incident)
+import { armable, partitionRecipesByOrigin, recipeFromCatalogEntry } from '../../Core/rideRecipe.js';   // v2.74.2052 — the OWN-ORIGIN read door (the vs_state-as-shopify-canary incident); v2229 — the write-back projects its leg from the catalog
 import { primaryHost } from '../../Core/groundDedup.js';   // v2.74.2052 — the ground's OWN identity anchors the filter (never the modal-of-records host)
-import { invokeRideRecipe } from '../../Core/rideStep.js';   // DESIGN_cadence.md §12 (v1715) — share the RUNNER: one resolve→plan→invoke for the canary AND the workflow step
+import { invokeRideRecipe, projectRideLeg } from '../../Core/rideStep.js';   // DESIGN_cadence.md §12 (v1715) — share the RUNNER: one resolve→plan→invoke for the canary AND the workflow step; v2229 — projectRideLeg for the write-back's gate verdict
+import { gateActionForLeg } from '../../Core/pipelineGate.js';   // v2229 — the write-back runs ONLY on a gate-auto verdict (gateCleared authority)
+import { composeNoteLine, appendNote, dueWriteBacks, markWriteBack } from '../../Core/consequenceNote.js';   // v2229 — §14 write-back, pure half
 import { planSessionGovernorTick } from '../../Core/sessionGovernor.js';   // SGV-0 — the governor's PURE planner (inert soak; BUILD_ARC rung 4)
 import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   // SGV-0 — due-soon demand source for the snapshot
 // AU-6 (v2.74.2207, §12.4) — the COLLECTION poll rides this tick: the catalog it reads, the ledger it reconciles,
@@ -29,7 +31,7 @@ import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   //
 import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';
 import { loadCreates, updateCreate } from '../../Services/Storage/AuditCreateStore.js';
 import { pollPlan, reconcileCollection, rowsAt, probePlan, probeParams, readTransition, observeFields, hasNews, newsToFields, destinationWarmMs } from '../../Core/recordObserve.js';   // v2217 — the hand-off grants the DESTINATION kind's warm window
-import { applyGone, applyUpdate, applyTransition, warmWindowMs, nextWatch } from '../../Core/recordLife.js';
+import { applyGone, applyUpdate, applyTransition, applyLabel, warmWindowMs, nextWatch } from '../../Core/recordLife.js';
 
 const TICK_ALARM = 'vitals:tick';
 const CONFIRM_PREFIX = 'vitals:confirm:';
@@ -367,6 +369,7 @@ async function _recordWatchSweep({ force = false, onlyKey = '' } = {}) {
           // targeted read answers. (Shopify's DraftOrderList carries `status` and no `order` — HAR 2026-08-11.)
           else if (a.kind === 'probe') {
             const got = await _probeOne(a.via, { id: a.id, label: '' }, Date.now());
+            if (got && got.name) { try { await updateCreate(ref, (row) => applyLabel(row, { label: got.name })); } catch { /* */ } }   // v2226 — label backfill rides this tier too
             if (got && got.handOff) {
               const r = await updateCreate(ref, (row) => applyTransition(row, { ...got.handOff, at: a.at, windowMs: got.windowMs }));
               if (r.changed) handed++;
@@ -414,6 +417,9 @@ async function _recordWatchSweep({ force = false, onlyKey = '' } = {}) {
         if (!got) { failed++; continue; }
         probed++;
         lastProbeAt[step.key] = Date.now();
+        // v2.74.2226 — LABEL BACKFILL: an id-titled row takes the vendor's own name (applyLabel — once, never
+        // over a human label, no event). This is how every pre-v2225 customer card stops reading as 13 digits.
+        if (got.name) { try { await updateCreate(ref, (row) => applyLabel(row, { label: got.name })); } catch { /* */ } }
         // v2.74.2222 (§12.2) — an EXACT probe that resolved to nothing IS the "object returned 404" observation:
         // the read addressed the record by its own id (`probe.exact`, a leg declaration) and the vendor answered
         // "no such record". Search-shaped probes (a `name:` query) never take this branch — an empty search is
@@ -432,6 +438,78 @@ async function _recordWatchSweep({ force = false, onlyKey = '' } = {}) {
           seenBy[step.key] = got.seenNext;   // v2222 — advance when processed, not only when changed (see the collection tier)
         }
       } catch { /* one row's failure must not stop the rest */ }
+    }
+
+    // ── v2.74.2229 — §14 CONSEQUENCE WRITE-BACK (the CW-VS slice; USER RULING 2026-08-14). When a watched
+    // record's lifecycle moves — hand-off confirmed / tracking observed / delivered — write one dated line onto
+    // the VendorSuite task that INCITED it (§12.8.1's provenance is the address). STATE-DERIVED off each row
+    // (dueWriteBacks), so a write lost to a blip retries next sweep; markWriteBack is what makes it stop.
+    // The append contract is what makes the unattended write honest: the leg's transport REPLACES
+    // VendorExplanation wholesale (v2227 capture), so the sweep reads the task first and appendNote preserves
+    // the prior text. Authority: gateActionForLeg must say 'auto' (the v2229 reversible ruling) and the leg is
+    // CURATED by construction (read straight from CONNECTOR_RECIPES — headlessWrite's curated-only rule holds);
+    // invokeRideRecipe stamps gateCleared, so the trace and the ledger say who: 'gate', never 'human'.
+    // v1 scope: the one declared consequence pair (Shopify order → VendorSuite task). A second pair becomes a
+    // catalog declaration, not a second loop.
+    {
+      const _reload = onlyKey ? fresh : _freshAll;
+      for (const row of _reload) {
+        try {
+          // v2.74.2229b — NAME THE NOTHINGS (the v2214 lesson): on a SCOPED sweep (a human is looking) say WHY
+          // no write-back fired, or the drill-open proof is indistinguishable from a silent throw.
+          const due = dueWriteBacks(row);
+          if (!due.length) {
+            if (onlyKey) { try { Logger.info('audit', `AUDIT ▸ write-back none due — ${row.incitedBy && row.incitedBy.id ? 'provenance ok, no unsent lifecycle events' : 'row has NO incitedBy (provenance was never banked for it)'}`); } catch { /* */ } }
+            continue;
+          }
+          const inc = row.incitedBy || {};
+          if (!/(^|\.)vendorsuite\.drhorton\.com$/i.test(String(inc.system || ''))) { try { Logger.info('audit', `AUDIT ▸ write-back skipped — inciting system has no declared consequence pair`); } catch { /* */ } continue; }   // CW-VS v1
+          const wentry = (CONNECTOR_RECIPES || []).find((r) => r && r.id === 'vs_update_task_note');
+          const rentry = (CONNECTOR_RECIPES || []).find((r) => r && r.id === 'vs_warranty_task');
+          if (!wentry || !rentry) continue;
+          let vsGround = '';
+          try { vsGround = (await _ctx.invokeSgHandler('ENSURE_GROUND_FOR_URL', { url: `https://${wentry.appHost}/` }))?.groundId || ''; } catch { vsGround = ''; }
+          if (!vsGround) continue;
+          // READ the task first — the append contract's load-bearing half (and proof the task is reachable).
+          let taskReply = null;
+          try {
+            taskReply = await invokeRideRecipe({ id: rentry.id, ...rentry }, vsGround, {
+              params: { taskId: String(inc.id) },
+              invoke: (p) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...p, headless: true }),
+            });
+          } catch { taskReply = null; }
+          if (!taskReply || !taskReply.ok) { try { Logger.info('audit', `AUDIT ▸ write-back skipped — task unreadable (${(taskReply && taskReply.error) || 'no-reply'})`); } catch { /* */ } continue; }
+          const taskRow = rowsAt(taskReply.value, rentry.rows || '')[0] || taskReply.value;
+          const prior = String((taskRow && taskRow.VendorExplanation) || '');
+          const wleg = projectRideLeg(recipeFromCatalogEntry(wentry, { groundId: vsGround, origin: wentry.appHost }), vsGround);
+          const gate = wleg ? gateActionForLeg(wleg) : { decision: 'refused', why: 'no leg' };
+          if (gate.decision !== 'auto') { try { Logger.info('audit', `AUDIT ▸ write-back parked — gate ${gate.decision} (${gate.why || ''})`); } catch { /* */ } continue; }
+          const _date = new Date().toLocaleDateString();
+          let noteText = prior;
+          for (const d of due) noteText = appendNote(noteText, composeNoteLine(d.key, { date: _date, ref: d.ref, tracking: d.tracking, carrier: d.carrier }));
+          if (noteText === prior) {   // every line already present (a prior run wrote, the marker was lost) — mark and move on
+            const _ref = { at: Number(row.at) || 0, id: String(row.id || '') };
+            for (const d of due) await updateCreate(_ref, (r) => markWriteBack(r, d.key, Date.now()));
+            continue;
+          }
+          const wr = await invokeRideRecipe({ id: wentry.id, ...wentry }, vsGround, {
+            params: { task_id: String(inc.id), note: noteText },
+            gate,
+            invoke: (p) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...p, headless: true }),
+          });
+          if (wr && wr.ok && wr.value === true) {   // the bare-boolean contract: only a literal true is a save
+            const _ref = { at: Number(row.at) || 0, id: String(row.id || '') };
+            for (const d of due) await updateCreate(_ref, (r) => markWriteBack(r, d.key, Date.now()));
+            try { Logger.info('audit', `AUDIT ▸ write-back ${due.map((d) => d.key).join('+')} → task on ${inc.system} (ok)`); } catch { /* */ }
+          } else {
+            try { Logger.info('audit', `AUDIT ▸ write-back ${due.map((d) => d.key).join('+')} → task on ${inc.system} FAILED (${(wr && (wr.error || (wr.ok ? 'reply-not-true' : 'no-reply'))) || 'no-reply'}) — retries next sweep`); } catch { /* */ }
+          }
+        } catch (e) {
+          // v2.74.2229b — fail-safe means "do not break the sweep", NOT "say nothing" (the sweep's own v2213
+          // lesson, re-learned by this block's first draft): a throw here was invisible for exactly one tick.
+          try { Logger.info('audit', `AUDIT ▸ write-back ERROR — ${(e && e.message) || e}`); } catch { /* */ }
+        }
+      }
     }
 
     // v2.74.2222 — PRUNE the row-keyed watch state for rows no longer in the book (evicted past the cap, or
@@ -492,17 +570,31 @@ async function _probeOne(recipeId, { id = '', label = '' } = {}, now = 0, seen =
   // as a gone observation. Anything else (a search probe, a non-exact read) keeps failing toward silence.
   if (!one) return (leg.probe && leg.probe.exact === true) ? { gone: true } : null;
   const windowMs = warmWindowMs(leg);
+  // v2.74.2226 — the vendor's own HUMAN name for this record, riding every probe so the sweep can BACKFILL a
+  // display label onto id-titled rows (recordLife.applyLabel — once, never over a human label). Name-shaped
+  // fields only; an id is not a name.
+  const _nm = (() => {
+    try {
+      const fn = [one.firstName, one.lastName].filter((x) => typeof x === 'string' && x.trim()).join(' ').trim();
+      if (fn) return fn;
+      for (const f of ['name', 'title', 'displayName', 'email', 'subject']) {
+        const v = one[f];
+        if (typeof v === 'string' && v.trim() && v.trim().length <= 60) return v.trim();
+      }
+    } catch { /* */ }
+    return '';
+  })();
   const ho = readTransition(one, leg.handOff);
   // v2.74.2217 — a hand-off re-warms on the DESTINATION kind's timescale. This leg's own window (the draft
   // detail declares none → 14d default) was granted to the ORDER the record became, so a shipment slower than
   // 14 quiet days went cold before its tracking number existed — and cold suppresses the very read that would
   // have seen it. The order leg's `warm: '60d'` now applies from the moment of the hand-off, not from its first
   // lucky observation.
-  if (ho) return { handOff: ho, windowMs: destinationWarmMs(CONNECTOR_RECIPES, { toKind: ho.toKind, host: leg.appHost }) };
-  if (!leg.observe) return { windowMs };
+  if (ho) return { handOff: ho, name: _nm, windowMs: destinationWarmMs(CONNECTOR_RECIPES, { toKind: ho.toKind, host: leg.appHost }) };
+  if (!leg.observe) return { name: _nm, windowMs };
   const obs = observeFields(one, leg.observe, seen);
-  if (!hasNews(obs)) return { windowMs };
-  return { fields: newsToFields(obs), seenNext: obs.seenNext, windowMs };
+  if (!hasNews(obs)) return { name: _nm, windowMs };
+  return { fields: newsToFields(obs), seenNext: obs.seenNext, name: _nm, windowMs };
 }
 
 const _isPlain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
