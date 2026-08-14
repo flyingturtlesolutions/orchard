@@ -228,12 +228,20 @@ export function asOfLine(row, clock = '', now = 0) {
   const r = _isObj(row) ? row : {};
   const seen = _num(r.lastSeenAt);
   const state = nextWatch(r, now);
+  // v2.74.2225 (UX review) — HUMAN WORDS, not engine states. "warm — as of <t>" was watch-machinery vocabulary
+  // on a human-facing card, and when nothing had ever been confirmed beyond birth it duplicated the created-at
+  // timestamp in the same breath. The §12.6 obligation is the FRESHNESS, not the state's internal name:
+  //   gone   → "no longer on the site — <t>" / "deleted — <t>"  (the describeEvent vocabulary, reused)
+  //   cold   → "not checked since <t>"                          (staleness, stated as what it means)
+  //   warm   → "checked <t>", and NOTHING when lastSeenAt === at (the created-at line already says that instant)
   if (state === 'gone') {
     const g = (Array.isArray(r.events) ? r.events : []).filter((e) => _isObj(e) && e.type === 'gone').pop();
-    return `gone${g && g.why === '404' ? ' (not found on the site)' : ''}${clock ? ` — as of ${clock}` : ''}`;
+    return `${g && g.why === '404' ? 'no longer on the site' : 'deleted'}${clock ? ` — ${clock}` : ''}`;
   }
   if (!seen) return '';
-  return `${state} — as of ${clock || 'the last check'}`;
+  if (state === 'cold') return `not checked since ${clock || 'a while ago'}`;
+  if (seen === _num(r.at)) return '';
+  return `checked ${clock || 'recently'}`;
 }
 
 /**

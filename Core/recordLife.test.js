@@ -240,13 +240,16 @@ describe('recordLife — the warm window is recipe DATA (§12.4)', () => {
 
 describe('recordLife — staleness is RENDERED, never implied (§12.6)', () => {
   it('says the state and when it was last confirmed', () => {
-    assert.equal(asOfLine(draft(), '10:04', T0 + DAY), 'warm — as of 10:04');
-    assert.equal(asOfLine({ ...draft(), warmUntil: T0 }, '10:04', T0 + DAY), 'cold — as of 10:04');
+    // v2.74.2225 — human words: a re-confirmed warm row says "checked <t>"; a fresh one (lastSeenAt === at)
+    // says NOTHING (the created-at line already names that instant); cold states what staleness means.
+    assert.equal(asOfLine({ ...draft(), lastSeenAt: T0 + DAY }, '10:04', T0 + 2 * DAY), 'checked 10:04');
+    assert.equal(asOfLine(draft(), '10:04', T0 + DAY), '', 'never confirmed beyond birth → no duplicate timestamp');
+    assert.equal(asOfLine({ ...draft(), warmUntil: T0, lastSeenAt: T0 + DAY }, '10:04', T0 + 2 * DAY), 'not checked since 10:04');
   });
 
-  it('a gone row says so, and a 404 says which kind of gone', () => {
-    assert.match(asOfLine(applyGone(draft(), { why: '404', at: T0 }), '10:04', T0), /gone \(not found on the site\)/);
-    assert.match(asOfLine(applyGone(draft(), { why: 'deleted', at: T0 }), '10:04', T0), /^gone —/);
+  it('a gone row says so in human words, and a 404 says which kind of gone', () => {
+    assert.match(asOfLine(applyGone(draft(), { why: '404', at: T0 }), '10:04', T0), /^no longer on the site/);
+    assert.match(asOfLine(applyGone(draft(), { why: 'deleted', at: T0 }), '10:04', T0), /^deleted —/);
   });
 
   it('NEVER confirmed → says nothing rather than inventing a freshness', () => {

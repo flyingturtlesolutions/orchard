@@ -1394,7 +1394,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             try { void reportLegOutcome({ ..._evtBase, ok: true, urlArgs: _urlArgs || null }); } catch { /* LEG-1 — the funnel banks lastUrlArgs off successful rides */ }
             // AU-1 (DESIGN_audit.md §11) — bank the create into the audit ledger (fail-safe; auditSucceeded is
             // belt-and-suspenders here — reply.value already passed the :1263-1280 nested-userErrors screen).
-            if (isWrite) { try { void recordCreate({ value: reply.value, origin, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && payload.params) || null, urlArgs: _urlArgs || null, incitedBy: (payload && payload.incitedBy) || null }); } catch { /* */ } }
+            // v2.74.2225 — `payload.args`, NOT `payload.params`: INVOKE_SESSION's fill bag is `args` (:858);
+            // `params` exists only on SESSION_REPLAY (:1663). Reading the wrong name made inputParams null on
+            // the PRIMARY path, so customerLabelFrom never fired and every customer row banked a bare internal
+            // id — §10.5 dead on every live create, visible as 13-digit card titles. args-first, params as the
+            // belt for any caller that threads the replay-shaped name.
+            if (isWrite) { try { void recordCreate({ value: reply.value, origin, recipeId: (payload && payload.recipeId) || '', groundId: (payload && payload.groundId) || '', method, who: clearedBy, inputParams: (payload && (payload.args || payload.params)) || null, urlArgs: _urlArgs || null, incitedBy: (payload && payload.incitedBy) || null }); } catch { /* */ } }
             sendResponse({ ...reply, origin, urlArgs: _urlArgs });
           } else {
             let _heal = null;

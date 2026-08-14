@@ -81,7 +81,7 @@ import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recen
 import { readShapeFacts, ensureScopeNamed, unsupportedCountClaim, payloadMetrics, sumMetrics, metricAnswerLine, countAnswerLine } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from; v1887 — ensureScopeNamed: a count claim names the scope it covers; v1888 — metrics: the payload's OWN numbers (a record count is not a domain count) + the fan's aggregate
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID, ADMIN_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { parseDashboardAsk, friendlyVitalsLine, clockWord } from './Core/vitalsDashboard.js';   // VT-2d (v2.74.1583) — the context dashboard door; v1590 — the human-words layer for incident cases
-import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer, recordOpenUrl, incitedOpener } from './Core/audit.js';   // v2195 §12.8.1 — incitedOpener decides link|drive|none for the record that CAUSED this one   // AU-2 (v2.74.2147) — recordOpenUrl resolves a banked row to its page on the owning system (the eye button)
+import { parseCreatesAsk, filterCreatesByScope, renderCreatesAnswer, recordOpenUrl, incitedOpener, customerLabelFrom } from './Core/audit.js';   // v2225 — customerLabelFrom names an id-only create from its INPUT in the reply (§10.5 at the reply surface)   // v2195 §12.8.1 — incitedOpener decides link|drive|none for the record that CAUSED this one   // AU-2 (v2.74.2147) — recordOpenUrl resolves a banked row to its page on the owning system (the eye button)
 import { buildWarrantyExtractSystem, readWarrantyItem, tallyOutcomes, WARRANTY_ARMS } from './Core/warrantySwitch.js';   // v2.74.2106 — the warranty branch EXTRACTS typed fields; code derives the arm (no label for the model to invent)   // AU-3 (DESIGN_audit.md §11) — the "what have I created?" read surface (local ledger, one-shot answer)
 import { friendlyError as _errWord, actionPhrase as _actionPhrase, recordNounWord as _recordNounWord } from './Core/chatVoice.js';   // v2.74.1591 — ONE chat voice: slugs/codes → phrases, catalog verbs → sentences, leg names → nouns
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
@@ -12421,10 +12421,24 @@ async function _renderRailRecords(opts = {}) {
   head.className = 'rail-auto-group';
   head.textContent = notice ? `Records · ${notice}` : `Records · ${creates.length}`;   // quiet count (§10.6)
   container.appendChild(head);
-  const fmtTime = (at) => { try { return at ? new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''; } catch { return ''; } };
+  const fmtTime = (at) => { try { return at ? new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''; } catch { return ''; } };   // v2225 — "4:26 AM", not "04:26 AM"
   for (const e of creates.slice().reverse()) container.appendChild(_railRecordCard(e, fmtTime));   // newest first
   if (!live.isConnected) return;
   live.replaceChildren(...container.childNodes);
+}
+
+// v2.74.2225 (UX review) — the app's display NAME for a banked `system` host: cards say "Shopify", the raw host
+// stays in tooltips and the drill where precision belongs. Resolved through the catalog (appHost → app), so a
+// new connector gets a name the day its recipes land; an unmatched host falls back to itself, never to blank.
+const _SYSTEM_LABELS = { shopify: 'Shopify', zendesk: 'Zendesk', vendorsuite: 'VendorSuite', aircall: 'Aircall', hubspot: 'HubSpot', ups: 'UPS' };
+function _systemLabel(host) {
+  try {
+    const h = String(host || '');
+    if (!h) return '';
+    const rec = (CONNECTOR_RECIPES || []).find((r) => r && r.appHost && originMatchesAppHost(h, r.appHost));
+    const app = rec ? String(rec.app || '').toLowerCase() : '';
+    return (app && (_SYSTEM_LABELS[app] || app.charAt(0).toUpperCase() + app.slice(1))) || h;
+  } catch { return String(host || ''); }
 }
 
 // One record card (§6.1): HOVER peeks its detail line (the .rail-add-desc idiom); CLICK/Enter DRILLS INTO the
@@ -12444,22 +12458,27 @@ function _railRecordCard(e, fmtTime) {
   const _ho = handOff(e);
   kind.textContent = _ho ? `${_ho.fromKind} → ${_ho.toKind}` : (e.kind || 'record');
   const label = document.createElement('span'); label.className = 'rail-record-label';
-  label.textContent = _ho ? `${e.label || e.id || ''} → #${_ho.toId}` : (e.label || e.id || '');
+  // v2.74.2225 (UX review) — the hand-off shows the HUMAN number we banked (DEAKO#72046), never the internal
+  // tail dressed as one (#7742160535686 only LOOKS like a human number). toLabel is exactly why v2209 banked it.
+  label.textContent = _ho ? `${e.label || e.id || ''} → ${_ho.toLabel || `#${_ho.toId}`}` : (e.label || e.id || '');
   top.append(kind, label); card.appendChild(top);
   const meta = document.createElement('div'); meta.className = 'rail-record-meta';
   // §12.6 — STALENESS IS RENDERED, NEVER IMPLIED. Under session-ride the poll runs only while a live session
   // exists, so a cadence is a CEILING ("at most every N"), and a card that omits this implies a completeness it
   // does not have. Same visible-total honesty §4 forces on `truncationNotice`.
+  // v2.74.2225 — the meta line speaks the app's NAME (Shopify), not its hostname; asOfLine now suppresses the
+  // duplicate timestamp itself (a fresh row's "as of" repeated the created-at instant in the same breath).
   const _life = asOfLine(e, e.lastSeenAt ? fmtTime(e.lastSeenAt) : '', Date.now());
-  meta.textContent = [e.system, fmtTime(e.at), e.who === 'human' ? 'you' : 'auto', _life].filter(Boolean).join(' · ');
+  meta.textContent = [_systemLabel(e.system), fmtTime(e.at), e.who === 'human' ? 'you' : 'auto', _life].filter(Boolean).join(' · ');
   card.appendChild(meta);
   if (nextWatch(e, Date.now()) === 'gone') card.classList.add('is-gone');   // a record that no longer exists must not read as live
   // HOVER-PEEK — a detail line that slides open on hover/focus (same curve + intent as ＋ View, §6.1).
   const peek = document.createElement('div'); peek.className = 'rail-record-peek';
   const pbits = [];
   if (e.id) pbits.push(`id ${e.id}`);
-  if (_ho) pbits.push(`became ${_ho.toKind} ${_ho.toId}`);
-  if (e.recipeId) pbits.push(`via ${e.recipeId}`);
+  if (_ho) pbits.push(`became ${_ho.toKind} ${_ho.toLabel || _ho.toId}`);
+  // v2.74.2225 — the recipe's display NAME on the human surface; underscored ids belong in traces.
+  if (e.recipeId) pbits.push(`via ${(((CONNECTOR_RECIPES || []).find((r) => r && r.id === e.recipeId) || {}).name) || e.recipeId}`);
   const _evN = (Array.isArray(e.events) ? e.events : []).length;
   if (_evN > 1) pbits.push(`${_evN} events`);
   pbits.push('click to open →');
@@ -13260,10 +13279,13 @@ function _openRecordDrill(e, fmtTime) {
   body.appendChild(note);
   // The as-of line (§12.6) — a cadence is a CEILING, never a guarantee, so the overlay says when this was last
   // confirmed rather than implying it is current.
-  const _as = asOfLine(e, e.lastSeenAt ? fmtTime(e.lastSeenAt) : '', Date.now());
-  if (_as) {
-    const s = document.createElement('div'); s.className = 'rail-record-drill-note'; s.textContent = `State: ${_as}`;
-    body.appendChild(s);
+  // v2.74.2225 — the state SENTENCE and the verify TRIGGER are decoupled: asOfLine now returns '' for a fresh
+  // warm row (no duplicate timestamp), and the old structure hid the verify-at-view fire inside `if (_as)` — so
+  // exactly the rows most in need of a first check (fresh, or legacy lastSeenAt=0) would never get one.
+  {
+    const _as = asOfLine(e, e.lastSeenAt ? fmtTime(e.lastSeenAt) : '', Date.now());
+    const s = document.createElement('div'); s.className = 'rail-record-drill-note';
+    if (_as) { s.textContent = `State: ${_as}`; body.appendChild(s); }
     // AU-6 (v2.74.2207, §12.3) — VERIFY-AT-VIEW, the tier that fires because a HUMAN is looking. It ignores the
     // poll window on purpose: the window bounds BACKGROUND cost, and a person opening a record has asked a
     // question the cadence cannot answer. §12.3 marks this trigger "fires when cold: yes".
@@ -13290,7 +13312,11 @@ function _openRecordDrill(e, fmtTime) {
             : (t.handed || t.updated) ? 'just updated it'
               : (t.polled || t.probed) ? `re-checked just now${t.failed ? ` · ${t.failed} unreadable` : ' · no change'}`
                 : t.failed ? `couldn’t re-check — ${t.failed} unreadable` : 'nothing to re-check';
-          try { s.textContent = `State: ${_as} · ${_said}`; } catch { /* */ }
+          // v2225 — the note may not exist yet (a fresh row renders no state sentence); attach it for the verdict.
+          try {
+            s.textContent = `State: ${_as ? `${_as} · ` : ''}${_said}`;
+            if (!s.isConnected) body.appendChild(s);
+          } catch { /* */ }
           if (t && (t.handed || t.updated || t.gone)) void _renderActiveRailTab({ force: true });
         } catch { /* the banked state is still on screen and still honest */ }
       })();
@@ -16974,7 +17000,14 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _dri
     // record (the write leg carries an itemUrl; createdRecordId digs the new id out of the mutation reply's
     // data.<op>.<entity>). Only when we actually have an id + itemUrl — else a plain "Done." (nothing to open).
     const _madeId = createdRecordId(sw && sw.value);
-    const _madeLabel = createdRecordLabel(sw && sw.value) || _madeId;   // v2.74.2073 — DISPLAY the human number (#D29684), not the internal gid tail; itemId below keeps the internal id for the itemUrl
+    let _madeLabel = createdRecordLabel(sw && sw.value) || _madeId;   // v2.74.2073 — DISPLAY the human number (#D29684), not the internal gid tail; itemId below keeps the internal id for the itemUrl
+    // v2.74.2225 (UX review) — an id-only create names itself from the INPUT the user just typed (§10.5 at the
+    // reply surface): "created Test Convert", never "created it (#9616520839302)" — a # on an internal id
+    // dresses it as a human number it is not. customerLabelFrom reads first_name/email off the same params.
+    if (_madeId != null && String(_madeLabel) === String(_madeId)) {
+      const _pn = [params && (params.first_name || params.firstName), params && (params.last_name || params.lastName)].filter(Boolean).join(' ').trim();
+      _madeLabel = _pn || customerLabelFrom(params) || _madeLabel;
+    }
     if (_madeId != null && leg.tool.itemUrl) {
       _lastGroundedRead = { leg, params, at: Date.now(), itemId: _madeId, urlArgs: (sw && sw.urlArgs) || null };
       const _mSig = (/^[A-Za-z]*#?[\d-]+$/.test(String(_madeLabel)) && !String(_madeLabel).includes('#')) ? '#' : '';   // v1915-b — sixth sigil sibling (add # only for a bare-numeric fallback id; a #D-name already carries its own)
@@ -18694,7 +18727,7 @@ async function sendChatMessage(textOverride = null) {
       try {
         const { items, total, notice } = await loadCreates();
         const scoped = filterCreatesByScope(items, createsAsk.scope, Date.now());
-        const fmtTime = (at) => { try { return at ? new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''; } catch { return ''; } };
+        const fmtTime = (at) => { try { return at ? new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''; } catch { return ''; } };   // v2225 — human hour
         _setMessageBody(m, renderCreatesAnswer({ items: scoped, total, notice }, { fmtTime, scope: createsAsk.scope }));
       } catch { _setMessageBody(m, 'Couldn’t read the audit ledger.'); }
       _orchFinalize(m); return;
