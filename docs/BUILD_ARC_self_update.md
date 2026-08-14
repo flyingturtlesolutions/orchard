@@ -284,7 +284,7 @@ names. A convergence bought that way is the opposite of the safety the feature i
 | Rung | Slice | Repo/area | Size | State |
 |---|---|---|---|---|
 | 0 | SPIKE: two platform truths | hands-on, 2 machines | ~half day | not started — **stop condition · → M1 · owed by the human** |
-| 1 | SU-0 branches + ignores + control | git/repo | ~1 hr | **partial** — `.gitignore` stamps + `.orchard-dev` landed 2026-08-14; `fleet`/`fleet-control` branch creation deferred to first enrollment (a push, not yet asked) |
+| 1 | SU-0 branches + ignores + control | git/repo | ~1 hr | **DONE** 2026-08-14 — `.gitignore` stamps + `.orchard-dev`; `fleet` (payload, at main tip) and `fleet-control` (orphan, `control.json`=`{hold:false}`) branches pushed to origin |
 | 2 | SU-1a `promote.cjs` gate | tools/updater | ~1–2 days | **BUILT + TESTED** 2026-08-14 — `tools/updater/promote{,Checks}.cjs`; `node tools/updater/promote.test.cjs` = 40/40 (unit + fixture-repo integration: dirty-checkout-ignored, failing-gate, dangling-ref, version-not-bumped, node --check, no-op, hold/release off the payload) |
 | 3 | SU-1b updater (both wrappers) + installer | tools/updater | ~2–3 days | not started — external-risk rung · **→ M2** |
 | 4 | SU-2 extension signal | extension | ~2 days | not started |
