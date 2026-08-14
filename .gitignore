@@ -56,3 +56,13 @@ bridge/resumetest.cjs
 
 # Leftover commit-message scratch
 COMMIT_MSG.tmp
+
+# Fleet self-update (SU / DESIGN_self_update.md) — the updater's untracked on-disk stamps and the dev-machine
+# opt-out marker. ready.json/updater-state.json/apply-in-progress are written by the host updater per tick and
+# must never be committed (they're per-machine state); .orchard-dev opts a checkout OUT of auto-apply. NB the
+# name must NOT start with "_" (Chrome refuses to load "_"-prefixed root files). control.json is NOT ignored —
+# it lives tracked on the dedicated `fleet-control` branch, never on main/fleet.
+/update/ready.json
+/update/updater-state.json
+/update/apply-in-progress
+/.orchard-dev
