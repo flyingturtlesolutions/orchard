@@ -475,29 +475,32 @@ describe('CX-7 — Shopify recipes project with the transport markers', () => {
     assert.ok(!legs.some((l) => l.tool.app === 'zendesk'));                // appHost keying keeps sites separate
   });
 
-  // ── CX-7b (v2.74.1387) — the ALLOWED Shopify WRITE: CustomerCreate as a persisted operation ──────────────────
-  it('shopify_create_customer projects as an ACT leg (gated write) with the persistedOp marker; still no NOT-gql', () => {
+  // ── CX-7b (v2.74.1387) — the ALLOWED Shopify WRITE: CustomerCreate. v2.74.2224 — document-in-body (the v2223
+  // create's live-proven pattern): no persisted hash, nothing for an admin deploy to rotate. ──────────────────
+  it('shopify_create_customer projects as an ACT leg (gated write) as a DOCUMENT mutation on the write path', () => {
     const leg = recipeLegs().find((l) => l && l.tool && l.tool.recipeId === 'shopify_create_customer');
     assert.ok(leg);
     assert.equal(leg.mode, 'act');                                         // it IS a write — gated, confirmed:true at both belts
     assert.notEqual(leg.safety, 'auto');
     assert.equal(leg.tool.method, 'POST');
-    assert.equal(leg.tool.gql, false);                                     // persisted op, not the ad-hoc gql read endpoint
-    assert.equal(leg.tool.persistedOp, 'CustomerCreate');
+    assert.equal(leg.tool.gql, true);                                      // document-in-body — inherited from SH (v2224)
+    assert.ok(leg.tool.persistedOp == null, 'no hash demand — nothing to rotate');
     assert.equal(leg.tool.csrf, 'sniff');
-    assert.equal(leg.tool.endpoint, '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}');
+    assert.match(String(leg.tool.endpoint), /\?operation=CustomerCreate&type=mutation$/);
+    assert.match(String(leg.tool.body.query), /^mutation CustomerCreate\(\$customerInput/);
+    assert.equal(isReadOnlyGql(leg.tool.body.query), false, 'a mutation document stays on the WRITE path');
     // banned money/inventory classes never became recipes
     assert.ok(!CONNECTOR_RECIPES.some((r) => /refund|return|draftorder|complete_order/i.test(r.id)));
   });
-  it('create-customer body: email OR phone (unfilled optional drops); {op_sha}/{handle} fill the endpoint path', () => {
+  it('create-customer body: email OR phone (unfilled optional drops); {handle} fills the endpoint path', () => {
     const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_create_customer');
     const b = fillBody(rec.body, { first_name: 'Jane', last_name: 'Doe', email: 'jane.doe@example.com' });
     assert.equal(b.variables.customerInput.firstName, 'Jane');
     assert.equal(b.variables.customerInput.email, 'jane.doe@example.com');
     assert.ok(!('phone' in b.variables.customerInput));                    // unfilled optional dropped (Shopify accepts email-only)
     assert.ok(!('note' in b.variables.customerInput));
-    const path = fillEndpoint(rec.endpoint, { op_sha: 'a1b2c3d4e5f60718', handle: 'deako' });
-    assert.equal(path, '/api/operations/a1b2c3d4e5f60718/CustomerCreate/shopify/deako');
+    const path = fillEndpoint(rec.endpoint, { handle: 'deako' });
+    assert.equal(path, '/api/shopify/deako?operation=CustomerCreate&type=mutation');
   });
 
   // ── CX-7c (v2.74.1388) — EditCustomer + DraftOrderCreate writes, gid coercion, order-read returns, liveness ──
@@ -513,11 +516,13 @@ describe('CX-7 — Shopify recipes project with the transport markers', () => {
     assert.equal(out.customer_gid, 'gid://shopify/Customer/9987');
     assert.equal(out.email, 'x@example.com');                             // non-gid param untouched
   });
-  it('shopify_update_customer: ACT leg, persistedOp EditCustomer, partial body (only set fields ride)', () => {
+  it('shopify_update_customer: ACT leg, DOCUMENT mutation (v2224), partial body (only set fields ride)', () => {
     const leg = recipeLegs().find((l) => l && l.tool && l.tool.recipeId === 'shopify_update_customer');
     assert.ok(leg);
     assert.equal(leg.mode, 'act');
-    assert.equal(leg.tool.persistedOp, 'EditCustomer');
+    assert.ok(leg.tool.persistedOp == null, 'no hash demand — nothing to rotate');
+    assert.match(String(leg.tool.endpoint), /\?operation=EditCustomer&type=mutation$/);
+    assert.equal(isReadOnlyGql(leg.tool.body.query), false, 'stays on the write path');
     assert.equal(leg.tool.shopProbe, true);
     const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_update_customer');
     const b = fillBody(rec.body, { customer_gid: 'gid://shopify/Customer/9987', phone: '+15551234567' });
@@ -756,10 +761,11 @@ describe('connectorRecipes — LEG-2a (v2.74.1594): the SH-T4 checklist surface 
     // v2.74.1926 — order_creator rides the SAME op (one sha, one bank entry, one capture hint) — so the wanted
     // list must not gain a duplicate: the checklist asks a human to capture each OP once, not each leg.
     // v2.74.2069 — DeleteDraftOrder (the draft delete write) + DraftOrderList (its lookup viaLeg read) join.
-    // v2.74.2223 — DraftOrderCreate LEAVES: the create is a document-in-body mutation now (nothing to bank, no
-    // capture demand). The remaining persisted legs convert the same way once the create's first live run
-    // proves the BFF executes document mutations.
-    assert.deepEqual([...new Set(ops)], ['CustomerCreate', 'DeleteDraftOrder', 'DraftOrderList', 'EditCustomer', 'OrderListData', 'Search', 'Timeline'], 'the SH persisted writes (minus the converted create) + the persisted reads (+ draft-index)');
+    // v2.74.2223 — DraftOrderCreate LEAVES: the create is a document-in-body mutation (nothing to bank).
+    // v2.74.2224 — ALL remaining writes leave (CustomerCreate / EditCustomer / DeleteDraftOrder converted on the
+    // create's live PASS): the checklist now holds only the persisted READS (GET-with-encoded-variables — a
+    // different transport shape, owed its own conversion look).
+    assert.deepEqual([...new Set(ops)], ['DraftOrderList', 'OrderListData', 'Search', 'Timeline'], 'persisted READS only — every write is a document mutation now');
     assert.equal(ops.filter((o) => o === 'Timeline').length, 1, 'two legs, ONE Timeline capture demand');
     for (const w of wanted) { assert.ok(w.recipeId && w.recipeName, 'each carries its recipe identity for the checklist line'); }
     assert.deepEqual(persistedOpsForHost('deako.zendesk.com'), [], 'Zendesk writes are REST — no op-hash demands');
@@ -1019,12 +1025,13 @@ describe('shopify delete-draft (v2.74.2069) — destructive write + its draft-or
     assert.ok(leg, 'the delete leg projects');
     assert.equal(leg.mode, 'act');
     assert.equal(leg.safety, 'gated');                       // destructive → gated (human confirm only)
-    assert.equal(leg.tool.method, 'POST');                   // persisted-op transport, NOT method:'DELETE'
+    assert.equal(leg.tool.method, 'POST');                   // a GraphQL mutation over POST, NOT method:'DELETE'
     assert.notEqual(leg.tool.method, 'DELETE');
-    assert.equal(leg.tool.gql, false);
-    assert.equal(leg.tool.persistedOp, 'DeleteDraftOrder');
+    assert.equal(leg.tool.gql, true);                        // v2224 — document-in-body; the mutation doc fails isReadOnlyGql → write path
+    assert.ok(leg.tool.persistedOp == null, 'no hash demand — nothing to rotate');
     assert.equal(leg.tool.csrf, 'sniff');                    // inherited from SH — a write needs the sniffed token
-    assert.equal(leg.tool.endpoint, '/api/operations/{op_sha}/DeleteDraftOrder/shopify/{handle}');
+    assert.match(String(leg.tool.endpoint), /\?operation=DeleteDraftOrder&type=mutation$/);
+    assert.equal(isReadOnlyGql(leg.tool.body.query), false, 'destructive mutation stays on the write path');
     assert.equal(leg.tool.reversible, false);                // the honest axis — a deleted draft cannot be restored
     assert.equal(leg.tool.outward, false);
     assert.equal(leg.tool.itemUrl, null);                    // the record ceases to exist — no "show" venue
@@ -1100,11 +1107,10 @@ describe('shopify delete-draft (v2.74.2069) — destructive write + its draft-or
     }
   });
 
-  it('persistedOpsForHost banks the two new ops; opCaptureHint coaches each with a by-hand action', () => {
+  it('the delete left the capture checklist (v2224 document conversion); its lookup read remains', () => {
     const ops = persistedOpsForHost('admin.shopify.com').map((w) => w.op);
-    assert.ok(ops.includes('DeleteDraftOrder'));
+    assert.ok(!ops.includes('DeleteDraftOrder'), 'a document mutation demands no capture');
     assert.ok(ops.includes('DraftOrderList'));
-    assert.match(opCaptureHint('DeleteDraftOrder'), /delete/i);
     assert.match(opCaptureHint('DraftOrderList'), /draft/i);
   });
 });

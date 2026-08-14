@@ -140,6 +140,18 @@ const _GQL_DRAFT_ONE = 'query DraftOrderDetails_0($id: ID!) { draftOrder(id: $id
 // is the PUBLIC schema's type name for a mutation field whose internal `input` variable and spellings are
 // live-proven (wrong → a named GraphQL validation error, zero execution, zero side effects).
 const _GQL_DRAFT_CREATE = 'mutation DraftOrderCreate($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id name status totalPrice } userErrors { field message } } }';
+// v2.74.2224 — the REMAINING three writes convert the same way, on the strength of the create's live PASS
+// (09:02Z 2026-08-14: `type=mutation` routes; the internal schema validates PUBLIC type names). Each document
+// declares the variables key its recipe ALREADY sends (live/HAR-proven spellings — `customerInput`, `input`,
+// `draftOrderDeleteInput`), so fillBody output is byte-identical to the persisted era; only the transport moved.
+// Mutation field names are the ones the extractors already read off replies (customerCreate / customerUpdate /
+// draftOrderDelete — the last is §10.3's named assumption, and it now fails LOUD on a named validation error
+// instead of never being reachable). This empties the SH-T4 capture checklist of every WRITE — the remaining
+// persisted legs are READS (Search / Timeline / OrderListData / DraftOrderList, GET-with-encoded-variables — a
+// different shape, owed its own look).
+const _GQL_CUSTOMER_CREATE = 'mutation CustomerCreate($customerInput: CustomerInput!) { customerCreate(input: $customerInput) { customer { id firstName lastName email } userErrors { field message } } }';
+const _GQL_CUSTOMER_EDIT = 'mutation EditCustomer($input: CustomerInput!) { customerUpdate(input: $input) { customer { id firstName lastName email } userErrors { field message } } }';
+const _GQL_DRAFT_DELETE = 'mutation DeleteDraftOrder($draftOrderDeleteInput: DraftOrderDeleteInput!) { draftOrderDelete(input: $draftOrderDeleteInput) { deletedId userErrors { field message } } }';
 const _GQL_ORDERS = 'query Orders($q: String!, $n: Int!) { orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true) { edges { node { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } customer { email } lineItems(first: 10) { edges { node { title quantity } } } fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } events(first: 10) { edges { node { status happenedAt } } } } returns(first: 10) { edges { node { id status returnLineItems(first: 10) { edges { node { quantity } } } reverseFulfillmentOrders(first: 5) { edges { node { reverseDeliveries(first: 5) { edges { node { deliverable { ... on ReverseDeliveryShippingDeliverable { tracking { carrierName number url } } } } } } } } } } } } refunds { createdAt note totalRefundedSet { shopMoney { amount currencyCode } } } tags note } } } }';
 // v2.74.1904 — `sortKey: RELEVANCE`, from ADMIN-UI ground truth (user-supplied, 2026-07-31): the search bar's top
 // five for "smart switch" were Smart Switch · Gen 2 · Bundle · Scene Controller · Gen 1 Refurbished, while this query
@@ -687,16 +699,19 @@ export const CONNECTOR_RECIPES = [
   //
   // The declaration is an OPT-IN by design: absence means undeclared, and `gateAction` fails an undeclared write
   // CLOSED. That is why this sits on one recipe and not on a shared default.
-  { ...SH, id: 'shopify_create_customer', name: 'Create a Shopify customer', write: true, gql: false, persistedOp: 'CustomerCreate',
+  // v2.74.2224 — DOCUMENT-IN-BODY (the v2223 create's live-proven pattern): no persisted hash, nothing for an
+  // admin deploy to rotate, no "create one by hand once" capture chore. Inherits SH's gql:true + csrf:'sniff';
+  // the mutation document fails isReadOnlyGql and stays on the confirm-gated write path.
+  { ...SH, id: 'shopify_create_customer', name: 'Create a Shopify customer', write: true,
     reversible: true, outward: false,
     does: 'create a NEW Shopify customer profile (name + email and/or phone — at least one contact is required; optional mailing address), riding your admin login',
-    endpoint: '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after a create opens the new record (id from the reply, handle from the ride tab)
+    endpoint: '/api/shopify/{handle}?operation=CustomerCreate&type=mutation', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after a create opens the new record (id from the reply, handle from the ride tab)
     // CX-7 — the optional mailing address rides as customerInput.addresses[0]. With NO address field set, the inner
     // object empties → the array empties → `addresses` drops entirely (the array-drop symmetry in _fillBodyNode), so
     // a contact-only create is byte-identical to before. province/country map to the GraphQL CODES (provinceCode
     // "WA", countryCode "US"); if this store's persisted op wants names or a different key, the live userErrors names
     // it (same hand-authored-guess caveat as the op variable shape — CX-8 body-capture forges this exactly later).
-    body: { operationName: 'CustomerCreate', variables: { customerInput: {
+    body: { operationName: 'CustomerCreate', query: _GQL_CUSTOMER_CREATE, variables: { customerInput: {
       firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}',
       addresses: [{ address1: '{address1}', address2: '{address2}', city: '{city}', provinceCode: '{province}', countryCode: '{country}', zip: '{zip}', company: '{company}' }],
     } } },
@@ -717,10 +732,12 @@ export const CONNECTOR_RECIPES = [
   // CX-7c (v2.74.1388) — EDIT an existing customer (spec's ALLOWED EditCustomer op). Partial: only filled fields
   // ride the body (fillBody drops unfilled optionals). `customer_gid` gid-coerces (bare id → gid) — it's the `id`
   // a customer read returned.
-  { ...SH, id: 'shopify_update_customer', name: 'Edit a Shopify customer', write: true, reversible: false, outward: false, gql: false, persistedOp: 'EditCustomer',
+  // v2.74.2224 — DOCUMENT-IN-BODY (see CustomerCreate above; same conversion, same two loud-fail unknowns
+  // already resolved once by the create's live PASS).
+  { ...SH, id: 'shopify_update_customer', name: 'Edit a Shopify customer', write: true, reversible: false, outward: false,
     does: 'update fields on an EXISTING Shopify customer (name, email, phone, note, tags) — only the fields you set change; identify them by the customer id from a lookup',
-    endpoint: '/api/operations/{op_sha}/EditCustomer/shopify/{handle}', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after an edit opens the record
-    body: { operationName: 'EditCustomer', variables: { input: { id: '{customer_gid}', firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}', tags: '{tags}' } } },
+    endpoint: '/api/shopify/{handle}?operation=EditCustomer&type=mutation', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after an edit opens the record
+    body: { operationName: 'EditCustomer', query: _GQL_CUSTOMER_EDIT, variables: { input: { id: '{customer_gid}', firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}', tags: '{tags}' } } },
     params: [
       { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },
       { name: 'first_name', type: 'string', required: false },
@@ -936,7 +953,10 @@ export const CONNECTOR_RECIPES = [
   // is inferred from the admin's own EditCustomer op (input:{id}) + the public draftOrderDelete(DraftOrderDeleteInput{id}).
   // The internal DeleteDraftOrder op MAY instead take a bare variables:{id}; first live run is the proof owed — it
   // fails LOUD (server userErrors), never silently.
-  { ...SH, id: 'shopify_delete_order', name: 'Delete a Shopify draft order', write: true, reversible: false, outward: false, destructive: true, gql: false, persistedOp: 'DeleteDraftOrder',
+  // v2.74.2224 — DOCUMENT-IN-BODY (the v2223 pattern). The destructive axes and the human-confirm gate are
+  // untouched — only the transport moved; a wrong document fails on a named validation error with ZERO execution,
+  // which for a destructive leg is exactly the right failure shape.
+  { ...SH, id: 'shopify_delete_order', name: 'Delete a Shopify draft order', write: true, reversible: false, outward: false, destructive: true,
     does: 'permanently DELETE a Shopify DRAFT order by its number (#D1023) — IRREVERSIBLE, this cannot be undone; only unsent/open DRAFTS are deleted this way, never a completed or paid order — riding your admin login. A human confirms every delete',
     // v2.74.2069 — resolve a draft number/name → the draft's internal gid via the draft-orders search leg; a value
     // already a gid:// passes through, ambiguous/none/completed ASK (never guess on a destructive delete).
@@ -947,10 +967,10 @@ export const CONNECTOR_RECIPES = [
         // yields an ASK, never a wrong delete; a harmless no-op if DraftOrderList omits completed drafts.
         require: [{ field: 'status', op: '!=', value: 'COMPLETED', fail: 'completed' }] },
     },
-    endpoint: '/api/operations/{op_sha}/DeleteDraftOrder/shopify/{handle}',
+    endpoint: '/api/shopify/{handle}?operation=DeleteDraftOrder&type=mutation',
     // v2.74.2071 — REAL shape from a live HAR (was the best-guess `input:{id}`): the variables key is
     // `draftOrderDeleteInput`, and the id is a full gid://shopify/DraftOrder/… (the lookup mints it).
-    body: { operationName: 'DeleteDraftOrder', variables: { draftOrderDeleteInput: { id: '{draft_gid}' } } },
+    body: { operationName: 'DeleteDraftOrder', query: _GQL_DRAFT_DELETE, variables: { draftOrderDeleteInput: { id: '{draft_gid}' } } },
     params: [{ name: 'draft_gid', type: 'string', required: true,
       hint: 'the draft order number (e.g. #D1023 or D1023) — resolved to the exact draft for you; a gid:// is also accepted' }] },
   // ── VendorSuite (CX-9) — the curated cookie-ride READS. {divisionId}/{status}/{taskId} are explicit params for now;
