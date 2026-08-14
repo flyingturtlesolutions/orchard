@@ -530,7 +530,15 @@ describe('CX-7 — Shopify recipes project with the transport markers', () => {
     const leg = recipeLegs().find((l) => l && l.tool && l.tool.recipeId === 'shopify_create_order');
     assert.ok(leg);
     assert.equal(leg.mode, 'act');
-    assert.equal(leg.tool.persistedOp, 'DraftOrderCreate');
+    // v2.74.2223 — DOCUMENT-IN-BODY, no longer a persisted op: the hash was a vendor-versioned artifact that
+    // rotated on an admin deploy (op-hash-stale, live 2026-08-14) and disarmed a verified leg. Our own document
+    // has nothing to rotate. The mutation document must FAIL isReadOnlyGql — that is what keeps it on the
+    // confirm-gated write path (connector.js:1630) rather than the read fast-path.
+    assert.ok(leg.tool.persistedOp == null, 'no hash demand — nothing for a vendor deploy to rotate');   // recipeToLeg normalizes absent → null
+    assert.equal(leg.tool.gql, true);
+    assert.match(String(leg.tool.endpoint), /\?operation=DraftOrderCreate&type=mutation$/);
+    assert.match(String(leg.tool.body.query), /^mutation DraftOrderCreate/);
+    assert.equal(isReadOnlyGql(leg.tool.body.query), false, 'a mutation document stays on the WRITE path');
     const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_create_order');
     // FOC warranty replacement: 100% discount + free shipping ride as whole objects
     const foc = fillBody(rec.body, {
@@ -543,8 +551,9 @@ describe('CX-7 — Shopify recipes project with the transport markers', () => {
     assert.deepEqual(foc.variables.input.lineItems, [{ variantId: 'gid://shopify/ProductVariant/55', quantity: 1 }]);
     assert.equal(foc.variables.input.appliedDiscount.value, 100);
     assert.equal(foc.variables.input.shippingLine.price, '0.00');
-    assert.equal(foc.variables.hasDiscountsPermission, true);            // permission literals always ride
-    assert.equal(foc.variables.firstLineItems, 50);
+    // v2.74.2223 — the pinned document's private variables envelope is GONE: our document declares only $input
+    assert.ok(!('hasDiscountsPermission' in foc.variables));
+    assert.ok(!('firstLineItems' in foc.variables));
     // an ordinary paid draft: no discount/shipping objects → they DROP entirely (no half-formed structs)
     const paid = fillBody(rec.body, { customer_gid: 'gid://shopify/Customer/9987', line_items: [{ variantId: 'gid://shopify/ProductVariant/55', quantity: 2 }] });
     assert.ok(!('appliedDiscount' in paid.variables.input));
@@ -747,7 +756,10 @@ describe('connectorRecipes — LEG-2a (v2.74.1594): the SH-T4 checklist surface 
     // v2.74.1926 — order_creator rides the SAME op (one sha, one bank entry, one capture hint) — so the wanted
     // list must not gain a duplicate: the checklist asks a human to capture each OP once, not each leg.
     // v2.74.2069 — DeleteDraftOrder (the draft delete write) + DraftOrderList (its lookup viaLeg read) join.
-    assert.deepEqual([...new Set(ops)], ['CustomerCreate', 'DeleteDraftOrder', 'DraftOrderCreate', 'DraftOrderList', 'EditCustomer', 'OrderListData', 'Search', 'Timeline'], 'the SH writes (+ delete-draft) + the persisted reads (+ draft-index)');
+    // v2.74.2223 — DraftOrderCreate LEAVES: the create is a document-in-body mutation now (nothing to bank, no
+    // capture demand). The remaining persisted legs convert the same way once the create's first live run
+    // proves the BFF executes document mutations.
+    assert.deepEqual([...new Set(ops)], ['CustomerCreate', 'DeleteDraftOrder', 'DraftOrderList', 'EditCustomer', 'OrderListData', 'Search', 'Timeline'], 'the SH persisted writes (minus the converted create) + the persisted reads (+ draft-index)');
     assert.equal(ops.filter((o) => o === 'Timeline').length, 1, 'two legs, ONE Timeline capture demand');
     for (const w of wanted) { assert.ok(w.recipeId && w.recipeName, 'each carries its recipe identity for the checklist line'); }
     assert.deepEqual(persistedOpsForHost('deako.zendesk.com'), [], 'Zendesk writes are REST — no op-hash demands');

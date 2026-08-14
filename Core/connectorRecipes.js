@@ -128,6 +128,18 @@ const _GQL_CUSTOMERS = 'query Customers($q: String!, $n: Int!) { customers(first
 // whether. Deliberately NOT the admin's ~400-line DraftOrderDetails document: a smaller ask is a smaller thing
 // to be wrong about, and every field here is attested in the 2026-08-11 capture.
 const _GQL_DRAFT_ONE = 'query DraftOrderDetails_0($id: ID!) { draftOrder(id: $id) { id name status completedAt order { id name } } }';
+// v2.74.2223 — the CREATE as OUR OWN document (the §12.5/v2209 reads pattern, applied to the first write).
+// WHY: the persisted-op hash is a VENDOR-VERSIONED artifact — it identifies Shopify's deploy, not our recipe —
+// and it rotated between 2026-08-11 (#D29741 created through it) and 2026-08-14 (PERSISTED_OPERATION_NOT_FOUND,
+// classified op-hash-stale, live 03:41 CDT). A verified leg that a vendor deploy can silently disarm makes every
+// rotation a chore visit (re-bank by hand), which the iron principle forbids. A document is ours: nothing rotates.
+// Selection is minimal on purpose (the _GQL_DRAFT_ONE lesson: a smaller ask is a smaller thing to be wrong
+// about); `userErrors` rides for the §10.1 phantom-row screen, `id`+`name` for the extractors and the eye.
+// TWO LOUD-FAIL UNKNOWNS, named (the RH-0a posture — it cannot fail quietly): `type=mutation` as the routing
+// param mirrors the proven `type=query` (wrong → the live http-404-empty, fix is one param); `DraftOrderInput`
+// is the PUBLIC schema's type name for a mutation field whose internal `input` variable and spellings are
+// live-proven (wrong → a named GraphQL validation error, zero execution, zero side effects).
+const _GQL_DRAFT_CREATE = 'mutation DraftOrderCreate($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id name status totalPrice } userErrors { field message } } }';
 const _GQL_ORDERS = 'query Orders($q: String!, $n: Int!) { orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true) { edges { node { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } customer { email } lineItems(first: 10) { edges { node { title quantity } } } fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } events(first: 10) { edges { node { status happenedAt } } } } returns(first: 10) { edges { node { id status returnLineItems(first: 10) { edges { node { quantity } } } reverseFulfillmentOrders(first: 5) { edges { node { reverseDeliveries(first: 5) { edges { node { deliverable { ... on ReverseDeliveryShippingDeliverable { tracking { carrierName number url } } } } } } } } } } } } refunds { createdAt note totalRefundedSet { shopMoney { amount currencyCode } } } tags note } } } }';
 // v2.74.1904 — `sortKey: RELEVANCE`, from ADMIN-UI ground truth (user-supplied, 2026-07-31): the search bar's top
 // five for "smart switch" were Smart Switch · Gen 2 · Bundle · Scene Controller · Gen 1 Refurbished, while this query
@@ -728,7 +740,16 @@ export const CONNECTOR_RECIPES = [
   // produces was the one create with nowhere to go. Draft orders live at /draft_orders/, NOT /orders/: a draft is
   // a distinct admin object until it is completed, which is the same distinction the user's "the order needs to be
   // completed by a human" ruling turns on.
-  { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, gql: false, persistedOp: 'DraftOrderCreate', itemUrl: '/store/{handle}/draft_orders/{id}',
+  // v2.74.2223 — DOCUMENT-IN-BODY, no longer a persisted op (see _GQL_DRAFT_CREATE above for the whole why).
+  // Drops `gql:false, persistedOp:'DraftOrderCreate'` — the leg inherits SH's `gql:true` + `csrf:'sniff'` +
+  // requestHeaders, exactly like the four live-proven document reads. A `mutation` document deliberately FAILS
+  // isReadOnlyGql, so it STAYS on the write path (connector.js:1630 — both confirm belts, pipelineGate axes
+  // unchanged); the 200-with-userErrors screen applies via `gql:true` just as it did via `persistedOp`. The
+  // op-bank precondition this removes ("create one by hand once to bank the op") was a COST, never a gate — the
+  // HITL/gate layer is the safety boundary, and it is untouched. The sibling persisted writes (customer
+  // create/edit, the delete) stay persisted until this leg's first live run proves the BFF executes document
+  // MUTATIONS as it does document queries; then their conversion is mechanical.
+  { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, reversible: true, outward: false, itemUrl: '/store/{handle}/draft_orders/{id}',
     // v2.74.2203 — WHICH LEG UNDOES THIS ONE. `reversible: true` has been an assertion with no address since
     // v1681: it says an undo exists and names nothing, so every consumer had to know the pair by heart. PP-0d
     // (DESIGN_peritem_pipeline.md §6) called for exactly this — 'reversible becomes a leg REFERENCE, not a
@@ -759,13 +780,16 @@ export const CONNECTOR_RECIPES = [
         // ACTIVE gate so a genuinely archived/draft product is still refused before the wire.
         require: [{ field: 'status', equals: 'ACTIVE', fail: 'inactive' }] },
     },
-    endpoint: '/api/operations/{op_sha}/DraftOrderCreate/shopify/{handle}', itemUrl: '/store/{handle}/draft_orders/{id}',   // CX-7f — "show order" after a create opens the draft
-    body: { operationName: 'DraftOrderCreate', variables: {
-      input: { purchasingEntity: { customerId: '{customer_gid}' }, lineItems: '{line_items}', useCustomerDefaultAddress: true, note: '{note}', poNumber: '{po_number}', tags: '{tags}', appliedDiscount: '{applied_discount}', shippingLine: '{shipping_line}' },
-      hasDiscountsPermission: true, hasVaultedPaymentPermissions: true, firstLineItems: 50 } },
-    // ⚠ LIVE-UNVERIFIED (v2.74.2055 review): this leg has NEVER executed against a live store — the persisted-op
-    // variables envelope (hasDiscountsPermission/…/firstLineItems) and input spellings are HAR-era hand-authoring
-    // the server alone can validate; first live run is the SH-T5-class proof still owed.
+    endpoint: '/api/shopify/{handle}?operation=DraftOrderCreate&type=mutation', itemUrl: '/store/{handle}/draft_orders/{id}',   // CX-7f — "show order" after a create opens the draft
+    // The INPUT object is byte-identical to the persisted era — those spellings (purchasingEntity.customerId,
+    // lineItems, useCustomerDefaultAddress, …) are LIVE-PROVEN (#D29741, 2026-08-11). Only the pinned document's
+    // private variables envelope (hasDiscountsPermission / hasVaultedPaymentPermissions / firstLineItems) is
+    // gone — those belonged to THEIR ~400-line document's reply gating, and our document declares only $input.
+    body: { operationName: 'DraftOrderCreate', query: _GQL_DRAFT_CREATE, variables: {
+      input: { purchasingEntity: { customerId: '{customer_gid}' }, lineItems: '{line_items}', useCustomerDefaultAddress: true, note: '{note}', poNumber: '{po_number}', tags: '{tags}', appliedDiscount: '{applied_discount}', shippingLine: '{shipping_line}' } } },
+    // ⚠ LIVE-UNVERIFIED as a DOCUMENT mutation (v2.74.2223): the input spellings are live-proven but the
+    // document route for mutations is not — first live run is the proof (fails loud + side-effect-free either
+    // way; see _GQL_DRAFT_CREATE's two named unknowns).
     // v2.74.2055 — the three nested params carry HINTS (the CX-9f rule applied: shapes lived only in JS comments
     // the binder never sees) + `elementGid` (nested identifier members were unreachable by param-level `gid`).
     params: [
