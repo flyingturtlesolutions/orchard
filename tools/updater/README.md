@@ -44,6 +44,16 @@ precondition). The updater applies files; the human clicks the lit reload button
 **Decommission:** unregister the task / `launchctl unload` the agent, revoke the deploy token, delete the state
 dir and the clone.
 
+**Provenance signing (SU-6, opt-in):** to refuse any fleet tip that didn't come through `promote.cjs` (a raw
+push that skipped the gate):
+```
+node tools/updater/promote.cjs keygen        # mints update/promote-key.pem (gitignored) + prints the public key
+```
+Save the printed public key to a file and pin it at enrollment: `install-updater.ps1 -Pubkey key.pem` /
+`install-updater.sh <clone> 10 key.pem`. Thereafter `promote.cjs` signs each push (publishing
+`update/attest.json` to `fleet-control`) and the updater refuses an un-attested tip (`state=refused:unattested`).
+Rotation = re-`keygen` + re-pin (re-enroll). Without a pinned key the check is skipped (default).
+
 ## Run-from-copy invariant
 
 The scheduler runs `node <state-dir>/updater.cjs`, a COPY — never `tools/updater/` in the clone, because the

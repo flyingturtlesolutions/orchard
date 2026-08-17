@@ -27,6 +27,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const C = require('./promoteChecks.cjs');
+const A = require('./attest.cjs');   // SU-6 provenance signing (opt-in)
 
 const REMOTE = process.env.ORCHARD_PROMOTE_REMOTE || 'origin';
 const MAIN = process.env.ORCHARD_PROMOTE_MAIN || 'main';
@@ -36,6 +37,7 @@ const CONTROL_PATH = 'update/control.json';
 const TEST_CMD = process.env.ORCHARD_PROMOTE_TEST_CMD || 'npm test';
 const DRY_RUN = !!process.env.ORCHARD_PROMOTE_DRY_RUN;
 const SKIP_NODECHECK = !!process.env.ORCHARD_PROMOTE_SKIP_NODECHECK;
+const PRIVKEY_PATH = process.env.ORCHARD_PROMOTE_KEY || path.join(process.cwd(), 'update', 'promote-key.pem');   // SU-6 signing key (gitignored)
 
 const CWD = process.cwd();
 
@@ -121,10 +123,11 @@ function promote() {
     log('gate ✓');
 
     // 5. push fleet to EXACTLY the verified sha
-    if (DRY_RUN) { log(`DRY-RUN: would push ${candidate.slice(0, 7)} → ${REMOTE}/${FLEET}`); pushed = true; return; }
+    if (DRY_RUN) { log(`DRY-RUN: would push ${candidate.slice(0, 7)} → ${REMOTE}/${FLEET}` + (fs.existsSync(PRIVKEY_PATH) ? ' + sign' : '')); pushed = true; return; }
     git(['push', REMOTE, `${candidate}:refs/heads/${FLEET}`]);
     pushed = true;
     log(`PROMOTED v${candidateVersion} — ${candidate.slice(0, 7)} → ${REMOTE}/${FLEET}`);
+    attestFleet(candidate);   // SU-6: sign the pushed sha (no-op if no key configured)
   } finally {
     gitTry(['worktree', 'remove', '--force', wt]);   // 6. always remove the worktree
     if (!pushed && !DRY_RUN) log('fleet unchanged.');
@@ -176,6 +179,41 @@ function setHold(value) {
   }
 }
 
+// ---- SU-6 provenance: sign the promoted sha (opt-in) -----------------------------------------------------
+
+/** Generate the promote keypair. Private key → PRIVKEY_PATH (gitignored, mode 600); public key → stdout to pin
+ *  on each fleet machine (install-updater --pubkey). Rotating the key = re-run keygen + re-pin (re-enroll). */
+function keygen() {
+  const kp = A.generateKeypair();
+  fs.mkdirSync(path.dirname(PRIVKEY_PATH), { recursive: true });
+  fs.writeFileSync(PRIVKEY_PATH, kp.privatePem, { mode: 0o600 });
+  log(`private key → ${PRIVKEY_PATH} (gitignored — NEVER commit or share it)`);
+  log('public key — save it and pin on each fleet machine at enrollment (install-updater --pubkey <file>):\n');
+  process.stdout.write(kp.publicPem + '\n');
+}
+
+/** Sign the pushed fleet sha and publish update/attest.json to fleet-control (like hold/release). No key → skip. */
+function attestFleet(sha) {
+  if (!fs.existsSync(PRIVKEY_PATH)) { log('no promote key at ' + PRIVKEY_PATH + ' — skipped signing (SU-6 provenance not enabled)'); return; }
+  const sig = A.signSha(sha, fs.readFileSync(PRIVKEY_PATH, 'utf8'));
+  const cf = gitTry(['fetch', REMOTE, CONTROL]);
+  if (!cf.ok) { fail(`cannot fetch ${CONTROL} to attest:\n${cf.out}`); }
+  const controlTip = git(['rev-parse', `${REMOTE}/${CONTROL}`]);
+  const wt = path.join(os.tmpdir(), `orchard-attest-${process.pid}-${Date.now()}`);
+  try {
+    git(['worktree', 'add', '-B', CONTROL, wt, controlTip]);
+    const aPath = path.join(wt, 'update', 'attest.json');
+    fs.mkdirSync(path.dirname(aPath), { recursive: true });
+    fs.writeFileSync(aPath, JSON.stringify({ sha, sig, alg: 'ed25519' }, null, 2) + '\n');
+    git(['add', 'update/attest.json'], { cwd: wt });
+    if (!gitTry(['diff', '--cached', '--quiet'], { cwd: wt }).ok) {
+      git(['commit', '-m', `attest ${sha.slice(0, 7)}`], { cwd: wt });
+      git(['push', REMOTE, CONTROL], { cwd: wt });
+      log(`signed ${sha.slice(0, 7)} → ${CONTROL}`);
+    }
+  } finally { gitTry(['worktree', 'remove', '--force', wt]); }
+}
+
 // ---- entry -----------------------------------------------------------------------------------------------
 
 function main(argv) {
@@ -184,11 +222,12 @@ function main(argv) {
     case 'promote': return promote();
     case 'hold': return setHold(true);
     case 'release': return setHold(false);
+    case 'keygen': return keygen();
     default:
-      process.stderr.write(`usage: promote.cjs [promote|hold|release]\n`);
+      process.stderr.write(`usage: promote.cjs [promote|hold|release|keygen]\n`);
       process.exit(2);
   }
 }
 
 if (require.main === module) main(process.argv);
-module.exports = { promote, setHold, main };
+module.exports = { promote, setHold, keygen, attestFleet, main };

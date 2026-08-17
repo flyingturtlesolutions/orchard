@@ -15,8 +15,9 @@
 # Usage:  ./install-updater.sh /path/to/orchard-clone   [interval_minutes]
 set -euo pipefail
 
-CLONE="${1:?usage: install-updater.sh <clone-path> [interval-minutes]}"
+CLONE="${1:?usage: install-updater.sh <clone-path> [interval-minutes] [promote-pubkey.pem]}"
 INTERVAL_MIN="${2:-10}"
+PUBKEY_FILE="${3:-}"   # SU-6: pin the promote PUBLIC key → refuse un-attested fleet tips (opt-in)
 CLONE="$(cd "$CLONE" && pwd)"
 [ -f "$CLONE/manifest.json" ] || { echo "Clone '$CLONE' has no manifest.json — is it the Orchard extension clone?" >&2; exit 1; }
 
@@ -31,11 +32,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cp -f "$HERE/updater.cjs"       "$STATE_DIR/updater.cjs"
 cp -f "$HERE/promoteChecks.cjs" "$STATE_DIR/promoteChecks.cjs"
 
-# config (no env marshalling through launchd). Pin the ABSOLUTE git path so the launchd tick resolves the same
-# git the credential was seeded under, not launchd's minimal PATH (review F5 / §7 — only node was pinned before).
-cat > "$STATE_DIR/config.json" <<JSON
-{ "clone": "$CLONE", "remote": "origin", "fleet": "fleet", "control": "fleet-control", "cadenceMin": $INTERVAL_MIN, "git": "$GIT" }
-JSON
+# config (no env marshalling through launchd). Pin the ABSOLUTE git path (review F5 / §7) and, when given, the
+# SU-6 promote public key. Written via node (a prerequisite) so paths + a multi-line PEM JSON-escape correctly.
+"$NODE" -e '
+  const fs = require("fs");
+  const cfg = { clone: process.argv[1], remote: "origin", fleet: "fleet", control: "fleet-control", cadenceMin: +process.argv[2], git: process.argv[3] };
+  if (process.argv[4]) cfg.pubkey = fs.readFileSync(process.argv[4], "utf8");
+  fs.writeFileSync(process.argv[5], JSON.stringify(cfg, null, 2) + "\n");
+' "$CLONE" "$INTERVAL_MIN" "$GIT" "$PUBKEY_FILE" "$STATE_DIR/config.json"
 
 # per-clone machine GUID (§7)
 [ -f "$STATE_DIR/machine-guid" ] || uuidgen > "$STATE_DIR/machine-guid"

@@ -28,6 +28,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const C = require('./promoteChecks.cjs');
+const A = require('./attest.cjs');   // SU-6 provenance verify (opt-in)
 
 function defaultStateDir() {
   if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'orchard-updater');
@@ -45,6 +46,7 @@ const FLEET = process.env.ORCHARD_UPDATER_FLEET || CFG.fleet || 'fleet';
 const CONTROL = process.env.ORCHARD_UPDATER_CONTROL || CFG.control || 'fleet-control';
 const CADENCE_MIN = parseInt(process.env.ORCHARD_UPDATER_CADENCE_MIN || CFG.cadenceMin || '10', 10) || 10;
 const GIT = process.env.ORCHARD_UPDATER_GIT || CFG.git || 'git';   // absolute path under launchd's minimal PATH (F5/§7)
+const PUBKEY = process.env.ORCHARD_UPDATER_PUBKEY || CFG.pubkey || '';   // SU-6: pinned promote public key (opt-in); empty → provenance check skipped
 const GUID = (() => { try { return fs.readFileSync(path.join(STATE_DIR, 'machine-guid'), 'utf8').trim(); } catch { return ''; } })();
 
 const LOCK = path.join(STATE_DIR, 'lock');
@@ -153,6 +155,15 @@ function main() {
     const refs = C.collectRefs(pm.manifest);
     const walk = C.walkRefs({ brick: refs.brick, broken: [] }, tree);   // host mirror = brick tier (§3.2.6)
     if (!walk.ok) { s.refuseReason = 'invalid'; s.lastError = 'missing-ref:' + walk.missing.brick.join(','); return; }
+
+    // 6a. PROVENANCE (SU-6, opt-in) — if a promote public key is pinned, the target must carry a valid signature
+    // proving it came through promote.cjs, not a raw push that skipped the gate. attest.json rides fleet-control.
+    // No pinned key → skip (backward-compatible). An attacker with fleet write can't forge a signature (no privkey).
+    if (PUBKEY) {
+      const att = gitTry(['show', `${REMOTE}/${CONTROL}:update/attest.json`]);
+      let attest = null; try { attest = JSON.parse(att.out); } catch { /* */ }
+      if (!att.ok || !attest || attest.sha !== target || !A.verifySha(target, attest.sig, PUBKEY)) { s.refuseReason = 'unattested'; return; }
+    }
 
     // 7. APPLY guards — protect HUMAN dirt (the updater's own torn apply already healed at step 2).
     if (gitTry(['status', '--porcelain', '--untracked-files=no']).out) { s.refuseReason = 'dirty'; return; }

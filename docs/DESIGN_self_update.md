@@ -343,10 +343,16 @@ same hardware is a second enrollment (the fleet correctly sees two). Deferred (�
 token-vending endpoint exchanging a low-value device credential for short-lived git tokens — worth it only if
 per-machine revocation stops scaling.
 
-**Push protection (minor):** ruling 5 ("`fleet` moves only via `promote.cjs`") needs enforcement, and branch
-protection may be unavailable on a GitHub Free private repo. Verify the plan supports a ruleset on `fleet` +
-`fleet-control`; failing that, have `promote.cjs` push a signed tag / content hash the updater verifies
-before applying, so a raw push that skipped the gate is refused host-side.
+**Push protection — provenance BUILT (SU-6, opt-in, 2026-08-14):** ruling 5 ("`fleet` moves only via
+`promote.cjs`") needs enforcement, and branch protection may be unavailable on a GitHub Free private repo.
+Primary control stays a ruleset on `fleet` + `fleet-control`; the cryptographic belt is now built
+(`tools/updater/attest.cjs`): `promote.cjs keygen` mints an Ed25519 keypair (private key gitignored on the
+dev box, `update/promote-key.pem`); `promote.cjs` signs each pushed sha and publishes `update/attest.json` to
+`fleet-control`; each fleet machine PINS the public key at enrollment (`install-updater … --pubkey`) and the
+updater refuses (`refused:unattested`) any fleet tip lacking a valid signature. OPT-IN + backward-compatible:
+no pinned key → the check is skipped. An attacker with fleet/fleet-control write can push a malicious sha +
+forged attest.json but cannot forge a signature valid under the locally-pinned key (no private key), and the
+pinned key can't be rewritten by a branch push (it's local). Rotation = re-`keygen` + re-pin (re-enroll).
 
 ## 8. Alternatives considered
 
@@ -400,7 +406,10 @@ before applying, so a raw push that skipped the gate is refused host-side.
   the multi-profile GUID dedup.
 - **SU-5** — incident drill: `promote hold` → confirm every install `state=held` and stops applying →
   revert+bump on main → `promote` → `release` → confirm convergence. End-to-end fix-forward.
-- **SU-6 (deferred)** — token-vending credentials (D′); gentle browser-idle auto-reload IF `glf` shows
+- **SU-6 provenance (BUILT 2026-08-14)** — Ed25519 signed attestation (`attest.cjs`, `promote keygen`/sign,
+  updater `refused:unattested` verify, installer `--pubkey` pin). Tests: `attest.test.cjs` 11 + 6 updater
+  drills. Opt-in; live-owed = one real keygen→pin→promote→verify pass.
+- **SU-6 (still deferred)** — token-vending credentials (D′); gentle browser-idle auto-reload IF `glf` shows
   chronic skew-hours (§4 ruling 6 tripwire); rings IF the fleet outgrows one channel; the signed-tag push
   guard if branch protection proves unavailable (§7).
 

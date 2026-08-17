@@ -65,4 +65,5 @@ COMMIT_MSG.tmp
 /update/ready.json
 /update/updater-state.json
 /update/apply-in-progress
+/update/promote-key.pem
 /.orchard-dev

@@ -314,6 +314,10 @@ have not survived contact with the build.
 
 ## Not in this arc (SU-6 and beyond)
 
+- **Provenance signing — now BUILT (SU-6, 2026-08-14, opt-in).** `tools/updater/attest.cjs` (Ed25519) +
+  `promote keygen`/sign + updater `refused:unattested` verify + installer `--pubkey` pin. The Rung 7 review's
+  one real residual; closes a raw push that skipped the gate. Tests: attest 11 + 6 updater drills. Live-owed:
+  one real keygen→pin→promote→verify pass.
 - **Rings / staged rollout** — the fleet is small; everyone converges at once, and the promotion gate is the
   blast-radius control. Revisit only when the fleet outgrows one channel.
 - **Gentle browser-idle auto-reload** — deferred; added only IF `glf` shows chronic skew-hours (spec §4

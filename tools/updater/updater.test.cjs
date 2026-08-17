@@ -14,6 +14,7 @@ const os = require('os');
 const path = require('path');
 
 const UPDATER = path.join(__dirname, 'updater.cjs');
+const ATT = require('./attest.cjs');   // SU-6 provenance
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error('  ✗ ' + msg); } };
 
@@ -218,6 +219,48 @@ try {
   const r16 = spawnSync(process.execPath, [UPDATER], { cwd: FLEETCLONE, env: env2, encoding: 'utf8' });
   ok(r16.status === 0, 'F7: BOM-prefixed config.json parses (updater runs)');
   ok(headVer() === '1.0.9', 'F7: config-driven CLONE converged to v1.0.9 despite the BOM');
+
+  // ===== SU-6 provenance drills =====
+  const kp = ATT.generateKeypair();
+  const PUB = kp.publicPem;
+  function setAttest(sha, sig) {
+    const at = path.join(ROOT, 'att');
+    G(['worktree', 'add', '-B', 'fleet-control', at, 'origin/fleet-control'], WORK);
+    fs.mkdirSync(path.join(at, 'update'), { recursive: true });
+    fs.writeFileSync(path.join(at, 'update', 'attest.json'), JSON.stringify({ sha, sig, alg: 'ed25519' }, null, 2) + '\n');
+    G(['add', 'update/attest.json'], at);
+    if (G(['status', '--porcelain'], at)) { G(['commit', '-m', 'attest'], at); G(['push', 'origin', 'fleet-control'], at); }
+    G(['worktree', 'remove', '--force', at], WORK);
+  }
+
+  // SU6a — an attested target applies with a pinned pubkey.
+  commitPushMain(WORK, '1.1.0', 'v1.1.0'); setFleet('main');
+  const tip110 = G(['rev-parse', 'origin/fleet'], WORK);
+  setAttest(tip110, ATT.signSha(tip110, kp.privatePem));
+  runUpdater({ ORCHARD_UPDATER_PUBKEY: PUB });
+  ok(headVer() === '1.1.0', 'SU-6: attested target applies with a pinned pubkey');
+
+  // SU6b — a new fleet tip with only a STALE attestation (for the prior sha) is refused.
+  commitPushMain(WORK, '1.1.1', 'v1.1.1'); setFleet('main');
+  runUpdater({ ORCHARD_UPDATER_PUBKEY: PUB });
+  ok(headVer() === '1.1.0', 'SU-6: un-attested new tip refused (stale attest for the prior sha)');
+  ok(stateFile().refuseReason === 'unattested', 'SU-6: state=refused:unattested');
+
+  // SU6c — an attestation with a TAMPERED signature is refused.
+  const tip111 = G(['rev-parse', 'origin/fleet'], WORK);
+  setAttest(tip111, 'AAAA' + ATT.signSha(tip111, kp.privatePem).slice(4));
+  runUpdater({ ORCHARD_UPDATER_PUBKEY: PUB });
+  ok(headVer() === '1.1.0' && stateFile().refuseReason === 'unattested', 'SU-6: a tampered signature is refused');
+
+  // SU6d — a corrected valid attestation applies.
+  setAttest(tip111, ATT.signSha(tip111, kp.privatePem));
+  runUpdater({ ORCHARD_UPDATER_PUBKEY: PUB });
+  ok(headVer() === '1.1.1', 'SU-6: a corrected valid attestation applies');
+
+  // SU6e — NO pinned pubkey → provenance check skipped (backward-compatible).
+  commitPushMain(WORK, '1.1.2', 'v1.1.2'); setFleet('main');
+  runUpdater();
+  ok(headVer() === '1.1.2', 'SU-6: no pinned pubkey → provenance skipped (backward-compatible)');
 
 } catch (err) {
   fail++;

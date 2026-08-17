@@ -18,7 +18,8 @@
 param(
   [Parameter(Mandatory = $true)][string]$Clone,
   [int]$IntervalMinutes = 10,
-  [string]$TaskName = 'orchard-fleet-updater'
+  [string]$TaskName = 'orchard-fleet-updater',
+  [string]$Pubkey = ''   # SU-6: pin the promote PUBLIC key (a .pem file from `promote.cjs keygen`) → refuse un-attested fleet tips
 )
 $ErrorActionPreference = 'Stop'
 
@@ -40,7 +41,9 @@ Copy-Item (Join-Path $PSScriptRoot 'promoteChecks.cjs') (Join-Path $StateDir 'pr
 # WriteAllText with a no-BOM UTF8Encoding. Pin the ABSOLUTE git path so the task resolves the same git the
 # credential was seeded under, not a PATH surprise (review F5 / §7).
 $gitPath = (Get-Command git).Source
-$cfg = @{ clone = $Clone; remote = 'origin'; fleet = 'fleet'; control = 'fleet-control'; cadenceMin = $IntervalMinutes; git = $gitPath } | ConvertTo-Json
+$cfgObj = @{ clone = $Clone; remote = 'origin'; fleet = 'fleet'; control = 'fleet-control'; cadenceMin = $IntervalMinutes; git = $gitPath }
+if ($Pubkey) { $cfgObj.pubkey = (Get-Content -Raw $Pubkey) }   # SU-6 provenance (opt-in)
+$cfg = $cfgObj | ConvertTo-Json
 [IO.File]::WriteAllText((Join-Path $StateDir 'config.json'), $cfg, (New-Object System.Text.UTF8Encoding $false))
 
 # per-clone machine GUID (§7) — dedup key for N profiles' identical heartbeats
