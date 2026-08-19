@@ -317,7 +317,17 @@ Pin the clone command and set `remote.origin.fetch = +refs/heads/fleet:refs/remo
 same for `fleet-control`), and check out `fleet` in a DEDICATED working dir so `reset --hard` never silently
 repoints local `main`.
 
-**Credentials (ruling 10):** a keystore cannot remove the local secret, only shrink it — fetching from AWS
+**Credentials — MOOT for a public repo (2026-08-18):** the repo is now PUBLIC, so fleet machines
+clone/fetch ANONYMOUSLY — no per-machine deploy token, no credential seed, no credential store. This deletes
+the entire per-machine-secret concern below AND the read-only-token line of `install-updater`; the
+interactive seed fetch just populates the remote-tracking refs. The trust model is unchanged: public =
+read-open, but WRITE to `main`/`fleet`/`fleet-control` stays collaborator-only, so "push-to-fleet is code
+execution" (ruling 5) still holds — and SU-6 provenance matters MORE now that the mechanism is publicly
+visible and a probe target (a compromised write credential is refused host-side, §7 provenance). Verified
+2026-08-18: no private key or secret is committed (the signing key is gitignored + never tracked). The
+paragraph below is retained for the PRIVATE-repo case (revisit if the repo is ever re-privatised).
+
+**Credentials, private-repo case (ruling 10):** a keystore cannot remove the local secret, only shrink it — fetching from AWS
 Secrets Manager itself needs an AWS credential (one turtle down). An unattended machine irreducibly holds
 SOME durable bootstrap secret. v1 is a per-machine READ-ONLY repo deploy token, protected at rest by the
 platform store: Windows via git-credential-manager (DPAPI-bound), macOS via `git-credential-osxkeychain`

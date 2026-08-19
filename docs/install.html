@@ -1,0 +1,251 @@
+<title>Install Orchard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --ground: #F6F8F4; --surface: #FFFFFF; --surface-2: #EEF3EC;
+    --ink: #1C271F; --muted: #56655B; --line: #DCE4DB;
+    --accent: #2E6B4C; --accent-ink: #1F4D37; --accent-soft: #E2EFE6;
+    --amber: #9A6612; --amber-soft: #F5EAD4; --amber-line: #E6D3A8;
+    --shadow: 0 1px 2px rgba(28,39,31,.05), 0 6px 20px rgba(28,39,31,.06);
+    --serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #10150F; --surface: #171E17; --surface-2: #1E2820;
+      --ink: #E9EFE9; --muted: #9BAD9F; --line: #2A362C;
+      --accent: #74C093; --accent-ink: #A7D9BC; --accent-soft: #1E2E24;
+      --amber: #E0AE5A; --amber-soft: #2A2314; --amber-line: #423718;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #10150F; --surface: #171E17; --surface-2: #1E2820;
+    --ink: #E9EFE9; --muted: #9BAD9F; --line: #2A362C;
+    --accent: #74C093; --accent-ink: #A7D9BC; --accent-soft: #1E2E24;
+    --amber: #E0AE5A; --amber-soft: #2A2314; --amber-line: #423718;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 17px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 56px 24px 88px; }
+
+  /* ---- header ---- */
+  .eyebrow {
+    font-size: 12.5px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(34px, 6vw, 46px);
+    line-height: 1.08; letter-spacing: -.01em; margin: 0 0 12px; text-wrap: balance;
+  }
+  .lede { font-size: 19px; color: var(--muted); margin: 0 0 22px; max-width: 30em; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 40px; }
+  .fact {
+    font-size: 13.5px; color: var(--accent-ink); background: var(--accent-soft);
+    border-radius: 999px; padding: 5px 13px; font-weight: 500;
+  }
+
+  /* ---- prereq note ---- */
+  .note {
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 20px; margin: 0 0 40px; font-size: 15.5px; color: var(--muted);
+  }
+  .note b { color: var(--ink); font-weight: 600; }
+
+  /* ---- platform toggle ---- */
+  .plat { display: flex; align-items: center; gap: 12px; margin: 0 0 28px; }
+  .plat-label { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    border: 0; background: transparent; color: var(--muted);
+    padding: 6px 16px; border-radius: 7px; transition: background .15s, color .15s;
+  }
+  .seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---- steps ---- */
+  .step { display: grid; grid-template-columns: 40px 1fr; gap: 18px; margin: 0 0 30px; }
+  .num {
+    width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--accent); color: #fff; font-family: var(--serif); font-weight: 600; font-size: 18px;
+    margin-top: 2px;
+  }
+  :root[data-theme="dark"] .num, :root:not([data-theme="light"]) .num { color: #10150F; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .num { color: #fff; } }
+  .step h2 { font-family: var(--serif); font-weight: 600; font-size: 22px; margin: 4px 0 6px; letter-spacing: -.01em; }
+  .step p { margin: 0 0 14px; }
+  .step p.tight { margin-bottom: 10px; }
+  ol.sub { margin: 0 0 14px; padding-left: 22px; }
+  ol.sub li { margin: 0 0 6px; }
+  kbd {
+    font-family: var(--mono); font-size: .85em; background: var(--surface-2);
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px;
+  }
+
+  /* ---- command block ---- */
+  .cmd { position: relative; margin: 0 0 14px; }
+  .cmd pre {
+    margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 52px 16px 16px; overflow-x: auto; box-shadow: var(--shadow);
+  }
+  .cmd code { font-family: var(--mono); font-size: 13.5px; line-height: 1.55; color: var(--ink); white-space: pre; }
+  .copy {
+    position: absolute; top: 9px; right: 9px; font: inherit; font-size: 12px; font-weight: 600;
+    cursor: pointer; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted);
+    border-radius: 7px; padding: 5px 10px; transition: color .15s, border-color .15s;
+  }
+  .copy:hover { color: var(--accent); border-color: var(--accent); }
+  .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .copy.done { color: var(--accent); border-color: var(--accent); }
+  .win, .mac { display: none; }
+  [data-plat="win"] .win { display: block; }
+  [data-plat="mac"] .mac { display: block; }
+
+  /* ---- success checkpoint ---- */
+  .check {
+    display: flex; gap: 9px; align-items: flex-start; font-size: 14.5px; color: var(--muted);
+    background: var(--accent-soft); border-radius: 10px; padding: 10px 14px;
+  }
+  .check svg { flex: 0 0 auto; margin-top: 3px; color: var(--accent); }
+  .check b { color: var(--accent-ink); font-weight: 600; }
+
+  /* ---- done + help ---- */
+  .done {
+    background: var(--amber-soft); border: 1px solid var(--amber-line); border-radius: 16px;
+    padding: 22px 24px; margin: 44px 0 0;
+  }
+  .done h2 { font-family: var(--serif); font-size: 22px; margin: 0 0 8px; color: var(--ink); }
+  .done p { margin: 0; color: var(--ink); }
+  .done .pill {
+    display: inline-block; font-size: 13px; font-weight: 600; color: var(--amber);
+    border: 1px solid var(--amber-line); border-radius: 7px; padding: 2px 9px; margin: 0 2px;
+  }
+  .help {
+    margin: 26px 0 0; padding: 18px 20px; border: 1px dashed var(--line); border-radius: 14px;
+    font-size: 15px; color: var(--muted);
+  }
+  .help b { color: var(--ink); }
+  .divider { height: 1px; background: var(--line); border: 0; margin: 40px 0; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap" data-plat="win">
+  <p class="eyebrow">Workstation setup</p>
+  <h1>Install Orchard</h1>
+  <p class="lede">Set up the side-panel assistant on your computer. About five minutes, and you never reinstall.</p>
+  <div class="facts">
+    <span class="fact">No login to download</span>
+    <span class="fact">Updates itself</span>
+    <span class="fact">~5 minutes</span>
+  </div>
+
+  <div class="note">
+    <b>Before you start:</b> your setup contact has already installed Chrome, Git, and Node on this computer,
+    and sent you the <b>enroll script</b> (<kbd>enroll.ps1</kbd> on Windows, <kbd>enroll.sh</kbd> on Mac). Save it to your Desktop.
+  </div>
+
+  <div class="plat">
+    <span class="plat-label">This computer is</span>
+    <div class="seg" role="group" aria-label="Choose your computer">
+      <button type="button" data-set="win" aria-pressed="true">Windows</button>
+      <button type="button" data-set="mac" aria-pressed="false">Mac</button>
+    </div>
+  </div>
+
+  <!-- Step 1 -->
+  <div class="step">
+    <div class="num">1</div>
+    <div>
+      <h2>Run the one setup command</h2>
+      <p class="win tight">Open <b>PowerShell</b> (press the Windows key, type <kbd>PowerShell</kbd>, press Enter), then paste this in exactly and press Enter:</p>
+      <p class="mac tight">Open <b>Terminal</b> (press <kbd>⌘</kbd>+<kbd>Space</kbd>, type <kbd>Terminal</kbd>, press Enter), then paste this in and press Enter:</p>
+      <div class="cmd win">
+        <pre><code>powershell -ExecutionPolicy Bypass -File "$HOME\Desktop\enroll.ps1" -RepoUrl https://github.com/flyingturtlesolutions/orchard.git</code></pre>
+        <button type="button" class="copy">Copy</button>
+      </div>
+      <div class="cmd mac">
+        <pre><code>bash ~/Desktop/enroll.sh https://github.com/flyingturtlesolutions/orchard.git</code></pre>
+        <button type="button" class="copy">Copy</button>
+      </div>
+      <div class="check">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 4.5 6 12 2.5 8.5"/></svg>
+        <span>You'll see <b>green text</b> with your next two steps and a folder path. Keep that window open.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 2 -->
+  <div class="step">
+    <div class="num">2</div>
+    <div>
+      <h2>Add it to Chrome</h2>
+      <ol class="sub">
+        <li>Open Chrome. In the address bar type <kbd>chrome://extensions</kbd> and press Enter.</li>
+        <li>Turn <b>on</b> “Developer mode” (the toggle at the top-right).</li>
+        <li>Click <b>Load unpacked</b> and choose the folder the green text showed you.</li>
+      </ol>
+      <div class="check">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 4.5 6 12 2.5 8.5"/></svg>
+        <span><b>“Orchard”</b> appears in your list of extensions.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3 -->
+  <div class="step">
+    <div class="num">3</div>
+    <div>
+      <h2>Open it and turn on logging</h2>
+      <ol class="sub">
+        <li>Click the <b>puzzle-piece</b> icon (top-right of Chrome) and <b>pin</b> Orchard.</li>
+        <li>Click the Orchard icon to open its <b>side panel</b>.</li>
+        <li>In the panel’s settings, turn on <b>cloud logs</b> and sign in when asked.</li>
+      </ol>
+      <div class="check">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 4.5 6 12 2.5 8.5"/></svg>
+        <span>The Orchard panel opens on the right side of Chrome.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="done">
+    <h2>That’s it — you’re set up</h2>
+    <p>Orchard keeps itself up to date. When a new version is ready, a small <span class="pill">reload</span> button lights up in the panel — click it to apply. Otherwise it updates quietly in the background, and you never reinstall.</p>
+  </div>
+
+  <div class="help">
+    <b>Something look wrong?</b> An error, no green text, or the extension won’t load — stop, take a photo of the screen, and message <b>your setup contact</b>. Don’t keep clicking.
+  </div>
+
+  <hr class="divider">
+  <p style="font-size:13px;color:var(--muted);margin:0;">Orchard · internal workstation tool</p>
+</div>
+
+<script>
+  const wrap = document.querySelector('.wrap');
+  document.querySelectorAll('.seg button').forEach((b) => {
+    b.addEventListener('click', () => {
+      const set = b.dataset.set;
+      wrap.dataset.plat = set;
+      document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+    });
+  });
+  document.querySelectorAll('.copy').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.parentElement.querySelector('code').textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = 'Copied ✓'; btn.classList.add('done');
+        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1800);
+      } catch { btn.textContent = 'Select & copy'; }
+    });
+  });
+</script>
