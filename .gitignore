@@ -67,3 +67,6 @@ COMMIT_MSG.tmp
 /update/apply-in-progress
 /update/promote-key.pem
 /.orchard-dev
+
+# Chrome Web Store package output (tools/pack-store.cjs)
+/dist/
