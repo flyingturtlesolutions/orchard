@@ -71,6 +71,56 @@ export function dueWriteBacks(row) {
   return out;
 }
 
+// ── v2.74.2230 — the CUSTOMER NOTIFY (the outward half; USER: "the customer is also notified by email") ──────
+// The sweep may only STAGE: composing and parking the draft on the row is internal; SENDING is outward and
+// belongs to a human click on the Records drill (pipelineGate queues outward acts — the leg cannot run
+// unattended even if a caller tried). `pendingNotify` on the row is the parked draft (or a withheld verdict,
+// which is equally visible — a silently-skipped email would be the §13.5 dead-control class).
+
+/** The customer-facing email for the order-confirmed event. PURE; date arrives formatted. */
+export function composeCustomerEmail({ name = '', ref = '', date = '', creator = NOTE_CREATOR_DEFAULT } = {}) {
+  const first = _str(name).trim().split(/\s+/)[0] || 'there';
+  return {
+    subject: 'Your warranty replacement has been ordered',
+    body: `Hi ${first},\n\nGood news — your warranty replacement was ordered on ${_str(date)}${_str(ref) ? ` (order ${_str(ref)})` : ''}. We'll follow up with tracking as soon as it ships.\n\n— ${_str(creator) || NOTE_CREATOR_DEFAULT}`,
+  };
+}
+
+/**
+ * Does this row owe the customer a confirmed-notification? PURE, state-derived like dueWriteBacks: handed-off +
+ * provenance + neither sent (wb.notify) nor already staged/withheld (pendingNotify — the drill owns it then).
+ * @returns {{ref:string}|null}
+ */
+export function dueNotify(row) {
+  const r = _isObj(row) ? row : {};
+  const inc = _isObj(r.incitedBy) ? r.incitedBy : null;
+  if (!inc || !_str(inc.id)) return null;
+  const wb = _isObj(r.writeBack) ? r.writeBack : {};
+  if (wb.notify) return null;
+  if (_isObj(r.pendingNotify)) return null;
+  const handedOff = !!(_str(r.currentKind) && _str(r.currentId)
+    && (_str(r.currentKind) !== _str(r.kind) || _str(r.currentId) !== _str(r.id)));
+  if (!handedOff) return null;
+  return { ref: _str(r.currentLabel) || `#${_str(r.currentId)}` };
+}
+
+/** Park a drafted email (or a withheld verdict) on the row. PURE; never overwrites an existing stage. */
+export function stagePendingNotify(row, pending) {
+  const r = _isObj(row) ? row : {};
+  if (_isObj(r.pendingNotify)) return r;
+  const p = _isObj(pending) ? pending : null;
+  if (!p) return r;
+  return { ...r, pendingNotify: p };
+}
+
+/** Remove the parked draft (after a successful send, or a human dismissal). PURE. */
+export function clearPendingNotify(row) {
+  const r = _isObj(row) ? row : {};
+  if (!('pendingNotify' in r)) return r;
+  const { pendingNotify: _drop, ...rest } = r;
+  return rest;
+}
+
 /** Mark one write-back sent. PURE; same-object return when already marked (the changed:false contract). */
 export function markWriteBack(row, key, at = 0) {
   const r = _isObj(row) ? row : {};

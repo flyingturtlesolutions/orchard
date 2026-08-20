@@ -1115,6 +1115,27 @@ describe('shopify delete-draft (v2.74.2069) — destructive write + its draft-or
   });
 });
 
+// ── v2.74.2230 — the customer-facing notify (zd_notify_customer): outward, structurally human-sent ───────────
+describe('connectorRecipes — zd_notify_customer: the requester=customer email (v2230)', () => {
+  const legOf = (id) => recipeLegs().find((l) => l && l.tool && l.tool.recipeId === id);
+  it('outward:true is the load-bearing axis — the gate QUEUES it, so no sweep can ever send unattended', () => {
+    const leg = legOf('zd_notify_customer');
+    assert.ok(leg, 'the notify leg projects');
+    assert.equal(leg.mode, 'act');
+    assert.equal(leg.tool.outward, true, 'an email the homeowner receives LEAVES the boundary (PP-3)');
+    assert.equal(leg.tool.reversible, false, '§13.4 — an email cannot be unsent');
+    assert.equal(gateActionForLeg(leg).decision, 'refused', 'outward + irreversible ⇒ safety GATED ⇒ REFUSED unattended (the delete_ticket class — stronger than queued): the human Send click (confirmed:true) is the only road to the wire');
+  });
+  it('the first comment is PUBLIC as a body literal, and the requester rides as a whole object', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'zd_notify_customer');
+    assert.equal(rec.body.ticket.comment.public, true, 'a literal, not a parameter — no visibility to misclassify');
+    const b = fillBody(rec.body, { subject: 'Your replacement', comment: 'Hi Vielka…', requester: { name: 'Vielka Wyatt', email: 'v@example.com' } });
+    assert.deepEqual(b.ticket.requester, { name: 'Vielka Wyatt', email: 'v@example.com' });
+    assert.equal(b.ticket.comment.public, true);
+    assert.ok(!('tags' in b.ticket), 'unfilled optional drops');
+  });
+});
+
 // ── v2.74.2227 — the FIRST VendorSuite WRITE (vs_update_task_note) + the form-urlencoded transport ────────────
 describe('connectorRecipes — vs_update_task_note: the HAR-authored warranty-note write (v2227)', () => {
   const legOf = (id) => recipeLegs().find((l) => l && l.tool && l.tool.recipeId === id);

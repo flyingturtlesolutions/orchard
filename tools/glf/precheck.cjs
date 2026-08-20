@@ -153,7 +153,26 @@ function main() {
     if (dirty.trim()) now.bus += '+undelivered';
   } catch { now.bus = `err-${Date.now()}`; }
 
-  const { run, why } = decide(prev, now, skips, maxSkips);
+  // v2.74.2231 — THE LEASE PEEK, zero tokens: when a LIVE interactive lane holds the grader lease, a headless
+  // firing can do NOTHING — the grade path is lease-refused on its first tool call, and builder-mode acts only
+  // on lane-cron-owned tests, of which there are none. Measured 2026-08-14 after the v2221 heartbeat fix: an
+  // active interactive session (whose own edits/bus pushes legitimately move the change digests every firing)
+  // drove 66 RUN vs 7 SKIP in under six hours, every RUN a paid sonnet call that ended `LEASE ▸ REFUSED`. The
+  // change-detector was doing its job; it was checking the wrong question. Fail-open holds: a torn/absent/
+  // expired lease skips nothing (the headless grader takes over within LEASE_TTL_MIN of the interactive session
+  // going quiet), and the max-skips heartbeat still bounds a wrong verdict.
+  let leaseHold = '';
+  try {
+    const { leaseState, LEASE_TTL_MIN } = require('./testbus.cjs');
+    const lf = path.join(REPO_ROOT, 'logs', 'run', 'grader.lease');
+    const lease = JSON.parse(fs.readFileSync(lf, 'utf8'));
+    if (lease && lease.lane && lease.lane !== 'lane-cron'
+      && leaseState(new Date().toISOString(), lease, LEASE_TTL_MIN) === 'live') {
+      leaseHold = `interactive grader ${lease.lane} holds a live lease — a headless firing could only be refused`;
+    }
+  } catch { /* no lease / unreadable → not a skip reason (fail open) */ }
+
+  const { run, why } = leaseHold ? { run: false, why: leaseHold } : decide(prev, now, skips, maxSkips);
 
   try {
     fs.mkdirSync(path.dirname(STATE), { recursive: true });

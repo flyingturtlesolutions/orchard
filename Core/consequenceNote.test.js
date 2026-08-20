@@ -1,7 +1,8 @@
 // Core/consequenceNote.test.js — v2.74.2229: the §14 write-back's pure half (CW-VS).
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { composeNoteLine, appendNote, dueWriteBacks, markWriteBack, NOTE_CREATOR_DEFAULT, TRACKING_RE } from './consequenceNote.js';
+import { composeNoteLine, appendNote, dueWriteBacks, markWriteBack, NOTE_CREATOR_DEFAULT, TRACKING_RE,
+  composeCustomerEmail, dueNotify, stagePendingNotify, clearPendingNotify } from './consequenceNote.js';
 
 const ROW = (over = {}) => ({
   at: 1, system: 'admin.shopify.com', kind: 'draft', id: '29741', label: '#D29741',
@@ -60,6 +61,35 @@ describe('dueWriteBacks — state-derived, marker-gated, provenance-required', (
     const r = ROW({ currentKind: 'order', currentId: '1', currentLabel: 'DEAKO#1' });
     assert.equal(dueWriteBacks(r).length, 1);
     assert.equal(dueWriteBacks(r).length, 1, 'derives identically until markWriteBack lands');
+  });
+});
+
+// ── v2.74.2230 — the customer notify: stage-only, allow-listed upstream, sent by a human. ────────────────────
+describe('composeCustomerEmail + dueNotify + stage/clear (v2230)', () => {
+  it('the email reads as a letter: first name, order ref, tracking promise, creator signature', () => {
+    const m = composeCustomerEmail({ name: 'Vielka Wyatt', ref: 'DEAKO#72046', date: '8/14/2026' });
+    assert.equal(m.subject, 'Your warranty replacement has been ordered');
+    assert.match(m.body, /^Hi Vielka,/);
+    assert.match(m.body, /ordered on 8\/14\/2026 \(order DEAKO#72046\)/);
+    assert.match(m.body, /tracking as soon as it ships/);
+    assert.match(m.body, /— Divine @ Deako$/);
+    assert.match(composeCustomerEmail({}).body, /^Hi there,/, 'no name → a graceful salutation, never blank');
+  });
+  it('dueNotify: handed-off + provenance + neither sent nor staged', () => {
+    const r = ROW({ currentKind: 'order', currentId: '1', currentLabel: 'DEAKO#1' });
+    assert.deepEqual(dueNotify(r), { ref: 'DEAKO#1' });
+    assert.equal(dueNotify(markWriteBack(r, 'notify', 5)), null, 'sent → not due');
+    assert.equal(dueNotify(stagePendingNotify(r, { to: 'x@y.com' })), null, 'staged → the drill owns it');
+    assert.equal(dueNotify(stagePendingNotify(r, { withheld: 'phone-only' })), null, 'withheld is staged too — no re-compose loop');
+    assert.equal(dueNotify(ROW({ currentKind: 'order', currentId: '1', incitedBy: null })), null, 'no provenance → no destination');
+    assert.equal(dueNotify(ROW()), null, 'not handed off → nothing to announce');
+  });
+  it('stagePendingNotify never overwrites; clearPendingNotify removes and is idempotent', () => {
+    const r = stagePendingNotify(ROW(), { to: 'a@b.com', subject: 's' });
+    assert.equal(stagePendingNotify(r, { to: 'other@x.com' }), r, 'first stage wins');
+    const c = clearPendingNotify(r);
+    assert.equal('pendingNotify' in c, false);
+    assert.equal(clearPendingNotify(c), c, 'same object back when nothing to clear');
   });
 });
 

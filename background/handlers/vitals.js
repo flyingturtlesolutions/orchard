@@ -23,7 +23,8 @@ import { armable, partitionRecipesByOrigin, recipeFromCatalogEntry } from '../..
 import { primaryHost } from '../../Core/groundDedup.js';   // v2.74.2052 — the ground's OWN identity anchors the filter (never the modal-of-records host)
 import { invokeRideRecipe, projectRideLeg } from '../../Core/rideStep.js';   // DESIGN_cadence.md §12 (v1715) — share the RUNNER: one resolve→plan→invoke for the canary AND the workflow step; v2229 — projectRideLeg for the write-back's gate verdict
 import { gateActionForLeg } from '../../Core/pipelineGate.js';   // v2229 — the write-back runs ONLY on a gate-auto verdict (gateCleared authority)
-import { composeNoteLine, appendNote, dueWriteBacks, markWriteBack } from '../../Core/consequenceNote.js';   // v2229 — §14 write-back, pure half
+import { composeNoteLine, appendNote, dueWriteBacks, markWriteBack, composeCustomerEmail, dueNotify, stagePendingNotify } from '../../Core/consequenceNote.js';   // v2229 — §14 write-back, pure half; v2230 — the customer-notify STAGE (send stays human)
+import { contactMethodClass } from '../../Core/contactChannel.js';   // v2230 — the automated-email ALLOW-LIST (CONCERN 1: never machine-email someone who asked to be phoned)
 import { planSessionGovernorTick } from '../../Core/sessionGovernor.js';   // SGV-0 — the governor's PURE planner (inert soak; BUILD_ARC rung 4)
 import { listAllWorkflows } from '../../Services/Storage/WorkflowStore.js';   // SGV-0 — due-soon demand source for the snapshot
 // AU-6 (v2.74.2207, §12.4) — the COLLECTION poll rides this tick: the catalog it reads, the ledger it reconciles,
@@ -508,6 +509,51 @@ async function _recordWatchSweep({ force = false, onlyKey = '' } = {}) {
           // v2.74.2229b — fail-safe means "do not break the sweep", NOT "say nothing" (the sweep's own v2213
           // lesson, re-learned by this block's first draft): a throw here was invisible for exactly one tick.
           try { Logger.info('audit', `AUDIT ▸ write-back ERROR — ${(e && e.message) || e}`); } catch { /* */ }
+        }
+      }
+
+      // v2.74.2230 — the CUSTOMER NOTIFY, STAGE ONLY (USER: "the customer is also notified by email"). The
+      // email is an OUTWARD act — pipelineGate queues outward, so the sweep composes and PARKS the draft on the
+      // row (pendingNotify) and the Records drill's Send click is the one road to the wire (PP-3). The homeowner
+      // comes from the inciting task's contacts read; the automated-email ALLOW-LIST holds (contactMethodClass —
+      // only an affirmative Any/Email ever stages a sendable draft; anything else stages a VISIBLE withheld
+      // verdict, never a silent skip).
+      for (const row of _reload) {
+        try {
+          const need = dueNotify(row);
+          if (!need) continue;
+          const inc = row.incitedBy || {};
+          if (!/(^|\.)vendorsuite\.drhorton\.com$/i.test(String(inc.system || ''))) continue;   // CW-VS v1 pair
+          const centry = (CONNECTOR_RECIPES || []).find((r) => r && r.id === 'vs_task_contacts');
+          if (!centry) continue;
+          let vsg = '';
+          try { vsg = (await _ctx.invokeSgHandler('ENSURE_GROUND_FOR_URL', { url: `https://${centry.appHost}/` }))?.groundId || ''; } catch { vsg = ''; }
+          if (!vsg) continue;
+          let cReply = null;
+          try {
+            cReply = await invokeRideRecipe({ id: centry.id, ...centry }, vsg, {
+              params: { taskId: String(inc.id) },
+              invoke: (p) => _ctx.invokeSgHandler('INVOKE_SESSION', { ...p, headless: true }),
+            });
+          } catch { cReply = null; }
+          if (!cReply || !cReply.ok) { try { Logger.info('audit', `AUDIT ▸ notify skipped — contacts unreadable (${(cReply && cReply.error) || 'no-reply'})`); } catch { /* */ } continue; }
+          const contacts = Array.isArray(cReply.value) ? cReply.value : [];
+          const person = contacts.find((c) => c && !c.IsDrHorton && c.IsPrimary) || contacts.find((c) => c && !c.IsDrHorton) || null;
+          const email = String((person && person.Email) || '').trim();
+          const nm = String((person && (person.FullName || [person.FirstName, person.LastName].filter(Boolean).join(' '))) || '').trim();
+          const klass = contactMethodClass(person && person.ContactMethod);
+          const _ref = { at: Number(row.at) || 0, id: String(row.id || '') };
+          if (!person || !email || !(klass === 'any' || klass === 'email')) {
+            const why = !person ? 'no homeowner contact on the task' : (!email ? 'no email on file' : `their contact preference reads "${String(person.ContactMethod || 'unset')}" — call, don't email`);
+            await updateCreate(_ref, (r) => stagePendingNotify(r, { withheld: why, at: Date.now() }));
+            try { Logger.info('audit', `AUDIT ▸ notify withheld — ${why}`); } catch { /* */ }
+            continue;
+          }
+          const draft = composeCustomerEmail({ name: nm, ref: need.ref, date: new Date().toLocaleDateString() });
+          await updateCreate(_ref, (r) => stagePendingNotify(r, { to: email, name: nm, subject: draft.subject, body: draft.body, at: Date.now() }));
+          try { Logger.info('audit', `AUDIT ▸ notify staged — a draft awaits the human Send on the record card`); } catch { /* */ }
+        } catch (e) {
+          try { Logger.info('audit', `AUDIT ▸ notify ERROR — ${(e && e.message) || e}`); } catch { /* */ }
         }
       }
     }

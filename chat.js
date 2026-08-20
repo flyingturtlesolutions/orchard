@@ -103,6 +103,8 @@ import { describeRun, normalizeHistoryItems, groupHistoryItems, filterLogsForRun
 import { appendRunEntry } from './Services/Storage/WorkflowRunStore.js';   // §6.5 (v1746) — PANEL runs write history too (finding 2: they wrote none)
 import { loadCreates, removeCreate, updateCreate } from './Services/Storage/AuditCreateStore.js';
 import { nextWatch, applyGone, currentRef, handOff, asOfLine, reversalOffer, describeEvent } from './Core/recordLife.js';   // v2206 — reversalOffer (§13.2, four conditions + the suppression sentence) + describeEvent (§12.1a, the timeline the drill has been promising)   // v2205 (bug pass) — applyTransition/warmWindowMs are NOT imported here: nothing in the panel observes a hand-off yet (§12.5's adapter is unbuilt) and the warm window is resolved at the write seam. An unused import implies a wiring that does not exist.   // AU-6 (v2204, DESIGN_audit.md §12) — the record LIFECYCLE: one row per ACT, kind/id immutable, currentKind/currentId follow the artifact, one append-only timeline   // v2203 — removeCreate: the TESTING undo on a record card (a real ledger is append-only; a production Records surface drops this first)   // AU-3 (DESIGN_audit.md §11) — the local creates ledger the "what have I created?" ask reads (shared chrome.storage with the SW hook)
+import { markWriteBack, clearPendingNotify } from './Core/consequenceNote.js';   // v2230 — the Send click marks + clears the staged notify
+import { customerRequester } from './Core/zendeskRequester.js';   // v2230 — the requester=customer arc (ruling 2026-08-08)
 import { mintRunId } from './Core/pipelineRun.js';   // §6.5 — every run entry carries its gl/case join key
 import { pickFieldPath, resolveJoinField, normalizeRungs, ladderValues, extractValue, buildJoinRows, mapTally, tallyResults, valueShapeMismatch, unwrapMapPrior, resolveIdentityField, targetKeyRung, probeValue } from './Core/peritemMap.js';
 import { askContactRole, readContacts, renderContactAnswer, renderContactRoster, selectContacts, roleSaid } from './Core/contactRoles.js';
@@ -13294,6 +13296,54 @@ function _openRecordDrill(e, fmtTime) {
   note.className = 'rail-record-drill-note';
   note.textContent = _revNote.why;
   body.appendChild(note);
+  // v2.74.2230 — the STAGED CUSTOMER NOTIFY (the outward half of the consequence loop). The sweep may only
+  // COMPOSE and park; this button is the one road to the wire, because an email the homeowner receives is an
+  // outward act and outward takes a human click (PP-3; pipelineGate queues outward, so even a rogue caller
+  // could not send unattended). A withheld verdict renders in words — a silently missing email would be the
+  // §13.5 dead-control class. Rails-have-buttons: the record's drill owns the action.
+  {
+    const _pn = (e.pendingNotify && typeof e.pendingNotify === 'object') ? e.pendingNotify : null;
+    if (_pn && _pn.withheld) {
+      const w = document.createElement('div'); w.className = 'rail-record-drill-note';
+      w.textContent = `Customer email withheld — ${_pn.withheld}.`;
+      body.appendChild(w);
+    } else if (_pn && _pn.to) {
+      const box = document.createElement('div'); box.className = 'wf-history-row';
+      const h = document.createElement('div'); h.className = 'wf-history-summary';
+      h.textContent = `Customer email ready — to ${_pn.to}`;
+      box.appendChild(h);
+      const d = document.createElement('div'); d.className = 'wf-history-detail';
+      const subj = document.createElement('div'); subj.className = 'rail-record-drill-line'; subj.textContent = `Subject: ${_pn.subject || ''}`;
+      const bodyEl = document.createElement('pre'); bodyEl.className = 'rail-record-drill-val'; bodyEl.style.whiteSpace = 'pre-wrap'; bodyEl.textContent = _pn.body || '';
+      d.append(subj, bodyEl);
+      const send = document.createElement('button'); send.type = 'button'; send.className = 'hitl-confirm';
+      send.textContent = `✉ Send to ${_pn.to}`;
+      send.addEventListener('click', () => { void (async () => {
+        if (!confirm(`Email ${_pn.name ? `${_pn.name} <${_pn.to}>` : _pn.to}?\n\nSubject: ${_pn.subject}\n\nThis sends a real email to the homeowner (a Zendesk ticket in their name).`)) return;
+        send.disabled = true; const was = send.textContent; send.textContent = 'Sending…';
+        try {
+          const leg = await _rideCatalogLeg('zd_notify_customer');
+          if (!leg) throw new Error('Zendesk isn’t connected here — connect it, or enable the notify recipe');
+          const req = customerRequester({ name: _pn.name, email: _pn.to });
+          if (!req) throw new Error('no usable email address');
+          const r = await _rideExecOnce(leg, { subject: _pn.subject, comment: _pn.body, requester: req, tags: ['warranty-replacement', 'orchard-notify'] }, { groundId: (leg.tool && leg.tool.groundId) || null, confirmed: true });
+          if (!r || !r.ok) throw new Error((r && (r.detail ? `${r.error}: ${r.detail}` : r.error)) || 'send failed');
+          await updateCreate({ at: e.at, id: e.id }, (row) => clearPendingNotify(markWriteBack(row, 'notify', Date.now())));
+          try { _orchLog(`AUDIT ▸ notify sent — ticket raised in the customer’s name (human-confirmed)`); } catch { /* */ }
+          send.textContent = '✓ Sent'; try { toast(`Emailed ${_pn.to}.`, 'ok'); } catch { /* */ }
+          void _renderActiveRailTab({ force: true });
+        } catch (err) {
+          send.disabled = false; send.textContent = was;
+          const why = (err && err.message) || 'send failed';
+          try { toast(`Couldn’t send — ${why}`, 'err'); } catch { /* */ }
+          try { _orchLog(`AUDIT ▸ notify send FAILED — ${why}`); } catch { /* */ }
+        }
+      })(); });
+      d.appendChild(send);
+      box.appendChild(d);
+      body.appendChild(box);
+    }
+  }
   // The as-of line (§12.6) — a cadence is a CEILING, never a guarantee, so the overlay says when this was last
   // confirmed rather than implying it is current.
   // v2.74.2225 — the state SENTENCE and the verify TRIGGER are decoupled: asOfLine now returns '' for a fresh

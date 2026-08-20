@@ -74,6 +74,8 @@ export const ROUTER_HINTS = Object.freeze({
 
   // v2.74.2227 — the first VendorSuite WRITE: the hint must carry the REPLACE semantics the clipped does loses.
   vs_update_task_note: 'SAVE/REPLACE the vendor note (VendorExplanation) on ONE task — human-confirmed write; OVERWRITES the note; never completes the task',
+  // v2.74.2230 — the customer-facing notify vs create_ticket (agent-side): the hint carries the distinction.
+  zd_notify_customer: 'EMAIL the customer: a Zendesk ticket in THEIR name whose public first comment reaches their inbox — outward write, human-confirmed send',
 
   // ── Aircall ────────────────────────────────────────────────────────────────────────────────────────────────
   aw_team_availability: "EVERY teammate's live availability company-wide (\"who is available?\") — not your own status",

@@ -77,14 +77,30 @@ describe('classifyCreate — kind from op key, else recipeId, else record', () =
 });
 
 describe('customerLabelFrom — minimal human label from the INPUT (§10.5)', () => {
-  it('prefers first name', () => assert.equal(customerLabelFrom({ firstName: 'Divine', email: 'x@y.com' }), 'Divine'));
+  // v2.74.2232 — the JOIN. `shopify_create_customer` sends first_name AND last_name (both required), and the
+  // first-name-only read is what put a bare "Larry" on the Records card while the chat receipt for the very same
+  // create said the full name. Both param spellings are covered because the seam forwards payload.params verbatim.
+  it('joins first + last (snake_case, as the Shopify leg sends it)',
+    () => assert.equal(customerLabelFrom({ first_name: 'Larry', last_name: 'Sandoval', email: 'x@y.com' }), 'Larry Sandoval'));
+  it('joins first + last (camelCase)',
+    () => assert.equal(customerLabelFrom({ firstName: 'Divine', lastName: 'Monkam' }), 'Divine Monkam'));
+  it('either half alone is still a name', () => {
+    assert.equal(customerLabelFrom({ firstName: 'Divine', email: 'x@y.com' }), 'Divine');
+    assert.equal(customerLabelFrom({ last_name: 'Segal' }), 'Segal');
+  });
   it('falls to email-local-part', () => assert.equal(customerLabelFrom({ email: 'dmonk@deako.com' }), 'dmonk'));
   it('falls to name', () => assert.equal(customerLabelFrom({ name: 'Acme Co' }), 'Acme Co'));
   it('null when no human handle', () => {
     assert.equal(customerLabelFrom({}), null);
     assert.equal(customerLabelFrom(null), null);
   });
-  it('truncates ≤24', () => assert.equal(customerLabelFrom({ firstName: 'x'.repeat(40) }).length, 24));
+  it('truncates a joined name ≤48, and stays under auditEntry\'s 80-char field cap', () => {
+    const l = customerLabelFrom({ first_name: 'x'.repeat(40), last_name: 'y'.repeat(40) });
+    assert.equal(l.length, 48);
+    assert.equal(auditEntry({ at: 1, kind: 'customer', id: '1', label: l }).label, l);
+  });
+  it('email-local-part keeps its own 24 bound (a handle, not a name)',
+    () => assert.equal(customerLabelFrom({ email: `${'x'.repeat(40)}@y.com` }).length, 24));
 });
 
 describe('auditEntry — whitelist normalizer, clock passed in', () => {

@@ -375,6 +375,27 @@ export const CONNECTOR_RECIPES = [
       { name: 'priority', type: 'string', required: false, enum: ['low', 'normal', 'high', 'urgent'] },
       { name: 'requester_id', type: 'integer', required: false },
     ] },
+  // v2.74.2230 — the CUSTOMER-FACING NOTIFY (USER: "when an order is confirmed on shopify, the customer is also
+  // notified by email"). The requester=customer arc (ruling 2026-08-08, Core/zendeskRequester.js): `requester:
+  // {name, email}` makes Zendesk create the ticket IN THE HOMEOWNER'S NAME, so the public first comment reaches
+  // their inbox as an email — no support hand-off, no separate user create. The comment's `public: true` is a
+  // BODY LITERAL, not a parameter — this leg IS the outward mail, there is no visibility to misclassify.
+  // `outward: true` is the load-bearing axis: pipelineGate QUEUES outward acts, so this leg is STRUCTURALLY
+  // incapable of running unattended — the sweep can only STAGE a draft (consequenceNote.stagePendingNotify) and
+  // a human's Send click on the Records drill is what fires it (PP-3: a message a real person receives).
+  // reversible:false — §13.4's own row: an email cannot be unsent. Separate from create_ticket on purpose (the
+  // by_email/by_phone house pattern): that leg's requester_id form is the AGENT-side create and stays
+  // outward:false honestly; only this one mails a customer.
+  { ...ZD, id: 'zd_notify_customer', name: 'Email a customer via Zendesk', write: true, reversible: false, outward: true, method: 'POST',
+    does: 'send a customer an EMAIL by opening a Zendesk ticket in their name (requester = the customer) with a PUBLIC first comment — the message reaches their inbox directly; a human confirms every send',
+    endpoint: '/api/v2/tickets.json',
+    body: { ticket: { subject: '{subject}', comment: { body: '{comment}', public: true }, requester: '{requester}', tags: '{tags}' } },
+    params: [
+      { name: 'subject', type: 'string', required: true },
+      { name: 'comment', type: 'string', required: true, hint: 'the email body the customer reads' },
+      { name: 'requester', type: 'object', required: true, hint: 'the customer: {name, email} — zendeskRequester.customerRequester builds it; the ticket is created in THEIR name so Zendesk emails them' },
+      { name: 'tags', type: 'array', required: false, hint: 'e.g. ["warranty-replacement","orchard-notify"]' },
+    ] },
   { ...ZD, id: 'add_comment', name: 'Comment on a Zendesk ticket', write: true, reversible: false, outward: false, method: 'PUT',
     does: 'add a comment to a Zendesk ticket — public=true REPLIES to the customer, public=false adds an INTERNAL note — riding your login',
     endpoint: '/api/v2/tickets/{id}.json',

@@ -73,6 +73,8 @@ export const GOLDEN_ASKS = Object.freeze(_e([
   { ask: 'mark ticket 4521 as spam', expect: { legId: 'mark_as_spam' }, mustBeGated: true },
   // the ladder-§6 canonical: the destructive ask resolves AND stays behind the gate
   { ask: 'delete ticket 5', expect: { legId: 'delete_ticket' }, mustBeGated: true },
+  // v2.74.2230 — the customer-facing notify (requester=customer; outward → always a human send).
+  { ask: 'email the homeowner that their replacement has been ordered', expect: { legId: 'zd_notify_customer' }, mintedAt: 'v2.74.2230' },
   // ── Shopify ───────────────────────────────────────────────────────────────────────────────────────────────
   { ask: 'find the shopify customer with email jane@example.com', expect: { legId: 'shopify_customer_by_email' } },
   { ask: 'find the customer with phone 206-555-0147', expect: { legId: 'shopify_customer_by_phone' } },

@@ -151,7 +151,7 @@ auditEntry({
   id,            // createdRecordId(reply.value)   — internal id (gid → numeric tail)   (connectorRender.js:135)
   label,         // createdRecordLabel(reply.value): the entity's name/title — the HUMAN number "#D29684"/"#1001"
                  //   for an order/draft; a CUSTOMER has no name/title, so v1 captures a MINIMAL human label from
-                 //   the create INPUT (firstName or email-local-part, truncated — §10.5), same at-rest posture as
+                 //   the create INPUT (first+last name, else email-local-part — §10.5), same at-rest posture as
                  //   the #D-number (§5), so "what customers did I create?" answers for real, not id-only
   itemUrl,       // FILLED ONCE: fillEndpoint(leg.tool.itemUrl, {...urlArgs, id})       (§ below; durable link)
   who,           // clearedBy: 'human' (a person clicked) | 'gate' (internal+reversible, no person)
@@ -234,7 +234,7 @@ global index (open question §9). Register the key as **local-only, never sync-r
 ## 5. Privacy + scope — local-only, un-redacted at rest, body-blind on any wire
 
 The audit store holds real identity (a `#D`-number, a created record's id + link; for an order/draft the human
-number — for a customer, a **minimal human label**: the first name or email-local-part in the create input,
+number — for a customer, a **minimal human label**: the name (first+last) or email-local-part in the create input,
 §10.5, the same full-fidelity-at-rest treatment #D-numbers get) and must, or it cannot answer "what did we
 create?". That is safe **only** under a strict posture, all of it grounded in the existing boundary docs.
 
@@ -490,9 +490,18 @@ The review caught an internal inconsistency: §5 stores #D-numbers + ids un-reda
 pseudonymized audit "could not answer the question", yet an id-only customer is a **hollow answer** to the
 headline "what customers did I create?" (a bare internal Shopify id) AND the opposite treatment under the same
 logic. **Resolution: capture a minimal human customer label at the seam** — the create input carries
-firstName/lastName/email (`shopify_create_customer`), so store the first name or email-local-part (truncated),
+firstName/lastName/email (`shopify_create_customer`), so store the name or email-local-part (truncated),
 same full-fidelity-at-rest posture as §5 (local-only, never synced, never in a `#call` payload). The customer ask
 then answers for real, not link-only.
+
+**v2.74.2232 — "minimal" meant do not INVENT, not discard half of what we were given.** The first implementation
+read `first_name` and stopped, so the Records card titled a person "Larry" while the same create's chat receipt
+read the full name (`chat.js:17075` joins first+last since v2.74.2225) — one record, two naming rules, and the
+ledger's was the lossier one. The last name was a required param of the very leg that wrote the row
+(`connectorRecipes.js:779-780`), sitting one key away in the same object. Now: `[first, last]` joined (either half
+alone still a name), capped at 48 so a real name survives whole; the email-local-part fallback keeps its own 24
+(it is a handle, not a name). This is not cosmetic — a first name stops identifying anyone the moment two
+customers share one, which is the AU-3 answer's whole job.
 
 ### 10.6 Surface — flat table first (see §6.1)
 Rail **section, not tab** (never collides with the dev-only Connect tab); v1 is a **flat per-event table** (system
@@ -541,8 +550,9 @@ Mirrors `Core/runHistory.js` (pure, tested; the store in AU-1 is the I/O around 
   review fix). Returns false when: top-level `errors[]` non-empty, OR any `data.<op>.userErrors` non-empty (mirror
   connector.js:1274-1278), OR `createRecordFrom` extracts no id. A rejected mutation banks NOTHING. This is the
   screen SESSION_REPLAY-ok lacks upstream, lifted to where BOTH seams can call it.
-- `customerLabelFrom(inputParams) → string|null` — the §10.5 minimal label: first name, else email-local-part,
-  truncated ≤24. Fed the create INPUT (`shopify_create_customer` carries firstName/lastName/email), not the reply.
+- `customerLabelFrom(inputParams) → string|null` — the §10.5 minimal label: first+last name (≤48), else
+  email-local-part (≤24). Fed the create INPUT (`shopify_create_customer` carries firstName/lastName/email), not
+  the reply. *(v2.74.2232 — was first-name-only; see §10.5.)*
 - `appendCreate(prev, entry, {cap}) → items[]` + `truncationNotice(shown,total)` + `AUDIT_CAP=500` — reuse
   runHistory.js's `appendRun`/`truncationNotice` verbatim if importable; else the same 3 lines.
 

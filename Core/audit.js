@@ -29,6 +29,10 @@ export const AUDIT_KINDS = Object.freeze(['customer', 'order', 'draft', 'ticket'
 export const AUDIT_WHO = Object.freeze(['human', 'gate']);            // clearedBy: a person clicked vs pipelineGate auto
 export const AUDIT_CAP = 500;   // GLOBAL book — creates are human-gated + rare, so a generous cap with a VISIBLE
                                 // total (truncationNotice) is honest; never the action-ledger's silent slice(-500).
+// v2.74.2232 — the customer-label bound. Wide enough that a real "First Last" survives whole (the old 24 was sized
+// for a first name and would now cut a joined name mid-word, which reads as corruption on the card rather than as
+// brevity), and still far under auditEntry's 80-char field cap, which stays the storage-side bound.
+const NAME_CAP = 48;
 
 // The reversible/destructive axes do NOT separate create from update (both are write:true) — so `kind`/`verb` come
 // from the reply's DATA FIELD KEY (the GraphQL op name), else the recipeId (§10.3). PURE string maps, no invention.
@@ -161,18 +165,27 @@ export function auditSucceeded(value) {
 
 /**
  * The §10.5 minimal human customer label, from the create INPUT (not the reply — a customer reply carries no
- * name/title). First name, else email-local-part, else name; truncated ≤24. Same full-fidelity-at-rest posture as
- * the #D-number (§5, local-only). PURE. Null when the input carries no human handle. Only used when kind==='customer'.
+ * name/title). Full name, else email-local-part, else name. Same full-fidelity-at-rest posture as the #D-number
+ * (§5, local-only). PURE. Null when the input carries no human handle. Only used when kind==='customer'.
+ *
+ * v2.74.2232 — JOIN first + last. `shopify_create_customer` declares BOTH as required params
+ * (connectorRecipes.js:779-780), so taking `first_name` alone discarded a name the user had already typed and
+ * that was sitting one key away in the same object: the Records card read "Larry" while the same create's chat
+ * receipt read "Larry <last>" (chat.js:17075 has joined since v2.74.2225). §10.5's "minimal" was about not
+ * INVENTING identity we were never given — never about dropping half of what we were. It is also a correctness
+ * bound, not just polish: a first name stops identifying anyone the moment two customers share one.
  */
 export function customerLabelFrom(params) {
   const p = (params && typeof params === 'object') ? params : null;
   if (!p) return null;
   const first = _str(p.firstName || p.first_name);
-  if (first) return first.slice(0, 24);
+  const last = _str(p.lastName || p.last_name);
+  const full = [first, last].filter(Boolean).join(' ');       // either half alone is still a name
+  if (full) return full.slice(0, NAME_CAP);
   const email = _str(p.email);
   if (email.includes('@')) return email.split('@')[0].slice(0, 24);
   const name = _str(p.name);
-  if (name) return name.slice(0, 24);
+  if (name) return name.slice(0, NAME_CAP);
   return null;
 }
 
